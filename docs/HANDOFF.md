@@ -28,10 +28,14 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 - Processes that may still be running: `/tmp/pokebot-live emulator serve --no-save` (the virtual console) and `/tmp/pokebot-webrun …` (the last live run, holding port 8080). Kill them by exact name: `pkill -INT -x pokebot-webrun`. Never use `pkill -f` with patterns that match your own shell command.
 
 ## Current game state (checkpoint)
-- `saves/progress.json` plus the ROM's `.sav`: all milestones through **BeatBrock** are done. The game is saved in the Pewter Gym at (7,5).
-  - Party: BULBASAUR Lv 14 with Tackle, Growl, Leech Seed, Vine Whip.
-  - Player RED (Boy), rival GREEN, Boulder Badge, about ₽4.6k (unverified).
-- Backups: `saves/pre-brock.sav` + `progress.pre-brock.json` (after the Pokédex) and `saves/trained.sav` + `progress.trained.json` (Lv 10 at the Viridian Pokémon Center). To restore one, copy it over the ROM's `.sav` and `saves/progress.json`.
+- `saves/progress.json` plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4).
+  - Party: IVYSAUR Lv 18 with Tackle, Sleep Powder, Leech Seed, Vine Whip.
+  - Player RED (Boy), rival GREEN, Boulder Badge.
+- Backups (copy both files over the ROM's `.sav` and `saves/progress.json` to restore one):
+  - `saves/route3-ready.sav` + `progress.route3-ready.json`: after PrepareForRoute3;
+  - `saves/brock.sav` + `progress.brock.json`: after BeatBrock;
+  - `saves/pre-brock.sav` + `progress.pre-brock.json`: after the Pokédex;
+  - `saves/trained.sav` + `progress.trained.json`: Lv 10 at the Viridian Pokémon Center.
 - Resume with: `tools/live-run.sh /tmp/x.log story --continue --save-game --record /tmp/run-N`.
 
 ## Code map (about 14k lines of Rust)
@@ -69,7 +73,7 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 - **Renders must match the game's colours exactly** (the mGBA RGB565 path). Map weather changes palettes: `WEATHER_SHADE` scales 5-bit channels by 13/16. Other weathers are unhandled.
 
 ## Known gaps / what blocks the full story (prioritized)
-1. **General text OCR** (dialogue and menu font): needed to read menus, shop lists, bag, party, the "forget a move?" prompt, YES/NO context, evolution and received-item messages. Build the glyph table the same way as the HUD.
+1. **Text OCR is done for dialogue and battle text** (`vision::text`, font from the decompilation), along with move learning and evolution. Still to do: menu text (shops, bag, party, PC); see the global-state spec in `docs/superpowers/specs/`.
 2. **Menu flows:**
    - party menu (switch, summary, use a field move);
    - bag (use items, teach TM/HM);

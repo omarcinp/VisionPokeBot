@@ -15,8 +15,8 @@ pub use events::{EventExtractor, EventRecord, GameEvent};
 pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction, FrameMetrics,
-    KeyboardFocus, MenuObservation, NamingObservation, Observation, Observed, PlayerPose,
-    PoseObservation, Region,
+    KeyboardFocus, MenuObservation, MoveListObservation, NamingObservation, Observation, Observed,
+    PlayerPose, PoseObservation, Region,
 };
 pub use reducer::{DefaultReducer, StateReducer};
 pub use screen::ScreenState;

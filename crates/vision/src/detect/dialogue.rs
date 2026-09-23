@@ -39,6 +39,7 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
         arrow,
         stable_frames: 0,
         text_cells: text_cells(image, region, arrow),
+        lines: Vec::new(),
     })
 }
 

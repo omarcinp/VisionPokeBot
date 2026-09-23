@@ -87,6 +87,10 @@ pub struct DialogueObservation {
     /// used to confirm that text advanced. Not serialized.
     #[serde(skip)]
     pub text_cells: Vec<u8>,
+    /// The text as read with the game font (empty without a font; unknown
+    /// glyphs read as `?`).
+    #[serde(default)]
+    pub lines: Vec<String>,
 }
 
 /// A list menu with the ▶ cursor (YES/NO, gender, name presets, Start menu).
@@ -98,6 +102,16 @@ pub struct MenuObservation {
     pub cursor_row: u8,
     /// Screen y of the ▶ (menus differ in row pitch; the Start menu uses 15 px).
     pub cursor_y: u32,
+}
+
+/// The "KNOWN MOVES" list shown when a Pokémon with four moves learns a new
+/// one: its moves in menu order, then the new move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveListObservation {
+    /// Names as read (`?` for unknown glyphs); empty without a font.
+    pub moves: Vec<String>,
+    /// Row of the red selection frame.
+    pub selected: Option<u8>,
 }
 
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
@@ -122,6 +136,9 @@ pub struct BattleObservation {
     /// HP bar fill, per mille (None when the bar isn't visible).
     pub player_hp: Option<u16>,
     pub opponent_hp: Option<u16>,
+    /// PP left / maximum of the move under the ▶ in the move menu.
+    #[serde(default)]
+    pub move_pp: Option<(u8, u8)>,
 }
 
 /// Where the naming screen's cursor is.
@@ -156,6 +173,8 @@ pub struct Observation {
     /// Player position, when the overworld could be matched to the map.
     pub player: Option<PoseObservation>,
     pub battle: Option<BattleObservation>,
+    #[serde(default)]
+    pub move_list: Option<MoveListObservation>,
 }
 
 impl DialogueObservation {
@@ -181,6 +200,7 @@ impl Observation {
             naming: None,
             player: None,
             battle: None,
+            move_list: None,
         }
     }
 }

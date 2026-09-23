@@ -12,7 +12,10 @@ const ROW_HEIGHT: u32 = 16;
 const TOLERANCE: u8 = 20;
 
 pub fn detect(image: &RgbImage) -> Option<MenuObservation> {
-    let (cx, cy) = find_cursor(image)?;
+    // Field menus use the gray ▶; YES/NO boxes over battles use the battle ▶
+    // (above the battle panel).
+    let (cx, cy) = find_cursor(image)
+        .or_else(|| super::battle::find_cursor(image, 0..super::battle::PANEL_TOP))?;
     let white = |x: u32, y: u32| near(px(image, x, y), WHITE, TOLERANCE);
     // Walk out from the cursor through white window interior to the frame.
     let probe_x = cx.checked_sub(2)?;

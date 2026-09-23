@@ -34,7 +34,10 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name();
         if path.is_dir() {
-            if name != "target" && name != ".git" {
+            // Nested checkouts (git worktrees) are guarded by their own copy
+            // of this test.
+            let checkout = path.join(".git").exists();
+            if name != "target" && name != ".git" && !checkout {
                 rust_sources(&path, out);
             }
         } else if path.extension().is_some_and(|e| e == "rs") {

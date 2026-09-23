@@ -29,6 +29,9 @@ pub struct Species {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Move {
+    /// As the game prints it (`POISONPOWDER`).
+    #[serde(default)]
+    pub name: Option<String>,
     pub effect: Option<String>,
     pub power: u16,
     #[serde(rename = "type")]
@@ -122,6 +125,25 @@ impl GameData {
         self.moves.get(name)
     }
 
+    /// The move whose printed name matches `read` (`?` matches any
+    /// character), if exactly one does.
+    pub fn move_named(&self, read: &str) -> Option<&str> {
+        let fits = |name: &str| {
+            name.chars().count() == read.chars().count()
+                && name
+                    .chars()
+                    .zip(read.chars())
+                    .all(|(a, b)| b == '?' || a == b)
+        };
+        let mut found = self
+            .moves
+            .iter()
+            .filter(|(_, m)| m.name.as_deref().is_some_and(fits))
+            .map(|(k, _)| k.as_str());
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
     /// Damage multiplier ×10 for `attack` against a defender of `defender`
     /// types (10 = neutral, 0 = immune, 40 = double super effective).
     pub fn effectiveness(&self, attack: &str, defender: &[String]) -> u32 {
@@ -159,6 +181,17 @@ impl GameData {
     }
 
     /// The species `species` becomes by `level` through level evolutions.
+    /// Species this one can evolve into (any method), in name order.
+    pub fn evolutions_of(&self, species: &str) -> Vec<String> {
+        let mut targets: Vec<String> = self
+            .species(species)
+            .map(|s| s.evolutions.iter().map(|(_, _, t)| t.clone()).collect())
+            .unwrap_or_default();
+        targets.sort();
+        targets.dedup();
+        targets
+    }
+
     pub fn evolved_at(&self, species: &str, level: u8) -> String {
         let mut current = species.to_owned();
         while let Some((_, _, target)) = self.species(&current).and_then(|s| {

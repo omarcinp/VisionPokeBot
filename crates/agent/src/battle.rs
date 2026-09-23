@@ -60,47 +60,47 @@ pub fn identify_opponent(data: &GameData, observation: &Observation) -> Option<C
     )
 }
 
-/// The move slot to use: the evaluator's best move among those with PP to
-/// spare; slot 0 if nothing is known.
+/// The move slot to use: the evaluator's best damaging move among those
+/// with PP to spare; in wild battles, the trainer reserve is spent only when
+/// nothing else is left. `None` when no damaging move has PP.
 pub fn choose_move(
     data: &GameData,
     party: &Party,
     opponent: Option<&Combatant>,
     memory: &BattleMemory,
     policy: &BattlePolicy,
-) -> (u8, Option<String>) {
-    let Some(lead) = party.lead() else {
-        return (0, None);
+) -> Option<(u8, String)> {
+    let lead = party.lead()?;
+    let damaging = |m: &String| data.move_(m).is_some_and(|mv| mv.power > 0);
+    let spare = |m: &String| {
+        let left = lead.pp_left(data, m);
+        let max = data.move_(m).map_or(0, |mv| mv.pp);
+        left > 0 && (memory.trainer || max >= 30 || left > policy.wild_pp_reserve)
     };
-    let usable: Vec<String> = lead
-        .moves
-        .iter()
-        .filter(|m| {
-            let left = lead.pp_left(data, m);
-            let max = data.move_(m).map_or(0, |mv| mv.pp);
-            left > 0 && (memory.trainer || max >= 30 || left > policy.wild_pp_reserve)
+    let with_pp = |m: &String| lead.pp_left(data, m) > 0;
+    let pick = |usable: Vec<String>| -> Option<String> {
+        let best = opponent.and_then(|foe| {
+            let us = Combatant::new(data, &lead.species, lead.level, usable.clone(), 10)?;
+            best_move(data, &us, foe).map(|(m, _)| m)
+        });
+        // Unknown opponent: strongest usable move by power.
+        best.or_else(|| {
+            usable
+                .iter()
+                .max_by_key(|m| data.move_(m).map_or(0, |mv| mv.power))
+                .cloned()
         })
-        .cloned()
-        .collect();
-    let chosen = opponent.and_then(|foe| {
-        let us = Combatant::new(data, &lead.species, lead.level, usable.clone(), 10)?;
-        best_move(data, &us, foe).map(|(m, _)| m)
-    });
-    let chosen = chosen.or_else(|| {
-        // Unknown opponent: strongest usable damaging move by power.
-        usable
+    };
+    let tier = |keep: &dyn Fn(&String) -> bool| -> Vec<String> {
+        lead.moves
             .iter()
-            .filter(|m| data.move_(m).is_some_and(|mv| mv.power > 0))
-            .max_by_key(|m| data.move_(m).map_or(0, |mv| mv.power))
+            .filter(|m| damaging(m) && keep(m))
             .cloned()
-    });
-    match chosen {
-        Some(m) => (
-            lead.moves.iter().position(|x| *x == m).unwrap_or(0) as u8,
-            Some(m),
-        ),
-        None => (0, lead.moves.first().cloned()),
-    }
+            .collect()
+    };
+    let chosen = pick(tier(&spare)).or_else(|| pick(tier(&with_pp)))?;
+    let slot = lead.moves.iter().position(|x| *x == chosen)? as u8;
+    Some((slot, chosen))
 }
 
 /// The next battle input, if a battle menu is open.
@@ -114,7 +114,9 @@ pub fn decide(
     let battle = observation.battle.as_ref()?;
     let menu = battle.menu?;
     let low = battle.player_hp.is_some_and(|hp| hp < policy.flee_below);
-    let flee = low && !memory.trainer && memory.run_attempts < policy.max_run_attempts;
+    let no_attacks = choose_move(data, party, None, memory, policy).is_none();
+    let flee =
+        (low || no_attacks) && !memory.trainer && memory.run_attempts < policy.max_run_attempts;
     Some(match menu {
         BattleMenu::Command { column, row } if flee => step_toward(
             (column, row),
@@ -130,14 +132,20 @@ pub fn decide(
             "FIGHT",
             Expectation::ScreenIs(ScreenState::BattleMoveSelection),
         ),
+        BattleMenu::Moves { .. } if flee => Decision::Act(Action::new(
+            "back to the command menu to RUN",
+            vec![ControllerCommand::Press(Button::B)],
+            Expectation::ScreenIs(ScreenState::BattleCommand),
+            45,
+        )),
         BattleMenu::Moves { column, row } => {
             let opponent = identify_opponent(data, observation);
-            let (slot, name) = choose_move(data, party, opponent.as_ref(), memory, policy);
-            memory.last_move = name.clone();
-            let label = match &name {
-                Some(n) => format!("move {} ({})", slot + 1, n.trim_start_matches("MOVE_")),
-                None => format!("move {}", slot + 1),
+            let Some((slot, name)) = choose_move(data, party, opponent.as_ref(), memory, policy)
+            else {
+                return Some(Decision::Fail("no damaging move has PP left".into()));
             };
+            memory.last_move = Some(name.clone());
+            let label = format!("move {} ({})", slot + 1, name.trim_start_matches("MOVE_"));
             step_toward(
                 (column, row),
                 (slot % 2, slot / 2),
@@ -189,4 +197,75 @@ fn step_toward(
         Expectation::BattleMenuAt(cell(next.0, next.1)),
         45,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use pokebot_state::BattleObservation;
+
+    use super::*;
+    use crate::party::Member;
+
+    fn data() -> Option<GameData> {
+        GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))
+            .ok()
+    }
+
+    fn ivysaur(data: &GameData, used: &[(&str, u8)]) -> Party {
+        let mut member = Member::new(data, "SPECIES_IVYSAUR", 16);
+        member.moves = [
+            "MOVE_TACKLE",
+            "MOVE_SLEEP_POWDER",
+            "MOVE_LEECH_SEED",
+            "MOVE_VINE_WHIP",
+        ]
+        .map(String::from)
+        .to_vec();
+        for (m, n) in used {
+            member.pp_used.insert((*m).to_owned(), *n);
+        }
+        Party {
+            members: vec![member],
+        }
+    }
+
+    #[test]
+    fn wild_battles_spend_the_reserve_before_running_dry() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        let wild = BattleMemory::default();
+        // Tackle empty, Vine Whip at the reserve: Vine Whip rather than nothing.
+        let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 5)]);
+        assert_eq!(
+            choose_move(&data, &party, None, &wild, &policy),
+            Some((3, "MOVE_VINE_WHIP".into()))
+        );
+        // No damaging PP at all: nothing to choose (the battle policy runs).
+        let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
+        assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
+    }
+
+    #[test]
+    fn the_hud_and_move_menu_update_species_and_pp() {
+        let Some(data) = data() else { return };
+        let mut party = ivysaur(&data, &[]);
+        party.members[0].species = "SPECIES_BULBASAUR".into();
+        let battle = BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
+            player_name: Some("I?YSAUR".into()),
+            player_level: Some(16),
+            player_hp_numbers: Some((28, 49)),
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: Some(562),
+            opponent_hp: None,
+            move_pp: Some((12, 35)),
+        };
+        party.observe_battle(&data, &battle);
+        let lead = party.lead().unwrap();
+        assert_eq!(lead.species, "SPECIES_IVYSAUR");
+        assert_eq!(lead.pp_left(&data, "MOVE_TACKLE"), 12);
+    }
 }

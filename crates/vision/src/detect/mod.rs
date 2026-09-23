@@ -5,6 +5,7 @@ pub mod dialogue;
 pub mod hud;
 pub mod main_menu;
 pub mod menu;
+pub mod move_list;
 pub mod naming;
 pub mod title;
 

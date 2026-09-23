@@ -13,6 +13,17 @@ pub const BOX_BLUE: Rgb = [41, 81, 107];
 const CURSOR: Rgb = [41, 48, 49];
 const CURSOR_WIDTHS: [u32; 9] = [2, 3, 4, 5, 5, 5, 4, 3, 2];
 
+/// First row of the bottom battle panel (message box and menus).
+pub const PANEL_TOP: u32 = 112;
+
+/// Where the move menu prints the selected move's "PP left/max" numbers.
+pub const MOVE_PP: Region = Region {
+    x: 196,
+    y: 118,
+    width: 40,
+    height: 16,
+};
+
 /// HP bars: left edge, row, 48 px wide.
 const OPPONENT_BAR: (u32, u32) = (52, 34);
 const PLAYER_BAR: (u32, u32) = (174, 92);
@@ -28,7 +39,7 @@ pub fn is_battle_text_box(image: &RgbImage) -> bool {
 }
 
 pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
-    let menu = find_cursor(image).map(|(x, y)| {
+    let menu = find_cursor(image, PANEL_TOP + 4..image.height()).map(|(x, y)| {
         let row = u8::from(y >= 132);
         if x >= 120 {
             BattleMenu::Command {
@@ -59,13 +70,15 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
         opponent_level: opponent.and_then(|l| l.level),
         player_hp,
         opponent_hp,
+        move_pp: None,
     })
 }
 
-/// Top-left of the battle ▶ within the bottom panel.
-fn find_cursor(image: &RgbImage) -> Option<(u32, u32)> {
+/// Top-left of the first battle ▶ whose top row is in `rows`.
+pub fn find_cursor(image: &RgbImage, rows: std::ops::Range<u32>) -> Option<(u32, u32)> {
     let dark = |x: u32, y: u32| near(px(image, x, y), CURSOR, 12);
-    for y in 116..image.height() - CURSOR_WIDTHS.len() as u32 {
+    let last = rows.end.min(image.height() - CURSOR_WIDTHS.len() as u32);
+    for y in rows.start..last {
         for x in 1..image.width() - 8 {
             let matches = CURSOR_WIDTHS.iter().enumerate().all(|(i, &w)| {
                 let yy = y + i as u32;

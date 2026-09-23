@@ -50,8 +50,15 @@ Controller ◀── commands (also emitted as InputIssued events)
   | Waiting for A | red ▼ whose rows shrink 9-7-5-3-1, inside the text area |
   | Menu | gray ▶ cursor (rows 1-2-3-4-5-4-3-2-1); window found by walking the white interior; rows 16 px apart |
   | Naming keyboard | panel colour; the focused key is the cell whose border isn't panel-coloured; typed count = filled 8 px name slots |
+  | YES/NO over a battle | the battle ▶ above the battle panel, inside a white window (same window walk as field menus) |
+  | KNOWN MOVES list | tan/blue header bar; the selected row's red frame (rows 28 px apart); five move names read with the font |
 
   Anything else is `Unknown`, including the overworld for now.
+- **Text reading (`vision::text`):** the game's normal font is extracted from the decompilation (`tools/gamedata/extract_font.py` → `data/world/font_normal.json`: bitmap and advance width per character, built locally).
+  - Text colour depends on the speaker and the window (blue, red, dark gray, white on battle blue), so the reader tries each prominent non-background colour as ink and keeps the reading that explains the most ink.
+  - Lines are found as bands of ink rows. Each band tries every cell top that fits, and glyphs are matched exactly on their ink columns, indexed by the first column. The widest, inkiest match wins, and ties go to the lowest character code.
+  - A gap of 4+ blank columns reads as a space; unexplained ink reads as `?`. Lines that glyphs explain worse than they leave unexplained (window frames) are dropped.
+  - Dialogue observations carry `lines`, re-read only when the text cells change (about 1 ms per page).
 - **Screen events:** a screen change must persist for 2 frames before `ScreenChanged` is emitted, so single-frame flicker never reaches state.
 - **Reducer:** pure. A `GameState` can be rebuilt from `events.jsonl`.
 - **Provenance:** every state field records where its value came from (`Observed`, `Tracked`, …, `Unknown`).
@@ -131,13 +138,27 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - the HP bars (48 px each, framed, green/yellow/red), read as per mille.
 - **Policy (placeholder):** FIGHT with move slot 1. RUN when HP is under 35 %, trying at most 3 times per battle so trainer battles fall back to fighting.
 
+## New moves and evolution (`agent::learn`, `agent::moves`)
+
+- Every finished page is parsed for facts: "X is trying to learn M.", "X forgot M.", "X learned M!", "X did not learn M.", "X evolved into S!". Move names map to constants through the game's own names (`move_names.h`, with `?` wildcards).
+- Party knowledge only changes on those confirmations. Level-ups add learnset moves by inference only while a slot is free.
+- **Which move to forget** (`moves::choose`): each candidate set (the current four, or the new move in slot k) is ranked by, in order:
+  1. total evaluator win probability against the trainers the last plan prepared for;
+  2. damage value (power × accuracy, STAB), because the evaluator ignores PP, so a damaging move is never traded for a status move unless that wins battles;
+  3. status utility (sleep > paralysis > poison / Leech Seed > stat drops);
+  4. keeping the current moves, then the earliest slot.
+- "Delete a move to make room for M?" gets YES if a slot was chosen, otherwise NO. "Stop learning M?" gets the opposite. On the KNOWN MOVES list the four moves shown replace party knowledge (and the choice is recomputed if they differ). The frame is then moved row by row, each step verified, to the chosen slot (or to the new move, to skip it), and A is pressed.
+- In battle, any other YES/NO question fails the attempt instead of being answered, because A would mean YES.
+- Evolution is never assumed. The species changes on "X evolved into S!" or when the HUD shows an evolved name (any branch of the evolution chain).
+- PP comes from the screen. The move menu prints `PP a/b` for the move under the ▶, which sets that move's PP. Wild battles spend damaging moves' PP above a 5-PP trainer reserve, then the reserve, then RUN. Training heals when fewer than 6 attack PP are left to spend, as well as below 50% HP.
+
 ## Readiness planning (`crates/gamedata`, `crates/planner`)
 
 - **Game data:** `tools/gamedata/extract_gamedata.py` pulls from the decompilation:
   - species (base stats, types, catch rate, exp yield, growth rate, learnset, evolutions);
   - moves and the type chart;
   - 743 trainers with their parties;
-  - which map objects are trainers (with sight range);
+  - which map objects are trainers (with sight range; route trainers' scripts live in `data/scripts/trainers.inc`);
   - FireRed wild encounter tables, marts and item prices.
 - **Mechanics:** Gen III stats, experience curves and gains, the damage formula (16 rolls, crits, STAB, type multipliers, physical/special by type), and the shake-check catch formula.
 - **Evaluator:** exact probability that one Pokémon beats another. It tracks the full HP distribution over hit/miss, crits and damage rolls, and uses speed order. Opponents are assumed to always use their most damaging move (pessimistic). Trainer battles chain matchups in party order with expected HP carried over (approximate).
@@ -159,6 +180,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Moves come from the learnset as levels rise. The knowledge is persisted in `saves/progress.json`.
 - **Battle move choice:** the opponent is identified from its HUD name and level, and the evaluator's best move is chosen. In wild battles, strong moves keep 5 PP in reserve for trainers. A battle counts as a trainer battle when dialogue preceded it (so no RUN).
 - **Checkpoints and retry:** `story --continue --save-game` runs one milestone at a time and saves after each. If our Pokémon's HP reads 0, the attempt fails; the bot reloads the last save (soft reset, then CONTINUE) and retries that milestone, up to 5 times.
+- **Route 3 preparation:** from the Boulder Badge save, the planner chose Lv 18 on Route 22 (Youngster Calvin's Spearow was 0% at Lv 14). Training took 68 battles. The bot swapped Growl for Poison Powder, then Poison Powder for Sleep Powder, evolved into IVYSAUR at 16, healed twice, and saved in Pewter. No Pokémon fainted.
 - **Result:** from the Pokédex save, the planner chose "Lv 10 on Route 22". Training took 12 battles. The bot then crossed Viridian Forest (7 battles), healed and saved in Pewter, beat Camper Liam and Brock (lowest HP 27/38) and received the Boulder Badge. No Pokémon fainted.
 
 ## Devices
@@ -218,6 +240,7 @@ session/
 
 ## Next
 
+- Menu text: read YES/NO and list menus with the font (shops, bag, party).
 - Catching (BAG → Poké Ball) and buying at marts, so plans with catches can run.
 - Route 3 / Mt. Moon toward Misty, with story gating (which areas are reachable) derived rather than listed.
 - The Town Map from Daisy (optional side goal).

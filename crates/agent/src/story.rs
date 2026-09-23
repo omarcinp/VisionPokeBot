@@ -15,6 +15,7 @@ use pokebot_world::World;
 use serde::Serialize;
 
 use crate::battle::{self, BattleMemory, BattlePolicy};
+use crate::learn::MoveLearning;
 use crate::nav::{Destination, NavStatus, Navigator};
 use crate::new_game::{advance_or_wait, select};
 use crate::party::Party;
@@ -28,6 +29,9 @@ const SETTLE_FRAMES: u32 = 90;
 const TRAINER_DIALOGUE_WINDOW: u64 = 600;
 /// Go heal when the lead's HP drops below this share (per mille) while training.
 const HEAL_BELOW: u32 = 500;
+/// Training heals when wild battles have fewer attack PP than this to spend
+/// (a few battles' worth).
+const HEAL_BELOW_PP: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Answer {
@@ -133,6 +137,10 @@ pub struct StoryTask {
     last_dialogue_frame: Option<u64>,
     /// Training: the two grass tiles we pace between, and which is next.
     pacing: Option<(Tile, Tile, bool)>,
+    /// New moves and evolution, read from the screen.
+    learning: MoveLearning,
+    /// Trainers the last plan prepared for (values moves when learning).
+    upcoming: Vec<String>,
 }
 
 impl StoryTask {
@@ -156,6 +164,8 @@ impl StoryTask {
             in_battle: false,
             last_dialogue_frame: None,
             pacing: None,
+            learning: MoveLearning::default(),
+            upcoming: Vec::new(),
         }
     }
 
@@ -402,6 +412,44 @@ impl Task for StoryTask {
         }
         let step = self.current().cloned().expect("milestone has steps");
 
+        // New moves and evolution can come up in and after battles: every
+        // finished page is read, and the KNOWN MOVES list and questions
+        // about moves are answered from the plan's value of each move.
+        if let Some(data) = self.data.clone() {
+            if let Some(d) = o
+                .dialogue
+                .as_ref()
+                .filter(|d| d.ready_for_a() || o.menu.is_some())
+            {
+                for detail in
+                    self.learning
+                        .observe_page(&d.lines, &data, &mut self.party, &self.upcoming)
+                {
+                    ctx.events.push(GameEvent::GoalProgress {
+                        goal: "Story".into(),
+                        phase: "Party".into(),
+                        detail,
+                    });
+                }
+            }
+            if let Some(list) = &o.move_list {
+                self.quiet_frames = 0;
+                return self
+                    .learning
+                    .on_move_list(list, &data, &mut self.party, &self.upcoming);
+            }
+            if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
+                if let Some(yes) = self.learning.answer(&d.lines) {
+                    self.quiet_frames = 0;
+                    return select(
+                        menu,
+                        u8::from(!yes),
+                        if yes { "learning: YES" } else { "learning: NO" },
+                    );
+                }
+            }
+        }
+
         // Battles interrupt whatever the step is doing (wild encounters,
         // trainers, the rival).
         if let Some(battle) = &o.battle {
@@ -446,6 +494,10 @@ impl Task for StoryTask {
                 {
                     return decision;
                 }
+            }
+            if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+                // A is YES: never answer a question we don't understand.
+                return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
             }
             if o.dialogue.is_some() {
                 return advance_or_wait(o.dialogue.as_ref(), "battle text");
@@ -537,6 +589,7 @@ impl Task for StoryTask {
                 confidence,
             } => match self.plan(&targets, &areas, confidence) {
                 Ok(steps) => {
+                    self.upcoming = targets.clone();
                     ctx.events.push(GameEvent::GoalProgress {
                         goal: "Story".into(),
                         phase: "Plan".into(),
@@ -702,10 +755,15 @@ impl StoryTask {
             self.advance_step(ctx);
             return Decision::Wait("training done".into());
         }
-        // Heal before continuing when HP is low (knowledge from the last battle).
-        if lead
-            .hp
-            .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
+        // Heal before continuing when HP is low (knowledge from the last
+        // battle) or wild battles have no attack PP left to spend.
+        let out_of_pp = self.data.as_ref().is_some_and(|data| {
+            lead.wild_attack_pp(data, self.policy.wild_pp_reserve) < HEAL_BELOW_PP
+        });
+        if out_of_pp
+            || lead
+                .hp
+                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
         {
             self.splice(vec![StoryStep::Heal { center: None }], true);
             return Decision::Wait("going to heal".into());
@@ -925,9 +983,42 @@ pub fn to_brock() -> Vec<Milestone> {
     ]
 }
 
+const ROUTE3_TRAINERS: [&str; 8] = [
+    "TRAINER_LASS_ROBIN",
+    "TRAINER_BUG_CATCHER_JAMES",
+    "TRAINER_LASS_SALLY",
+    "TRAINER_BUG_CATCHER_GREG",
+    "TRAINER_YOUNGSTER_CALVIN",
+    "TRAINER_LASS_JANICE",
+    "TRAINER_BUG_CATCHER_COLTON",
+    "TRAINER_YOUNGSTER_BEN",
+];
+
+/// From the Boulder Badge toward Mt. Moon: get ready for Route 3's trainers.
+pub fn to_mt_moon() -> Vec<Milestone> {
+    vec![Milestone::new(
+        "PrepareForRoute3",
+        "ask the planner what it takes to beat Route 3's trainers, then train",
+        vec![
+            StoryStep::Prepare {
+                targets: ROUTE3_TRAINERS.iter().map(|t| (*t).to_owned()).collect(),
+                areas: ["Route22", "Route2", "ViridianForest", "Route1"]
+                    .iter()
+                    .map(|a| (*a).to_owned())
+                    .collect(),
+                confidence: 0.9,
+            },
+            StoryStep::Heal {
+                center: Some("PewterCity_PokemonCenter_1F".into()),
+            },
+        ],
+    )]
+}
+
 /// Every milestone implemented so far, in order.
 pub fn all_milestones(starter: Starter) -> Vec<Milestone> {
     let mut list = opening(starter);
     list.extend(to_brock());
+    list.extend(to_mt_moon());
     list
 }

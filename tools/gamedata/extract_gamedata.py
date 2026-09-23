@@ -77,8 +77,10 @@ def species_data(src):
 def move_data(src):
     text = (src / "data/battle_moves.h").read_text()
     raw = parse_designated(text, "MOVE_")
+    names = dict(re.findall(r'\[(MOVE_\w+)\]\s*=\s*_\("(.*?)"\)', (src / "data/text/move_names.h").read_text()))
     return {
         name: {
+            "name": names.get(name),
             "effect": f.get("effect"),
             "power": num(f.get("power")),
             "type": f.get("type"),
@@ -134,16 +136,25 @@ def trainers(src):
 
 
 def map_scripts(pret, maps):
-    """Trainer objects and marts per map (from data/maps/*/scripts.inc)."""
+    """Trainer objects and marts per map (from data/maps/*/scripts.inc; route
+    trainers' scripts are shared in data/scripts/trainers.inc)."""
     map_trainers, marts = {}, {}
+
+    def script_blocks(text):
+        return {
+            b.group(1): b.group(2)
+            for b in re.finditer(r"^(\w+)::\n(.*?)(?=^\w+::|\Z)", text, re.S | re.M)
+        }
+
+    shared = {}
+    for path in sorted((pret / "data/scripts").glob("*.inc")):
+        shared.update(script_blocks(path.read_text()))
     for name, m in maps.items():
         path = pret / "data/maps" / name / "scripts.inc"
         if not path.exists():
             continue
         text = path.read_text()
-        blocks = {}
-        for b in re.finditer(r"^(\w+)::\n(.*?)(?=^\w+::|\Z)", text, re.S | re.M):
-            blocks[b.group(1)] = b.group(2)
+        blocks = {**shared, **script_blocks(text)}
         for i, obj in enumerate(m.get("object_events") or []):
             body = blocks.get(obj.get("script") or "", "")
             t = re.search(r"trainerbattle\w*\s+(TRAINER_\w+)", body)

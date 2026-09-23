@@ -1168,6 +1168,8 @@ dependencies = [
  "pokebot-core",
  "pokebot-state",
  "pokebot-world",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

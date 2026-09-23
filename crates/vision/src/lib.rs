@@ -7,12 +7,14 @@
 
 pub mod color;
 pub mod detect;
+pub mod text;
 
 use std::sync::Arc;
 
 use pokebot_core::{NormalizedFrame, RgbImage};
 use pokebot_state::{
-    BattleMenu, DialogueKind, FrameMetrics, Observation, Observed, PlayerPose, Region, ScreenState,
+    BattleMenu, DialogueKind, DialogueObservation, FrameMetrics, Observation, Observed, PlayerPose,
+    Region, ScreenState,
 };
 use pokebot_world::{localize::PLAYER_SPRITE, Localizer, World};
 
@@ -37,6 +39,9 @@ pub struct FireRedPerception {
     frames_since_global_search: u32,
     /// Previous frame's text cells and how long they have been unchanged.
     previous_text: Option<(Vec<u8>, u32)>,
+    font: Option<Arc<text::Font>>,
+    /// Last text read and the text cells it was read from.
+    last_read: Option<(Vec<u8>, Vec<String>)>,
 }
 
 /// Frames between whole-world searches while the player can't be located.
@@ -88,6 +93,15 @@ impl PerceptionSystem for FireRedPerception {
             observation.menu = Some(menu);
             return observation;
         }
+        if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::LearnMove, "known-moves"),
+                metrics,
+            );
+            observation.move_list = Some(list);
+            return observation;
+        }
         let mut dialogue = detect::dialogue::detect(image);
         match &mut dialogue {
             Some(d) => {
@@ -101,16 +115,24 @@ impl PerceptionSystem for FireRedPerception {
                 };
                 d.stable_frames = stable;
                 self.previous_text = Some((d.text_cells.clone(), stable));
+                d.lines = self.read_text(image, d);
             }
             None => self.previous_text = None,
         }
-        let battle = detect::battle::detect(image);
-        let menu = if battle.is_some() {
+        let mut battle = detect::battle::detect(image);
+        if let (Some(b), Some(font)) = (&mut battle, &self.font) {
+            if matches!(b.menu, Some(BattleMenu::Moves { .. })) {
+                b.move_pp = read_fraction(&font.read(image, detect::battle::MOVE_PP, &[]).join(""));
+            }
+        }
+        let battle_menu = battle.as_ref().and_then(|b| b.menu);
+        // In battle, list menus appear only over battle text (YES/NO
+        // questions such as "Delete a move…?").
+        let menu = if battle_menu.is_some() {
             None
         } else {
             detect::menu::detect(image)
         };
-        let battle_menu = battle.as_ref().and_then(|b| b.menu);
         let state = match (&dialogue, &menu) {
             _ if matches!(battle_menu, Some(BattleMenu::Command { .. })) => {
                 screen(ScreenState::BattleCommand, "battle-cursor")
@@ -151,6 +173,28 @@ impl FireRedPerception {
             world: Some(world),
             ..Self::default()
         }
+    }
+
+    /// Reads dialogue text with the game font.
+    pub fn with_font(mut self, font: Arc<text::Font>) -> Self {
+        self.font = Some(font);
+        self
+    }
+
+    /// The dialogue's text, re-read only when its text cells changed.
+    fn read_text(&mut self, image: &RgbImage, d: &DialogueObservation) -> Vec<String> {
+        let Some(font) = &self.font else {
+            return Vec::new();
+        };
+        if let Some((cells, lines)) = &self.last_read {
+            if *cells == d.text_cells {
+                return lines.clone();
+            }
+        }
+        let exclude: Vec<Region> = d.arrow.iter().map(|a| a.inflate(2)).collect();
+        let lines = font.read(image, d.region, &exclude);
+        self.last_read = Some((d.text_cells.clone(), lines.clone()));
+        lines
     }
 
     /// Allows whole-world searches when the player's map is unknown.
@@ -212,6 +256,12 @@ impl FireRedPerception {
             changed_pixels,
         }
     }
+}
+
+/// "a/b" → (a, b).
+fn read_fraction(text: &str) -> Option<(u8, u8)> {
+    let (a, b) = text.trim().split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
 fn is_uniform(image: &RgbImage) -> bool {

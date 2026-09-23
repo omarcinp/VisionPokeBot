@@ -68,6 +68,10 @@ pub enum Expectation {
     DialogueOpen,
     /// The battle ▶ is on this cell of this menu.
     BattleMenuAt(BattleMenu),
+    /// The KNOWN MOVES list's selection frame is on this row.
+    MoveListAt(u8),
+    /// The KNOWN MOVES list is gone.
+    MoveListClosed,
     /// Nothing to verify; only wait for the inputs to finish.
     InputsDone,
 }
@@ -117,6 +121,11 @@ impl Expectation {
             Expectation::BattleMenuAt(menu) => {
                 observation.battle.as_ref().and_then(|b| b.menu) == Some(*menu)
             }
+            Expectation::MoveListAt(row) => observation
+                .move_list
+                .as_ref()
+                .is_some_and(|l| l.selected == Some(*row)),
+            Expectation::MoveListClosed => observation.move_list.is_none(),
             Expectation::InputsDone => true,
         }
     }

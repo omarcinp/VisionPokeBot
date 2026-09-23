@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use pokebot_gamedata::GameData;
-use pokebot_state::BattleObservation;
+use pokebot_state::{BattleMenu, BattleObservation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,33 +42,52 @@ impl Member {
         max.saturating_sub(*self.pp_used.get(mv).unwrap_or(&0))
     }
 
-    /// Applies a level seen on screen: learn moves gained since (appended in
-    /// learning order; the oldest is replaced once four are known, as when
-    /// every new move is accepted) and evolve if due.
+    /// Applies a level seen on screen: learn moves gained since while a slot
+    /// is free (appended in learning order). With four moves known the game
+    /// asks which to forget, and evolution can be cancelled: both are
+    /// recorded from the screen (`learn`, the HUD name), not assumed here.
     pub fn observe_level(&mut self, data: &GameData, level: u8) -> Vec<String> {
         let mut learned = Vec::new();
         if level <= self.level {
             return learned;
         }
-        let evolved = data.evolved_at(&self.species, level);
-        for species in [self.species.clone(), evolved.clone()] {
+        {
+            let species = self.species.clone();
             for (lvl, mv) in data
                 .species(&species)
                 .map(|s| s.learnset.clone())
                 .unwrap_or_default()
             {
-                if lvl > self.level && lvl <= level && !self.moves.contains(&mv) {
-                    if self.moves.len() == 4 {
-                        self.moves.remove(0);
-                    }
+                if lvl > self.level
+                    && lvl <= level
+                    && !self.moves.contains(&mv)
+                    && self.moves.len() < 4
+                {
                     self.moves.push(mv.clone());
                     learned.push(mv);
                 }
             }
         }
-        self.species = evolved;
         self.level = level;
         learned
+    }
+
+    /// PP that wild battles may spend on damaging moves: moves with 30+ PP
+    /// in full, others above the reserve kept for trainers.
+    pub fn wild_attack_pp(&self, data: &GameData, reserve: u8) -> u32 {
+        self.moves
+            .iter()
+            .filter(|m| data.move_(m).is_some_and(|mv| mv.power > 0))
+            .map(|m| {
+                let left = self.pp_left(data, m);
+                let max = data.move_(m).map_or(0, |mv| mv.pp);
+                u32::from(if max >= 30 {
+                    left
+                } else {
+                    left.saturating_sub(reserve)
+                })
+            })
+            .sum()
     }
 
     pub fn heal(&mut self) {
@@ -99,14 +118,25 @@ impl Party {
         let Some(name) = &battle.player_name else {
             return Vec::new();
         };
-        let Some(member) = self.members.iter_mut().find(|m| {
-            crate::party::names_match(&m.display_name(), name)
-                || crate::party::names_match(&display_name(&data.evolved_at(&m.species, 100)), name)
-        }) else {
+        // The HUD shows an evolved name once the member has evolved.
+        let Some((member, species)) = self
+            .members
+            .iter_mut()
+            .find_map(|m| seen_as(data, &m.species, name).map(|s| (m, s)))
+        else {
             return Vec::new();
         };
+        member.species = species;
         if let Some(hp) = battle.player_hp_numbers {
             member.hp = Some(hp);
+        }
+        // The move menu shows the PP of the move under the ▶.
+        if let (Some(BattleMenu::Moves { column, row }), Some((left, max))) =
+            (battle.menu, battle.move_pp)
+        {
+            if let Some(mv) = member.moves.get(usize::from(row * 2 + column)).cloned() {
+                member.pp_used.insert(mv, max.saturating_sub(left));
+            }
         }
         match battle.player_level {
             Some(level) => member.observe_level(data, level),
@@ -117,6 +147,19 @@ impl Party {
     pub fn heal_all(&mut self) {
         self.members.iter_mut().for_each(Member::heal);
     }
+}
+
+/// `species` itself or the evolution of it whose name matches `read`.
+fn seen_as(data: &GameData, species: &str, read: &str) -> Option<String> {
+    let mut frontier = vec![species.to_owned()];
+    while !frontier.is_empty() {
+        let current = frontier.remove(0);
+        if names_match(&display_name(&current), read) {
+            return Some(current);
+        }
+        frontier.extend(data.evolutions_of(&current));
+    }
+    None
 }
 
 /// `read` may contain `?` for unrecognised letters.

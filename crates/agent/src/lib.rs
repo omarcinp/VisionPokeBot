@@ -10,6 +10,8 @@ mod action;
 pub mod battle;
 mod executor;
 pub mod keyboard;
+pub mod learn;
+pub mod moves;
 pub mod nav;
 pub mod new_game;
 pub mod party;

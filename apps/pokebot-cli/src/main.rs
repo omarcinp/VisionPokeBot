@@ -170,6 +170,9 @@ enum Command {
         /// Restrict localization to this map
         #[arg(long)]
         map: Option<String>,
+        /// Read text with this font (see tools/world/build.sh); skipped if missing
+        #[arg(long, default_value = "data/world/font_normal.json")]
+        font: PathBuf,
     },
     /// Verify and summarize a recorded session without any device.
     Replay {
@@ -281,7 +284,8 @@ fn main() -> Result<()> {
             out,
             world,
             map,
-        } => inspect(images, viewport, out, world, map),
+            font,
+        } => inspect(images, viewport, out, world, map, font),
         Command::Replay {
             session,
             from_frame,
@@ -406,7 +410,11 @@ fn story(
         })?),
         _ => None,
     };
+    let font_path = options.world.join("font_normal.json");
+    let font = pokebot_vision::text::Font::load(&font_path)
+        .with_context(|| format!("loading {} (run tools/world/build.sh)", font_path.display()))?;
     let perception = FireRedPerception::with_world(Arc::clone(&world))
+        .with_font(Arc::new(font))
         .with_global_search(matches!(start, StoryStart::AsIs));
     let devices = devices::open(args)?;
     let (video_name, controller_name) =
@@ -415,7 +423,12 @@ fn story(
     attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
     let started = std::time::Instant::now();
-    let executor = Executor::default();
+    // Milestones include long training plans; stuck detection still ends an
+    // attempt that stops making progress.
+    let executor = Executor {
+        max_frames: 60 * 60 * 60 * 3,
+        ..Executor::default()
+    };
     let data = Arc::new(
         pokebot_gamedata::GameData::load(options.world.join("gamedata.json"))
             .context("loading gamedata.json (run tools/world/build.sh)")?,
@@ -669,11 +682,16 @@ fn inspect(
     out: Option<PathBuf>,
     world: Option<PathBuf>,
     map: Option<String>,
+    font: PathBuf,
 ) -> Result<()> {
     if out.is_some() && paths.len() > 1 {
         bail!("--out needs a single image");
     }
     let world = world.map(pokebot_world::World::load).transpose()?;
+    let font = font
+        .exists()
+        .then(|| pokebot_vision::text::Font::load(&font).map(Arc::new))
+        .transpose()?;
     for path in paths {
         let image = pokebot_video::png::load(&path)?;
         let locator = match viewport.as_deref() {
@@ -702,7 +720,11 @@ fn inspect(
             image,
         };
         let normalized = Normalizer::new(locator).normalize(&captured)?;
-        let observation = FireRedPerception::default().observe(&normalized);
+        let mut perception = FireRedPerception::default();
+        if let Some(font) = &font {
+            perception = perception.with_font(Arc::clone(font));
+        }
+        let observation = perception.observe(&normalized);
         println!(
             "{} ({width}x{height}): {}",
             path.display(),
@@ -752,6 +774,9 @@ fn describe_observation(o: &Observation) -> String {
             }
         ));
     }
+    if let Some(d) = o.dialogue.as_ref().filter(|d| !d.lines.is_empty()) {
+        parts.push(format!("text {:?}", d.lines));
+    }
     if let Some(m) = &o.menu {
         parts.push(format!(
             "menu {} rows, cursor {} at ({},{})",
@@ -760,8 +785,9 @@ fn describe_observation(o: &Observation) -> String {
     }
     if let Some(b) = &o.battle {
         parts.push(format!(
-            "battle {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",
+            "battle {:?} PP {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",
             b.menu,
+            b.move_pp,
             b.player_name,
             b.player_level,
             b.player_hp_numbers,
@@ -770,6 +796,9 @@ fn describe_observation(o: &Observation) -> String {
             b.opponent_level,
             b.opponent_hp
         ));
+    }
+    if let Some(l) = &o.move_list {
+        parts.push(format!("moves {:?}, selected {:?}", l.moves, l.selected));
     }
     if let Some(n) = &o.naming {
         parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));
