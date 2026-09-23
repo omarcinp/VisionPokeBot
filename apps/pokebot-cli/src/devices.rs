@@ -8,8 +8,9 @@ use std::str::FromStr;
 use anyhow::{bail, Context, Result};
 use pokebot_capture_card::{CaptureCardConfig, CaptureCardVideoSource};
 use pokebot_controller::NullController;
-use pokebot_core::{Controller, PressProfile, VideoSource};
+use pokebot_core::{Controller, GbaOnSwitch, PressProfile, VideoSource};
 use pokebot_emulator_libretro::{launch, ClockMode, EmulatorConfig};
+use pokebot_esp32_wifi::{Esp32WifiConfig, Esp32WifiController};
 use pokebot_pabotbase::{PabotBaseConfig, PabotBaseController};
 use pokebot_replay::Session;
 use pokebot_runtime::Devices;
@@ -43,6 +44,8 @@ impl FromStr for VideoSpec {
 pub enum ControllerSpec {
     Emulator,
     Pabotbase(PathBuf),
+    /// ESP32-S3 WiFi controller firmware (or its simulator) at `host[:port]`.
+    Esp32Wifi(String),
     Null,
 }
 
@@ -54,8 +57,9 @@ impl FromStr for ControllerSpec {
             None if s == "emulator" => Ok(Self::Emulator),
             None if s == "null" => Ok(Self::Null),
             Some(("pabotbase", port)) => Ok(Self::Pabotbase(port.into())),
+            Some(("esp32", address)) => Ok(Self::Esp32Wifi(address.into())),
             _ => Err(format!(
-                "expected emulator | pabotbase:<serial port> | null, got {s:?}"
+                "expected emulator | pabotbase:<serial port> | esp32:<host[:port]> | null, got {s:?}"
             )),
         }
     }
@@ -110,7 +114,7 @@ pub struct DeviceArgs {
     /// Video device: emulator | capture-card:<device> | replay:<session> | images:<dir>
     #[arg(long, default_value = "emulator")]
     pub video: VideoSpec,
-    /// Controller device: emulator | pabotbase:<serial port> | null
+    /// Controller device: emulator | pabotbase:<serial port> | esp32:<host[:port]> | null
     #[arg(long, default_value = "emulator")]
     pub controller: ControllerSpec,
     /// Game viewport inside captured frames as x,y,w,h (default: whole frame)
@@ -200,6 +204,21 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
                 info.firmware, info.queue_capacity
             );
             (Box::new(controller), name)
+        }
+        ControllerSpec::Esp32Wifi(address) => {
+            let controller = Esp32WifiController::connect(Esp32WifiConfig::new(address))
+                .with_context(|| format!("connecting to {address}"))?;
+            let info = controller.info();
+            let name = format!(
+                "esp32:{} \"{}\" {} (firmware {})",
+                controller.peer(),
+                info.name,
+                info.controller,
+                info.firmware
+            );
+            eprintln!("{name}");
+            // The device is a full Switch controller; the bot plays GBA on it.
+            (Box::new(GbaOnSwitch(controller)), name)
         }
         ControllerSpec::Null => (
             Box::new(NullController::new(PressProfile::default())),

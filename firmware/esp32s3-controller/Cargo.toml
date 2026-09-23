@@ -1,0 +1,45 @@
+[package]
+name = "pokebot-esp32s3-controller"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+description = "ESP32-S3 firmware: a USB wired Switch controller driven over WiFi"
+
+# Built for xtensa-esp32s3-espidf with the `esp` toolchain, so it is its own
+# workspace rather than a member of the bot's.
+[workspace]
+
+[[bin]]
+name = "pokebot-esp32s3-controller"
+harness = false # no test harness on the target
+
+[features]
+default = []
+# Run under Espressif QEMU: OpenCores Ethernet instead of WiFi, and no USB
+# (QEMU does not emulate the OTG peripheral); HID reports are logged.
+qemu = []
+
+[dependencies]
+anyhow = "1.0.104"
+log = "0.4"
+esp-idf-svc = { version = "0.53", features = ["critical-section"] }
+pokebot-core = { path = "../../crates/core" }
+pokebot-remote = { path = "../../crates/remote" }
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true # symbols do not take flash space
+opt-level = "z"
+
+# TinyUSB (Espressif's esp_tinyusb component) plus our small C glue that owns
+# the USB descriptors and TinyUSB callbacks. Rust calls into it via bindings.
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = "components/switch_hid"
+bindings_header = "components/switch_hid/include/switch_hid.h"
+bindings_module = "switch_hid"
