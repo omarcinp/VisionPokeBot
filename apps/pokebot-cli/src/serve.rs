@@ -1,7 +1,9 @@
 //! `pokebot emulator serve`: runs the emulator as a stand-alone "console"
 //! that exposes the same interfaces as real hardware — video on a V4L2
-//! device, controller input over a PABotBase2 serial port.
+//! device, controller input over a PABotBase2 serial port and over the ESP32-S3
+//! WiFi controller protocol.
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,7 +12,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use pokebot_core::{VideoSource, CANONICAL_HEIGHT, CANONICAL_WIDTH};
 use pokebot_emulator_libretro::{launch, ClockMode};
-use pokebot_virtual_console::{spawn_virtual_esp32, EmulatorButtons, V4l2Sink, VirtualSerialPort};
+use pokebot_remote::protocol::CONTROL_PORT;
+use pokebot_remote::{Device, DeviceConfig};
+use pokebot_virtual_console::{
+    spawn_virtual_esp32, EmulatorButtons, EmulatorHid, V4l2Sink, VirtualSerialPort,
+};
 
 use crate::devices::{emulator_config, EmulatorArgs};
 
@@ -27,6 +33,15 @@ pub struct ServeArgs {
     /// Path of the virtual ESP32 serial port (a symlink to a pseudo-terminal)
     #[arg(long, default_value = "/tmp/pokebot-esp32")]
     pub serial: PathBuf,
+    /// Address the virtual WiFi controller listens on
+    #[arg(long, default_value = "127.0.0.1")]
+    pub wifi_bind: IpAddr,
+    /// Control port of the virtual WiFi controller (0 disables it)
+    #[arg(long, default_value_t = CONTROL_PORT)]
+    pub wifi_port: u16,
+    /// HTTP port of the virtual WiFi controller's API and control page
+    #[arg(long, default_value_t = 8078)]
+    pub wifi_http_port: u16,
 }
 
 pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
@@ -65,6 +80,25 @@ pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
         port.path().display()
     );
     let (log_tx, log_rx) = std::sync::mpsc::channel();
+    let _wifi = if args.wifi_port == 0 {
+        None
+    } else {
+        let config = DeviceConfig::new(
+            "PokeBot virtual ESP32-S3 (emulator)",
+            args.wifi_bind,
+            args.wifi_port,
+            args.wifi_http_port,
+        );
+        let device = Device::start(config, EmulatorHid::new(controller.clone()))
+            .context("starting virtual WiFi controller")?;
+        eprintln!(
+            "controller: {} (WiFi controller protocol) -> --controller esp32:{}; http://{}/",
+            device.control_addr(),
+            device.control_addr(),
+            device.http_addr()
+        );
+        Some(device)
+    };
     let _esp32 = spawn_virtual_esp32(
         port,
         EmulatorButtons(controller),
