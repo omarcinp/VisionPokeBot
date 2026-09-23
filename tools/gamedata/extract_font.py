@@ -52,21 +52,41 @@ def parse_charmap(path):
     return chars
 
 
-def parse_widths(text_c):
-    body = re.search(r"sFontNormalLatinGlyphWidths\[\]\s*=\s*\{([^}]*)\}", text_c).group(1)
+def parse_widths(text_c, table):
+    body = re.search(rf"{table}\[\]\s*=\s*\{{([^}}]*)\}}", text_c).group(1)
     return [int(v) for v in re.findall(r"\d+", body)]
+
+
+FONTS = {
+    "normal": {
+        "sheet": "graphics/fonts/latin_normal.png",
+        "widths_table": "sFontNormalLatinGlyphWidths",
+        "cell_width": 16,
+        "out": Path("data/world/font_normal.json"),
+    },
+    "small": {
+        "sheet": "graphics/fonts/latin_small.png",
+        "widths_table": "sFontSmallLatinGlyphWidths",
+        "cell_width": 8,
+        "out": Path("data/world/font_small.json"),
+    },
+}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pret", type=Path, default=Path("data/pret-pokefirered"))
-    parser.add_argument("--out", type=Path, default=Path("data/world/font_normal.json"))
+    parser.add_argument("--font", choices=sorted(FONTS), default="normal")
+    parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    font = FONTS[args.font]
+    out = args.out or font["out"]
 
     chars = parse_charmap(args.pret / "charmap.txt")
-    widths = parse_widths((args.pret / "src/text.c").read_text(encoding="utf-8"))
-    sheet = Image.open(args.pret / "graphics/fonts/latin_normal.png")
-    columns = sheet.width // 16
+    widths = parse_widths((args.pret / "src/text.c").read_text(encoding="utf-8"), font["widths_table"])
+    sheet = Image.open(args.pret / font["sheet"])
+    cell_w = font["cell_width"]
+    columns = sheet.width // cell_w
     pixels = sheet.load()
 
     glyphs = []
@@ -78,16 +98,16 @@ def main():
         width = widths[code]
         rows = [
             "".join(
-                {1: "#", 2: "s"}.get(pixels[col * 16 + x, row * 16 + y], ".")
+                {1: "#", 2: "s"}.get(pixels[col * cell_w + x, row * 16 + y], ".")
                 for x in range(width)
             )
             for y in range(16)
         ]
         glyphs.append({"code": code, "text": text, "width": width, "rows": rows})
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({"height": 16, "glyphs": glyphs}, ensure_ascii=False, indent=1))
-    print(f"font: {len(glyphs)} glyphs → {args.out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"height": 16, "glyphs": glyphs}, ensure_ascii=False, indent=1))
+    print(f"font: {len(glyphs)} glyphs → {out}")
 
 
 if __name__ == "__main__":

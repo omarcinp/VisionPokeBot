@@ -204,7 +204,7 @@ def main():
         maps[m["name"]] = m
     id_to_name = {m["id"]: n for n, m in maps.items()}
     map_trainers, marts = map_scripts(pret, maps)
-    items = {i["itemId"]: {"price": i.get("price", 0), "name": i.get("english", i["itemId"])} for i in json.loads((src / "data/items.json").read_text())["items"]}
+    items = {i["itemId"]: {"price": i.get("price", 0), "name": i.get("english", i["itemId"]), "pocket": i.get("pocket")} for i in json.loads((src / "data/items.json").read_text())["items"]}
     data = {
         "species": species_data(src),
         "moves": move_data(src),

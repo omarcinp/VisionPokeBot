@@ -20,3 +20,4 @@ cd "${ROOT}"
 "${VENV}/bin/python" tools/world/extract_world.py "$@"
 "${VENV}/bin/python" tools/gamedata/extract_gamedata.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py
+"${VENV}/bin/python" tools/gamedata/extract_font.py --font small

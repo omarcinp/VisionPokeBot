@@ -91,6 +91,25 @@ pub struct EncounterTable {
 pub struct Item {
     pub price: u32,
     pub name: String,
+    #[serde(default)]
+    pub pocket: Option<String>,
+}
+
+/// The unique key whose printed name matches `read` (`?` = any character).
+fn unique_named<'a, 'b>(
+    names: impl Iterator<Item = (&'a String, &'b str)>,
+    read: &str,
+) -> Option<&'a str> {
+    let fits = |name: &str| {
+        name.chars().count() == read.chars().count()
+            && name
+                .chars()
+                .zip(read.chars())
+                .all(|(a, b)| b == '?' || a == b)
+    };
+    let mut found = names.filter(|(_, n)| fits(n)).map(|(k, _)| k.as_str());
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,20 +147,38 @@ impl GameData {
     /// The move whose printed name matches `read` (`?` matches any
     /// character), if exactly one does.
     pub fn move_named(&self, read: &str) -> Option<&str> {
-        let fits = |name: &str| {
-            name.chars().count() == read.chars().count()
-                && name
-                    .chars()
-                    .zip(read.chars())
-                    .all(|(a, b)| b == '?' || a == b)
-        };
-        let mut found = self
-            .moves
-            .iter()
-            .filter(|(_, m)| m.name.as_deref().is_some_and(fits))
-            .map(|(k, _)| k.as_str());
-        let first = found.next()?;
-        found.next().is_none().then_some(first)
+        unique_named(
+            self.moves
+                .iter()
+                .filter_map(|(k, m)| Some((k, m.name.as_deref()?))),
+            read,
+        )
+    }
+
+    /// The item whose printed name matches `read` (`?` = any character), if
+    /// exactly one does.
+    pub fn item_named(&self, read: &str) -> Option<&str> {
+        unique_named(self.items.iter().map(|(k, i)| (k, i.name.as_str())), read)
+    }
+
+    /// Species by printed name (`SPECIES_NIDORAN_F` prints as `NIDORAN♀`).
+    pub fn species_named(&self, read: &str) -> Option<&str> {
+        let printed: Vec<(&String, String)> = self
+            .species
+            .keys()
+            .map(|k| {
+                let base = k.trim_start_matches("SPECIES_");
+                let name = match base {
+                    "NIDORAN_F" => "NIDORAN♀".to_owned(),
+                    "NIDORAN_M" => "NIDORAN♂".to_owned(),
+                    "MR_MIME" => "MR. MIME".to_owned(),
+                    "FARFETCHD" => "FARFETCH'D".to_owned(),
+                    _ => base.replace('_', " "),
+                };
+                (k, name)
+            })
+            .collect();
+        unique_named(printed.iter().map(|(k, n)| (*k, n.as_str())), read)
     }
 
     /// Damage multiplier ×10 for `attack` against a defender of `defender`
@@ -202,5 +239,31 @@ impl GameData {
             current = target.clone();
         }
         current
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    fn data() -> Option<GameData> {
+        GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn names_resolve_uniquely_with_wildcards() {
+        let Some(d) = data() else { return };
+        assert_eq!(d.item_named("POKé BALL"), Some("ITEM_POKE_BALL"));
+        assert_eq!(
+            d.items["ITEM_POKE_BALL"].pocket.as_deref(),
+            Some("POCKET_POKE_BALLS")
+        );
+        assert_eq!(d.species_named("I?YSAUR"), Some("SPECIES_IVYSAUR"));
+        assert_eq!(d.move_named("POISONPOWDER"), Some("MOVE_POISON_POWDER"));
+        // Too many wildcards: several moves fit, so nothing is resolved.
+        assert_eq!(d.move_named("?????"), None);
     }
 }
