@@ -1,0 +1,16 @@
+[package]
+name = "pokebot-planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pokebot-gamedata.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+pokebot-gamedata = { path = "../gamedata" }

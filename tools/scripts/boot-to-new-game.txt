@@ -1,0 +1,14 @@
+# Boots FireRed (no save file), skips the intro, and pages through the
+# New Game controls tutorial.
+# Development smoke test only: waits are frame counts, not game-state checks.
+wait 300
+screenshot captures/smoke/01-intro.png
+press Start           # skip the Game Freak intro
+wait 360              # title screen flashes in; input is ignored meanwhile
+screenshot captures/smoke/02-title.png
+press Start           # leave the title screen (no save: straight to New Game)
+wait 400              # page fades in; input is ignored meanwhile
+screenshot captures/smoke/03-controls.png
+press A               # next tutorial page
+wait 120
+screenshot captures/smoke/04-next-page.png

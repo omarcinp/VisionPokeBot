@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/video",
+    "crates/controller",
+    "crates/replay",
+    "crates/state",
+    "crates/vision",
+    "crates/runtime",
+    "crates/telemetry",
+    "crates/agent",
+    "crates/world",
+    "crates/gamedata",
+    "crates/planner",
+    "adapters/emulator-libretro",
+    "adapters/capture-card",
+    "adapters/pabotbase",
+    "adapters/virtual-console",
+    "apps/pokebot-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+pokebot-core = { path = "crates/core" }
+pokebot-video = { path = "crates/video" }
+pokebot-controller = { path = "crates/controller" }
+pokebot-replay = { path = "crates/replay" }
+pokebot-state = { path = "crates/state" }
+pokebot-vision = { path = "crates/vision" }
+pokebot-runtime = { path = "crates/runtime" }
+pokebot-telemetry = { path = "crates/telemetry" }
+pokebot-agent = { path = "crates/agent" }
+pokebot-world = { path = "crates/world" }
+pokebot-gamedata = { path = "crates/gamedata" }
+pokebot-planner = { path = "crates/planner" }
+pokebot-emulator-libretro = { path = "adapters/emulator-libretro" }
+pokebot-capture-card = { path = "adapters/capture-card" }
+pokebot-pabotbase = { path = "adapters/pabotbase" }
+pokebot-virtual-console = { path = "adapters/virtual-console" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+# Frame conversion and normalization loops are hot; keep dev/test builds usable.
+[profile.dev]
+opt-level = 1

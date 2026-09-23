@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PokéBot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #d8dee6; --muted: #7c8794;
+    --accent: #e8573f; --action: #5aa9e6; --event: #7bd88f; --goal: #f2c14e; --info: #9aa5b1; --error: #ff6b6b;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; display: grid;
+         grid-template-rows: auto 1fr; }
+  header { display: flex; gap: 18px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 14px; margin: 0; color: var(--accent); letter-spacing: .5px; }
+  header .stat { color: var(--muted); } header .stat b { color: var(--text); font-weight: 600; }
+  #conn { margin-left: auto; } #conn.live b { color: var(--event); } #conn.down b { color: var(--error); }
+  main { display: grid; grid-template-columns: minmax(480px, auto) minmax(320px, 1fr);
+         grid-template-rows: auto 1fr; gap: 1px; background: var(--line); min-height: 0; }
+  section { background: var(--panel); padding: 10px 12px; min-height: 0; overflow: auto; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 8px; }
+  #video { grid-row: 1; grid-column: 1; }
+  #screen { width: 720px; height: 480px; image-rendering: pixelated; background: #000; display: block;
+            border: 1px solid var(--line); }
+  .under { display: flex; gap: 14px; margin-top: 6px; color: var(--muted); }
+  .under a { color: var(--action); }
+  #state { grid-row: 1 / span 2; grid-column: 2; }
+  #log { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin-bottom: 12px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  .big { font-size: 20px; color: var(--accent); }
+  .src { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--line); color: var(--muted); }
+  .src.Observed { color: var(--event); } .src.Unknown { color: var(--error); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  details { margin-bottom: 10px; } summary { cursor: pointer; color: var(--muted); }
+  .filters { display: flex; gap: 12px; margin-bottom: 6px; align-items: center; }
+  .filters label { cursor: pointer; } .filters input[type=search] { margin-left: auto; background: var(--bg);
+    color: var(--text); border: 1px solid var(--line); padding: 3px 6px; width: 180px; }
+  #entries { flex: 1; overflow: auto; min-height: 120px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 6px; border-bottom: 1px solid #1d222a; vertical-align: top; }
+  td.t, td.f { color: var(--muted); white-space: nowrap; text-align: right; }
+  td.k { white-space: nowrap; font-weight: 600; }
+  tr.action td.k { color: var(--action); } tr.event td.k { color: var(--event); }
+  tr.goal td.k, tr.goal td.s { color: var(--goal); }
+  tr.info td.k { color: var(--info); } tr.error td.k, tr.error td.s { color: var(--error); }
+  tr[data-detail] { cursor: pointer; } tr.open + tr.detail { display: table-row; }
+  tr.detail { display: none; } tr.detail td { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>POKéBOT</h1>
+  <span class="stat">frame <b id="frame-id">–</b></span>
+  <span class="stat">fps <b id="fps">–</b></span>
+  <span class="stat">video <b id="video-src">–</b></span>
+  <span class="stat">controller <b id="controller">–</b></span>
+  <span class="stat">uptime <b id="uptime">–</b></span>
+  <span class="stat" id="conn">link <b>connecting</b></span>
+</header>
+<main>
+  <section id="video">
+    <h2>What the bot sees (normalized 240×160)</h2>
+    <img id="screen" alt="latest frame">
+    <div class="under">
+      <label><input type="checkbox" id="pause"> pause video</label>
+      <a href="/frame.png" target="_blank">frame.png</a>
+      <a href="/stream.mjpg" target="_blank">stream.mjpg</a>
+    </div>
+  </section>
+  <section id="state">
+    <h2>Goal</h2>
+    <dl class="kv">
+      <dt>goal</dt><dd><span class="big" id="goal">idle</span></dd>
+      <dt>phase</dt><dd id="goal-phase">–</dd>
+    </dl>
+    <h2>Progression</h2>
+    <dl class="kv">
+      <dt>player</dt><dd><span id="player-name">–</span> <span class="src" id="player-name-src">–</span></dd>
+      <dt>gender</dt><dd><span id="gender">–</span> <span class="src" id="gender-src">–</span></dd>
+      <dt>rival</dt><dd><span id="rival-name">–</span> <span class="src" id="rival-name-src">–</span></dd>
+      <dt>in control</dt><dd><span id="control">–</span> <span class="src" id="control-src">–</span></dd>
+    </dl>
+    <h2>Inferred state</h2>
+    <dl class="kv">
+      <dt>screen</dt><dd><span class="big" id="screen-state">–</span> <span class="src" id="screen-src">–</span></dd>
+      <dt>verified at</dt><dd id="screen-frame">–</dd>
+      <dt>sync</dt><dd id="sync">–</dd>
+      <dt>inputs</dt><dd id="inputs">–</dd>
+      <dt>last input</dt><dd id="last-input">–</dd>
+      <dt>dropped frames</dt><dd id="dropped">–</dd>
+    </dl>
+    <h2>Current observation</h2>
+    <dl class="kv">
+      <dt>classified as</dt><dd id="obs-screen">–</dd>
+      <dt>ui</dt><dd id="obs-ui">–</dd>
+      <dt>detector</dt><dd id="obs-detector">–</dd>
+      <dt>mean luma</dt><dd id="obs-luma">–</dd>
+      <dt>changed px</dt><dd id="obs-changed">–</dd>
+    </dl>
+    <details open><summary>GameState (raw)</summary><pre id="state-json"></pre></details>
+    <details><summary>Observation (raw)</summary><pre id="obs-json"></pre></details>
+  </section>
+  <section id="log">
+    <h2>Actions &amp; events</h2>
+    <div class="filters">
+      <label><input type="checkbox" data-kind="goal" checked> goal</label>
+      <label><input type="checkbox" data-kind="action" checked> actions</label>
+      <label><input type="checkbox" data-kind="event" checked> events</label>
+      <label><input type="checkbox" data-kind="info" checked> info</label>
+      <label><input type="checkbox" data-kind="error" checked> errors</label>
+      <label><input type="checkbox" id="follow" checked> follow</label>
+      <input type="search" id="search" placeholder="filter…">
+    </div>
+    <div id="entries"><table><tbody id="rows"></tbody></table></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const rows = $('rows');
+const MAX_ROWS = 2000;
+let lastSeq = -1;
+let session = null;
+
+/// A new bot run (different session) starts a fresh log.
+function adoptSession(id) {
+  if (id === session) return;
+  session = id;
+  lastSeq = -1;
+  rows.replaceChildren();
+}
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+}
+
+function fmtCommand(c) {
+  if (c == null) return '–';
+  if (typeof c === 'string') return c;
+  const [kind, v] = Object.entries(c)[0];
+  if (kind === 'Hold') return `Hold ${v.buttons.join('+') || 'none'} ${durMs(v.duration)}ms`;
+  if (kind === 'Chord') return `Chord ${v.join('+')}`;
+  if (kind === 'Sequence') return `Sequence ×${v.length}`;
+  return `${kind} ${v}`;
+}
+const durMs = (d) => Math.round(d.secs * 1000 + d.nanos / 1e6);
+
+function visible(entry) {
+  const box = document.querySelector(`[data-kind="${entry.kind}"]`);
+  const q = $('search').value.toLowerCase();
+  return (!box || box.checked) && (!q || entry.summary.toLowerCase().includes(q));
+}
+
+function addEntry(entry) {
+  if (entry.seq <= lastSeq) return;
+  lastSeq = entry.seq;
+  const tr = document.createElement('tr');
+  tr.className = entry.kind;
+  tr._entry = entry;
+  tr.innerHTML = `<td class="t">${fmtTime(entry.t_ms)}</td><td class="f">${entry.frame_id ?? ''}</td>` +
+                 `<td class="k">${entry.kind}</td><td class="s"></td>`;
+  tr.querySelector('.s').textContent = entry.summary;
+  const detail = document.createElement('tr');
+  detail.className = 'detail';
+  if (entry.detail !== null) {
+    tr.dataset.detail = '1';
+    detail.innerHTML = '<td></td><td></td><td></td><td><pre></pre></td>';
+    detail.querySelector('pre').textContent = JSON.stringify(entry.detail, null, 2);
+    tr.onclick = () => tr.classList.toggle('open');
+  }
+  tr.hidden = detail.hidden = !visible(entry);
+  rows.append(tr, detail);
+  while (rows.children.length > MAX_ROWS * 2) { rows.firstChild.remove(); rows.firstChild.remove(); }
+  if ($('follow').checked) $('entries').scrollTop = $('entries').scrollHeight;
+}
+
+function refilter() {
+  for (const tr of rows.querySelectorAll('tr:not(.detail)')) {
+    const show = visible(tr._entry);
+    tr.hidden = !show; tr.nextSibling.hidden = !show;
+  }
+}
+document.querySelectorAll('.filters input').forEach((el) => el.addEventListener('input', refilter));
+
+function setStatus(status) {
+  const s = status.stats;
+  adoptSession(s.session);
+  $('frame-id').textContent = s.frame_id ?? '–';
+  $('fps').textContent = s.fps.toFixed(0);
+  $('video-src').textContent = s.video_source;
+  $('controller').textContent = s.controller;
+  $('uptime').textContent = fmtTime(s.uptime_ms).replace(/\.\d+$/, '');
+  const st = status.state || {};
+  if (st.screen) {
+    $('screen-state').textContent = st.screen.value ?? 'Unknown';
+    $('screen-src').textContent = st.screen.source;
+    $('screen-src').className = 'src ' + st.screen.source;
+    $('screen-frame').textContent = st.screen.last_verified_frame ?? '–';
+    $('sync').textContent = st.synchronization;
+    $('inputs').textContent = st.input.commands_issued;
+    $('last-input').textContent = st.input.last_command
+      ? `${fmtCommand(st.input.last_command)} @ frame ${st.input.last_command_frame}` : '–';
+    $('dropped').textContent = st.dropped_frames;
+  }
+  const goal = st.active_goal;
+  $('goal').textContent = goal ? goal.goal : 'idle';
+  $('goal-phase').textContent = goal ? `${goal.phase} — ${goal.detail}` : '–';
+  const knowledge = (id, k) => {
+    if (!k) return;
+    $(id).textContent = k.value ?? '–';
+    $(id + '-src').textContent = k.source;
+    $(id + '-src').className = 'src ' + k.source;
+  };
+  const pr = st.progression || {};
+  knowledge('player-name', pr.player_name);
+  knowledge('gender', pr.gender);
+  knowledge('rival-name', pr.rival_name);
+  knowledge('control', pr.in_control);
+  const ob = status.observation || {};
+  if (ob.screen) {
+    $('obs-screen').textContent = ob.screen.value;
+    $('obs-detector').textContent = ob.screen.detector;
+    $('obs-luma').textContent = ob.metrics.mean_luma;
+    $('obs-changed').textContent = ob.metrics.changed_pixels;
+    const ui = [];
+    if (ob.dialogue) ui.push(`${ob.dialogue.kind}${ob.dialogue.waiting_for_input ? ' ▼ waiting for A' : ' (printing)'}`);
+    if (ob.menu) ui.push(`menu: ${ob.menu.rows} rows, cursor on ${ob.menu.cursor_row}`);
+    if (ob.naming) {
+      const f = ob.naming.focus;
+      ui.push(`keyboard: ${f.Key ? `key col ${f.Key.column} row ${f.Key.row}` : 'buttons'}, ${ob.naming.typed} typed`);
+    }
+    $('obs-ui').textContent = ui.join(' · ') || '–';
+  }
+  $('state-json').textContent = JSON.stringify(st, null, 2);
+  $('obs-json').textContent = JSON.stringify(ob, null, 2);
+}
+
+let loading = false, wanted = null;
+function showFrame(id) {
+  if ($('pause').checked) return;
+  wanted = id;
+  if (loading) return;
+  loading = true;
+  const img = new Image();
+  img.onload = img.onerror = () => {
+    if (img.naturalWidth) $('screen').src = img.src;
+    loading = false;
+    if (wanted !== id) showFrame(wanted);
+  };
+  img.src = `/frame.png?f=${id}`;
+}
+
+function loadSnapshot() {
+  return fetch('/api/snapshot').then((r) => r.json()).then((snap) => {
+    setStatus(snap.status);
+    snap.log.forEach(addEntry);
+    if (snap.status.stats.frame_id != null) showFrame(snap.status.stats.frame_id);
+  });
+}
+
+function connect() {
+  const es = new EventSource('/api/stream');
+  // (Re)connected: possibly to a new run, so reload the full snapshot.
+  es.onopen = () => {
+    $('conn').className = 'stat live'; $('conn').querySelector('b').textContent = 'live';
+    loadSnapshot();
+  };
+  es.onerror = () => { $('conn').className = 'stat down'; $('conn').querySelector('b').textContent = 'waiting for next run'; };
+  es.addEventListener('status', (e) => setStatus(JSON.parse(e.data)));
+  es.addEventListener('log', (e) => addEntry(JSON.parse(e.data)));
+  es.addEventListener('frame', (e) => showFrame(e.data));
+}
+connect();
+</script>
+</body>
+</html>

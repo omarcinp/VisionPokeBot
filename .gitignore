@@ -1,7 +1,15 @@
+/target/
+captures/
+*.gb
+*.gba
+*.gbc
+*.sav
+.env
+/roms/
+/emulator/
 __pycache__/
 *.pyc
 .venv/
-captures/
-*.gb *.gba *.gbc *.sav
-.env
-/roms/
+/data/pret-pokefirered/
+/data/world/
+/saves/

@@ -1,0 +1,20 @@
+[package]
+name = "pokebot-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pokebot-controller.workspace = true
+pokebot-core.workspace = true
+pokebot-replay.workspace = true
+pokebot-state.workspace = true
+pokebot-telemetry.workspace = true
+pokebot-video.workspace = true
+pokebot-vision.workspace = true
+serde = "1.0.229"
+serde_json = "1.0.151"

@@ -1,0 +1,819 @@
+mod devices;
+mod plan;
+mod script;
+mod serve;
+#[cfg(feature = "viewer")]
+mod viewer;
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use pokebot_agent::party::{Member, Party};
+use pokebot_agent::{
+    all_milestones, ContinueTask, Executor, NewGameConfig, NewGameTask, Progress, SaveGameTask,
+    Starter, StoryTask,
+};
+use pokebot_core::{CapturedFrame, Error, VideoSource};
+use pokebot_replay::Session;
+use pokebot_runtime::Runtime;
+use pokebot_state::{Gender, Observation, PlayerPose};
+use pokebot_telemetry::Telemetry;
+use pokebot_video::{detect_viewport, Normalizer, ViewportLocator};
+use pokebot_vision::{FireRedPerception, PerceptionSystem};
+
+use crate::devices::{DeviceArgs, ViewportArg};
+use crate::script::Step;
+
+/// PokéBot development tools. The bot sees only video and acts only through
+/// a controller; these commands wire those devices up.
+#[derive(Parser)]
+#[command(name = "pokebot", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, clap::Args)]
+struct OutputArgs {
+    /// Serve the web UI (default address 127.0.0.1:8080)
+    #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:8080")]
+    web: Option<SocketAddr>,
+    /// Record a replayable session to this directory
+    #[arg(long)]
+    record: Option<PathBuf>,
+    /// Also record full-resolution captured frames
+    #[arg(long)]
+    record_raw: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the bot loop headlessly: observe video, optionally play an input script.
+    Run {
+        #[command(flatten)]
+        devices: DeviceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+        /// Input script (see apps/pokebot-cli/src/script.rs for the format)
+        #[arg(long)]
+        script: Option<PathBuf>,
+        /// Extra frames to observe after the script
+        #[arg(long, default_value_t = 0)]
+        frames: u64,
+        /// Keep observing after the script until Ctrl-C
+        #[arg(long)]
+        hold: bool,
+        /// Save the final normalized frame here
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+    },
+    /// Start a new game from any state: title, intro, gender, names, until the
+    /// player is confirmed in control in their bedroom.
+    NewGame {
+        #[command(flatten)]
+        devices: DeviceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+        #[arg(long, value_enum, default_value_t = GenderArg::Boy)]
+        gender: GenderArg,
+        /// Player name (1-7 letters A-Z)
+        #[arg(long, default_value = "RED")]
+        name: String,
+        /// Rival name (GREEN, GARY, KAZ, TORU use the preset list; others are typed)
+        #[arg(long, default_value = "GREEN")]
+        rival: String,
+        /// Skip the initial soft reset (game already at power-on)
+        #[arg(long)]
+        no_reset: bool,
+        /// Keep observing after finishing until Ctrl-C
+        #[arg(long)]
+        hold: bool,
+    },
+    /// Play the story: (optionally) a new game, then the opening milestones
+    /// (bedroom → Mom → Pallet Town → Oak → starter).
+    Story {
+        #[command(flatten)]
+        devices: DeviceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+        /// Start with a new game (soft reset, intro, names) first
+        #[arg(long)]
+        new_game: bool,
+        #[arg(long, value_enum, default_value_t = GenderArg::Boy)]
+        gender: GenderArg,
+        #[arg(long, default_value = "RED")]
+        name: String,
+        #[arg(long, default_value = "GREEN")]
+        rival: String,
+        #[arg(long, value_enum, default_value_t = Starter::Bulbasaur)]
+        starter: Starter,
+        /// World model directory (tools/world/build.sh)
+        #[arg(long, default_value = "data/world")]
+        world: PathBuf,
+        /// Continue the saved game (title → CONTINUE) and resume after the
+        /// milestones recorded in the progress file
+        #[arg(long, conflicts_with = "new_game")]
+        r#continue: bool,
+        /// Save in-game at the end and record progress
+        #[arg(long)]
+        save_game: bool,
+        /// The bot's memory of the save file (milestones done, save position)
+        #[arg(long, default_value = "saves/progress.json")]
+        progress: PathBuf,
+        /// Tries per milestone; a fainted Pokémon reloads the last save
+        #[arg(long, default_value_t = 5)]
+        attempts: u32,
+        /// Stop after this many milestones
+        #[arg(long)]
+        milestones: Option<usize>,
+        /// Keep observing after finishing until Ctrl-C
+        #[arg(long)]
+        hold: bool,
+    },
+    /// Open a window showing the video feed, with the keyboard as controller.
+    #[cfg(feature = "viewer")]
+    Play {
+        #[command(flatten)]
+        devices: DeviceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+        /// Window scale factor
+        #[arg(long, default_value_t = 3)]
+        scale: usize,
+    },
+    /// Readiness planning: chance to beat a trainer now, and the cheapest
+    /// training/catching plan to reach the confidence target.
+    Plan(plan::PlanArgs),
+    /// Run the emulator as a stand-alone virtual console.
+    Emulator {
+        #[command(subcommand)]
+        command: EmulatorCommand,
+    },
+    /// Normalize captured images and report what perception sees in each.
+    Inspect {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
+        /// Game viewport as x,y,w,h, or "auto" to detect it
+        #[arg(long)]
+        viewport: Option<String>,
+        /// Save the normalized 240x160 frame here
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Also locate the player using this world model (see tools/world/build.sh)
+        #[arg(long)]
+        world: Option<PathBuf>,
+        /// Restrict localization to this map
+        #[arg(long)]
+        map: Option<String>,
+    },
+    /// Verify and summarize a recorded session without any device.
+    Replay {
+        session: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        from_frame: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum EmulatorCommand {
+    /// Video out on a V4L2 device, controller in over a PABotBase2 serial port.
+    Serve(serve::ServeArgs),
+}
+
+fn main() -> Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || {
+            if stop.swap(true, Ordering::Relaxed) {
+                std::process::exit(130); // second Ctrl-C: give up on a clean exit
+            }
+        })
+        .context("installing Ctrl-C handler")?;
+    }
+    match Cli::parse().command {
+        Command::Run {
+            devices,
+            output,
+            script,
+            frames,
+            hold,
+            screenshot,
+        } => run(&devices, &output, script, frames, hold, screenshot, &stop),
+        #[cfg(feature = "viewer")]
+        Command::Play {
+            mut devices,
+            output,
+            scale,
+        } => {
+            devices.realtime = true;
+            let runtime = start_runtime(&devices, &output)?;
+            viewer::play(runtime, scale, &stop)
+        }
+        Command::NewGame {
+            devices,
+            output,
+            gender,
+            name,
+            rival,
+            no_reset,
+            hold,
+        } => {
+            let config = NewGameConfig {
+                gender: gender.into(),
+                player_name: name.to_ascii_uppercase(),
+                rival_name: rival.to_ascii_uppercase(),
+                soft_reset: !no_reset,
+            };
+            new_game(&devices, &output, config, hold, &stop)
+        }
+        Command::Story {
+            devices,
+            output,
+            new_game,
+            gender,
+            name,
+            rival,
+            starter,
+            world,
+            r#continue,
+            save_game,
+            progress,
+            attempts,
+            milestones,
+            hold,
+        } => {
+            let start = if r#continue {
+                StoryStart::Continue
+            } else if new_game {
+                StoryStart::NewGame(NewGameConfig {
+                    gender: gender.into(),
+                    player_name: name.to_ascii_uppercase(),
+                    rival_name: rival.to_ascii_uppercase(),
+                    soft_reset: true,
+                })
+            } else {
+                StoryStart::AsIs
+            };
+            let options = StoryOptions {
+                starter,
+                world,
+                save_game,
+                progress,
+                hold,
+                attempts,
+                milestones,
+            };
+            story(&devices, &output, start, &options, &stop)
+        }
+        Command::Plan(args) => plan::run(args),
+        Command::Emulator {
+            command: EmulatorCommand::Serve(args),
+        } => serve::serve(args, stop),
+        Command::Inspect {
+            images,
+            viewport,
+            out,
+            world,
+            map,
+        } => inspect(images, viewport, out, world, map),
+        Command::Replay {
+            session,
+            from_frame,
+        } => replay(session, from_frame),
+    }
+}
+
+fn start_runtime(devices: &DeviceArgs, output: &OutputArgs) -> Result<Runtime> {
+    let devices = devices::open(devices)?;
+    let (video_name, controller_name) =
+        (devices.video_name.clone(), devices.controller_name.clone());
+    let mut runtime = Runtime::new(devices);
+    attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    Ok(runtime)
+}
+
+fn attach_outputs(
+    runtime: &mut Runtime,
+    output: &OutputArgs,
+    video_name: &str,
+    controller_name: &str,
+) -> Result<()> {
+    if let Some(addr) = output.web {
+        let telemetry = Telemetry::new(video_name, controller_name);
+        let server = pokebot_telemetry::serve(telemetry.clone(), addr)?;
+        eprintln!("web UI: http://{}", server.addr);
+        runtime.attach_telemetry(telemetry);
+    }
+    if let Some(dir) = &output.record {
+        runtime.record_to(dir, output.record_raw)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum GenderArg {
+    Boy,
+    Girl,
+}
+
+impl From<GenderArg> for Gender {
+    fn from(g: GenderArg) -> Self {
+        match g {
+            GenderArg::Boy => Gender::Boy,
+            GenderArg::Girl => Gender::Girl,
+        }
+    }
+}
+
+fn new_game(
+    args: &DeviceArgs,
+    output: &OutputArgs,
+    config: NewGameConfig,
+    hold: bool,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut task = NewGameTask::new(config).map_err(anyhow::Error::msg)?;
+    let mut runtime = start_runtime(args, output)?;
+    runtime.echo_events(true);
+    let started = std::time::Instant::now();
+    let result = Executor::default().run(&mut runtime, &mut task, stop);
+    match &result {
+        Ok(summary) => runtime.info(format!(
+            "NewGame finished in {:.1} s ({} frames): {summary}",
+            started.elapsed().as_secs_f64(),
+            runtime.frames_seen()
+        )),
+        Err(e) => runtime.error(format!("NewGame: {e}")),
+    }
+    if hold && !stop.load(Ordering::Relaxed) {
+        runtime.info("observing until Ctrl-C");
+        while !stop.load(Ordering::Relaxed) {
+            match runtime.observe() {
+                Ok(_) => {}
+                Err(Error::EndOfStream) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    runtime.finish()?;
+    result.map(|_| ()).map_err(Into::into)
+}
+
+enum StoryStart {
+    NewGame(NewGameConfig),
+    Continue,
+    /// Already in the overworld; locate the player anywhere.
+    AsIs,
+}
+
+struct StoryOptions {
+    starter: Starter,
+    world: PathBuf,
+    save_game: bool,
+    progress: PathBuf,
+    hold: bool,
+    /// Tries per milestone (a faint reloads the last save).
+    attempts: u32,
+    /// Stop after this many milestones.
+    milestones: Option<usize>,
+}
+
+fn story(
+    args: &DeviceArgs,
+    output: &OutputArgs,
+    start: StoryStart,
+    options: &StoryOptions,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let world = Arc::new(pokebot_world::World::load(&options.world).with_context(|| {
+        format!(
+            "loading {} (run tools/world/build.sh)",
+            options.world.display()
+        )
+    })?);
+    let previous = match &start {
+        StoryStart::Continue => Some(Progress::load(&options.progress).with_context(|| {
+            format!(
+                "--continue needs the progress file {} (written by --save-game)",
+                options.progress.display()
+            )
+        })?),
+        _ => None,
+    };
+    let perception = FireRedPerception::with_world(Arc::clone(&world))
+        .with_global_search(matches!(start, StoryStart::AsIs));
+    let devices = devices::open(args)?;
+    let (video_name, controller_name) =
+        (devices.video_name.clone(), devices.controller_name.clone());
+    let mut runtime = Runtime::with_perception(devices, perception);
+    attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    runtime.echo_events(true);
+    let started = std::time::Instant::now();
+    let executor = Executor::default();
+    let data = Arc::new(
+        pokebot_gamedata::GameData::load(options.world.join("gamedata.json"))
+            .context("loading gamedata.json (run tools/world/build.sh)")?,
+    );
+    let result = (|| -> Result<String> {
+        let mut progress = match (&start, previous) {
+            (StoryStart::NewGame(config), _) => {
+                executor.run(
+                    &mut runtime,
+                    &mut NewGameTask::new(config.clone()).map_err(anyhow::Error::msg)?,
+                    stop,
+                )?;
+                // A new game always starts in the bedroom, next to the bed.
+                runtime.set_pose_hint(PlayerPose {
+                    map: "PalletTown_PlayersHouse_2F".into(),
+                    x: 6,
+                    y: 6,
+                });
+                Progress {
+                    player_name: config.player_name.clone(),
+                    rival_name: config.rival_name.clone(),
+                    gender: config.gender,
+                    starter: options.starter,
+                    milestones: Vec::new(),
+                    saved_at: None,
+                    party: Party::default(),
+                }
+            }
+            (StoryStart::Continue, Some(previous)) => {
+                if let Some(pose) = &previous.saved_at {
+                    runtime.set_pose_hint(pose.clone());
+                }
+                executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
+                runtime.info(format!(
+                    "continuing after: {}",
+                    previous.milestones.join(", ")
+                ));
+                previous
+            }
+            _ => Progress {
+                player_name: "?".into(),
+                rival_name: "?".into(),
+                gender: Gender::Boy,
+                starter: options.starter,
+                milestones: Vec::new(),
+                saved_at: None,
+                party: Party::default(),
+            },
+        };
+        if progress.party.members.is_empty() {
+            // Known from the story: the starter was received at level 5.
+            progress
+                .party
+                .members
+                .push(Member::new(&data, progress.starter.species(), 5));
+        }
+        let remaining: Vec<_> = all_milestones(progress.starter)
+            .into_iter()
+            .filter(|m| !progress.milestones.contains(&m.name))
+            .take(options.milestones.unwrap_or(usize::MAX))
+            .collect();
+        if remaining.is_empty() {
+            return Ok("no milestones left".into());
+        }
+        // One milestone at a time: save after each; if a Pokémon faints,
+        // reload the last save and retry that milestone.
+        for milestone in remaining {
+            let mut attempt = 1;
+            loop {
+                let mut task = StoryTask::new(Arc::clone(&world), vec![milestone.clone()])
+                    .with_party(Arc::clone(&data), progress.party.clone());
+                match executor.run(&mut runtime, &mut task, stop) {
+                    Ok(_) => {
+                        progress.party = task.party().clone();
+                        progress.milestones.push(milestone.name.clone());
+                        break;
+                    }
+                    Err(e) if e.to_string().contains("fainted") && attempt < options.attempts => {
+                        attempt += 1;
+                        runtime.error(format!(
+                            "{}: {e} — reloading the last save (attempt {attempt}/{})",
+                            milestone.name, options.attempts
+                        ));
+                        let saved = Progress::load(&options.progress)
+                            .context("no save to reload (use --save-game)")?;
+                        if let Some(pose) = &saved.saved_at {
+                            runtime.set_pose_hint(pose.clone());
+                        }
+                        executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
+                        progress = saved;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if options.save_game {
+                executor.run(&mut runtime, &mut SaveGameTask::default(), stop)?;
+                runtime.persist_save()?;
+                progress.saved_at = runtime.state().player.pose.value.clone();
+                if let Some(dir) = options.progress.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                progress.store(&options.progress)?;
+                runtime.info(format!(
+                    "checkpoint after {}: saved in-game at {}; party {}",
+                    milestone.name,
+                    progress
+                        .saved_at
+                        .as_ref()
+                        .map_or("?".into(), |p| p.to_string()),
+                    progress
+                        .party
+                        .members
+                        .iter()
+                        .map(|m| format!("{} Lv{}", m.display_name(), m.level))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        Ok(format!("completed {}", progress.milestones.join(", ")))
+    })();
+    match &result {
+        Ok(summary) => runtime.info(format!(
+            "Story finished in {:.1} s ({} frames): {summary}",
+            started.elapsed().as_secs_f64(),
+            runtime.frames_seen()
+        )),
+        Err(e) => runtime.error(format!("Story: {e:#}")),
+    }
+    if options.hold && !stop.load(Ordering::Relaxed) {
+        runtime.info("observing until Ctrl-C");
+        while !stop.load(Ordering::Relaxed) {
+            match runtime.observe() {
+                Ok(_) => {}
+                Err(Error::EndOfStream) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    runtime.finish()?;
+    result.map(|_| ())
+}
+
+fn run(
+    args: &DeviceArgs,
+    output: &OutputArgs,
+    script: Option<PathBuf>,
+    frames: u64,
+    hold: bool,
+    screenshot: Option<PathBuf>,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let steps = match &script {
+        Some(path) => script::parse(
+            &std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?,
+        )?,
+        None => Vec::new(),
+    };
+    if steps.is_empty() && frames == 0 && !hold {
+        bail!("nothing to do: pass --script, --frames and/or --hold");
+    }
+    let mut runtime = start_runtime(args, output)?;
+    let result = run_steps(&mut runtime, steps, frames, hold, stop);
+    if let Err(e) = &result {
+        runtime.error(format!("{e:#}"));
+    }
+    if let Some(path) = screenshot {
+        save_last(&runtime, &path)?;
+    }
+    if let Some(frame) = runtime.last_frame() {
+        println!(
+            "observed {} frames; last frame #{} fingerprint {:016x}",
+            runtime.frames_seen(),
+            frame.frame_id,
+            frame.image().fingerprint()
+        );
+    }
+    // Keep the web UI up after a finished/failed run until Ctrl-C.
+    if output.web.is_some() && hold && !stop.load(Ordering::Relaxed) {
+        eprintln!("run finished; web UI stays up until Ctrl-C");
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    runtime.finish()?;
+    result
+}
+
+fn run_steps(
+    runtime: &mut Runtime,
+    steps: Vec<Step>,
+    frames: u64,
+    hold: bool,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let stopped = || stop.load(Ordering::Relaxed);
+    for step in steps.into_iter().chain(std::iter::once(Step::Wait(frames))) {
+        match step {
+            Step::Wait(n) => {
+                for _ in 0..n {
+                    if stopped() {
+                        return Ok(());
+                    }
+                    runtime.observe()?;
+                }
+            }
+            Step::Command(command) => {
+                runtime.execute(command)?;
+            }
+            Step::UntilIdle => {
+                while !runtime.is_idle()? && !stopped() {
+                    runtime.observe()?;
+                }
+            }
+            Step::Screenshot(path) => save_last(runtime, &path)?,
+        }
+    }
+    if hold {
+        runtime.info("script done; observing until Ctrl-C");
+        while !stopped() {
+            match runtime.observe() {
+                Ok(_) => {}
+                Err(Error::EndOfStream) => {
+                    runtime.info("video source ended");
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_last(runtime: &Runtime, path: &Path) -> Result<()> {
+    let Some(frame) = runtime.last_frame() else {
+        bail!("screenshot requested before any frame was observed");
+    };
+    pokebot_video::png::save(frame.image(), path)?;
+    runtime.info(format!(
+        "saved frame #{} to {}",
+        frame.frame_id,
+        path.display()
+    ));
+    Ok(())
+}
+
+fn inspect(
+    paths: Vec<PathBuf>,
+    viewport: Option<String>,
+    out: Option<PathBuf>,
+    world: Option<PathBuf>,
+    map: Option<String>,
+) -> Result<()> {
+    if out.is_some() && paths.len() > 1 {
+        bail!("--out needs a single image");
+    }
+    let world = world.map(pokebot_world::World::load).transpose()?;
+    for path in paths {
+        let image = pokebot_video::png::load(&path)?;
+        let locator = match viewport.as_deref() {
+            None => ViewportLocator::FullFrame,
+            Some("auto") => {
+                let rect = detect_viewport(&image, 16)
+                    .context("no game viewport found (frame is black)")?;
+                println!(
+                    "{}: detected viewport {},{},{},{}",
+                    path.display(),
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height
+                );
+                ViewportLocator::Fixed(rect)
+            }
+            Some(spec) => {
+                ViewportLocator::Fixed(spec.parse::<ViewportArg>().map_err(anyhow::Error::msg)?.0)
+            }
+        };
+        let (width, height) = (image.width(), image.height());
+        let captured = CapturedFrame {
+            frame_id: 0,
+            captured_at: std::time::Instant::now(),
+            image,
+        };
+        let normalized = Normalizer::new(locator).normalize(&captured)?;
+        let observation = FireRedPerception::default().observe(&normalized);
+        println!(
+            "{} ({width}x{height}): {}",
+            path.display(),
+            describe_observation(&observation)
+        );
+        if let Some(world) = &world {
+            let started = std::time::Instant::now();
+            let localizer = pokebot_world::Localizer::new(world);
+            let exclude = [pokebot_world::localize::PLAYER_SPRITE];
+            let found = match &map {
+                Some(name) => {
+                    let data = world
+                        .map(name)
+                        .with_context(|| format!("unknown map {name}"))?;
+                    localizer.locate_in(normalized.image(), data, None, 0, &exclude)
+                }
+                None => localizer.locate_anywhere(normalized.image(), &exclude),
+            };
+            match found {
+                Some(p) => println!(
+                    "  player at {} (score {}) in {:?}",
+                    p.pose,
+                    p.score,
+                    started.elapsed()
+                ),
+                None => println!("  player not located ({:?})", started.elapsed()),
+            }
+        }
+        if let Some(out) = &out {
+            pokebot_video::png::save(normalized.image(), out)?;
+            println!("wrote {}", out.display());
+        }
+    }
+    Ok(())
+}
+
+fn describe_observation(o: &Observation) -> String {
+    let mut parts = vec![format!("{:?}", o.screen.value)];
+    if let Some(d) = &o.dialogue {
+        parts.push(format!(
+            "{:?}{}",
+            d.kind,
+            if d.waiting_for_input {
+                " waiting▼"
+            } else {
+                ""
+            }
+        ));
+    }
+    if let Some(m) = &o.menu {
+        parts.push(format!(
+            "menu {} rows, cursor {} at ({},{})",
+            m.rows, m.cursor_row, m.window.x, m.window.y
+        ));
+    }
+    if let Some(b) = &o.battle {
+        parts.push(format!(
+            "battle {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",
+            b.menu,
+            b.player_name,
+            b.player_level,
+            b.player_hp_numbers,
+            b.player_hp,
+            b.opponent_name,
+            b.opponent_level,
+            b.opponent_hp
+        ));
+    }
+    if let Some(n) = &o.naming {
+        parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));
+    }
+    parts.join(" | ")
+}
+
+fn replay(dir: PathBuf, from_frame: u64) -> Result<()> {
+    let session = Session::open(&dir)?;
+    println!(
+        "session {} (video: {}, controller: {}): {} frames, {} commands",
+        dir.display(),
+        session.metadata.video_source,
+        session.metadata.controller,
+        session.frames.len(),
+        session.commands.len()
+    );
+    let mut source = session.video_source(from_frame);
+    let mut checked = 0;
+    for record in session.frames.iter().filter(|f| f.frame_id >= from_frame) {
+        let frame = source.next_frame()?;
+        let actual = format!("{:016x}", frame.image.fingerprint());
+        if frame.frame_id != record.frame_id || actual != record.fingerprint {
+            bail!(
+                "frame {} does not match its record (fingerprint {actual}, expected {})",
+                record.frame_id,
+                record.fingerprint
+            );
+        }
+        checked += 1;
+    }
+    println!("verified {checked} frames from #{from_frame}");
+    for command in session
+        .commands
+        .iter()
+        .filter(|c| c.after_frame_id.unwrap_or(0) >= from_frame)
+    {
+        let after = command
+            .after_frame_id
+            .map_or("-".into(), |id| id.to_string());
+        println!(
+            "  after frame {after:>6}: #{} {:?}",
+            command.command_id, command.command
+        );
+    }
+    Ok(())
+}

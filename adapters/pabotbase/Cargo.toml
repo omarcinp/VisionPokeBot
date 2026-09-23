@@ -1,0 +1,13 @@
+[package]
+name = "pokebot-pabotbase"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pokebot-core.workspace = true
+serialport = { version = "4.10.1", default-features = false }
