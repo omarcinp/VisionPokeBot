@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+captures/
+*.gb *.gba *.gbc *.sav
+.env
