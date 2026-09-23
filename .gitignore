@@ -4,3 +4,4 @@ __pycache__/
 captures/
 *.gb *.gba *.gbc *.sav
 .env
+/roms/
