@@ -326,6 +326,38 @@ fn summarize(event: &GameEvent) -> String {
         }
         GameEvent::Evolved { slot, species } => format!("Party {slot} evolved into {species}"),
         GameEvent::Healed => "Healed (party restored)".into(),
+        GameEvent::ItemsChanged {
+            item,
+            delta,
+            reason,
+            ..
+        } => format!("Bag {item} {delta:+} ({reason})"),
+        GameEvent::PocketObserved { pocket, items } => {
+            format!("Bag {pocket:?}: {} items seen", items.len())
+        }
+        GameEvent::MoneyObserved { amount } => format!("Money ₽{amount}"),
+        GameEvent::MoneyChanged { delta, reason } => format!("Money {delta:+} ({reason})"),
+        GameEvent::BoxObserved { box_index, mons } => {
+            format!("PC box {}: {} Pokémon", box_index + 1, mons.len())
+        }
+        GameEvent::PcItemsObserved { items } => format!("PC items: {}", items.len()),
+        GameEvent::SentToPc { box_index, mon } => format!(
+            "{:?} sent to PC box {:?}",
+            mon.species.value,
+            box_index.map(|b| b + 1)
+        ),
+        GameEvent::MonDeposited {
+            party_slot,
+            box_index,
+        } => format!("Party {party_slot} deposited in box {}", box_index + 1),
+        GameEvent::MonWithdrawn {
+            box_index,
+            box_slot,
+        } => format!("Withdrew box {} slot {box_slot}", box_index + 1),
+        GameEvent::SpeciesSeen { species } => format!("Seen {species}"),
+        GameEvent::SpeciesCaught { species } => format!("Caught {species}"),
+        GameEvent::ShinySeen { species } => format!("SHINY {species}!"),
+        GameEvent::CheckpointRestored { .. } => "Checkpoint knowledge restored".into(),
     }
 }
 

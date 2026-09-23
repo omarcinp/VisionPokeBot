@@ -77,7 +77,22 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::MoveReplaced { .. }
                 | GameEvent::MoveOutOfPp { .. }
                 | GameEvent::Evolved { .. }
-                | GameEvent::Healed => unreachable!("handled by reduce_knowledge"),
+                | GameEvent::Healed
+                | GameEvent::ItemsChanged { .. }
+                | GameEvent::PocketObserved { .. }
+                | GameEvent::MoneyObserved { .. }
+                | GameEvent::MoneyChanged { .. }
+                | GameEvent::BoxObserved { .. }
+                | GameEvent::PcItemsObserved { .. }
+                | GameEvent::SentToPc { .. }
+                | GameEvent::MonDeposited { .. }
+                | GameEvent::MonWithdrawn { .. }
+                | GameEvent::SpeciesSeen { .. }
+                | GameEvent::SpeciesCaught { .. }
+                | GameEvent::ShinySeen { .. }
+                | GameEvent::CheckpointRestored { .. } => {
+                    unreachable!("handled by reduce_knowledge")
+                }
             }
         }
         state

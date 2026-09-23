@@ -116,6 +116,128 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 }
             }
         }
+        GameEvent::ItemsChanged {
+            pocket,
+            item,
+            delta,
+            ..
+        } => {
+            if let Some(k) = state.bag.pockets.get_mut(pocket) {
+                if let Some(list) = &k.value {
+                    *k = Knowledge::tracked(add_items(list, item, *delta), k.last_verified_frame);
+                }
+            }
+        }
+        GameEvent::PocketObserved { pocket, items } => {
+            state
+                .bag
+                .pockets
+                .insert(*pocket, Knowledge::observed(items.clone(), frame));
+        }
+        GameEvent::MoneyObserved { amount } => state.money = Knowledge::observed(*amount, frame),
+        GameEvent::MoneyChanged { delta, .. } => {
+            if let Some(m) = state.money.value {
+                let new = (i64::from(m) + delta).clamp(0, i64::from(u32::MAX)) as u32;
+                state.money = Knowledge::tracked(new, state.money.last_verified_frame);
+            }
+        }
+        GameEvent::BoxObserved { box_index, mons } => {
+            if let Some(b) = state.pc.boxes.get_mut(usize::from(*box_index)) {
+                *b = Knowledge::observed(mons.clone(), frame);
+            }
+        }
+        GameEvent::PcItemsObserved { items } => {
+            state.pc.items = Knowledge::observed(items.clone(), frame)
+        }
+        GameEvent::SentToPc {
+            box_index: Some(i),
+            mon,
+        } => {
+            if let Some(b) = state.pc.boxes.get_mut(usize::from(*i)) {
+                if let Some(list) = &b.value {
+                    let mut list = list.clone();
+                    list.push(mon.clone());
+                    *b = Knowledge::tracked(list, b.last_verified_frame);
+                }
+            }
+        }
+        GameEvent::SentToPc {
+            box_index: None, ..
+        }
+        | GameEvent::ShinySeen { .. } => {}
+        GameEvent::MonDeposited {
+            party_slot,
+            box_index,
+        } => {
+            let taken = state.party.value.as_mut().and_then(|p| {
+                (usize::from(*party_slot) < p.len()).then(|| p.remove(usize::from(*party_slot)))
+            });
+            if state.party.value.is_some() {
+                state.party.source = KnowledgeSource::Tracked;
+            }
+            if let (Some(mon), Some(b)) = (taken, state.pc.boxes.get_mut(usize::from(*box_index))) {
+                if let Some(list) = &b.value {
+                    let mut list = list.clone();
+                    let slot = (0..30u8)
+                        .find(|s| list.iter().all(|m| m.slot != *s))
+                        .unwrap_or(0);
+                    list.push(crate::BoxMon {
+                        slot,
+                        species: mon.species,
+                        level: mon.level,
+                        nickname: mon.nickname,
+                    });
+                    *b = Knowledge::tracked(list, b.last_verified_frame);
+                }
+            }
+        }
+        GameEvent::MonWithdrawn {
+            box_index,
+            box_slot,
+        } => {
+            let mon = state
+                .pc
+                .boxes
+                .get_mut(usize::from(*box_index))
+                .and_then(|b| {
+                    let list = b.value.as_mut()?;
+                    let at = list.iter().position(|m| m.slot == *box_slot)?;
+                    let mon = list.remove(at);
+                    b.source = KnowledgeSource::Tracked;
+                    Some(mon)
+                });
+            if let Some(mon) = mon {
+                let slot = state.party.value.as_ref().map_or(0, |p| p.len()) as u8;
+                let m = member(state, slot, KnowledgeSource::Tracked, frame);
+                m.species = mon.species;
+                m.level = mon.level;
+                m.nickname = mon.nickname;
+            }
+        }
+        GameEvent::SpeciesSeen { species } => {
+            state
+                .pokedex
+                .seen
+                .insert(species.clone(), Knowledge::observed(true, frame));
+        }
+        GameEvent::SpeciesCaught { species } => {
+            state
+                .pokedex
+                .seen
+                .insert(species.clone(), Knowledge::observed(true, frame));
+            state
+                .pokedex
+                .caught
+                .insert(species.clone(), Knowledge::observed(true, frame));
+        }
+        GameEvent::CheckpointRestored { knowledge } => {
+            let k = (**knowledge).clone();
+            state.party = k.party;
+            state.bag = k.bag;
+            state.money = k.money;
+            state.pc = k.pc;
+            state.pokedex = k.pokedex;
+        }
         _ => return false,
     }
     true
@@ -147,6 +269,25 @@ fn move_slot_mut(state: &mut GameState, slot: u8, move_slot: u8) -> Option<&mut 
         .moves
         .get_mut(usize::from(move_slot))?
         .as_mut()
+}
+
+/// `list` with `delta` of `item` added (entries reaching 0 are removed; new
+/// items go to the end, as the game lists them).
+fn add_items(list: &crate::ItemList, item: &str, delta: i32) -> crate::ItemList {
+    let mut out = list.clone();
+    match out.iter().position(|(i, _)| i == item) {
+        Some(at) => {
+            let n = (i32::from(out[at].1) + delta).max(0) as u16;
+            if n == 0 {
+                out.remove(at);
+            } else {
+                out[at].1 = n;
+            }
+        }
+        None if delta > 0 => out.push((item.to_owned(), delta.min(i32::from(u16::MAX)) as u16)),
+        None => {}
+    }
+    out
 }
 
 #[cfg(test)]
@@ -276,5 +417,113 @@ mod tests {
         assert_eq!(mon.moves[0].as_ref().unwrap().pp.value, Some((0, 35)));
         assert_eq!(mon.species.value.as_deref(), Some("SPECIES_IVYSAUR"));
         assert_eq!(mon.species.source, KnowledgeSource::Observed);
+    }
+
+    use crate::{BoxMon, Pocket, SavedKnowledge};
+
+    #[test]
+    fn tracked_deltas_need_a_known_base() {
+        let s = run(vec![GameEvent::ItemsChanged {
+            pocket: Pocket::PokeBalls,
+            item: "ITEM_POKE_BALL".into(),
+            delta: 5,
+            reason: "bought".into(),
+        }]);
+        assert_eq!(s.bag.pockets[&Pocket::PokeBalls], Knowledge::unknown());
+        let s = run(vec![
+            GameEvent::PocketObserved {
+                pocket: Pocket::PokeBalls,
+                items: vec![("ITEM_POKE_BALL".into(), 3)],
+            },
+            GameEvent::ItemsChanged {
+                pocket: Pocket::PokeBalls,
+                item: "ITEM_POKE_BALL".into(),
+                delta: -3,
+                reason: "thrown".into(),
+            },
+            GameEvent::ItemsChanged {
+                pocket: Pocket::PokeBalls,
+                item: "ITEM_GREAT_BALL".into(),
+                delta: 2,
+                reason: "bought".into(),
+            },
+        ]);
+        let balls = &s.bag.pockets[&Pocket::PokeBalls];
+        assert_eq!(
+            balls.value,
+            Some(vec![("ITEM_GREAT_BALL".to_owned(), 2u16)])
+        );
+        assert!(balls.is_stale());
+        let s = run(vec![
+            GameEvent::MoneyObserved { amount: 4600 },
+            GameEvent::MoneyChanged {
+                delta: -1000,
+                reason: "bought".into(),
+            },
+        ]);
+        assert_eq!(s.money.value, Some(3600));
+        assert!(s.money.is_stale());
+    }
+
+    fn boxed(slot: u8, species: &str) -> BoxMon {
+        BoxMon {
+            slot,
+            species: Knowledge::observed(species.into(), 1),
+            level: Knowledge::observed(5, 1),
+            nickname: Knowledge::unknown(),
+        }
+    }
+
+    #[test]
+    fn pc_moves_mons_between_party_and_boxes() {
+        let s = run(vec![
+            starter(),
+            GameEvent::BoxObserved {
+                box_index: 0,
+                mons: vec![boxed(0, "SPECIES_PIDGEY")],
+            },
+            GameEvent::MonWithdrawn {
+                box_index: 0,
+                box_slot: 0,
+            },
+        ]);
+        assert_eq!(s.pc.boxes[0].value.as_ref().unwrap().len(), 0);
+        let party = s.party.value.as_ref().unwrap();
+        assert_eq!(party[1].species.value.as_deref(), Some("SPECIES_PIDGEY"));
+        let s = run(vec![
+            starter(),
+            GameEvent::BoxObserved {
+                box_index: 0,
+                mons: vec![],
+            },
+            GameEvent::SentToPc {
+                box_index: Some(0),
+                mon: boxed(0, "SPECIES_RATTATA"),
+            },
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_RATTATA".into(),
+            },
+        ]);
+        assert_eq!(s.pc.boxes[0].value.as_ref().unwrap().len(), 1);
+        assert_eq!(s.pokedex.caught["SPECIES_RATTATA"].value, Some(true));
+        assert_eq!(s.pokedex.seen["SPECIES_RATTATA"].value, Some(true));
+    }
+
+    #[test]
+    fn checkpoint_restore_replaces_knowledge() {
+        let saved = run(vec![starter()]).saved_knowledge();
+        let s = run(vec![
+            starter(),
+            GameEvent::MoveUsed {
+                slot: 0,
+                move_slot: 0,
+            },
+            GameEvent::MoneyObserved { amount: 1 },
+            GameEvent::CheckpointRestored {
+                knowledge: Box::new(saved.clone()),
+            },
+        ]);
+        assert_eq!(s.saved_knowledge(), saved);
+        assert_eq!(SavedKnowledge::default().money, Knowledge::unknown());
     }
 }

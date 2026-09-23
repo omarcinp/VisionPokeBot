@@ -1,7 +1,10 @@
 use pokebot_core::ControllerCommand;
 use serde::{Deserialize, Serialize};
 
-use crate::{Gender, Observation, PartyMon, PlayerPose, ScreenState, Status};
+use crate::{
+    BoxMon, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
+    ScreenState, Status,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
@@ -118,6 +121,58 @@ pub enum GameEvent {
     },
     /// The nurse restored the party.
     Healed,
+    /// Items gained (+) or spent (−) as told by text or a confirmed action.
+    ItemsChanged {
+        pocket: Pocket,
+        item: String,
+        delta: i32,
+        reason: String,
+    },
+    PocketObserved {
+        pocket: Pocket,
+        items: ItemList,
+    },
+    MoneyObserved {
+        amount: u32,
+    },
+    MoneyChanged {
+        delta: i64,
+        reason: String,
+    },
+    BoxObserved {
+        box_index: u8,
+        mons: Vec<BoxMon>,
+    },
+    PcItemsObserved {
+        items: ItemList,
+    },
+    /// A caught Pokémon went to the PC ("transferred to BILL's PC").
+    SentToPc {
+        box_index: Option<u8>,
+        mon: BoxMon,
+    },
+    MonDeposited {
+        party_slot: u8,
+        box_index: u8,
+    },
+    MonWithdrawn {
+        box_index: u8,
+        box_slot: u8,
+    },
+    SpeciesSeen {
+        species: String,
+    },
+    SpeciesCaught {
+        species: String,
+    },
+    /// A shiny appeared (for the log and the catch policy).
+    ShinySeen {
+        species: String,
+    },
+    /// The knowledge stored with the save that was just loaded.
+    CheckpointRestored {
+        knowledge: Box<SavedKnowledge>,
+    },
 }
 
 /// An event and the frame it was derived at.
