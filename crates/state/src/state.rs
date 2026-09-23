@@ -62,4 +62,23 @@ pub struct GameState {
     pub player: PlayerState,
     pub in_battle: bool,
     pub active_goal: Option<GoalStatus>,
+    /// Party in slot order.
+    pub party: Knowledge<Vec<crate::PartyMon>>,
+    pub bag: crate::Bag,
+    pub money: Knowledge<u32>,
+    pub pc: crate::PcStorage,
+    pub pokedex: crate::Pokedex,
+}
+
+impl GameState {
+    /// The part of the state that belongs to the save file.
+    pub fn saved_knowledge(&self) -> crate::SavedKnowledge {
+        crate::SavedKnowledge {
+            party: self.party.clone(),
+            bag: self.bag.clone(),
+            money: self.money.clone(),
+            pc: self.pc.clone(),
+            pokedex: self.pokedex.clone(),
+        }
+    }
 }

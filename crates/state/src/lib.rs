@@ -5,19 +5,23 @@
 //! from its event log.
 
 mod events;
+mod inventory;
 mod knowledge;
 mod observation;
+mod party;
 mod reducer;
 mod screen;
 mod state;
 
 pub use events::{EventExtractor, EventRecord, GameEvent};
+pub use inventory::{Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, SavedKnowledge, BOXES};
 pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction, FrameMetrics,
     KeyboardFocus, MenuObservation, MoveListObservation, NamingObservation, Observation, Observed,
     PlayerPose, PoseObservation, Region,
 };
+pub use party::{MoveSlot, PartyMon, Status};
 pub use reducer::{DefaultReducer, StateReducer};
 pub use screen::ScreenState;
 pub use state::{
