@@ -9,6 +9,7 @@ mod inventory;
 mod knowledge;
 mod observation;
 mod party;
+mod reduce_knowledge;
 mod reducer;
 mod screen;
 mod state;

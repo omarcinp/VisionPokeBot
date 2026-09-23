@@ -14,6 +14,9 @@ impl StateReducer for DefaultReducer {
     fn reduce(&self, previous: &GameState, events: &[EventRecord]) -> GameState {
         let mut state = previous.clone();
         for record in events {
+            if crate::reduce_knowledge::apply(&mut state, record.frame_id, &record.event) {
+                continue;
+            }
             match &record.event {
                 // Classifying a screen as Unknown means we no longer know it.
                 GameEvent::ScreenChanged {
@@ -65,6 +68,16 @@ impl StateReducer for DefaultReducer {
                     state.progression.in_control = Knowledge::observed(true, record.frame_id);
                     state.synchronization = SynchronizationState::Synchronized;
                 }
+                GameEvent::PartyMonDerived { .. }
+                | GameEvent::PartyObserved { .. }
+                | GameEvent::MovesObserved { .. }
+                | GameEvent::MovePpObserved { .. }
+                | GameEvent::MoveUsed { .. }
+                | GameEvent::MoveLearned { .. }
+                | GameEvent::MoveReplaced { .. }
+                | GameEvent::MoveOutOfPp { .. }
+                | GameEvent::Evolved { .. }
+                | GameEvent::Healed => unreachable!("handled by reduce_knowledge"),
             }
         }
         state

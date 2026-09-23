@@ -1,7 +1,7 @@
 use pokebot_core::ControllerCommand;
 use serde::{Deserialize, Serialize};
 
-use crate::{Gender, Observation, PlayerPose, ScreenState};
+use crate::{Gender, Observation, PartyMon, PlayerPose, ScreenState, Status};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
@@ -61,6 +61,63 @@ pub enum GameEvent {
     FramesDropped {
         missing: u64,
     },
+    /// A party member known without seeing it (story, legacy data).
+    PartyMonDerived {
+        slot: u8,
+        mon: Box<PartyMon>,
+    },
+    /// Fields of a party member read from the screen (`None` = not shown).
+    PartyObserved {
+        slot: u8,
+        species: Option<String>,
+        nickname: Option<String>,
+        level: Option<u8>,
+        hp: Option<(u16, u16)>,
+        status: Option<Status>,
+        held_item: Option<Option<String>>,
+    },
+    /// A member's complete move list, in menu order.
+    MovesObserved {
+        slot: u8,
+        moves: Vec<String>,
+    },
+    MovePpObserved {
+        slot: u8,
+        move_slot: u8,
+        cur: u8,
+        max: u8,
+    },
+    /// A move was used (one PP spent).
+    MoveUsed {
+        slot: u8,
+        move_slot: u8,
+    },
+    /// "X learned M!" into an empty slot.
+    MoveLearned {
+        slot: u8,
+        move_slot: u8,
+        mv: String,
+        max_pp: u8,
+    },
+    /// "X forgot O … learned N!"
+    MoveReplaced {
+        slot: u8,
+        move_slot: u8,
+        old: String,
+        new: String,
+        max_pp: u8,
+    },
+    /// "There's no PP left for this move!"
+    MoveOutOfPp {
+        slot: u8,
+        move_slot: u8,
+    },
+    Evolved {
+        slot: u8,
+        species: String,
+    },
+    /// The nurse restored the party.
+    Healed,
 }
 
 /// An event and the frame it was derived at.

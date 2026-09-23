@@ -295,6 +295,37 @@ fn summarize(event: &GameEvent) -> String {
             command,
         } => format!("InputIssued #{command_id} {}", describe(command)),
         GameEvent::FramesDropped { missing } => format!("FramesDropped {missing}"),
+        GameEvent::PartyMonDerived { slot, mon } => format!(
+            "Party {slot}: {} Lv{} (derived)",
+            mon.species.value.as_deref().unwrap_or("?"),
+            mon.level.value.map_or("?".into(), |l| l.to_string())
+        ),
+        GameEvent::PartyObserved {
+            slot,
+            species,
+            level,
+            hp,
+            ..
+        } => {
+            format!("Party {slot} seen: {species:?} Lv{level:?} HP {hp:?}")
+        }
+        GameEvent::MovesObserved { slot, moves } => format!("Party {slot} moves {moves:?}"),
+        GameEvent::MovePpObserved {
+            slot,
+            move_slot,
+            cur,
+            max,
+        } => {
+            format!("Party {slot} move {move_slot} PP {cur}/{max}")
+        }
+        GameEvent::MoveUsed { slot, move_slot } => format!("Party {slot} used move {move_slot}"),
+        GameEvent::MoveLearned { slot, mv, .. } => format!("Party {slot} learned {mv}"),
+        GameEvent::MoveReplaced { slot, old, new, .. } => format!("Party {slot}: {old} → {new}"),
+        GameEvent::MoveOutOfPp { slot, move_slot } => {
+            format!("Party {slot} move {move_slot} has no PP")
+        }
+        GameEvent::Evolved { slot, species } => format!("Party {slot} evolved into {species}"),
+        GameEvent::Healed => "Healed (party restored)".into(),
     }
 }
 
