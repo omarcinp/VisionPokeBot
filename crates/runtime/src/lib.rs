@@ -390,6 +390,7 @@ fn summarize(event: &GameEvent) -> String {
         GameEvent::SpeciesSeen { species } => format!("Seen {species}"),
         GameEvent::SpeciesCaught { species } => format!("Caught {species}"),
         GameEvent::ShinySeen { species } => format!("SHINY {species}!"),
+        GameEvent::BadgeEarned { badge } => format!("Badge earned: {badge}"),
         GameEvent::CheckpointRestored { .. } => "Checkpoint knowledge restored".into(),
     }
 }

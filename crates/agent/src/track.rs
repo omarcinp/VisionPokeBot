@@ -46,6 +46,11 @@ impl TextTracker {
                 }
             }
         }
+        if let Some(badge) = badge_received(&page) {
+            events.push(GameEvent::BadgeEarned {
+                badge: badge.to_owned(),
+            });
+        }
         if page.contains("restored your POKéMON") {
             events.push(GameEvent::Healed);
         }
@@ -68,6 +73,25 @@ fn money_won(page: &str) -> Option<u32> {
         .collect();
     page.contains("for winning")
         .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// Kanto's gym badges in gym order, as the game spells them.
+pub const BADGES: [&str; 8] = [
+    "BOULDERBADGE",
+    "CASCADEBADGE",
+    "THUNDERBADGE",
+    "RAINBOWBADGE",
+    "SOULBADGE",
+    "MARSHBADGE",
+    "VOLCANOBADGE",
+    "EARTHBADGE",
+];
+
+/// "RED received the BOULDERBADGE from BROCK." → `BOULDERBADGE`.
+fn badge_received(page: &str) -> Option<&'static str> {
+    page.contains(" received ")
+        .then(|| BADGES.into_iter().find(|b| page.contains(b)))
         .flatten()
 }
 
@@ -159,5 +183,14 @@ mod tests {
                 move_slot: 2
             }]
         );
+    }
+
+    #[test]
+    fn badge_page_becomes_badge_event() {
+        assert_eq!(
+            badge_received("RED received the BOULDERBADGE from BROCK."),
+            Some("BOULDERBADGE")
+        );
+        assert_eq!(badge_received("The BOULDERBADGE raises ATTACK."), None);
     }
 }

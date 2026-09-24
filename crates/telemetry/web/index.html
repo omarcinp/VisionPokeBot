@@ -3,51 +3,228 @@
 <head>
 <meta charset="utf-8">
 <title>PokéBot</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d1014">
 <style>
   :root {
-    --bg: #0f1216; --panel: #171b21; --line: #262c35; --text: #d8dee6; --muted: #7c8794;
+    --bg: #0d1014; --panel: #161a20; --panel2: #1c2129; --line: #272e38; --text: #dde3ea; --muted: #7d8895;
     --accent: #e8573f; --action: #5aa9e6; --event: #7bd88f; --goal: #f2c14e; --info: #9aa5b1; --error: #ff6b6b;
-    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --hp-hi: #58d27a; --hp-mid: #f2c14e; --hp-lo: #ff5b5b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: 13px/1.45 var(--sans);
+    -webkit-text-size-adjust: 100%;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; display: grid;
-         grid-template-rows: auto 1fr; }
-  header { display: flex; gap: 18px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 14px; margin: 0; color: var(--accent); letter-spacing: .5px; }
-  header .stat { color: var(--muted); } header .stat b { color: var(--text); font-weight: 600; }
-  #conn { margin-left: auto; } #conn.live b { color: var(--event); } #conn.down b { color: var(--error); }
-  main { display: grid; grid-template-columns: minmax(480px, auto) minmax(320px, 1fr);
-         grid-template-rows: auto 1fr; gap: 1px; background: var(--line); min-height: 0; }
-  section { background: var(--panel); padding: 10px 12px; min-height: 0; overflow: auto; }
-  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 8px; }
-  #video { grid-row: 1; grid-column: 1; }
-  #screen { width: 720px; height: 480px; image-rendering: pixelated; background: #000; display: block;
-            border: 1px solid var(--line); }
-  .under { display: flex; gap: 14px; margin-top: 6px; color: var(--muted); }
-  .under a { color: var(--action); }
-  #state { grid-row: 1 / span 2; grid-column: 2; }
-  #log { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; }
-  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin-bottom: 12px; }
-  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
-  .big { font-size: 20px; color: var(--accent); }
-  .src { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--line); color: var(--muted); }
-  .src.Observed { color: var(--event); } .src.Unknown { color: var(--error); }
-  pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
-  details { margin-bottom: 10px; } summary { cursor: pointer; color: var(--muted); }
-  .filters { display: flex; gap: 12px; margin-bottom: 6px; align-items: center; }
-  .filters label { cursor: pointer; } .filters input[type=search] { margin-left: auto; background: var(--bg);
-    color: var(--text); border: 1px solid var(--line); padding: 3px 6px; width: 180px; }
-  #entries { flex: 1; overflow: auto; min-height: 120px; }
-  table { width: 100%; border-collapse: collapse; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { min-height: 100vh; min-height: 100dvh; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+
+  header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
+           padding: 8px 14px; background: rgba(13,16,20,.92); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+           border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 1px; font-weight: 800; }
+  .stat { color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .stat b { color: var(--text); font-weight: 600; }
+  #conn { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  #conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--goal); display: inline-block; }
+  #conn.live i { background: var(--event); box-shadow: 0 0 8px var(--event); }
+  #conn.down i { background: var(--error); }
+
+  main { display: grid; gap: 12px; padding: 12px; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr);
+         align-items: start; max-width: 1700px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin: 0 0 10px;
+       display: flex; align-items: center; gap: 8px; }
+  h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  #left { display: grid; gap: 12px; min-width: 0; position: sticky; top: calc(var(--hdr, 40px) + 12px); }
+  #side { display: grid; gap: 12px; min-width: 0; }
+  #log-card { display: flex; flex-direction: column; height: calc(100vh - var(--hdr, 40px) - 36px - var(--video-h, 60vh));
+              min-height: 240px; }
+
+  /* Screen + gamepad overlay */
+  .screen-wrap { position: relative; width: 100%; max-width: calc((100vh - 260px) * 1.5); margin: 0 auto; aspect-ratio: 3 / 2; background: #000; border-radius: 8px;
+                 overflow: hidden; }
+  #screen { position: absolute; inset: 0; width: 100%; height: 100%; display: block; object-fit: contain;
+            image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; }
+  #stale { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); padding: 3px 10px; border-radius: 10px;
+           background: rgba(0,0,0,.7); color: var(--goal); font: 12px var(--mono); display: none; }
+  #stale.on { display: block; }
+  .pad { --u: 6px; position: absolute; inset: 0; pointer-events: none; transition: opacity .2s; }
+  .pad.hidden { opacity: 0; }
+  .btn { position: absolute; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.75);
+         font: 700 calc(var(--u) * 1.9) var(--sans); background: rgba(10,14,20,.35);
+         border: max(1px, calc(var(--u) * .25)) solid rgba(255,255,255,.55); opacity: .6;
+         text-shadow: 0 0 3px #000;
+         transition: background .08s, transform .08s, opacity .15s, box-shadow .15s; }
+  .btn.on { opacity: 1; color: #fff; transform: scale(.92); background: var(--c); border-color: #fff;
+            box-shadow: 0 0 calc(var(--u) * 2.5) var(--c); }
+  .btn.round { border-radius: 50%; width: calc(var(--u) * 8); height: calc(var(--u) * 8); }
+  .btn.pill { border-radius: calc(var(--u) * 2); height: calc(var(--u) * 3.4); width: calc(var(--u) * 9);
+              font-size: calc(var(--u) * 1.4); letter-spacing: .5px; }
+  .btn.shoulder { top: calc(var(--u) * 2); height: calc(var(--u) * 4.4); width: calc(var(--u) * 13); font-size: calc(var(--u) * 2); }
+  .btn.L { left: calc(var(--u) * 2); border-radius: calc(var(--u) * 3) calc(var(--u) * 1) calc(var(--u) * 1) calc(var(--u) * 1); --c: #9b8cff; }
+  .btn.R { right: calc(var(--u) * 2); border-radius: calc(var(--u) * 1) calc(var(--u) * 3) calc(var(--u) * 1) calc(var(--u) * 1); --c: #9b8cff; }
+  .btn.A { right: calc(var(--u) * 3); bottom: calc(var(--u) * 12); --c: #e8573f; }
+  .btn.B { right: calc(var(--u) * 12.5); bottom: calc(var(--u) * 6); --c: #f2a23c; }
+  .btn.Select { left: calc(50% - var(--u) * 10); bottom: calc(var(--u) * 2.5); --c: #5aa9e6; }
+  .btn.Start { left: calc(50% + var(--u) * 1); bottom: calc(var(--u) * 2.5); --c: #5aa9e6; }
+  .btn.Home { left: calc(50% - var(--u) * 2); bottom: calc(var(--u) * 7.5); width: calc(var(--u) * 4); height: calc(var(--u) * 4);
+              border-radius: 50%; font-size: calc(var(--u) * 1.1); --c: #7bd88f; }
+  .dpad { position: absolute; left: calc(var(--u) * 3); bottom: calc(var(--u) * 3); width: calc(var(--u) * 18);
+          height: calc(var(--u) * 18); }
+  .dpad .btn { width: calc(var(--u) * 6); height: calc(var(--u) * 6); border-radius: calc(var(--u) * 1); --c: #3fc1c9;
+               font-size: calc(var(--u) * 2); }
+  .dpad .Up { left: calc(var(--u) * 6); top: 0; } .dpad .Down { left: calc(var(--u) * 6); bottom: 0; }
+  .dpad .Left { left: 0; top: calc(var(--u) * 6); } .dpad .Right { right: 0; top: calc(var(--u) * 6); }
+  .dpad .hub { position: absolute; left: calc(var(--u) * 6); top: calc(var(--u) * 6); width: calc(var(--u) * 6);
+               height: calc(var(--u) * 6); background: rgba(10,14,20,.35); opacity: .6; }
+  #last-cmd { position: absolute; right: calc(var(--u) * 2); top: calc(var(--u) * 8); padding: 2px 8px; border-radius: 8px;
+              background: rgba(0,0,0,.55); font: 600 calc(var(--u) * 1.6) var(--mono); color: #fff; opacity: 0;
+              transition: opacity .4s; white-space: nowrap; }
+  #last-cmd.on { opacity: .9; transition: opacity .05s; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; color: var(--muted); align-items: center; }
+  .toolbar a { color: var(--action); text-decoration: none; }
+  .toolbar label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+  .toolbar .sp { margin-left: auto; }
+
+  /* Goal strip */
+  #goal-card { border-left: 4px solid var(--goal); }
+  #goal { font-size: 18px; font-weight: 700; color: var(--goal); }
+  #goal-phase { color: var(--text); margin-top: 2px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { font: 11px var(--mono); padding: 2px 8px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line);
+          color: var(--muted); white-space: nowrap; }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.ok b { color: var(--event); } .chip.bad b { color: var(--error); } .chip.warn b { color: var(--goal); }
+
+  /* Trainer card */
+  .trainer { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+  .trainer .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  .trainer .val { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .badges { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin-top: 12px; }
+  .badge { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 8px;
+           background: var(--panel2); border: 1px solid var(--line); }
+  .badge svg { width: 72%; height: 72%; fill: none; stroke: #3a434f; stroke-width: 1.5; }
+  .badge.on { border-color: var(--c); box-shadow: inset 0 0 12px color-mix(in srgb, var(--c) 35%, transparent); }
+  .badge.on svg { fill: var(--c); stroke: #fff; filter: drop-shadow(0 0 4px var(--c)); }
+  .badge-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+  /* Party */
+  .party { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+  .mon { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 8px; border-radius: 10px;
+         background: var(--panel2); border: 1px solid var(--line); min-width: 0; }
+  .mon.lead { border-color: #3d4a5c; }
+  .mon.fainted { opacity: .55; } .mon.fainted .sprite img { filter: grayscale(1); }
+  .mon.shiny { border-color: #f2c14e; box-shadow: inset 0 0 14px rgba(242,193,78,.2); }
+  .mon.empty { display: flex; align-items: center; justify-content: center; min-height: 82px; color: #39414c; }
+  .sprite { width: 64px; height: 64px; border-radius: 50%; background: radial-gradient(circle at 50% 60%, #2b3440, #1c2129 70%);
+            display: flex; align-items: center; justify-content: center; }
+  .sprite img { width: 64px; height: 64px; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;
+                image-rendering: pixelated; }
+  .mon .top { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+  .mon .nm { font-weight: 700; font-size: 14px; }
+  .mon .sp { color: var(--muted); font-size: 11px; }
+  .mon .lv { margin-left: auto; font: 600 12px var(--mono); }
+  .st { font: 700 10px var(--sans); padding: 0 5px; border-radius: 4px; color: #111; }
+  .st.Poisoned, .st.BadlyPoisoned { background: #b36bd6; } .st.Burned { background: #f0803c; }
+  .st.Paralyzed { background: #f2d64e; } .st.Asleep { background: #9aa5b1; } .st.Frozen { background: #7fd3f0; }
+  .st.Fainted { background: #ff5b5b; }
+  .hp { display: flex; align-items: center; gap: 6px; margin: 4px 0; font: 11px var(--mono); color: var(--muted); }
+  .hp .bar { flex: 1; height: 6px; background: #0b0d10; border-radius: 3px; overflow: hidden; }
+  .hp .bar i { display: block; height: 100%; background: var(--hp-hi); transition: width .3s; }
+  .hp .bar i.mid { background: var(--hp-mid); } .hp .bar i.lo { background: var(--hp-lo); }
+  .moves { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; font: 11px var(--mono); }
+  .moves span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .moves small { color: var(--muted); }
+  .moves .nopp { color: var(--error); }
+  .mon .held { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); vertical-align: middle; }
+  .dot.Observed { background: var(--event); } .dot.Derived { background: var(--action); } .dot.Tracked { background: var(--goal); }
+  .dot.Assumed { background: #c38bff; } .dot.Unknown { background: var(--error); }
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+
+  /* Map */
+  .minimap, .bigmap-inner { position: relative; }
+  .minimap { width: 100%; aspect-ratio: 240 / 144; border-radius: 8px; overflow: hidden; background: #6fb3e8; }
+  #minimap-canvas, #bigmap-canvas { display: block; width: 100%; height: 100%;
+    image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; }
+  .pin { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #ff3b30;
+         border: 2px solid #fff; box-shadow: 0 0 0 0 rgba(255,59,48,.7); animation: ping 1.4s infinite; pointer-events: none; }
+  .pin.stale { background: #9aa5b1; animation: none; }
+  .pin.big { width: 10px; height: 10px; margin: -5px 0 0 -5px; }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(255,59,48,.7); } 70% { box-shadow: 0 0 0 10px rgba(255,59,48,0); }
+                    100% { box-shadow: 0 0 0 0 rgba(255,59,48,0); } }
+  .map-caption { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .map-caption #map-where { color: var(--text); font-weight: 600; }
+  .bigmap { margin-top: 10px; max-height: 70vh; overflow: auto; -webkit-overflow-scrolling: touch; border-radius: 8px;
+            background: #10141a; cursor: zoom-in; }
+  .bigmap.zoom { cursor: zoom-out; }
+  .bigmap.zoom .bigmap-inner { width: max-content; }
+  .bigmap.zoom #bigmap-canvas { width: auto; height: auto; }
+
+  /* Battle */
+  #battle-card { display: none; border-left: 4px solid var(--accent); }
+  #battle-card.on { display: block; }
+  .vs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .vs .who { font-weight: 700; } .vs .hp { margin-top: 2px; }
+
+  /* Bag */
+  .bag { display: grid; gap: 6px; }
+  .bag .pocket { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  .items { display: flex; flex-wrap: wrap; gap: 4px; }
+  .items .chip { color: var(--text); }
+
+  /* Details */
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; font-family: var(--mono); font-size: 12px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); font: 11px/1.4 var(--mono); }
+  details { margin-top: 10px; } summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+
+  /* Log */
+  .filters { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; align-items: center; }
+  .filters label { cursor: pointer; display: flex; gap: 4px; align-items: center; }
+  .filters input[type=search] { margin-left: auto; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 8px; width: 180px; font-size: 13px; -webkit-appearance: none; appearance: none; }
+  #entries { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; min-height: 0; }
+  table { width: 100%; border-collapse: collapse; font: 12px/1.4 var(--mono); }
   td { padding: 2px 6px; border-bottom: 1px solid #1d222a; vertical-align: top; }
   td.t, td.f { color: var(--muted); white-space: nowrap; text-align: right; }
   td.k { white-space: nowrap; font-weight: 600; }
+  td.s { overflow-wrap: anywhere; }
   tr.action td.k { color: var(--action); } tr.event td.k { color: var(--event); }
   tr.goal td.k, tr.goal td.s { color: var(--goal); }
   tr.info td.k { color: var(--info); } tr.error td.k, tr.error td.s { color: var(--error); }
   tr[data-detail] { cursor: pointer; } tr.open + tr.detail { display: table-row; }
   tr.detail { display: none; } tr.detail td { color: var(--muted); }
+
+  @media (max-width: 1000px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 8px; gap: 8px; }
+    #left { display: contents; }
+    #video-card { order: 1; } #side { order: 2; gap: 8px; } #log-card { order: 3; height: 60vh; }
+  }
+  @media (max-width: 600px) {
+    :root { font-size: 14px; }
+    header { padding: 6px 10px; gap: 2px 10px; }
+    header .opt { display: none; }
+    main { padding: 0 0 env(safe-area-inset-bottom); gap: 8px; }
+    .card { border-radius: 0; border-left: 0; border-right: 0; padding: 10px; }
+    #video-card { padding: 0 0 8px; position: sticky; top: var(--hdr, 38px); z-index: 4; border-top: 0; }
+    #video-card h2 { display: none; }
+    .screen-wrap { border-radius: 0; max-width: none; }
+    .toolbar { padding: 0 10px; }
+    .party { grid-template-columns: 1fr; }
+    .mon.empty { min-height: 0; padding: 2px; font-size: 10px; }
+    .filters input[type=search] { font-size: 16px; width: 100%; margin-left: 0; } /* 16px: no iOS focus zoom */
+    td.f { display: none; }
+  }
+  @media (max-width: 600px) and (orientation: landscape) {
+    #video-card { position: static; }
+  }
 </style>
 </head>
 <body>
@@ -55,61 +232,46 @@
   <h1>POKéBOT</h1>
   <span class="stat">frame <b id="frame-id">–</b></span>
   <span class="stat">fps <b id="fps">–</b></span>
-  <span class="stat">video <b id="video-src">–</b></span>
-  <span class="stat">controller <b id="controller">–</b></span>
-  <span class="stat">uptime <b id="uptime">–</b></span>
-  <span class="stat" id="conn">link <b>connecting</b></span>
+  <span class="stat opt">video <b id="video-src">–</b></span>
+  <span class="stat opt">controller <b id="controller">–</b></span>
+  <span class="stat">up <b id="uptime">–</b></span>
+  <span class="stat" id="conn"><i></i><b>connecting</b></span>
 </header>
 <main>
-  <section id="video">
-    <h2>What the bot sees (normalized 240×160)</h2>
-    <img id="screen" alt="latest frame">
-    <div class="under">
-      <label><input type="checkbox" id="pause"> pause video</label>
+  <div id="left">
+  <section class="card" id="video-card">
+    <h2>What the bot sees <span class="right" id="screen-title">–</span></h2>
+    <div class="screen-wrap" id="screen-wrap">
+      <canvas id="screen" width="240" height="160"></canvas>
+      <div id="stale">reconnecting…</div>
+      <div class="pad" id="pad">
+        <div class="btn shoulder L" data-b="L">L</div>
+        <div class="btn shoulder R" data-b="R">R</div>
+        <div class="dpad">
+          <div class="hub"></div>
+          <div class="btn Up" data-b="Up">▲</div>
+          <div class="btn Down" data-b="Down">▼</div>
+          <div class="btn Left" data-b="Left">◀</div>
+          <div class="btn Right" data-b="Right">▶</div>
+        </div>
+        <div class="btn round B" data-b="B">B</div>
+        <div class="btn round A" data-b="A">A</div>
+        <div class="btn Home" data-b="Home">⌂</div>
+        <div class="btn pill Select" data-b="Select">SELECT</div>
+        <div class="btn pill Start" data-b="Start">START</div>
+        <div id="last-cmd"></div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <label><input type="checkbox" id="show-pad" checked> gamepad</label>
+      <label><input type="checkbox" id="pause"> pause</label>
+      <span class="sp"></span>
       <a href="/frame.png" target="_blank">frame.png</a>
-      <a href="/stream.mjpg" target="_blank">stream.mjpg</a>
+      <a href="/stream.mjpg" target="_blank">mjpeg</a>
     </div>
   </section>
-  <section id="state">
-    <h2>Goal</h2>
-    <dl class="kv">
-      <dt>goal</dt><dd><span class="big" id="goal">idle</span></dd>
-      <dt>phase</dt><dd id="goal-phase">–</dd>
-    </dl>
-    <h2>Progression</h2>
-    <dl class="kv">
-      <dt>player</dt><dd><span id="player-name">–</span> <span class="src" id="player-name-src">–</span></dd>
-      <dt>gender</dt><dd><span id="gender">–</span> <span class="src" id="gender-src">–</span></dd>
-      <dt>rival</dt><dd><span id="rival-name">–</span> <span class="src" id="rival-name-src">–</span></dd>
-      <dt>in control</dt><dd><span id="control">–</span> <span class="src" id="control-src">–</span></dd>
-    </dl>
-    <h2>party &amp; items</h2>
-    <dl class="kv">
-      <dt>money</dt><dd><span id="money">–</span> <span class="src" id="money-src">–</span></dd>
-      <dt>party</dt><dd id="party">–</dd>
-      <dt>bag</dt><dd id="bag">–</dd>
-    </dl>
-    <h2>Inferred state</h2>
-    <dl class="kv">
-      <dt>screen</dt><dd><span class="big" id="screen-state">–</span> <span class="src" id="screen-src">–</span></dd>
-      <dt>verified at</dt><dd id="screen-frame">–</dd>
-      <dt>sync</dt><dd id="sync">–</dd>
-      <dt>inputs</dt><dd id="inputs">–</dd>
-      <dt>last input</dt><dd id="last-input">–</dd>
-      <dt>dropped frames</dt><dd id="dropped">–</dd>
-    </dl>
-    <h2>Current observation</h2>
-    <dl class="kv">
-      <dt>classified as</dt><dd id="obs-screen">–</dd>
-      <dt>ui</dt><dd id="obs-ui">–</dd>
-      <dt>detector</dt><dd id="obs-detector">–</dd>
-      <dt>mean luma</dt><dd id="obs-luma">–</dd>
-      <dt>changed px</dt><dd id="obs-changed">–</dd>
-    </dl>
-    <details open><summary>GameState (raw)</summary><pre id="state-json"></pre></details>
-    <details><summary>Observation (raw)</summary><pre id="obs-json"></pre></details>
-  </section>
-  <section id="log">
+
+  <section class="card" id="log-card">
     <h2>Actions &amp; events</h2>
     <div class="filters">
       <label><input type="checkbox" data-kind="goal" checked> goal</label>
@@ -122,27 +284,105 @@
     </div>
     <div id="entries"><table><tbody id="rows"></tbody></table></div>
   </section>
+  </div>
+
+  <div id="side">
+    <section class="card" id="goal-card">
+      <div id="goal">idle</div>
+      <div id="goal-phase">–</div>
+      <div class="chips">
+        <span class="chip" id="chip-screen">screen <b>–</b></span>
+        <span class="chip" id="chip-sync">sync <b>–</b></span>
+        <span class="chip" id="chip-ui">ui <b>–</b></span>
+        <span class="chip" id="chip-input">last input <b>–</b></span>
+      </div>
+    </section>
+
+    <section class="card" id="battle-card">
+      <h2>Battle</h2>
+      <div class="vs">
+        <div><div class="who" id="b-player">–</div><div class="hp"><div class="bar"><i id="b-player-bar"></i></div><span id="b-player-hp"></span></div></div>
+        <div><div class="who" id="b-opp">–</div><div class="hp"><div class="bar"><i id="b-opp-bar"></i></div><span id="b-opp-hp"></span></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Trainer <span class="right legend" title="where each value came from">
+        <span><i class="dot Observed"></i> seen</span><span><i class="dot Derived"></i> derived</span>
+        <span><i class="dot Tracked"></i> tracked</span><span><i class="dot Unknown"></i> unknown</span></span></h2>
+      <div class="trainer">
+        <div><div class="lbl">Player</div><div class="val" id="t-player">–</div></div>
+        <div><div class="lbl">Rival</div><div class="val" id="t-rival">–</div></div>
+        <div><div class="lbl">Money</div><div class="val" id="t-money">–</div></div>
+        <div><div class="lbl">Pokédex</div><div class="val" id="t-dex">–</div></div>
+        <div style="grid-column: 1 / -1"><div class="lbl">Location</div><div class="val" id="t-loc">–</div></div>
+      </div>
+      <div class="badges" id="badges"></div>
+      <div class="badge-note" id="badge-note"></div>
+    </section>
+
+    <section class="card" id="map-card">
+      <h2>Map <span class="right"><label><input type="checkbox" id="show-bigmap"> full map</label></span></h2>
+      <div class="minimap" id="minimap">
+        <canvas id="minimap-canvas" width="240" height="144"></canvas>
+        <div class="pin" id="mini-pin" hidden></div>
+      </div>
+      <div class="map-caption"><span id="map-where">–</span><span id="map-note"></span></div>
+      <div class="bigmap" id="bigmap" hidden>
+        <div class="bigmap-inner" id="bigmap-inner">
+          <canvas id="bigmap-canvas"></canvas>
+          <div class="pin big" id="big-pin" hidden></div>
+        </div>
+      </div>
+      <div class="map-caption" id="bigmap-hint" hidden><span>Kanto overworld · tap to zoom</span><span id="bigmap-trail"></span></div>
+    </section>
+
+    <section class="card">
+      <h2>Party <span class="right" id="party-src"></span></h2>
+      <div class="party" id="party"></div>
+    </section>
+
+    <section class="card">
+      <h2>Bag</h2>
+      <div class="bag" id="bag">–</div>
+    </section>
+
+    <section class="card">
+      <h2>Perception</h2>
+      <dl class="kv">
+        <dt>classified</dt><dd id="obs-screen">–</dd>
+        <dt>detector</dt><dd id="obs-detector">–</dd>
+        <dt>state screen</dt><dd id="screen-state">–</dd>
+        <dt>verified at</dt><dd id="screen-frame">–</dd>
+        <dt>in control</dt><dd id="control">–</dd>
+        <dt>inputs</dt><dd id="inputs">–</dd>
+        <dt>dropped frames</dt><dd id="dropped">–</dd>
+        <dt>mean luma</dt><dd id="obs-luma">–</dd>
+        <dt>changed px</dt><dd id="obs-changed">–</dd>
+        <dt>dialogue</dt><dd id="obs-text">–</dd>
+      </dl>
+      <details id="state-details"><summary>GameState (raw)</summary><pre id="state-json"></pre></details>
+      <details id="obs-details"><summary>Observation (raw)</summary><pre id="obs-json"></pre></details>
+    </section>
+  </div>
+
 </main>
 <script>
+'use strict';
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const rows = $('rows');
 const MAX_ROWS = 2000;
 let lastSeq = -1;
 let session = null;
 
-/// A new bot run (different session) starts a fresh log.
-function adoptSession(id) {
-  if (id === session) return;
-  session = id;
-  lastSeq = -1;
-  rows.replaceChildren();
-}
+// ---------------------------------------------------------------- formatting
 
 function fmtTime(ms) {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
 }
-
+const durMs = (d) => Math.round(d.secs * 1000 + d.nanos / 1e6);
 function fmtCommand(c) {
   if (c == null) return '–';
   if (typeof c === 'string') return c;
@@ -152,7 +392,34 @@ function fmtCommand(c) {
   if (kind === 'Sequence') return `Sequence ×${v.length}`;
   return `${kind} ${v}`;
 }
-const durMs = (d) => Math.round(d.secs * 1000 + d.nanos / 1e6);
+/// SPECIES_NIDORAN_F → Nidoran♀, ITEM_POKE_BALL → Poke Ball
+function prettyConst(s) {
+  if (s == null) return '?';
+  s = String(s).replace(/^(SPECIES|ITEM|MOVE)_/, '');
+  if (/_F$/.test(s) && /NIDORAN/.test(s)) return 'Nidoran♀';
+  if (/_M$/.test(s) && /NIDORAN/.test(s)) return 'Nidoran♂';
+  return s.toLowerCase().split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+/// PewterCity_PokemonCenter_1F → Pewter City · Pokemon Center 1F
+function prettyMap(m) {
+  return String(m).split('_').map((p) => p.replace(/([a-z])([A-Z0-9])/g, '$1 $2')).join(' · ');
+}
+const dot = (k) => `<i class="dot ${k ? k.source : 'Unknown'}" title="${k ? k.source : 'Unknown'}${k && k.last_verified_frame != null ? ' @ frame ' + k.last_verified_frame : ''}"></i>`;
+const val = (k) => (k && k.value != null ? k.value : null);
+const hpClass = (f) => (f > 0.5 ? '' : f > 0.2 ? 'mid' : 'lo');
+function setText(id, text) { const el = $(id); if (el.textContent !== text) el.textContent = text; }
+function setHtml(el, html) { if (el._html !== html) { el._html = html; el.innerHTML = html; } }
+
+// ---------------------------------------------------------------- log
+
+function adoptSession(id) {
+  if (id === session) return;
+  session = id;
+  lastSeq = -1;
+  rows.replaceChildren();
+  frames.shown = null;
+  world.reset();
+}
 
 function visible(entry) {
   const box = document.querySelector(`[data-kind="${entry.kind}"]`);
@@ -160,9 +427,10 @@ function visible(entry) {
   return (!box || box.checked) && (!q || entry.summary.toLowerCase().includes(q));
 }
 
-function addEntry(entry) {
+function addEntry(entry, live) {
   if (entry.seq <= lastSeq) return;
   lastSeq = entry.seq;
+  if (live && entry.kind === 'action') pad.command(entry);
   const tr = document.createElement('tr');
   tr.className = entry.kind;
   tr._entry = entry;
@@ -173,7 +441,7 @@ function addEntry(entry) {
   detail.className = 'detail';
   if (entry.detail !== null) {
     tr.dataset.detail = '1';
-    detail.innerHTML = '<td></td><td></td><td></td><td><pre></pre></td>';
+    detail.innerHTML = '<td></td><td class="f"></td><td></td><td><pre></pre></td>';
     detail.querySelector('pre').textContent = JSON.stringify(entry.detail, null, 2);
     tr.onclick = () => tr.classList.toggle('open');
   }
@@ -191,112 +459,510 @@ function refilter() {
 }
 document.querySelectorAll('.filters input').forEach((el) => el.addEventListener('input', refilter));
 
+// ---------------------------------------------------------------- gamepad overlay
+
+/// Replays each issued command's button timeline on the overlay. Commands
+/// queue on the controller, so they are played back to back too.
+const pad = {
+  held: new Map(),       // button → number of overlapping presses
+  busyUntil: 0,
+  el: (b) => document.querySelector(`.pad [data-b="${b}"]`),
+  set(buttons, on) {
+    for (const b of buttons) {
+      const n = (this.held.get(b) || 0) + (on ? 1 : -1);
+      this.held.set(b, Math.max(0, n));
+      const el = this.el(b);
+      if (el) el.classList.toggle('on', n > 0);
+    }
+  },
+  releaseAll() {
+    this.held.clear();
+    document.querySelectorAll('.pad .btn.on').forEach((el) => el.classList.remove('on'));
+    this.busyUntil = 0;
+  },
+  timeline(cmd, totalMs) {
+    if (typeof cmd === 'string') return [];           // Neutral
+    const [kind, v] = Object.entries(cmd)[0];
+    const half = totalMs ? totalMs / 2 : 80;
+    if (kind === 'Press') return [{ b: [v], ms: half }, { b: [], ms: half }];
+    if (kind === 'Chord') return [{ b: v, ms: half }, { b: [], ms: half }];
+    if (kind === 'Hold') return [{ b: v.buttons, ms: durMs(v.duration) }];
+    if (kind === 'Sequence') return v.map((s) => ({ b: s.buttons, ms: durMs(s.duration) }));
+    return [];
+  },
+  command(entry) {
+    const cmd = entry.detail;
+    if (cmd === 'Neutral') { this.releaseAll(); return; }
+    const m = /\((\d+) ms\)$/.exec(entry.summary);
+    const steps = this.timeline(cmd, m ? Number(m[1]) : 0);
+    const now = performance.now();
+    let t = Math.max(now, this.busyUntil);
+    if (t - now > 2000) t = now;                        // fell behind (tab was hidden): catch up
+    for (const s of steps) {
+      if (s.b.length) {
+        const show = Math.max(s.ms, 110);               // short taps still need to be visible
+        setTimeout(() => this.set(s.b, true), t - now);
+        setTimeout(() => this.set(s.b, false), t - now + show);
+      }
+      t += s.ms;
+    }
+    this.busyUntil = t;
+    const label = $('last-cmd');
+    setTimeout(() => {
+      label.textContent = fmtCommand(cmd);
+      label.classList.add('on');
+      clearTimeout(label._t);
+      label._t = setTimeout(() => label.classList.remove('on'), 900);
+    }, Math.max(0, t - now - steps.reduce((a, s) => a + s.ms, 0)));
+  },
+};
+const padBox = $('pad');
+new ResizeObserver(() => {
+  padBox.style.setProperty('--u', `${$('screen-wrap').offsetWidth / 100}px`);
+  document.documentElement.style.setProperty('--video-h', `${$('video-card').offsetHeight}px`);
+}).observe($('video-card'));
+$('show-pad').checked = localStorage.getItem('pokebot.pad') !== '0';
+const syncPad = () => { padBox.classList.toggle('hidden', !$('show-pad').checked); localStorage.setItem('pokebot.pad', $('show-pad').checked ? '1' : '0'); };
+$('show-pad').addEventListener('change', syncPad); syncPad();
+
+// ---------------------------------------------------------------- badges
+
+const BADGES = [
+  ['BOULDERBADGE', 'Boulder', '#b8bec6', '<polygon points="8,2 16,2 22,8 22,16 16,22 8,22 2,16 2,8"/>'],
+  ['CASCADEBADGE', 'Cascade', '#4fa3e0', '<path d="M12 2C12 2 4 11 4 15.5a8 8 0 0 0 16 0C20 11 12 2 12 2z"/>'],
+  ['THUNDERBADGE', 'Thunder', '#f2a23c', '<polygon points="12,1 14.5,8 22,7 16.5,12 22,17 14.5,16 12,23 9.5,16 2,17 7.5,12 2,7 9.5,8"/>'],
+  ['RAINBOWBADGE', 'Rainbow', '#7bd88f', '<circle cx="12" cy="6.5" r="4.5"/><circle cx="17.5" cy="12" r="4.5"/><circle cx="12" cy="17.5" r="4.5"/><circle cx="6.5" cy="12" r="4.5"/>'],
+  ['SOULBADGE', 'Soul', '#e070b8', '<path d="M12 21.5 3.2 12.7a5.2 5.2 0 0 1 8.8-6.4 5.2 5.2 0 0 1 8.8 6.4z"/>'],
+  ['MARSHBADGE', 'Marsh', '#e8c34a', '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/>'],
+  ['VOLCANOBADGE', 'Volcano', '#e8573f', '<path d="M12 1.5c1 4.5 7 7 7 13a7 7 0 0 1-14 0c0-3.5 2.5-5 3-8 1.5 1.5 2 3 2 4.5 1.5-2 2-6 2-9.5z"/>'],
+  ['EARTHBADGE', 'Earth', '#3fc1c9', '<polygon points="12,1.5 22.5,12 12,22.5 1.5,12"/>'],
+];
+$('badges').innerHTML = BADGES.map(([key, name, color, shape]) =>
+  `<div class="badge" id="badge-${key}" style="--c:${color}" title="${name} Badge"><svg viewBox="0 0 24 24">${shape}</svg></div>`).join('');
+
+function renderBadges(k) {
+  const earned = (k && k.value) || [];
+  for (const [key] of BADGES) $('badge-' + key).classList.toggle('on', earned.includes(key));
+  setText('badge-note', !k || k.source === 'Unknown'
+    ? 'Badges: not seen yet (read from "received the …BADGE" text)'
+    : `${earned.length} / 8 badges`);
+}
+
+// ---------------------------------------------------------------- party / trainer
+
+function hpBar(cur, max) {
+  const f = max ? cur / max : 0;
+  return `<div class="bar"><i class="${hpClass(f)}" style="width:${(f * 100).toFixed(1)}%"></i></div>`;
+}
+
+function renderMon(m, i) {
+  const species = val(m.species);
+  const nick = val(m.nickname);
+  const shiny = val(m.shiny) === true;
+  const hp = val(m.hp);
+  const status = val(m.status);
+  const fainted = status === 'Fainted' || (hp && hp[0] === 0);
+  const sprite = species ? `<img src="/sprite/${encodeURIComponent(species)}${shiny ? '?shiny=1' : ''}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : '';
+  const moves = (m.moves || []).filter(Boolean).map((s) => {
+    const pp = val(s.pp);
+    return `<span class="${pp && pp[0] === 0 ? 'nopp' : ''}">${esc(prettyConst(val(s.mv)))} <small>${pp ? `${pp[0]}/${pp[1]}` : '?'}</small></span>`;
+  }).join('');
+  const held = val(m.held_item);
+  return `<div class="mon${i === 0 ? ' lead' : ''}${fainted ? ' fainted' : ''}${shiny ? ' shiny' : ''}">
+    <div class="sprite">${sprite}</div>
+    <div style="min-width:0">
+      <div class="top"><span class="nm">${esc(nick || prettyConst(species))}${shiny ? ' ✨' : ''}</span>
+        ${nick && species ? `<span class="sp">${esc(prettyConst(species))}</span>` : ''}
+        ${status && status !== 'Healthy' ? `<span class="st ${esc(status)}">${esc(status.slice(0, 3).toUpperCase())}</span>` : ''}
+        <span class="lv">Lv${val(m.level) ?? '?'} ${dot(m.level)}</span></div>
+      <div class="hp">${hp ? hpBar(hp[0], hp[1]) : hpBar(0, 0)}<span>${hp ? `${hp[0]}/${hp[1]}` : '?'}</span> ${dot(m.hp)}</div>
+      <div class="moves">${moves || '<small>moves unknown</small>'}</div>
+      ${held ? `<div class="held">holds ${esc(prettyConst(held))}</div>` : ''}
+    </div></div>`;
+}
+
+function renderParty(k) {
+  const party = (k && k.value) || [];
+  let html = party.map(renderMon).join('');
+  for (let i = party.length; i < 6; i++) html += '<div class="mon empty">—</div>';
+  const box = $('party');
+  if (box._html === html) return setHtml($('party-src'), `${dot(k)} ${party.length}/6`);
+  // Reuse loaded sprites so HP/PP updates don't make them blink.
+  const old = new Map([...box.querySelectorAll('.sprite img')].map((img) => [img.getAttribute('src'), img]));
+  setHtml(box, html);
+  for (const img of box.querySelectorAll('.sprite img')) {
+    const keep = old.get(img.getAttribute('src'));
+    if (keep) { img.replaceWith(keep); old.delete(img.getAttribute('src')); }
+  }
+  setHtml($('party-src'), `${dot(k)} ${party.length}/6`);
+}
+
+function renderTrainer(st) {
+  const pr = st.progression || {};
+  const name = val(pr.player_name);
+  const gender = val(pr.gender);
+  setHtml($('t-player'), `${esc(name ?? '?')}${gender ? (gender === 'Girl' ? ' ♀' : ' ♂') : ''} ${dot(pr.player_name)}`);
+  setHtml($('t-rival'), `${esc(val(pr.rival_name) ?? '?')} ${dot(pr.rival_name)}`);
+  const money = val(st.money);
+  setHtml($('t-money'), `${money != null ? '₽' + money.toLocaleString() : '?'} ${dot(st.money)}`);
+  const dex = st.pokedex || {};
+  const count = (m) => Object.values(m || {}).filter((k) => k.value === true).length;
+  setText('t-dex', `${count(dex.caught)} caught · ${count(dex.seen)} seen`);
+  const pose = st.player && st.player.pose;
+  const p = val(pose);
+  setHtml($('t-loc'), p ? `${esc(prettyMap(p.map))} <small style="color:var(--muted)">(${p.x}, ${p.y})</small> ${dot(pose)}` : `? ${dot(pose)}`);
+  renderBadges(pr.badges);
+}
+
+function renderBag(bag) {
+  const pockets = Object.entries((bag && bag.pockets) || {});
+  const name = (p) => esc(p.replace(/([a-z])([A-Z])/g, '$1 $2'));
+  let html = pockets.filter(([, k]) => k.value).map(([p, k]) => {
+    const items = k.value.length
+      ? k.value.map(([i, n]) => `<span class="chip">${esc(prettyConst(i))} <b>×${n}</b></span>`).join('')
+      : '<small style="color:var(--muted)">empty</small>';
+    return `<div><div class="pocket">${name(p)} ${dot(k)}</div><div class="items">${items}</div></div>`;
+  }).join('');
+  const unknown = pockets.filter(([, k]) => !k.value).map(([p]) => name(p));
+  if (unknown.length) html += `<div class="pocket">${dot(null)} not looked at yet: ${unknown.join(', ')}</div>`;
+  setHtml($('bag'), html || '–');
+}
+
+function renderBattle(ob) {
+  const b = ob && ob.battle;
+  $('battle-card').classList.toggle('on', !!b);
+  if (!b) return;
+  setText('b-player', `${b.player_name ?? '?'} Lv${b.player_level ?? '?'}`);
+  setText('b-opp', `${b.opponent_name ?? '?'} Lv${b.opponent_level ?? '?'}`);
+  const bar = (id, permille) => {
+    const f = permille == null ? 0 : permille / 1000;
+    $(id).style.width = `${(f * 100).toFixed(1)}%`;
+    $(id).className = hpClass(f);
+  };
+  bar('b-player-bar', b.player_hp);
+  bar('b-opp-bar', b.opponent_hp);
+  setText('b-player-hp', b.player_hp_numbers ? `${b.player_hp_numbers[0]}/${b.player_hp_numbers[1]}` : '');
+  setText('b-opp-hp', b.opponent_hp != null ? `${Math.round(b.opponent_hp / 10)}%` : '');
+}
+
+function chip(id, text, cls) {
+  const el = $(id);
+  el.className = 'chip ' + (cls || '');
+  setText(id + '-v', text);
+}
+for (const id of ['chip-screen', 'chip-sync', 'chip-ui', 'chip-input']) $(id).querySelector('b').id = id + '-v';
+
+// ---------------------------------------------------------------- map
+
+/// Places the player on the Town Map (as the Fly menu does) and on the
+/// stitched overworld. Interiors and caves use the entrance they were
+/// entered from, like the game's own map.
+const world = {
+  data: null, region: new Image(), over: new Image(), trail: [], pose: null, stale: true,
+  async load() {
+    try {
+      const r = await fetch('/world/region_map.json');
+      if (!r.ok) throw new Error(r.status);
+      this.data = await r.json();
+    } catch (e) {
+      setText('map-note', 'map views not built: run tools/world/build.sh');
+      return;
+    }
+    this.region.onload = () => { this.key = null; this.update(this.lastK); };
+    this.region.src = '/world/region_map.png';
+    this.over.onload = () => this.drawBig();
+  },
+  outdoor: (m) => /TOWN|CITY|ROUTE/.test(m.type),
+  /// Grid cell on the Town Map, following GetPlayerPositionOnRegionMap.
+  regionCell(name, x, y) {
+    const d = this.data, m = d.maps[name];
+    if (!m) return null;
+    const override = d.overrides[m.section];
+    if (override) return { x: override[0], y: override[1] };
+    let sec = m.section, w = m.width, h = m.height;
+    if ((!this.outdoor(m) || !d.sections[sec]) && m.entrance) {
+      const e = d.maps[m.entrance.map];
+      [sec, w, h, x, y] = [e.section, e.width, e.height, m.entrance.x, m.entrance.y];
+    }
+    const cells = d.sections[sec];
+    if (!cells) return null;
+    const xs = cells.map((c) => c[0]), ys = cells.map((c) => c[1]);
+    const bx = Math.min(...xs), by = Math.min(...ys);
+    const bw = Math.max(...xs) - bx + 1, bh = Math.max(...ys) - by + 1;
+    const dx = Math.max(1, Math.floor(w / bw)), dy = Math.max(1, Math.floor(h / bh));
+    return { x: bx + Math.min(Math.floor(x / dx), bw - 1), y: by + Math.min(Math.floor(y / dy), bh - 1), cells };
+  },
+  /// Block on the stitched overworld.
+  overworldPos(name, x, y) {
+    const d = this.data, m = d.maps[name];
+    if (!m) return null;
+    if (m.overworld) return { x: m.overworld[0] + x, y: m.overworld[1] + y };
+    const e = m.entrance && d.maps[m.entrance.map];
+    if (e && e.overworld) return { x: e.overworld[0] + m.entrance.x, y: e.overworld[1] + m.entrance.y, inside: true };
+    return null;
+  },
+  update(k) {
+    this.lastK = k;
+    const p = val(k);
+    const stale = !p || (k.source !== 'Observed' && k.source !== 'Tracked');
+    const key = p ? `${p.map}:${p.x}:${p.y}:${stale}` : 'none';
+    if (key === this.key || !this.data) return;
+    this.key = key;
+    this.stale = stale;
+    if (p) {
+      this.pose = p;
+      const o = this.overworldPos(p.map, p.x, p.y);
+      const last = this.trail[this.trail.length - 1];
+      if (o && !o.inside && (!last || last.x !== o.x || last.y !== o.y)) {
+        this.trail.push(o);
+        if (this.trail.length > 600) this.trail.shift();
+      }
+    }
+    this.draw();
+  },
+  reset() { this.trail = []; this.pose = null; this.key = null; },
+  place(pin, left, top) {
+    pin.hidden = false;
+    pin.style.left = `${left}%`;
+    pin.style.top = `${top}%`;
+    pin.classList.toggle('stale', this.stale);
+  },
+  draw() {
+    if (!this.data || !this.region.complete) return;
+    const ctx = $('minimap-canvas').getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.region, 0, 16, 240, 144, 0, 0, 240, 144);   // skip the empty title bar
+    const p = this.pose;
+    const cell = p && this.regionCell(p.map, p.x, p.y);
+    const g = this.data.grid;
+    if (cell) {
+      ctx.fillStyle = 'rgba(255,235,120,.45)';
+      for (const [cx, cy] of cell.cells || []) ctx.fillRect(g.x + cx * g.cell, g.y + cy * g.cell - 16, g.cell, g.cell);
+      this.place($('mini-pin'), (g.x + (cell.x + 0.5) * g.cell) / 2.4, (g.y + (cell.y + 0.5) * g.cell - 16) / 1.44);
+    } else {
+      $('mini-pin').hidden = true;
+    }
+    const o = p && this.overworldPos(p.map, p.x, p.y);
+    setText('map-where', p ? `${prettyMap(p.map)} (${p.x}, ${p.y})` : 'location unknown');
+    setText('map-note', p && o && o.inside ? 'inside · shown at its entrance' : this.stale && p ? 'last known' : '');
+    this.drawBig();
+  },
+  drawBig() {
+    if (!$('show-bigmap').checked || !this.data) return;
+    if (!this.over.src) { this.over.src = '/world/overworld.png'; return; }
+    if (!this.over.complete || !this.over.naturalWidth) return;
+    const c = $('bigmap-canvas'), s = this.data.overworld.scale;
+    if (c.width !== this.over.naturalWidth) { c.width = this.over.naturalWidth; c.height = this.over.naturalHeight; }
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.over, 0, 0);
+    ctx.fillStyle = 'rgba(255,214,10,.85)';
+    for (const t of this.trail) ctx.fillRect(t.x * s + 1, t.y * s + 1, s - 2, s - 2);
+    const p = this.pose, o = p && this.overworldPos(p.map, p.x, p.y);
+    if (o) {
+      this.place($('big-pin'), (o.x + 0.5) * s / c.width * 100, (o.y + 0.5) * s / c.height * 100);
+      if ($('bigmap').classList.contains('zoom')) this.follow();
+    } else {
+      $('big-pin').hidden = true;
+    }
+    setText('bigmap-trail', this.trail.length ? `trail ${this.trail.length} steps` : '');
+  },
+  /// Keeps the player in view when zoomed in.
+  follow() {
+    const box = $('bigmap'), pin = $('big-pin');
+    const x = pin.offsetLeft - box.clientWidth / 2, y = pin.offsetTop - box.clientHeight / 2;
+    if (Math.abs(box.scrollLeft - x) > box.clientWidth / 4 || Math.abs(box.scrollTop - y) > box.clientHeight / 4) {
+      box.scrollTo({ left: x, top: y, behavior: 'smooth' });
+    }
+  },
+};
+$('show-bigmap').checked = localStorage.getItem('pokebot.bigmap') === '1';
+const syncBigmap = () => {
+  const on = $('show-bigmap').checked;
+  $('bigmap').hidden = $('bigmap-hint').hidden = !on;
+  localStorage.setItem('pokebot.bigmap', on ? '1' : '0');
+  world.drawBig();
+};
+$('show-bigmap').addEventListener('change', syncBigmap);
+$('bigmap').addEventListener('click', () => {
+  $('bigmap').classList.toggle('zoom');
+  if ($('bigmap').classList.contains('zoom')) requestAnimationFrame(() => world.follow());
+});
+syncBigmap();
+world.load();
+
+// ---------------------------------------------------------------- status
+
 function setStatus(status) {
   const s = status.stats;
   adoptSession(s.session);
-  $('frame-id').textContent = s.frame_id ?? '–';
-  $('fps').textContent = s.fps.toFixed(0);
-  $('video-src').textContent = s.video_source;
-  $('controller').textContent = s.controller;
-  $('uptime').textContent = fmtTime(s.uptime_ms).replace(/\.\d+$/, '');
+  setText('frame-id', String(s.frame_id ?? '–'));
+  setText('fps', s.fps.toFixed(0));
+  setText('video-src', s.video_source);
+  setText('controller', s.controller);
+  setText('uptime', fmtTime(s.uptime_ms).replace(/\.\d+$/, ''));
+  if (s.frame_id != null) frames.want(s.frame_id);
+
   const st = status.state || {};
-  if (st.screen) {
-    $('screen-state').textContent = st.screen.value ?? 'Unknown';
-    $('screen-src').textContent = st.screen.source;
-    $('screen-src').className = 'src ' + st.screen.source;
-    $('screen-frame').textContent = st.screen.last_verified_frame ?? '–';
-    $('sync').textContent = st.synchronization;
-    $('inputs').textContent = st.input.commands_issued;
-    $('last-input').textContent = st.input.last_command
-      ? `${fmtCommand(st.input.last_command)} @ frame ${st.input.last_command_frame}` : '–';
-    $('dropped').textContent = st.dropped_frames;
-  }
-  const goal = st.active_goal;
-  $('goal').textContent = goal ? goal.goal : 'idle';
-  $('goal-phase').textContent = goal ? `${goal.phase} — ${goal.detail}` : '–';
-  const knowledge = (id, k) => {
-    if (!k) return;
-    $(id).textContent = k.value ?? '–';
-    $(id + '-src').textContent = k.source;
-    $(id + '-src').className = 'src ' + k.source;
-  };
-  const pr = st.progression || {};
-  knowledge('player-name', pr.player_name);
-  knowledge('gender', pr.gender);
-  knowledge('rival-name', pr.rival_name);
-  knowledge('control', pr.in_control);
-  knowledge('money', st.money);
-  const kv = (k) => (k && k.value != null ? k.value : '?');
-  const src = (k) => `<span class="src ${k ? k.source : 'Unknown'}">${k ? k.source : 'Unknown'}</span>`;
-  const party = (st.party && st.party.value) || [];
-  $('party').innerHTML = party.length ? party.map((m) => {
-    const sp = String(kv(m.species)).replace('SPECIES_', '');
-    const hp = m.hp && m.hp.value ? `${m.hp.value[0]}/${m.hp.value[1]}` : '?';
-    const moves = m.moves.filter(Boolean).map((s) => {
-      const pp = s.pp && s.pp.value ? `${s.pp.value[0]}/${s.pp.value[1]}` : '?';
-      return `${String(kv(s.mv)).replace('MOVE_', '')} ${pp} ${src(s.pp)}`;
-    }).join(' · ');
-    return `<div><b>${sp}</b> Lv${kv(m.level)} HP ${hp} ${src(m.hp)}<br><small>${moves}</small></div>`;
-  }).join('') : '–';
-  const pockets = (st.bag && st.bag.pockets) || {};
-  $('bag').innerHTML = Object.entries(pockets).map(([p, k]) =>
-    `${p}: ${k.value ? k.value.map(([i, n]) => `${i.replace('ITEM_', '')}×${n}`).join(', ') || 'empty' : '?'} ${src(k)}`
-  ).join('<br>') || '–';
   const ob = status.observation || {};
+  const goal = st.active_goal;
+  setText('goal', goal ? goal.goal : 'idle');
+  setText('goal-phase', goal ? `${goal.phase} — ${goal.detail}` : '–');
+  if (st.screen) {
+    const screen = st.screen.value ?? 'Unknown';
+    chip('chip-screen', screen, st.screen.source === 'Observed' ? 'ok' : 'warn');
+    setText('screen-title', screen);
+    chip('chip-sync', String(st.synchronization), st.synchronization === 'Synchronized' ? 'ok' : st.synchronization === 'Desynchronized' ? 'bad' : 'warn');
+    chip('chip-input', st.input.last_command ? fmtCommand(st.input.last_command) : '–');
+    setText('screen-state', `${screen} (${st.screen.source})`);
+    setText('screen-frame', String(st.screen.last_verified_frame ?? '–'));
+    setText('inputs', String(st.input.commands_issued));
+    setText('dropped', String(st.dropped_frames));
+    const ctl = st.progression && st.progression.in_control;
+    setText('control', ctl ? `${ctl.value ?? '?'} (${ctl.source})` : '–');
+  }
+  renderTrainer(st);
+  world.update(st.player && st.player.pose);
+  renderParty(st.party);
+  renderBag(st.bag);
+  renderBattle(ob);
+
   if (ob.screen) {
-    $('obs-screen').textContent = ob.screen.value;
-    $('obs-detector').textContent = ob.screen.detector;
-    $('obs-luma').textContent = ob.metrics.mean_luma;
-    $('obs-changed').textContent = ob.metrics.changed_pixels;
+    setText('obs-screen', String(ob.screen.value));
+    setText('obs-detector', String(ob.screen.detector));
+    setText('obs-luma', String(ob.metrics.mean_luma));
+    setText('obs-changed', String(ob.metrics.changed_pixels));
     const ui = [];
-    if (ob.dialogue) ui.push(`${ob.dialogue.kind}${ob.dialogue.waiting_for_input ? ' ▼ waiting for A' : ' (printing)'}`);
-    if (ob.menu) ui.push(`menu: ${ob.menu.rows} rows, cursor on ${ob.menu.cursor_row}`);
+    if (ob.dialogue) ui.push(`${ob.dialogue.kind}${ob.dialogue.waiting_for_input ? ' ▼' : ' …'}`);
+    if (ob.menu) ui.push(`menu ${ob.menu.cursor_row + 1}/${ob.menu.rows}`);
+    if (ob.battle && ob.battle.menu) ui.push(Object.keys(ob.battle.menu)[0] + ' menu');
     if (ob.naming) {
       const f = ob.naming.focus;
-      ui.push(`keyboard: ${f.Key ? `key col ${f.Key.column} row ${f.Key.row}` : 'buttons'}, ${ob.naming.typed} typed`);
+      ui.push(`keyboard ${f.Key ? `${f.Key.column},${f.Key.row}` : 'buttons'} (${ob.naming.typed})`);
     }
-    $('obs-ui').textContent = ui.join(' · ') || '–';
+    chip('chip-ui', ui.join(' · ') || '–');
+    setText('obs-text', ob.dialogue && ob.dialogue.lines && ob.dialogue.lines.length ? ob.dialogue.lines.join(' / ') : '–');
   }
-  $('state-json').textContent = JSON.stringify(st, null, 2);
-  $('obs-json').textContent = JSON.stringify(ob, null, 2);
+  // Serializing the whole state is costly on phones: only when looked at.
+  if ($('state-details').open) setText('state-json', JSON.stringify(st, null, 2));
+  if ($('obs-details').open) setText('obs-json', JSON.stringify(ob, null, 2));
 }
 
-let loading = false, wanted = null;
-function showFrame(id) {
-  if ($('pause').checked) return;
-  wanted = id;
-  if (loading) return;
-  loading = true;
-  const img = new Image();
-  img.onload = img.onerror = () => {
-    if (img.naturalWidth) $('screen').src = img.src;
-    loading = false;
-    if (wanted !== id) showFrame(wanted);
-  };
-  img.src = `/frame.png?f=${id}`;
+// ---------------------------------------------------------------- frames
+
+/// Fetches the newest frame, one request at a time. Every request has a
+/// timeout, so a dropped connection can never leave the picture frozen.
+/// Draws only fully decoded frames, so the screen never blanks between two
+/// (swapping an <img> src can paint an empty box while it decodes, on Safari).
+async function drawFrame(blob) {
+  let source, done = () => {};
+  if (window.createImageBitmap) {
+    source = await createImageBitmap(blob);
+    done = () => source.close();
+  } else {
+    const url = URL.createObjectURL(blob);
+    source = new Image();
+    source.src = url;
+    await source.decode();
+    done = () => URL.revokeObjectURL(url);
+  }
+  const canvas = $('screen');
+  if (canvas.width !== source.width || canvas.height !== source.height) {
+    canvas.width = source.width;
+    canvas.height = source.height;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0);
+  done();
 }
 
-function loadSnapshot() {
-  return fetch('/api/snapshot').then((r) => r.json()).then((snap) => {
-    setStatus(snap.status);
-    snap.log.forEach(addEntry);
-    if (snap.status.stats.frame_id != null) showFrame(snap.status.stats.frame_id);
-  });
-}
+const frames = {
+  wanted: null, shown: null, busy: false, lastOk: performance.now(), failures: 0,
+  want(id) { this.wanted = id; this.pump(); },
+  async pump() {
+    if (this.busy || this.wanted == null || this.wanted === this.shown || $('pause').checked || document.hidden) return;
+    this.busy = true;
+    const id = this.wanted;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 2500);
+    let ok = false;
+    try {
+      const r = await fetch(`/frame.png?f=${id}`, { cache: 'no-store', signal: ctl.signal });
+      if (!r.ok) throw new Error(r.status);
+      await drawFrame(await r.blob());
+      this.shown = Number(r.headers.get('x-frame-id')) || id;
+      if (this.shown !== id && this.wanted === id) this.wanted = this.shown;
+      this.lastOk = performance.now();
+      this.failures = 0;
+      ok = true;
+    } catch (e) {
+      this.failures++;
+    } finally {
+      clearTimeout(timer);
+      this.busy = false;
+    }
+    if (this.wanted !== this.shown) setTimeout(() => this.pump(), ok ? 0 : Math.min(250 * this.failures, 2000));
+  },
+};
+$('pause').addEventListener('change', () => frames.pump());
 
-function connect() {
-  const es = new EventSource('/api/stream');
-  // (Re)connected: possibly to a new run, so reload the full snapshot.
-  es.onopen = () => {
-    $('conn').className = 'stat live'; $('conn').querySelector('b').textContent = 'live';
-    loadSnapshot();
-  };
-  es.onerror = () => { $('conn').className = 'stat down'; $('conn').querySelector('b').textContent = 'waiting for next run'; };
-  es.addEventListener('status', (e) => setStatus(JSON.parse(e.data)));
-  es.addEventListener('log', (e) => addEntry(JSON.parse(e.data)));
-  es.addEventListener('frame', (e) => showFrame(e.data));
-}
-connect();
+// ---------------------------------------------------------------- connection
+
+/// The server sends a ping every 2 s. If nothing arrives for a while the
+/// stream is dead (Wi-Fi switch, phone sleep, server restart) even when the
+/// browser doesn't notice, so we drop it and reconnect.
+const link = {
+  es: null, lastMsg: 0, openedAt: 0,
+  state(cls, text) { $('conn').className = 'stat ' + cls; setText('conn-text', text); },
+  connect() {
+    if (this.es) this.es.close();
+    this.openedAt = this.lastMsg = performance.now();
+    const es = this.es = new EventSource('/api/stream');
+    const alive = () => { this.lastMsg = performance.now(); };
+    es.onopen = () => {
+      alive();
+      this.state('live', 'live');
+      // (Re)connected, possibly to a new run: reload the full snapshot.
+      fetch('/api/snapshot', { cache: 'no-store' }).then((r) => r.json()).then((snap) => {
+        setStatus(snap.status);
+        snap.log.forEach((e) => addEntry(e, false));
+      }).catch(() => {});
+    };
+    es.onerror = () => this.state('down', 'waiting for bot');
+    es.addEventListener('ping', alive);
+    es.addEventListener('status', (e) => { alive(); setStatus(JSON.parse(e.data)); });
+    es.addEventListener('log', (e) => { alive(); addEntry(JSON.parse(e.data), true); });
+    es.addEventListener('frame', (e) => { alive(); frames.want(Number(e.data)); });
+  },
+  check() {
+    if (document.hidden) return;
+    const now = performance.now();
+    const quiet = now - this.lastMsg;
+    if (!this.es || this.es.readyState === 2 || (quiet > 6000 && now - this.openedAt > 5000)) {
+      this.state('down', 'reconnecting');
+      this.connect();
+    }
+    // The picture is stuck if newer frames exist but none loaded lately.
+    const stuck = frames.wanted !== frames.shown && now - frames.lastOk > 3000 && !$('pause').checked;
+    $('stale').classList.toggle('on', stuck || quiet > 4000 || this.es.readyState !== 1);
+    if (stuck && !frames.busy) frames.pump();
+  },
+};
+$('conn').querySelector('b').id = 'conn-text';
+new ResizeObserver(() => document.documentElement.style.setProperty('--hdr', `${document.querySelector('header').offsetHeight}px`))
+  .observe(document.querySelector('header'));
+link.connect();
+setInterval(() => link.check(), 1000);
+// Phones suspend background tabs; come back with a fresh connection.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  pad.releaseAll();
+  if (performance.now() - link.lastMsg > 2500) link.connect();
+  frames.pump();
+});
+window.addEventListener('pageshow', (e) => { if (e.persisted) link.connect(); });
+window.addEventListener('online', () => link.connect());
 </script>
 </body>
 </html>
