@@ -183,31 +183,17 @@ impl PlannerData {
     }
 }
 
-pub fn run(args: GoalArgs, stop: &AtomicBool) -> Result<()> {
+pub fn run(args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let goal = parse_goal(&args.goal).map_err(|e| anyhow::anyhow!(e))?;
     let mut pd = PlannerData::load(&args)?;
-    // The planner checks a flag it owns; a watcher mirrors the process's
-    // stop flag into it while planning runs.
-    let planner_stop = Arc::new(AtomicBool::new(false));
-    pd.options.stop = Some(Arc::clone(&planner_stop));
-    let done = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if stop.load(Ordering::Relaxed) {
-                    planner_stop.store(true, Ordering::Relaxed);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        });
-        let result = if args.dry_run {
-            dry_run(&args, &goal, &pd)
-        } else {
-            execute(&args, &goal, &pd, stop)
-        };
-        done.store(true, Ordering::Relaxed);
-        result
-    })
+    // SIGINT and SIGTERM set the process's stop flag; the planner polls it
+    // at every node, so a signal during planning ends the search promptly.
+    pd.options.stop = Some(Arc::clone(&stop));
+    if args.dry_run {
+        dry_run(&args, &goal, &pd)
+    } else {
+        execute(&args, &goal, &pd, &stop)
+    }
 }
 
 fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()> {

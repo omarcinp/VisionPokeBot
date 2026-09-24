@@ -223,6 +223,7 @@ fn step(intent: Planned) -> PlannedIntent {
         assumes: Vec::new(),
         unless: Vec::new(),
         note: None,
+        route: Vec::new(),
     }
 }
 

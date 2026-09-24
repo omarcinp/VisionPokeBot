@@ -319,7 +319,7 @@ fn main() -> Result<()> {
             story(&devices, &output, start, &options, &stop)
         }
         Command::Plan(args) => plan::run(args),
-        Command::Goal(args) => goal::run(args, &stop),
+        Command::Goal(args) => goal::run(args, Arc::clone(&stop)),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),
