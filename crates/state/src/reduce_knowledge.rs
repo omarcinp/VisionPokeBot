@@ -219,20 +219,43 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             }
         }
         GameEvent::SpeciesSeen { species } => {
-            state
+            let new = state
                 .pokedex
                 .seen
-                .insert(species.clone(), Knowledge::observed(true, frame));
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            if new {
+                if let Some(c) = state.pokedex.counts.value.as_mut() {
+                    c.seen = c.seen.map(|n| n + 1);
+                    state.pokedex.counts.source = KnowledgeSource::Tracked;
+                }
+            }
         }
         GameEvent::SpeciesCaught { species } => {
-            state
+            let newly_seen = state
                 .pokedex
                 .seen
-                .insert(species.clone(), Knowledge::observed(true, frame));
-            state
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            let newly_caught = state
                 .pokedex
                 .caught
-                .insert(species.clone(), Knowledge::observed(true, frame));
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            // A read total moves with the catches after it (a species not
+            // in the per-species map may still be in the total: only a
+            // first mark for the species counts).
+            if let Some(c) = state.pokedex.counts.value.as_mut() {
+                if newly_seen {
+                    c.seen = c.seen.map(|n| n + 1);
+                }
+                if newly_caught {
+                    c.caught += 1;
+                }
+                if newly_seen || newly_caught {
+                    state.pokedex.counts.source = KnowledgeSource::Tracked;
+                }
+            }
         }
         GameEvent::PokedexCountObserved { seen, caught } => {
             state.pokedex.counts = Knowledge::observed(
@@ -593,20 +616,46 @@ mod tests {
                 species: "SPECIES_RATTATA".into(),
             },
             GameEvent::PokedexCountObserved {
-                seen: 12,
+                seen: Some(12),
                 caught: 7,
             },
         ]);
         assert_eq!(
             s.pokedex.counts.value,
             Some(PokedexCounts {
-                seen: 12,
+                seen: Some(12),
                 caught: 7
             })
         );
         assert_eq!(s.pokedex.counts.source, KnowledgeSource::Observed);
         // The per-species map is untouched: it is a lower bound, not the total.
         assert_eq!(s.pokedex.caught.len(), 1);
+        // The card gives the caught total alone; catches after a read move
+        // the totals (a repeat of a known species doesn't).
+        let s = run(vec![
+            starter(),
+            GameEvent::PokedexCountObserved {
+                seen: None,
+                caught: 5,
+            },
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_SPEAROW".into(),
+            },
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_SPEAROW".into(),
+            },
+            GameEvent::SpeciesSeen {
+                species: "SPECIES_ZUBAT".into(),
+            },
+        ]);
+        assert_eq!(
+            s.pokedex.counts.value,
+            Some(PokedexCounts {
+                seen: None,
+                caught: 6
+            })
+        );
+        assert_eq!(s.pokedex.counts.source, KnowledgeSource::Tracked);
         // Round trip through the saved knowledge; older files load as unknown.
         let saved = s.saved_knowledge();
         let json = serde_json::to_string(&saved).unwrap();

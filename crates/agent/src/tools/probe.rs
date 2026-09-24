@@ -99,13 +99,13 @@ pub fn trainer_card_events(card: &TrainerCardObservation) -> Vec<GameEvent> {
     events
 }
 
-/// `PokedexCountObserved` for the counts that were read. The event carries
-/// both counts, so only a screen showing both (the Pokédex list) produces
-/// it; the card's lone caught count is kept in the log rather than paired
-/// with an invented `seen`.
+/// `PokedexCountObserved` for the counts that were read: both from the
+/// Pokédex list, the caught total alone from the Trainer Card (flash-2:
+/// with the card's count dropped, `PokedexCaught(≥10)` stayed Unknown and
+/// every replan opened the card again).
 pub fn pokedex_count_event(seen: Option<u16>, caught: Option<u16>) -> Option<GameEvent> {
     Some(GameEvent::PokedexCountObserved {
-        seen: seen?,
+        seen,
         caught: caught?,
     })
 }

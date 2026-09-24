@@ -165,9 +165,10 @@ pub enum GameEvent {
     SpeciesCaught {
         species: String,
     },
-    /// The Pokédex totals as the Trainer Card (or the Pokédex) shows them.
+    /// The Pokédex totals as the Pokédex shows them, or the caught total
+    /// alone from the Trainer Card.
     PokedexCountObserved {
-        seen: u16,
+        seen: Option<u16>,
         caught: u16,
     },
     /// A shiny appeared (for the log and the catch policy).

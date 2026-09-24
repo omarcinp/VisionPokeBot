@@ -261,14 +261,12 @@ impl<'a> StateBelief<'a> {
             .filter(|p| matches!(p, GoalPredicate::Caught { caught } if !observed.contains(caught)))
             .count() as u32;
         let observed = observed.len() as u32;
-        match dex.counts.value {
-            Some(c) => {
-                let total = match which {
-                    DexCount::Seen => c.seen,
-                    DexCount::Caught => c.caught,
-                };
-                (u32::from(total).max(observed) + new, true)
-            }
+        let total = dex.counts.value.and_then(|c| match which {
+            DexCount::Seen => c.seen,
+            DexCount::Caught => Some(c.caught),
+        });
+        match total {
+            Some(total) => (u32::from(total).max(observed) + new, true),
             None => (observed + new, false),
         }
     }
@@ -457,7 +455,7 @@ mod tests {
         let mut k2 = k.clone();
         k2.pokedex.counts = Knowledge::observed(
             pokebot_state::PokedexCounts {
-                seen: 12,
+                seen: Some(12),
                 caught: 7,
             },
             2,
@@ -465,6 +463,18 @@ mod tests {
         let b2 = StateBelief::new(&k2, &data, None);
         assert_eq!(b2.pokedex_count(DexCount::Caught), (7, true));
         assert_eq!(b2.pokedex_count(DexCount::Seen), (12, true));
+        // The card alone: caught exact, seen still a bound.
+        let mut k3 = k.clone();
+        k3.pokedex.counts = Knowledge::observed(
+            pokebot_state::PokedexCounts {
+                seen: None,
+                caught: 7,
+            },
+            2,
+        );
+        let b3 = StateBelief::new(&k3, &data, None);
+        assert_eq!(b3.pokedex_count(DexCount::Caught), (7, true));
+        assert_eq!(b3.pokedex_count(DexCount::Seen), (3, false));
         assert_eq!(
             b2.eval_goal(&GoalPredicate::pokedex_caught(10)),
             Truth::False

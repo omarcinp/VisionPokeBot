@@ -83,10 +83,11 @@ impl Default for PcStorage {
     }
 }
 
-/// The totals the Trainer Card and the Pokédex's own header show.
+/// The totals the Pokédex's own header shows; the Trainer Card shows the
+/// caught total only (`seen` stays `None` until the Pokédex is read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PokedexCounts {
-    pub seen: u16,
+    pub seen: Option<u16>,
     pub caught: u16,
 }
 

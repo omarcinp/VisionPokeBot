@@ -423,9 +423,10 @@ fn summarize(event: &GameEvent) -> String {
         } => format!("Withdrew box {} slot {box_slot}", box_index + 1),
         GameEvent::SpeciesSeen { species } => format!("Seen {species}"),
         GameEvent::SpeciesCaught { species } => format!("Caught {species}"),
-        GameEvent::PokedexCountObserved { seen, caught } => {
-            format!("Pokédex {seen} seen, {caught} caught")
-        }
+        GameEvent::PokedexCountObserved { seen, caught } => match seen {
+            Some(seen) => format!("Pokédex {seen} seen, {caught} caught"),
+            None => format!("Pokédex {caught} caught"),
+        },
         GameEvent::ShinySeen { species } => format!("SHINY {species}!"),
         GameEvent::BadgeEarned { badge } => format!("Badge earned: {badge}"),
         GameEvent::CheckpointRestored { .. } => "Checkpoint knowledge restored".into(),
