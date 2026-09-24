@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::events::{Effect, Events};
 use crate::path::Obstacles;
 use crate::{MapData, ObjectEvent};
 
@@ -21,14 +22,81 @@ pub fn static_obstacles(map: &MapData) -> Obstacles {
 pub fn object_obstacles(map: &MapData, gone: &Gone) -> Obstacles {
     map.objects
         .iter()
-        .filter(|o| {
-            o.movement
-                .as_deref()
-                .is_some_and(|m| m.contains("FACE") || m.contains("LOOK_AROUND"))
-        })
+        .filter(|o| is_stationary(o))
         .filter(|o| !gone.contains(&(map.name.clone(), o.local_id)))
         .filter_map(|o| Some((o.x?, o.y?)))
         .collect()
+}
+
+/// An object that stays on its tile (`MOVEMENT_TYPE_FACE_*`,
+/// `LOOK_AROUND`): a wall until something removes it.
+pub fn is_stationary(o: &ObjectEvent) -> bool {
+    o.movement
+        .as_deref()
+        .is_some_and(|m| m.contains("FACE") || m.contains("LOOK_AROUND"))
+}
+
+/// A way past a stationary object's tile.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Passage {
+    /// The object is hidden once `flag` is set (item balls picked up, story
+    /// blockers that leave).
+    Hidden { flag: String },
+    /// A trainer: beaten, it steps aside. `trainer` is the id its script
+    /// battles (`TRAINER_*`).
+    Trainer { trainer: String },
+}
+
+/// A stationary object and the ways past its tile; none means a wall.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocker {
+    pub local_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub passages: Vec<Passage>,
+}
+
+/// The map's stationary objects with how each can be passed. `FLAG_TEMP_*`
+/// flags don't count (cut trees and boulders are reset on every map load;
+/// the route planner models those as gates).
+pub fn blockers(map: &MapData, events: Option<&Events>) -> Vec<Blocker> {
+    map.objects
+        .iter()
+        .filter(|o| is_stationary(o))
+        .filter_map(|o| {
+            let (x, y) = (o.x?, o.y?);
+            let mut passages = Vec::new();
+            if let Some(flag) = o.flag.as_deref() {
+                if flag != "0" && !flag.starts_with("FLAG_TEMP_") {
+                    passages.push(Passage::Hidden {
+                        flag: flag.to_string(),
+                    });
+                }
+            }
+            if let Some(trainer) = o.script.as_deref().and_then(|s| battled_by(events?, s)) {
+                passages.push(Passage::Trainer { trainer });
+            }
+            Some(Blocker {
+                local_id: o.local_id,
+                x,
+                y,
+                passages,
+            })
+        })
+        .collect()
+}
+
+/// The trainer id a script battles, if any.
+fn battled_by(events: &Events, script: &str) -> Option<String> {
+    events
+        .script(script)?
+        .paths
+        .iter()
+        .flat_map(|p| &p.does)
+        .find_map(|e| match e {
+            Effect::Battle { battle, .. } => Some(battle.clone()),
+            _ => None,
+        })
 }
 
 /// An NPC that walks around (`MOVEMENT_TYPE_WANDER_*`, `WALK_*`), so any

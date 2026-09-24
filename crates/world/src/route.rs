@@ -3,6 +3,12 @@
 //! with a cost in seconds and a requirement, searched with Dijkstra against
 //! the belief. Edges the belief rules out are kept as blocked alternatives
 //! so the goal planner can price satisfying their requirement.
+//!
+//! A warp's place is the tile the player stands on to take it (below a
+//! door, on an arrow mat or stairs), the same rule as the navigator's, so a
+//! route's legs are exactly what the tools do. Stationary NPCs are walls
+//! unless a flag hides them or they are trainers: their tiles then carry a
+//! requirement (and a battle's cost) on the walk that crosses them.
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -14,11 +20,11 @@ use std::rc::Rc;
 use pokebot_state::{Direction, PlayerPose};
 use serde::{Deserialize, Serialize};
 
-use crate::behavior::is_water;
+use crate::behavior::{arrow_warp, is_water, stair_warp, WARP_DOOR};
 use crate::events::{Condition, Effect, Val};
-use crate::obstacles::{static_obstacles, wander_tiles};
+use crate::obstacles::{blockers, wander_tiles, Passage};
 use crate::path::{reach, Obstacles, Reach, Walk};
-use crate::predicate::{check, BeliefView, Predicate, Requirement};
+use crate::predicate::{check, BeliefView, Predicate, Requirement, Truth};
 use crate::{MapData, World};
 
 /// Timing model of the edges, in seconds. The tile time is the syncer's
@@ -38,6 +44,8 @@ pub struct RouteParams {
     pub surf_s: f64,
     /// Talking to an NPC (or standing on a trigger) that warps the player.
     pub talk_s: f64,
+    /// Beating a trainer that stands in the way.
+    pub battle_s: f64,
 }
 
 impl Default for RouteParams {
@@ -50,8 +58,57 @@ impl Default for RouteParams {
             gate_s: 6.0,
             surf_s: 5.0,
             talk_s: 4.0,
+            battle_s: 60.0,
         }
     }
+}
+
+/// Whether warp `index` of `map` is a door: a tile the player can't stand
+/// on (outdoor building doors, cave mouths with collision).
+fn warp_is_door(map: &MapData, index: usize) -> bool {
+    let Some(w) = map.warps.get(index) else {
+        return false;
+    };
+    map.tile(w.x, w.y)
+        .is_some_and(|t| t.behavior == WARP_DOOR || t.collision != 0)
+}
+
+/// Whether warp `index` is marked on the ground (arrow mat, stairs, door):
+/// the ones the player takes by pushing into them.
+fn warp_is_marked(map: &MapData, index: usize) -> bool {
+    let Some(w) = map.warps.get(index) else {
+        return false;
+    };
+    map.tile(w.x, w.y)
+        .is_some_and(|t| arrow_warp(t.behavior).is_some() || stair_warp(t.behavior).is_some())
+        || warp_is_door(map, index)
+}
+
+/// Whether warp `index` can be taken. A warp on a plain tile never fires
+/// when the map has a marked warp to the same place (the tiles flanking an
+/// exit mat), the navigator's rule.
+pub fn warp_usable(map: &MapData, index: usize) -> bool {
+    let Some(warp) = map.warps.get(index) else {
+        return false;
+    };
+    warp_is_marked(map, index)
+        || !map.warps.iter().enumerate().any(|(i, w)| {
+            w.dest_map == warp.dest_map && w.dest_warp == warp.dest_warp && warp_is_marked(map, i)
+        })
+}
+
+/// The tile the player stands on to take warp `index`: below a door, on
+/// the mat, stairs or plain warp tile otherwise (the navigator's rule).
+pub fn warp_approach(map: &MapData, index: usize) -> Option<(i32, i32)> {
+    let w = map.warps.get(index)?;
+    let on_mat = map
+        .tile(w.x, w.y)
+        .is_some_and(|t| arrow_warp(t.behavior).is_some() || stair_warp(t.behavior).is_some());
+    Some(if warp_is_door(map, index) && !on_mat {
+        (w.x, w.y + 1)
+    } else {
+        (w.x, w.y)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -230,14 +287,33 @@ pub fn fly_requirement(dest: &str) -> Requirement {
     ]
 }
 
-/// `(map, from, surf, obstacle hash)`: what a cached flood depends on.
+/// `(map, from, surf, terrain hash)`: what a cached flood depends on.
 type FloodKey = (String, (i32, i32), bool, u64);
 
+/// One way past a blocker's tile: what it needs and what it costs on top
+/// of the walk (a battle for trainers, nothing for hidden objects).
+#[derive(Debug, Clone)]
+struct Way {
+    requires: Requirement,
+    cost_s: f64,
+}
+
 struct MapInfo {
-    obstacles: Obstacles,
-    obstacle_hash: u64,
+    /// Tiles of stationary objects nothing removes.
+    walls: Obstacles,
+    /// Tiles of stationary objects with a way past, by tile.
+    blockers: BTreeMap<(i32, i32), Vec<Way>>,
     wander: BTreeSet<(i32, i32)>,
     outdoor: bool,
+}
+
+/// A map's walkability for one search: the walls plus the blockers whose
+/// ways the pass rules out, and the price of the tiles it may cross.
+struct Terrain {
+    obstacles: Obstacles,
+    /// Blocker tiles the pass may cross, with the cheapest allowed way.
+    passable: BTreeMap<(i32, i32), Way>,
+    hash: u64,
 }
 
 /// The place graph of a world (§5.1). Intra-map distances are searched on
@@ -266,12 +342,37 @@ impl PlaceGraph {
         let mut maps: Vec<&MapData> = world.maps().collect();
         maps.sort_by(|a, b| a.name.cmp(&b.name));
         for map in &maps {
-            let obstacles = static_obstacles(map);
+            let mut walls = Obstacles::new();
+            let mut blockers_by_tile: BTreeMap<(i32, i32), Vec<Way>> = BTreeMap::new();
+            for b in blockers(map, world.events()) {
+                if b.passages.is_empty() {
+                    walls.insert((b.x, b.y));
+                    continue;
+                }
+                let ways = b.passages.iter().map(|p| match p {
+                    Passage::Hidden { flag } => Way {
+                        requires: vec![Predicate::from_flag(flag, true)],
+                        cost_s: 0.0,
+                    },
+                    // Trainer ids are flags in the game (`TRAINER_FLAGS_START
+                    // + id`); the planner names defeated trainers this way.
+                    Passage::Trainer { trainer } => Way {
+                        requires: vec![Predicate::Flag {
+                            name: trainer.clone(),
+                            is: true,
+                        }],
+                        cost_s: params.battle_s,
+                    },
+                });
+                blockers_by_tile.entry((b.x, b.y)).or_default().extend(ways);
+            }
+            // Two objects on one tile: a wall wins.
+            blockers_by_tile.retain(|t, _| !walls.contains(t));
             g.maps.insert(
                 map.name.clone(),
                 MapInfo {
-                    obstacle_hash: hash_obstacles(&obstacles),
-                    obstacles,
+                    walls,
+                    blockers: blockers_by_tile,
                     wander: wander_tiles(map),
                     outdoor: map.is_outdoor(),
                 },
@@ -353,12 +454,24 @@ impl PlaceGraph {
         self.edges.entry(from.key()).or_default().push(edge);
     }
 
+    /// A warp's place is its approach tile ([`warp_approach`]); the landing
+    /// is the destination warp's tile itself (a door tile when leaving a
+    /// building: the flood starts there and steps off it).
     fn add_warps(&mut self, world: &World, map: &MapData) {
-        for w in &map.warps {
+        for (i, w) in map.warps.iter().enumerate() {
             let Some((dest, dx, dy)) = world.warp_destination(w) else {
                 continue;
             };
-            let from = self.add_place(&map.name, w.x, w.y, PlaceKind::Warp);
+            if !warp_usable(map, i) {
+                continue;
+            }
+            let Some((ax, ay)) = warp_approach(map, i) else {
+                continue;
+            };
+            if !map.in_bounds(ax, ay) {
+                continue;
+            }
+            let from = self.add_place(&map.name, ax, ay, PlaceKind::Warp);
             let to = self.add_place(&dest.name, dx, dy, PlaceKind::Warp);
             self.add_edge(
                 &from,
@@ -411,7 +524,7 @@ impl PlaceGraph {
         ];
         let (x, y) = (gate.x, gate.y);
         for (a, b) in [((x, y - 1), (x, y + 1)), ((x - 1, y), (x + 1, y))] {
-            let obstacles = &self.maps[&map.name].obstacles;
+            let obstacles = &self.maps[&map.name].walls;
             let open = |(x, y): (i32, i32)| {
                 map.tile(x, y).is_some_and(|t| t.collision == 0) && !obstacles.contains(&(x, y))
             };
@@ -524,28 +637,100 @@ impl PlaceGraph {
             .find(|&(nx, ny)| {
                 map.tile(nx, ny)
                     .is_some_and(|t| t.collision == 0 && !is_water(t.behavior))
-                    && !info.obstacles.contains(&(nx, ny))
+                    && !info.walls.contains(&(nx, ny))
             })
     }
 
-    /// The flood from `from` on `map`, from the cache when it has it.
-    fn flood(&self, map: &MapData, from: (i32, i32), surf: bool) -> Rc<Reach> {
+    /// The map's terrain for one search: each blocker's cheapest way the
+    /// pass allows (an ordinary tile once its requirement holds), the rest
+    /// walls.
+    fn terrain(
+        &self,
+        map: &str,
+        belief: &dyn BeliefView,
+        policy: UnknownPolicy,
+        pass: Pass,
+    ) -> Terrain {
+        let info = &self.maps[map];
+        let mut obstacles = info.walls.clone();
+        let mut passable = BTreeMap::new();
+        for (&tile, ways) in &info.blockers {
+            let mut best: Option<Way> = None;
+            for way in ways {
+                let c = check(belief, &way.requires);
+                if !pass.allows(&unmet_of(&c, policy)) {
+                    continue;
+                }
+                let held = c.truth() == Truth::True;
+                let cost_s = if held { 0.0 } else { way.cost_s };
+                if best.as_ref().is_none_or(|b| cost_s < b.cost_s) {
+                    best = Some(Way {
+                        requires: if held {
+                            Vec::new()
+                        } else {
+                            way.requires.clone()
+                        },
+                        cost_s,
+                    });
+                }
+            }
+            match best {
+                Some(way) => {
+                    passable.insert(tile, way);
+                }
+                None => {
+                    obstacles.insert(tile);
+                }
+            }
+        }
+        let hash = {
+            let sorted: BTreeSet<_> = obstacles.iter().copied().collect();
+            let mut h = std::hash::DefaultHasher::new();
+            sorted.hash(&mut h);
+            for (tile, way) in &passable {
+                tile.hash(&mut h);
+                way.requires.hash(&mut h);
+                way.cost_s.to_bits().hash(&mut h);
+            }
+            h.finish()
+        };
+        Terrain {
+            obstacles,
+            passable,
+            hash,
+        }
+    }
+
+    /// The flood from `from` on `map` over `terrain`, from the cache when
+    /// it has it. The flood starts on `from` even when it is a tile the
+    /// player can't walk onto (a door just left).
+    fn flood(&self, map: &MapData, from: (i32, i32), surf: bool, terrain: &Terrain) -> Rc<Reach> {
         let info = &self.maps[&map.name];
-        let key = (map.name.clone(), from, surf, info.obstacle_hash);
+        let key = (map.name.clone(), from, surf, terrain.hash);
         if let Some(r) = self.floods.borrow().get(&key) {
             return Rc::clone(r);
         }
         let penalty = self.params.wander_area_penalty_tiles as i32;
+        let tile_s = self.params.tile_s;
         let extra = |t: (i32, i32)| {
             let wander = if info.wander.contains(&t) { penalty } else { 0 };
             // Land is preferred over water of the same length: no mount.
             let water = map
                 .tile(t.0, t.1)
                 .is_some_and(|tile| is_water(tile.behavior)) as i32;
-            wander + water
+            // A blocker's way, in tiles, so the flood detours when it can;
+            // at least one so a free path wins ties against a requirement.
+            let way = terrain.passable.get(&t).map_or(0, |w| {
+                if w.requires.is_empty() {
+                    0
+                } else {
+                    ((w.cost_s / tile_s).round() as i32).max(1)
+                }
+            });
+            wander + water + way
         };
         let walk = Walk {
-            obstacles: &info.obstacles,
+            obstacles: &terrain.obstacles,
             surf,
         };
         let r = Rc::new(reach(map, from, &walk, extra));
@@ -553,12 +738,14 @@ impl PlaceGraph {
         r
     }
 
-    /// The walk edge from `from` to `to` on `map` along the flood, priced.
+    /// The walk edge from `from` to `to` on `map` along the flood, priced;
+    /// blocker tiles crossed add their requirement and cost.
     fn walk_edge(
         &self,
         map: &MapData,
         from: (i32, i32),
         flood: &Reach,
+        terrain: &Terrain,
         to: &Place,
     ) -> Option<Edge> {
         let steps = flood.path((to.x, to.y))?;
@@ -569,6 +756,8 @@ impl PlaceGraph {
         let mut tiles = 0u32;
         let mut wander = 0u32;
         let mut surf = false;
+        let mut requires = Requirement::new();
+        let mut ways_s = 0.0;
         let mut prev = from;
         for s in &steps {
             tiles += step_len(prev, s.to);
@@ -576,29 +765,32 @@ impl PlaceGraph {
             surf |= map
                 .tile(s.to.0, s.to.1)
                 .is_some_and(|t| is_water(t.behavior));
+            if let Some(way) = terrain.passable.get(&s.to) {
+                requires.extend(way.requires.iter().cloned());
+                ways_s += way.cost_s;
+            }
             prev = s.to;
         }
+        if surf {
+            requires.extend(surf_requirement());
+        }
+        requires.sort();
+        requires.dedup();
         let charged = tiles + wander * self.params.wander_area_penalty_tiles;
-        let cost_s =
-            charged as f64 * self.params.tile_s + if surf { self.params.surf_s } else { 0.0 };
+        let cost_s = charged as f64 * self.params.tile_s
+            + if surf { self.params.surf_s } else { 0.0 }
+            + ways_s;
         Some(Edge {
             to: to.clone(),
             kind: EdgeKind::Walk { tiles, surf },
             cost_s,
-            requires: if surf { surf_requirement() } else { Vec::new() },
+            requires,
         })
     }
 }
 
 fn step_len(from: (i32, i32), to: (i32, i32)) -> u32 {
     ((to.0 - from.0).abs() + (to.1 - from.1).abs()) as u32
-}
-
-fn hash_obstacles(obstacles: &Obstacles) -> u64 {
-    let sorted: BTreeSet<_> = obstacles.iter().copied().collect();
-    let mut h = std::hash::DefaultHasher::new();
-    sorted.hash(&mut h);
-    h.finish()
 }
 
 /// The belief-checkable requirement of a script path, or `None` when a
@@ -698,6 +890,22 @@ struct Found {
     unmet: Vec<Predicate>,
 }
 
+/// What a search runs to: one place, or any place on a map.
+#[derive(Clone, Copy)]
+enum Goal<'a> {
+    Place(&'a Place),
+    Map(&'a str),
+}
+
+impl Goal<'_> {
+    fn reached(self, key: &PlaceKey) -> bool {
+        match self {
+            Goal::Place(p) => *key == p.key(),
+            Goal::Map(m) => key.0 == m,
+        }
+    }
+}
+
 /// Cheapest route from `from` to `to` (§5.2). Dijkstra over places (no
 /// admissible cross-map heuristic beats Fly), deterministic: ties break by
 /// (cost, map, x, y, edge kind).
@@ -715,8 +923,34 @@ pub fn route(
     to: &Place,
     policy: UnknownPolicy,
 ) -> RouteResult {
+    plan(world, graph, belief, from, Goal::Place(to), policy)
+}
+
+/// Cheapest route from `from` to any place on `map` (the landing of a warp
+/// or connection into it, a heal spot...): a map's landings may lie in
+/// parts of it that don't connect, so `At{map}` is whichever is cheapest.
+/// Empty at no cost when the player is already there.
+pub fn route_to_map(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    map: &str,
+    policy: UnknownPolicy,
+) -> RouteResult {
+    plan(world, graph, belief, from, Goal::Map(map), policy)
+}
+
+fn plan(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    goal: Goal,
+    policy: UnknownPolicy,
+) -> RouteResult {
     let start = Place::from(from);
-    let open = search(world, graph, belief, &start, to, policy, Pass::Open);
+    let open = search(world, graph, belief, &start, goal, policy, Pass::Open);
     let open_cost = open.as_ref().map_or(f64::INFINITY, |f| f.cost_s);
     let mut blocked = Vec::new();
     let mut forbidden: Vec<Predicate> = Vec::new();
@@ -726,7 +960,7 @@ pub fn route(
             graph,
             belief,
             &start,
-            to,
+            goal,
             policy,
             Pass::Forbid(&forbidden),
         );
@@ -761,15 +995,15 @@ fn search(
     graph: &PlaceGraph,
     belief: &dyn BeliefView,
     start: &Place,
-    to: &Place,
+    goal: Goal,
     policy: UnknownPolicy,
     pass: Pass,
 ) -> Option<Found> {
     let surf_ok = pass.allows(&unmet_of(&check(belief, &surf_requirement()), policy));
-    let goal = to.key();
     let mut dist: BTreeMap<PlaceKey, f64> = BTreeMap::new();
     let mut came: Came = BTreeMap::new();
     let mut done: BTreeSet<PlaceKey> = BTreeSet::new();
+    let mut terrains: BTreeMap<String, Rc<Terrain>> = BTreeMap::new();
     let mut open = BinaryHeap::new();
     dist.insert(start.key(), 0.0);
     open.push(Reverse((Cost(0.0), start.key())));
@@ -823,11 +1057,13 @@ fn search(
             open.push(Reverse((Cost(ng), key)));
         }
     };
+    let mut reached: Option<PlaceKey> = None;
     while let Some(Reverse((Cost(g), key))) = open.pop() {
         if done.contains(&key) {
             continue;
         }
-        if key == goal {
+        if goal.reached(&key) {
+            reached = Some(key);
             break;
         }
         done.insert(key.clone());
@@ -839,17 +1075,26 @@ fn search(
         let Some(map) = world.map(&here.map) else {
             continue;
         };
+        if !graph.maps.contains_key(&here.map) {
+            continue;
+        }
+        let terrain = terrains
+            .entry(here.map.clone())
+            .or_insert_with(|| Rc::new(graph.terrain(&here.map, belief, policy, pass)))
+            .clone();
         // Walk to the map's other places (and the goal if it is here).
-        let flood = graph.flood(map, (here.x, here.y), surf_ok);
+        let flood = graph.flood(map, (here.x, here.y), surf_ok, &terrain);
         let mut targets: Vec<&Place> = graph.places_on(&here.map).iter().collect();
-        if to.map == here.map && !graph.places.contains_key(&goal) {
-            targets.push(to);
+        if let Goal::Place(to) = goal {
+            if to.map == here.map && !graph.places.contains_key(&to.key()) {
+                targets.push(to);
+            }
         }
         for target in targets {
             if target.key() == key || done.contains(&target.key()) {
                 continue;
             }
-            if let Some(edge) = graph.walk_edge(map, (here.x, here.y), &flood, target) {
+            if let Some(edge) = graph.walk_edge(map, (here.x, here.y), &flood, &terrain, target) {
                 relax(&here, edge, g, &mut dist, &mut open);
             }
         }
@@ -873,11 +1118,12 @@ fn search(
             }
         }
     }
-    let cost_s = *dist.get(&goal)?;
+    let reached = reached?;
+    let cost_s = *dist.get(&reached)?;
     let mut legs = Vec::new();
     let mut assumes = Vec::new();
     let mut unmet = Vec::new();
-    let mut at = goal;
+    let mut at = reached;
     while let Some((prev, leg, assumed, lacked)) = came.get(&at) {
         legs.push(leg.clone());
         assumes.extend(assumed.iter().cloned());
