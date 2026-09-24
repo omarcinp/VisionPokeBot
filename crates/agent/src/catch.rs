@@ -26,7 +26,7 @@ use pokebot_planner::evaluate::faint_probability;
 use pokebot_planner::Combatant;
 use pokebot_state::{
     BattleMenu, BoxMon, GameEvent, GameState, Knowledge, Observation, Pocket, ScreenState,
-    ShinyReading,
+    ShinyReading, Status,
 };
 
 use crate::bag::{
@@ -157,6 +157,14 @@ pub fn risk(data: &GameData, lead: &Lead, foe: &Foe, turns: u32) -> f64 {
     faint_probability(data, &them, &us, turns as usize)
 }
 
+/// Share of max HP (per mille) the lead needs to try a non-shiny catch.
+pub const CATCH_MIN_HP: u32 = 750;
+
+/// The lead's status as known in the game state (from battle text).
+fn lead_status(state: &GameState) -> Option<Status> {
+    state.party.value.as_ref()?.first()?.status.value
+}
+
 /// Decide whether to catch `foe`, and how. `Err` carries the reason not to.
 pub fn plan_catch(
     data: &GameData,
@@ -170,6 +178,18 @@ pub fn plan_catch(
     }
     if !foe.shiny && foe.caught != Some(false) {
         return Err(format!("{}: caught flag {:?}", foe.species, foe.caught));
+    }
+    // A catch costs the lead HP (weakening turns, throws): only a healthy
+    // lead tries for a non-shiny, so the story's battles aren't fought
+    // worn down.
+    if !foe.shiny {
+        let (hp, max) = lead.hp;
+        if u32::from(hp) * 1000 < u32::from(max) * CATCH_MIN_HP {
+            return Err(format!("the lead is at {hp}/{max} HP, below 75 %"));
+        }
+        if let Some(status) = lead_status(state).filter(|s| !matches!(s, Status::Healthy)) {
+            return Err(format!("the lead is {status:?}"));
+        }
     }
     let ball = match balls_held(state) {
         Some(balls) => best_ball(data, &balls).ok_or("no usable ball held")?,
@@ -1409,7 +1429,8 @@ mod tests {
         let state = with_balls(&[("ITEM_POKE_BALL", 20)]);
         let geodude = foe("SPECIES_GEODUDE", 9);
         let err = plan_catch(&data, &state, &lead, &geodude, false).unwrap_err();
-        assert!(err.contains("risk"), "{err}");
+        // At 3/54 the lead is too weak to try at all.
+        assert!(err.contains("below 75 %"), "{err}");
         // A shiny is still attempted, throwing at once.
         let shiny = Foe {
             shiny: true,
@@ -1418,6 +1439,48 @@ mod tests {
         let plan = plan_catch(&data, &state, &lead, &shiny, false).unwrap();
         assert_eq!(plan.status_move, None);
         assert!(plan.risk > RISK_LIMIT);
+    }
+
+    /// Live: catches in Mt. Moon (weakening turns, throws) wore the lead
+    /// down to 14/60 and PAR before Miguel. A non-shiny catch starts only
+    /// with the lead at 75 % HP or more and no major status.
+    #[test]
+    fn a_weak_or_statused_lead_does_not_try_a_catch() {
+        let Some(data) = data() else { return };
+        let member = ivysaur(&data);
+        let pidgey = foe("SPECIES_PIDGEY", 6);
+        let state = with_balls(&[("ITEM_POKE_BALL", 20)]);
+        let at = |hp| Lead {
+            member: &member,
+            hp: (hp, 60),
+        };
+        assert!(plan_catch(&data, &state, &at(45), &pidgey, false).is_ok());
+        let err = plan_catch(&data, &state, &at(44), &pidgey, false).unwrap_err();
+        assert!(err.contains("below 75 %"), "{err}");
+        // Paralyzed (read from battle text into the state).
+        let paralyzed = DefaultReducer.reduce(
+            &state,
+            &[EventRecord {
+                frame_id: 2,
+                event: GameEvent::PartyObserved {
+                    slot: 0,
+                    species: None,
+                    nickname: None,
+                    level: None,
+                    hp: None,
+                    status: Some(Status::Paralyzed),
+                    held_item: None,
+                },
+            }],
+        );
+        let err = plan_catch(&data, &paralyzed, &at(60), &pidgey, false).unwrap_err();
+        assert!(err.contains("Paralyzed"), "{err}");
+        // A shiny is still tried.
+        let shiny = Foe {
+            shiny: true,
+            ..pidgey
+        };
+        assert!(plan_catch(&data, &paralyzed, &at(20), &shiny, false).is_ok());
     }
 
     #[test]
