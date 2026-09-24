@@ -380,6 +380,11 @@ pub struct Attempt {
     pub throws: u32,
     /// The foe's status as told by battle text.
     pub foe_status: FoeStatus,
+    /// Balls held (Master Ball excluded): the tracked count when the
+    /// attempt began, one less per ball that broke free, and the battle
+    /// bag's own reading once a throw reads it. A non-shiny attempt stops
+    /// at [`SHINY_RESERVE`].
+    pub balls: Option<u16>,
 }
 
 /// (species, level, caught icon, shiny reading) as read on the command menu.
@@ -461,6 +466,7 @@ impl CatchMemory {
             Some(ThrowOutcome::BrokeFree) => {
                 if let Some(a) = &mut self.attempt {
                     a.throws += 1;
+                    a.balls = a.balls.map(|n| n.saturating_sub(1));
                 }
             }
             None => {}
@@ -742,6 +748,7 @@ pub fn identify(
                 opened: false,
                 throws: 0,
                 foe_status: FoeStatus::None,
+                balls: ball_count(state),
             });
         }
         Err(reason) => events.push(log(format!("not catching {species} Lv{level}: {reason}"))),
@@ -831,6 +838,15 @@ pub(crate) fn attempt_decision(
                 Expectation::ScreenIsNot(ScreenState::BattleCommand),
             ));
         }
+    } else if let Some(n) = attempt.balls.filter(|n| *n <= SHINY_RESERVE) {
+        // Only a shiny may throw the reserve: RUN (in a wild battle, when
+        // allowed), or fight on.
+        memory.catch.attempt = None;
+        memory.catch.flee = true;
+        events.push(log(format!(
+            "{species}: {n} balls, at the shiny reserve {SHINY_RESERVE}: abandoning the catch"
+        )));
+        return None;
     } else if choose_move(data, party, None, memory, policy).is_none() {
         memory.catch.attempt = None;
         events.push(log(format!(
@@ -880,7 +896,7 @@ pub(crate) fn attempt_decision(
                 )
             } else {
                 if (column, row) == (1, 0) {
-                    memory.catch.thrower = Some(Thrower::new());
+                    memory.catch.thrower = Some(Thrower::new().keeping_reserve(!plan.shiny));
                 }
                 step_toward(
                     (column, row),
@@ -960,9 +976,15 @@ pub fn in_bag(
         }
         return Decision::Wait("battle".into());
     };
-    match thrower.next(o, data, &ball, events) {
+    let decision = thrower.next(o, data, &ball, events);
+    if let (Some(n), Some(a)) = (thrower.counted(), &mut memory.attempt) {
+        a.balls = Some(n);
+    }
+    match decision {
         Decision::Done(detail) => {
             if thrower.gave_up().is_some() {
+                // At the reserve the attempt is over for good: RUN.
+                memory.flee |= thrower.at_reserve();
                 memory.attempt = None;
                 events.push(log(format!("throw abandoned: {detail}")));
             }
@@ -1007,11 +1029,35 @@ pub struct Thrower {
     waiting_since: Option<u64>,
     gave_up: Option<String>,
     closes: u32,
+    /// Give the throw up when the pocket holds [`SHINY_RESERVE`] balls or
+    /// fewer (a non-shiny attempt).
+    keep_reserve: bool,
+    /// The balls the confirmed rows hold (Master Ball excluded).
+    counted: Option<u16>,
+    /// The throw was given up because only the reserve is left.
+    at_reserve: bool,
 }
 
 impl Thrower {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Gives the throw up at [`SHINY_RESERVE`] balls or fewer (`keep`:
+    /// the attempt is not for a shiny).
+    pub fn keeping_reserve(mut self, keep: bool) -> Self {
+        self.keep_reserve = keep;
+        self
+    }
+
+    /// The balls the list read on two agreeing frames holds, once read.
+    pub fn counted(&self) -> Option<u16> {
+        self.counted
+    }
+
+    /// The throw was given up because only the shiny reserve is left.
+    pub fn at_reserve(&self) -> bool {
+        self.at_reserve
     }
 
     /// USE was pressed and the bag closed: the ball is on its way.
@@ -1126,6 +1172,21 @@ impl Thrower {
                 pocket: Pocket::PokeBalls,
                 items: items.clone(),
             });
+        }
+        // The count is a fact only for the whole pocket (a scrolled list
+        // shows part of it).
+        let count = whole.then(|| {
+            items
+                .iter()
+                .filter(|(item, _)| ball_multiplier(item).is_some())
+                .fold(0u16, |sum, (_, n)| sum.saturating_add(*n))
+        });
+        self.counted = count.or(self.counted);
+        if let Some(count) = count.filter(|n| self.keep_reserve && *n <= SHINY_RESERVE) {
+            let reason = format!("{count} balls: only the shiny reserve is left");
+            self.at_reserve = true;
+            self.gave_up = Some(reason.clone());
+            return self.close(o, ThrowPhase::List, &reason);
         }
         let Some(best) = best_ball(data, &items) else {
             let reason = format!("no usable ball in {items:?}");
@@ -2210,6 +2271,7 @@ mod tests {
             opened: true,
             throws: 0,
             foe_status: FoeStatus::None,
+            balls: Some(10),
         });
         let mut events = Vec::new();
         let empty = |f| bag_frame(f, "POKé BALLS", &[("CANCEL", None)], Some(0), None);
@@ -2271,6 +2333,7 @@ mod tests {
                 opened: true,
                 throws: 0,
                 foe_status: FoeStatus::None,
+                balls: Some(10),
             }),
             ..CatchMemory::default()
         };
@@ -2386,6 +2449,103 @@ mod tests {
             decide_on(&data, &party, &mut memory, &mid),
             "cursor to RUN: Down"
         );
+    }
+
+    /// Review: a non-shiny attempt kept throwing (`throws_left.max(1)`)
+    /// into the shiny reserve. Once the tracked count is at the reserve
+    /// the attempt is abandoned for RUN.
+    #[test]
+    fn a_non_shiny_attempt_stops_at_the_shiny_reserve() {
+        let Some(data) = data() else { return };
+        let party = Party {
+            members: vec![ivysaur(&data)],
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let mut memory = BattleMemory::default();
+        let mut events = Vec::new();
+        let command = BattleMenu::Command { column: 0, row: 0 };
+        for f in [1, 2] {
+            identify(
+                &wild(f, command, 1000),
+                &data,
+                &state,
+                &party,
+                &mut memory,
+                &mut events,
+            );
+        }
+        let attempt = memory.catch.attempt.as_mut().expect("an attempt");
+        assert_eq!(attempt.balls, Some(10));
+        attempt.balls = Some(SHINY_RESERVE + 1);
+        attempt.opened = true;
+        // One more ball broke free: only the reserve is left.
+        let mut text = wild(3, command, 200);
+        text.battle.as_mut().unwrap().menu = None;
+        text.dialogue = Some(battle_text(&["Oh, no!", "The POKéMON broke free!"]));
+        memory.catch.observe(&text);
+        text.frame_id = 4;
+        memory.catch.observe(&text);
+        assert_eq!(
+            memory.catch.attempt.as_ref().and_then(|a| a.balls),
+            Some(SHINY_RESERVE)
+        );
+        assert_eq!(
+            decide_on(&data, &party, &mut memory, &wild(5, command, 200)),
+            "cursor to RUN: Down"
+        );
+        assert!(memory.catch.attempt.is_none());
+        assert!(memory.catch.flee);
+    }
+
+    /// The battle bag's own count (read before each throw) also stops a
+    /// non-shiny attempt at the reserve; a shiny throws it.
+    #[test]
+    fn the_bag_count_at_the_reserve_gives_a_non_shiny_throw_up() {
+        let Some(data) = data() else { return };
+        let plan = |shiny: bool| CatchPlan {
+            ball: "ITEM_POKE_BALL".into(),
+            status_move: None,
+            expected_throws: 1,
+            risk: 0.0,
+            shiny,
+        };
+        let memory_for = |shiny: bool| CatchMemory {
+            thrower: Some(Thrower::new().keeping_reserve(!shiny)),
+            attempt: Some(Attempt {
+                plan: plan(shiny),
+                opened: true,
+                throws: 0,
+                foe_status: FoeStatus::None,
+                // The tracked count said 8 (stale).
+                balls: Some(8),
+            }),
+            ..CatchMemory::default()
+        };
+        let balls = [("POKé BALL", Some(SHINY_RESERVE)), ("CANCEL", None)];
+        let list = |f| bag_frame(f, "POKé BALLS", &balls, Some(0), None);
+        let mut events = Vec::new();
+        let mut memory = memory_for(false);
+        in_bag(&list(1), &data, &mut memory, &mut events);
+        let crate::Decision::Act(close) = in_bag(&list(2), &data, &mut memory, &mut events) else {
+            panic!("expected B");
+        };
+        assert_eq!(close.label, "battle bag: B to give up the throw");
+        assert_eq!(
+            memory.attempt.as_ref().and_then(|a| a.balls),
+            Some(SHINY_RESERVE)
+        );
+        let gone = Observation::bare(3, list(3).screen, Default::default());
+        in_bag(&gone, &data, &mut memory, &mut events);
+        assert!(memory.attempt.is_none());
+        assert!(memory.flee);
+        // A shiny throws one of the reserve.
+        let mut memory = memory_for(true);
+        in_bag(&list(1), &data, &mut memory, &mut events);
+        let crate::Decision::Act(select) = in_bag(&list(2), &data, &mut memory, &mut events) else {
+            panic!("expected A");
+        };
+        assert_eq!(select.label, "throw POKE_BALL: select it");
+        assert!(!memory.flee);
     }
 
     #[test]
