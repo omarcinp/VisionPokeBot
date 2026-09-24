@@ -139,11 +139,14 @@ pub const BADGES: [&str; 8] = [
     "EARTHBADGE",
 ];
 
-/// "RED received the BOULDERBADGE from BROCK." → `BOULDERBADGE`.
+/// "RED received the BOULDERBADGE from BROCK." → `BOULDERBADGE`. Misty
+/// prints no "received" page: her defeat page "You can have the
+/// CASCADEBADGE to show you beat me." gives it.
 fn badge_received(page: &str) -> Option<&'static str> {
-    page.contains(" received ")
-        .then(|| BADGES.into_iter().find(|b| page.contains(b)))
-        .flatten()
+    BADGES.into_iter().find(|b| {
+        page.contains(&format!(" received the {b}"))
+            || page.contains(&format!("You can have the {b}"))
+    })
 }
 
 /// "RED found a POTION!" / "received the TOWN MAP." / "obtained a X!", and
@@ -338,6 +341,33 @@ mod tests {
             Some("BOULDERBADGE")
         );
         assert_eq!(badge_received("The BOULDERBADGE raises ATTACK."), None);
+    }
+
+    /// Live (Task 13): Misty never prints "received the CASCADEBADGE"; her
+    /// defeat page, read in battle, is the only page that gives it.
+    #[test]
+    fn mistys_defeat_page_gives_the_cascade_badge() {
+        let Some(d) = data() else { return };
+        let mut t = TextTracker::default();
+        assert_eq!(
+            read(
+                &mut t,
+                "You can have the CASCADEBADGE to\nshow you beat me.",
+                &d,
+                None
+            ),
+            vec![GameEvent::BadgeEarned {
+                badge: "CASCADEBADGE".into()
+            }]
+        );
+        // Her explanation afterwards names the badge but gives nothing.
+        assert!(read(
+            &mut t,
+            "The CASCADEBADGE makes all\nPOKéMON up to Lv. 30 obey.",
+            &d,
+            None
+        )
+        .is_empty());
     }
 
     fn thrown() -> GameEvent {
