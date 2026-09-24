@@ -8,6 +8,7 @@
 
 mod action;
 pub mod battle;
+pub mod checkpoint;
 mod executor;
 pub mod keyboard;
 pub mod learn;

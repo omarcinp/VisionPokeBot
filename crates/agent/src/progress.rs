@@ -18,8 +18,8 @@ pub struct Progress {
     pub milestones: Vec<String>,
     /// Where the game was saved (and where CONTINUE resumes).
     pub saved_at: Option<PlayerPose>,
-    /// Party knowledge at the time of the save.
-    #[serde(default)]
+    /// Legacy: party knowledge from before `state.json` (read for migration).
+    #[serde(default, skip_serializing)]
     pub party: crate::party::Party,
 }
 

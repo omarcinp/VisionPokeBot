@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use pokebot_agent::party::{Member, Party};
+use pokebot_agent::checkpoint;
+use pokebot_agent::party::{self, Party};
 use pokebot_agent::{
     all_milestones, ContinueTask, Executor, NewGameConfig, NewGameTask, Progress, SaveGameTask,
     Starter, StoryTask,
@@ -21,7 +22,7 @@ use pokebot_agent::{
 use pokebot_core::{CapturedFrame, Error, VideoSource};
 use pokebot_replay::Session;
 use pokebot_runtime::Runtime;
-use pokebot_state::{Gender, Observation, PlayerPose};
+use pokebot_state::{GameEvent, Gender, Observation, PlayerPose};
 use pokebot_telemetry::Telemetry;
 use pokebot_video::{detect_viewport, Normalizer, ViewportLocator};
 use pokebot_vision::{FireRedPerception, PerceptionSystem};
@@ -441,6 +442,7 @@ fn story(
         pokebot_gamedata::GameData::load(options.world.join("gamedata.json"))
             .context("loading gamedata.json (run tools/world/build.sh)")?,
     );
+    let state_path = checkpoint::path_for(&options.progress);
     let result = (|| -> Result<String> {
         let mut progress = match (&start, previous) {
             (StoryStart::NewGame(config), _) => {
@@ -455,6 +457,11 @@ fn story(
                     x: 6,
                     y: 6,
                 });
+                // Known from the story: the starter was received at level 5.
+                runtime.emit(GameEvent::PartyMonDerived {
+                    slot: 0,
+                    mon: Box::new(party::starter_mon(&data, options.starter.species(), 5)),
+                })?;
                 Progress {
                     player_name: config.player_name.clone(),
                     rival_name: config.rival_name.clone(),
@@ -474,25 +481,32 @@ fn story(
                     "continuing after: {}",
                     previous.milestones.join(", ")
                 ));
+                let knowledge = checkpoint::restore(&state_path, &previous, &data)?;
+                runtime.emit(GameEvent::CheckpointRestored {
+                    knowledge: Box::new(knowledge),
+                })?;
+                runtime.info("Checkpoint knowledge restored".to_string());
                 previous
             }
-            _ => Progress {
-                player_name: "?".into(),
-                rival_name: "?".into(),
-                gender: Gender::Boy,
-                starter: options.starter,
-                milestones: Vec::new(),
-                saved_at: None,
-                party: Party::default(),
-            },
+            _ => {
+                let progress = Progress {
+                    player_name: "?".into(),
+                    rival_name: "?".into(),
+                    gender: Gender::Boy,
+                    starter: options.starter,
+                    milestones: Vec::new(),
+                    saved_at: None,
+                    party: Party::default(),
+                };
+                if runtime.state().party.value.is_none() {
+                    runtime.emit(GameEvent::PartyMonDerived {
+                        slot: 0,
+                        mon: Box::new(party::starter_mon(&data, progress.starter.species(), 5)),
+                    })?;
+                }
+                progress
+            }
         };
-        if progress.party.members.is_empty() {
-            // Known from the story: the starter was received at level 5.
-            progress
-                .party
-                .members
-                .push(Member::new(&data, progress.starter.species(), 5));
-        }
         let remaining: Vec<_> = all_milestones(progress.starter)
             .into_iter()
             .filter(|m| !progress.milestones.contains(&m.name))
@@ -510,7 +524,6 @@ fn story(
                     .with_data(Arc::clone(&data));
                 match executor.run(&mut runtime, &mut task, stop) {
                     Ok(_) => {
-                        progress.party = task.party().clone();
                         progress.milestones.push(milestone.name.clone());
                         break;
                     }
@@ -526,6 +539,11 @@ fn story(
                             runtime.set_pose_hint(pose.clone());
                         }
                         executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
+                        let knowledge = checkpoint::restore(&state_path, &saved, &data)?;
+                        runtime.emit(GameEvent::CheckpointRestored {
+                            knowledge: Box::new(knowledge),
+                        })?;
+                        runtime.info("Checkpoint knowledge restored".to_string());
                         progress = saved;
                     }
                     Err(e) => return Err(e.into()),
@@ -539,6 +557,8 @@ fn story(
                     std::fs::create_dir_all(dir)?;
                 }
                 progress.store(&options.progress)?;
+                checkpoint::store(&state_path, &runtime.state().saved_knowledge())?;
+                let party = Party::from_state(runtime.state());
                 runtime.info(format!(
                     "checkpoint after {}: saved in-game at {}; party {}",
                     milestone.name,
@@ -546,8 +566,7 @@ fn story(
                         .saved_at
                         .as_ref()
                         .map_or("?".into(), |p| p.to_string()),
-                    progress
-                        .party
+                    party
                         .members
                         .iter()
                         .map(|m| format!("{} Lv{}", m.display_name(), m.level))
