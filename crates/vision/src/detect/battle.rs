@@ -99,7 +99,12 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
     }
     let player = player_hp.and_then(|_| super::hud::player_line(image));
     let opponent = opponent_hp.and_then(|_| super::hud::opponent_line(image));
-    let opponent_caught = opponent.as_ref().map(|_| caught_icon(image));
+    // The icon is read only when the HUD name was: an unread name means the
+    // HUD isn't settled (or isn't there), not "not caught".
+    let opponent_caught = opponent
+        .as_ref()
+        .filter(|l| !l.name.is_empty())
+        .map(|_| caught_icon(image));
     Some(BattleObservation {
         menu,
         player_name: player.as_ref().map(|l| l.name.clone()),

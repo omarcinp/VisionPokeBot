@@ -11,6 +11,19 @@ use std::path::Path;
 use pokebot_core::{Error, Result};
 use serde::Deserialize;
 
+/// A species constant's name as the game prints it (`SPECIES_MR_MIME` →
+/// `MR. MIME`, `SPECIES_NIDORAN_F` → `NIDORAN♀`).
+pub fn printed_name(constant: &str) -> String {
+    let base = constant.trim_start_matches("SPECIES_");
+    match base {
+        "NIDORAN_F" => "NIDORAN♀".to_owned(),
+        "NIDORAN_M" => "NIDORAN♂".to_owned(),
+        "MR_MIME" => "MR. MIME".to_owned(),
+        "FARFETCHD" => "FARFETCH'D".to_owned(),
+        _ => base.replace('_', " "),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Species {
     /// HP, Attack, Defense, Speed, Sp. Atk, Sp. Def.
@@ -172,21 +185,8 @@ impl GameData {
 
     /// Species by printed name (`SPECIES_NIDORAN_F` prints as `NIDORAN♀`).
     pub fn species_named(&self, read: &str) -> Option<&str> {
-        let printed: Vec<(&String, String)> = self
-            .species
-            .keys()
-            .map(|k| {
-                let base = k.trim_start_matches("SPECIES_");
-                let name = match base {
-                    "NIDORAN_F" => "NIDORAN♀".to_owned(),
-                    "NIDORAN_M" => "NIDORAN♂".to_owned(),
-                    "MR_MIME" => "MR. MIME".to_owned(),
-                    "FARFETCHD" => "FARFETCH'D".to_owned(),
-                    _ => base.replace('_', " "),
-                };
-                (k, name)
-            })
-            .collect();
+        let printed: Vec<(&String, String)> =
+            self.species.keys().map(|k| (k, printed_name(k))).collect();
         unique_named(printed.iter().map(|(k, n)| (*k, n.as_str())), read)
     }
 
@@ -274,6 +274,15 @@ mod lookup_tests {
         assert_eq!(d.move_named("POISONPOWDER"), Some("MOVE_POISON_POWDER"));
         // Too many wildcards: several moves fit, so nothing is resolved.
         assert_eq!(d.move_named("?????"), None);
+    }
+
+    #[test]
+    fn printed_names_follow_the_game() {
+        assert_eq!(printed_name("SPECIES_RATTATA"), "RATTATA");
+        assert_eq!(printed_name("SPECIES_MR_MIME"), "MR. MIME");
+        assert_eq!(printed_name("SPECIES_FARFETCHD"), "FARFETCH'D");
+        assert_eq!(printed_name("SPECIES_NIDORAN_F"), "NIDORAN♀");
+        assert_eq!(printed_name("SPECIES_NIDORAN_M"), "NIDORAN♂");
     }
 
     #[test]

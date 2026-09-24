@@ -324,13 +324,18 @@ impl FireRedPerception {
     }
 }
 
-/// The opponent's shiny reading: only once the sprite is fully on screen
-/// (the HP bar shows) and the HUD name resolves to one palette entry.
+/// The opponent's shiny reading: only on the command menu (FIGHT/BAG/…),
+/// where the front sprite is fully drawn (text frames such as "Gotcha!"
+/// can show the HUD over an empty platform), and only when the HUD name
+/// resolves to one palette entry.
 fn opponent_shiny(
     image: &RgbImage,
     battle: &pokebot_state::BattleObservation,
     palettes: &shiny::SpritePalettes,
 ) -> Option<pokebot_state::ShinyReading> {
+    if !matches!(battle.menu, Some(BattleMenu::Command { .. })) {
+        return None;
+    }
     battle.opponent_hp?;
     let name = battle.opponent_name.as_deref()?;
     let key = detect::hud::resolve(name, palettes.keys().map(String::as_str))?;
@@ -590,6 +595,20 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn shiny_is_read_only_on_the_command_menu() {
+        // "Gotcha!": the HUD and HP bar still show, the platform is empty.
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        let Some(image) = fixture("battle-gotcha.png") else {
+            return;
+        };
+        let b = p.observe(&frame(0, image)).battle.unwrap();
+        assert_eq!(b.opponent_name.as_deref(), Some("RATTATA"));
+        assert_eq!(b.opponent_shiny, None);
     }
 
     #[test]

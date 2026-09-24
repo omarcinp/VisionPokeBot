@@ -953,9 +953,11 @@ fn inspect(
     Ok(())
 }
 
-/// Species sprite palettes keyed by the name the battle HUD prints
-/// (`party::display_name`). Names shared by several species (NIDORAN ♀/♂)
-/// are left out: the HUD name can't tell their palettes apart.
+/// Species sprite palettes keyed by the name the game prints
+/// (`pokebot_gamedata::printed_name`: `MR. MIME`, `FARFETCH'D`). NIDORAN ♀/♂
+/// are left out: the HUD reads the name without its coloured gender sign,
+/// so it can't tell their palettes apart. Any other name shared by several
+/// species is dropped for the same reason.
 fn sprite_palettes(data: &pokebot_gamedata::GameData) -> pokebot_vision::shiny::SpritePalettes {
     let mut species: Vec<_> = data.species.iter().collect();
     species.sort_by(|a, b| a.0.cmp(b.0));
@@ -967,7 +969,10 @@ fn sprite_palettes(data: &pokebot_gamedata::GameData) -> pokebot_vision::shiny::
         else {
             continue;
         };
-        let name = party::display_name(constant);
+        let name = pokebot_gamedata::printed_name(constant);
+        if name.ends_with(['♀', '♂']) {
+            continue;
+        }
         if palettes.insert(name.clone(), (normal, shiny)).is_some() {
             ambiguous.insert(name);
         }
@@ -1085,4 +1090,24 @@ fn replay(dir: PathBuf, from_frame: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sprite_palettes_are_keyed_by_printed_names() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json"))
+        else {
+            return;
+        };
+        let palettes = sprite_palettes(&data);
+        for name in ["RATTATA", "MR. MIME", "FARFETCH'D"] {
+            assert!(palettes.contains_key(name), "{name}");
+        }
+        assert!(!palettes.keys().any(|k| k.starts_with("NIDORAN")));
+        assert!(!palettes.contains_key("MR MIME"));
+    }
 }
