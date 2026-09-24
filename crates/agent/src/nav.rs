@@ -2,7 +2,7 @@
 //! along straight runs (tap single tiles), and confirm by locating the player
 //! on screen. Holds are cancelled as soon as something interrupts the walk.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
@@ -633,6 +633,62 @@ pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
     route_search(world, pose, to, |_| true, &Gone::new()).flatten()
 }
 
+type Node = (String, i32, i32);
+
+/// Tiles one move from `(x, y)` on `map`: walking within the map, a warp
+/// (standing on one, or below a door) or a map edge, each with the hop that
+/// leaves `map` (None when walking within it).
+fn neighbours(
+    world: &World,
+    map: &MapData,
+    (x, y): (i32, i32),
+    obstacles: &Obstacles,
+) -> Vec<(Node, Option<Hop>)> {
+    let name = &map.name;
+    let mut next: Vec<(Node, Option<Hop>)> = Vec::new();
+    // Walking within the map.
+    for dir in Direction::ALL {
+        if let Some(s) = pokebot_world::path::step(map, (x, y), dir, obstacles) {
+            next.push(((name.clone(), s.to.0, s.to.1), None));
+        }
+    }
+    // Warps: standing on one (mats, stairs, plain) or below a door.
+    for (i, w) in map.warps.iter().enumerate() {
+        if w.dest_warp < 0 || !warp_usable(map, i) {
+            continue;
+        }
+        let door = map
+            .tile(w.x, w.y)
+            .is_some_and(|t| t.behavior == WARP_DOOR || t.collision != 0);
+        let usable = if door {
+            (x, y) == (w.x, w.y + 1)
+        } else {
+            (x, y) == (w.x, w.y)
+        };
+        if usable {
+            if let Some((dest, dx, dy)) = world.warp_destination(w) {
+                next.push(((dest.name.clone(), dx, dy), Some(Hop::Warp(i))));
+            }
+        }
+    }
+    // Map edges.
+    for dir in Direction::ALL {
+        for (a, b) in world.crossings(map, dir) {
+            if a == (x, y) {
+                if let Some(other) = map
+                    .connections
+                    .iter()
+                    .find(|c| c.direction() == Some(dir))
+                    .and_then(|c| world.name_of(&c.map))
+                {
+                    next.push(((other.to_owned(), b.0, b.1), Some(Hop::Edge(dir))));
+                }
+            }
+        }
+    }
+    next
+}
+
 /// Breadth-first search over tiles across maps from `pose` to a tile of map
 /// `to` satisfying `goal`: None when no such tile is reachable, else the
 /// first hop out of the start map (None: walk there on the start map).
@@ -643,12 +699,9 @@ pub fn route_search(
     goal: impl Fn((i32, i32)) -> bool,
     gone: &Gone,
 ) -> Option<Option<Hop>> {
-    type Node = (String, i32, i32);
-    let mut blocked: std::collections::HashMap<String, Obstacles> =
-        std::collections::HashMap::new();
+    let mut blocked: HashMap<String, Obstacles> = HashMap::new();
     let start: Node = (pose.map.clone(), pose.x, pose.y);
-    let mut first: std::collections::HashMap<Node, Option<Hop>> =
-        std::collections::HashMap::from([(start.clone(), None)]);
+    let mut first: HashMap<Node, Option<Hop>> = HashMap::from([(start.clone(), None)]);
     let mut queue = VecDeque::from([start]);
     while let Some(node) = queue.pop_front() {
         let (name, x, y) = node.clone();
@@ -659,51 +712,10 @@ pub fn route_search(
         let Some(map) = world.map(&name) else {
             continue;
         };
-        let mut next: Vec<(Node, Option<Hop>)> = Vec::new();
-        // Walking within the map.
         let obstacles = blocked
             .entry(name.clone())
             .or_insert_with(|| object_obstacles(map, gone));
-        for dir in Direction::ALL {
-            if let Some(s) = pokebot_world::path::step(map, (x, y), dir, obstacles) {
-                next.push(((name.clone(), s.to.0, s.to.1), None));
-            }
-        }
-        // Warps: standing on one (mats, stairs, plain) or below a door.
-        for (i, w) in map.warps.iter().enumerate() {
-            if w.dest_warp < 0 || !warp_usable(map, i) {
-                continue;
-            }
-            let door = map
-                .tile(w.x, w.y)
-                .is_some_and(|t| t.behavior == WARP_DOOR || t.collision != 0);
-            let usable = if door {
-                (x, y) == (w.x, w.y + 1)
-            } else {
-                (x, y) == (w.x, w.y)
-            };
-            if usable {
-                if let Some((dest, dx, dy)) = world.warp_destination(w) {
-                    next.push(((dest.name.clone(), dx, dy), Some(Hop::Warp(i))));
-                }
-            }
-        }
-        // Map edges.
-        for dir in Direction::ALL {
-            for (a, b) in world.crossings(map, dir) {
-                if a == (x, y) {
-                    if let Some(other) = map
-                        .connections
-                        .iter()
-                        .find(|c| c.direction() == Some(dir))
-                        .and_then(|c| world.name_of(&c.map))
-                    {
-                        next.push(((other.to_owned(), b.0, b.1), Some(Hop::Edge(dir))));
-                    }
-                }
-            }
-        }
-        for (n, hop) in next {
+        for (n, hop) in neighbours(world, map, (x, y), obstacles) {
             if first.contains_key(&n) {
                 continue;
             }
@@ -718,6 +730,51 @@ pub fn route_search(
         }
     }
     None
+}
+
+/// The maps among `goals` (map → tiles to reach) that can be walked to
+/// from `pose` in the fewest moves (a warp or an edge counts as one), in
+/// name order; empty when none is reachable.
+pub fn nearest_reachable(
+    world: &World,
+    pose: &PlayerPose,
+    goals: &BTreeMap<String, HashSet<(i32, i32)>>,
+    gone: &Gone,
+) -> Vec<String> {
+    let mut blocked: HashMap<String, Obstacles> = HashMap::new();
+    let start: Node = (pose.map.clone(), pose.x, pose.y);
+    let mut dist: HashMap<Node, u32> = HashMap::from([(start.clone(), 0)]);
+    let mut queue = VecDeque::from([start]);
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut found_at: Option<u32> = None;
+    while let Some(node) = queue.pop_front() {
+        let d = dist[&node];
+        if found_at.is_some_and(|f| d > f) {
+            break;
+        }
+        let (name, x, y) = node;
+        if goals
+            .get(&name)
+            .is_some_and(|tiles| tiles.contains(&(x, y)))
+        {
+            found.insert(name.clone());
+            found_at = Some(d);
+            continue;
+        }
+        let Some(map) = world.map(&name) else {
+            continue;
+        };
+        let obstacles = blocked
+            .entry(name.clone())
+            .or_insert_with(|| object_obstacles(map, gone));
+        for (n, _) in neighbours(world, map, (x, y), obstacles) {
+            if !dist.contains_key(&n) {
+                dist.insert(n.clone(), d + 1);
+                queue.push_back(n);
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// First hop from `from` toward `to`: breadth-first over fixed warps and map

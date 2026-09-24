@@ -8,15 +8,16 @@
 //! paid. Money, quantities and prices count only once two frames read them
 //! the same (a single misread digit on the Switch must never be acted on).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, Observation, Pocket, ScreenState};
+use pokebot_state::{GameEvent, Observation, PlayerPose, Pocket, ScreenState};
 use pokebot_world::World;
 
 use crate::bag::fits;
-use crate::stock::buy_count;
+use crate::nav::{goal_tiles, nearest_reachable, Destination, Gone};
+use crate::stock::{affordable, buy_count};
 use crate::{Action, Decision, Expectation};
 
 /// More retries than this in one phase fail the purchase.
@@ -408,9 +409,9 @@ impl Purchase {
             );
             return Ok(0);
         };
-        let affordable = u16::try_from(money / price)
-            .unwrap_or(u16::MAX)
-            .min(MAX_QUANTITY);
+        // An explicit count keeps the Potion money too, like the stock
+        // policy's.
+        let affordable = affordable(data, &self.item, money).min(MAX_QUANTITY);
         let count = want.min(affordable);
         if count == 0 {
             self.log(
@@ -691,13 +692,17 @@ fn rows_of(data: &GameData, items: &[(String, Option<u32>)]) -> Rows {
         .collect()
 }
 
-/// Nearest map (fewest maps crossed) whose mart sells `item`, and its
-/// clerk's local id. Ties: the map name.
+/// The nearest mart selling `item` that can be walked to from `pose`
+/// (tile-level search across maps, as navigation plans, to the tiles the
+/// clerk is talked to from), and its clerk's local id. Ties: the map name.
+/// A mart only reachable through blocked ground (a one-way ledge, a cave
+/// not yet crossed) doesn't count, however few maps away it is.
 pub fn nearest_mart(
     world: &World,
     data: &GameData,
-    from: &str,
+    pose: &PlayerPose,
     item: &str,
+    gone: &Gone,
 ) -> Option<(String, u32)> {
     let clerk = |name: &str| {
         world
@@ -705,51 +710,31 @@ pub fn nearest_mart(
             .objects
             .iter()
             .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_CLERK"))
-            .map(|o| o.local_id)
-            .min()
+            .filter_map(|o| Some((o.local_id, o.x?, o.y?)))
+            .min_by_key(|(id, _, _)| *id)
     };
-    let sells = |name: &str| {
-        data.marts
-            .get(name)
-            .is_some_and(|items| items.iter().any(|i| i == item))
-    };
-    let mut dist = BTreeMap::from([(from.to_owned(), 0u32)]);
-    let mut queue = VecDeque::from([from.to_owned()]);
-    let mut best: Option<(u32, String, u32)> = None;
-    while let Some(name) = queue.pop_front() {
-        let d = dist[&name];
-        if best.as_ref().is_some_and(|(bd, _, _)| d > *bd) {
-            break;
+    let mut clerks = BTreeMap::new();
+    let mut goals = BTreeMap::new();
+    for (name, items) in &data.marts {
+        if !items.iter().any(|i| i == item) {
+            continue;
         }
-        if sells(&name) {
-            if let Some(id) = clerk(&name) {
-                if best
-                    .as_ref()
-                    .is_none_or(|(bd, bn, _)| (d, &name) < (*bd, bn))
-                {
-                    best = Some((d, name.clone(), id));
-                }
-            }
-        }
-        let Some(map) = world.map(&name) else {
+        let Some((id, x, y)) = clerk(name) else {
             continue;
         };
-        let next: Vec<String> = map
-            .warps
-            .iter()
-            .filter(|w| w.dest_warp >= 0)
-            .filter_map(|w| world.name_of(&w.dest_map))
-            .chain(map.connections.iter().filter_map(|c| world.name_of(&c.map)))
-            .map(str::to_owned)
-            .collect();
-        for n in next {
-            if !dist.contains_key(&n) {
-                dist.insert(n.clone(), d + 1);
-                queue.push_back(n);
-            }
-        }
+        let facing = Destination::Facing {
+            map: name.clone(),
+            x,
+            y,
+        };
+        goals.insert(name.clone(), goal_tiles(world, &facing));
+        clerks.insert(name.clone(), id);
     }
-    best.map(|(_, map, id)| (map, id))
+    let map = nearest_reachable(world, pose, &goals, gone)
+        .into_iter()
+        .next()?;
+    let id = clerks[&map];
+    Some((map, id))
 }
 
 #[cfg(test)]
@@ -926,23 +911,52 @@ mod tests {
         ));
     }
 
+    fn at(map: &str, x: i32, y: i32) -> PlayerPose {
+        PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        }
+    }
+
     #[test]
     fn nearest_mart_selling_balls() {
         let (Ok(world), Some(data)) = (World::load(root().join("data/world")), data()) else {
             return;
         };
+        let gone = Gone::new();
+        let nearest =
+            |pose: PlayerPose, item: &str| nearest_mart(&world, &data, &pose, item, &gone);
         assert_eq!(
-            nearest_mart(&world, &data, "PewterCity", "ITEM_POKE_BALL"),
+            nearest(at("PewterCity", 17, 26), "ITEM_POKE_BALL"),
             Some(("PewterCity_Mart".into(), 3))
         );
         assert_eq!(
-            nearest_mart(&world, &data, "ViridianCity", "ITEM_POKE_BALL"),
+            nearest(at("ViridianCity", 26, 27), "ITEM_POKE_BALL"),
             Some(("ViridianCity_Mart".into(), 1))
         );
         assert_eq!(
-            nearest_mart(&world, &data, "PewterCity", "ITEM_NOT_SOLD"),
-            None
+            nearest(at("CeruleanCity", 22, 20), "ITEM_POKE_BALL"),
+            Some(("CeruleanCity_Mart".into(), 1))
         );
+        assert_eq!(nearest(at("PewterCity", 17, 26), "ITEM_NOT_SOLD"), None);
+    }
+
+    /// Review: by map hops Cerulean is nearest from Route 4's west end, but
+    /// it is only reached through Mt. Moon; Pewter's mart is the walk.
+    #[test]
+    fn nearest_mart_is_the_nearest_walk_not_the_fewest_maps() {
+        let (Ok(world), Some(data)) = (World::load(root().join("data/world")), data()) else {
+            return;
+        };
+        let gone = Gone::new();
+        for pose in [at("Route4_PokemonCenter_1F", 7, 7), at("MtMoon_1F", 18, 36)] {
+            assert_eq!(
+                nearest_mart(&world, &data, &pose, "ITEM_POKE_BALL", &gone).map(|(map, _)| map),
+                Some("PewterCity_Mart".into()),
+                "from {pose:?}"
+            );
+        }
     }
 
     #[test]
@@ -1050,6 +1064,27 @@ mod tests {
         let a = act(twice(&mut p, quantity(4, 3000, 11), &data, &mut events));
         assert_eq!(a.expect, Expectation::ShopQuantity(12));
         let a = act(twice(&mut p, quantity(6, 3000, 12), &data, &mut events));
+        assert_eq!(a.expect, Expectation::Question);
+    }
+
+    /// Review: an explicit count was capped by `money / price` only, so
+    /// it could spend the 2-Potion reserve.
+    #[test]
+    fn an_explicit_count_keeps_the_potion_money() {
+        let Some(data) = data() else { return };
+        // ¥1000 − 2 Potions (¥600) = ¥400: 2 of the 3 asked for.
+        let mut p = Purchase::new("ITEM_POKE_BALL", 3);
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        let a = act(twice(&mut p, list(2, 1000, 0), &data, &mut events));
+        assert_eq!(a.expect, Expectation::ShopQuantity(1));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::GoalProgress { detail, .. } if detail.contains("buys only 2 of 3")
+        )));
+        let a = act(twice(&mut p, quantity(4, 1000, 1), &data, &mut events));
+        assert_eq!(a.expect, Expectation::ShopQuantity(2));
+        let a = act(twice(&mut p, quantity(6, 1000, 2), &data, &mut events));
         assert_eq!(a.expect, Expectation::Question);
     }
 

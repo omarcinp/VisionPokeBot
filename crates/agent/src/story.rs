@@ -109,11 +109,17 @@ pub enum StoryStep {
     /// Open the bag from the Start menu, read this pocket (`PocketObserved`)
     /// and close every menu again.
     AuditPocket(Pocket),
-    /// Buy `count` of `item` at the nearest mart selling it (the clerk is
-    /// approached like `Talk`, then [`Purchase`] runs the mart). `count: 0`
-    /// means "decide on the list": the ball stock policy's count for the
-    /// money read there, possibly none.
-    Buy { item: String, count: u16 },
+    /// Buy `count` of `item` at `mart` (or the nearest mart selling it that
+    /// can be walked to; the clerk is approached like `Talk`, then
+    /// [`Purchase`] runs the mart). `count: 0` means "decide on the list":
+    /// the ball stock policy's count for the money read there, possibly
+    /// none. The mart lives on the step, so a splice (a heal on the way)
+    /// keeps it.
+    Buy {
+        item: String,
+        count: u16,
+        mart: Option<String>,
+    },
     /// Audit if needed, then Buy up to the target at `mart` (or the nearest
     /// one selling balls).
     StockUp { mart: Option<String> },
@@ -255,8 +261,6 @@ pub struct StoryTask {
     purchase: Option<Purchase>,
     /// The current Buy step's mart map and clerk.
     buy_at: Option<(String, u32)>,
-    /// The mart a StockUp asked the Buy it spliced to use.
-    buy_mart: Option<String>,
     /// The current Talk step's conversation gave us an item.
     talk_gained_item: bool,
     /// Objects taken in this run (item balls, fossils): gone from the map.
@@ -358,7 +362,6 @@ impl StoryTask {
             audit: None,
             purchase: None,
             buy_at: None,
-            buy_mart: None,
             mandatory_buy_tried: false,
             talk_gained_item: false,
             taken: Gone::new(),
@@ -407,7 +410,6 @@ impl StoryTask {
         self.audit = None;
         self.purchase = None;
         self.buy_at = None;
-        self.buy_mart = None;
         if self.step >= self.milestones[self.milestone].steps.len() {
             ctx.events.push(GameEvent::GoalProgress {
                 goal: "Story".into(),
@@ -443,7 +445,6 @@ impl StoryTask {
         self.audit = None;
         self.purchase = None;
         self.buy_at = None;
-        self.buy_mart = None;
     }
 
     fn navigate(&mut self, dest: &Destination, observation: &Observation) -> NavStatusOrDecision {
@@ -906,7 +907,7 @@ impl Task for StoryTask {
         // Once the clerk talks (or any mart screen shows), the purchase
         // drives every screen until the mart is left: its menu and YES/NO
         // questions would otherwise be unexpected questions below.
-        if let StoryStep::Buy { item, count } = &step {
+        if let StoryStep::Buy { item, count, .. } = &step {
             if self.purchase.is_some()
                 || self.talk == TalkPhase::Talking
                 || o.shop.is_some()
@@ -1115,7 +1116,9 @@ impl Task for StoryTask {
                 }
             }
             StoryStep::AuditPocket(pocket) => self.audit_pocket(pocket, o, ctx),
-            StoryStep::Buy { item, count } => self.go_to_clerk(&item, count, o, ctx),
+            StoryStep::Buy { item, count, mart } => {
+                self.go_to_clerk(&item, count, mart.as_deref(), o, ctx)
+            }
             StoryStep::StockUp { mart } => self.stock_up(mart, ctx),
             StoryStep::Settle { frames } => {
                 if self.quiet_frames >= frames {
@@ -1216,10 +1219,10 @@ impl StoryTask {
             vec![StoryStep::Buy {
                 item: "ITEM_POKE_BALL".into(),
                 count: 0,
+                mart,
             }],
             false,
         );
-        self.buy_mart = mart;
         Decision::Wait("going to buy Poké Balls".into())
     }
 
@@ -1229,6 +1232,7 @@ impl StoryTask {
         &mut self,
         item: &str,
         count: u16,
+        mart: Option<&str>,
         o: &Observation,
         ctx: &mut TaskContext<'_>,
     ) -> Decision {
@@ -1239,15 +1243,15 @@ impl StoryTask {
             return Decision::Wait("locating".into());
         };
         if self.buy_at.is_none() {
-            self.buy_at = match &self.buy_mart {
+            self.buy_at = match mart {
                 Some(map) => self.world.map(map).and_then(|m| {
                     m.objects
                         .iter()
                         .filter(|ob| ob.graphics.as_deref() == Some("OBJ_EVENT_GFX_CLERK"))
-                        .map(|ob| (map.clone(), ob.local_id))
+                        .map(|ob| (map.to_owned(), ob.local_id))
                         .min_by_key(|(_, id)| *id)
                 }),
-                None => nearest_mart(&self.world, &data, &pose.pose.map, item),
+                None => nearest_mart(&self.world, &data, &pose.pose, item, &self.taken),
             };
         }
         let Some((map, clerk)) = self.buy_at.clone() else {
@@ -2391,9 +2395,45 @@ mod tests {
             task.current(),
             Some(&StoryStep::Buy {
                 item: "ITEM_POKE_BALL".into(),
-                count: 0
+                count: 0,
+                mart: None,
             })
         );
+    }
+
+    /// Review: StockUp's mart lived in a task field that every splice
+    /// reset, so a heal on the way sent the Buy to the nearest mart.
+    #[test]
+    fn stock_up_mart_survives_a_splice() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let steps = vec![
+            StoryStep::StockUp {
+                mart: Some("ViridianCity_Mart".into()),
+            },
+            StoryStep::Settle { frames: 1 },
+        ];
+        let mut task = one_milestone(world, data, steps);
+        let state = with_balls(3);
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &state);
+        let buy = StoryStep::Buy {
+            item: "ITEM_POKE_BALL".into(),
+            count: 0,
+            mart: Some("ViridianCity_Mart".into()),
+        };
+        assert_eq!(task.current(), Some(&buy));
+        // A heal is spliced in on the way, and done.
+        task.splice(vec![StoryStep::Heal { center: None }], true);
+        let mut events = Vec::new();
+        task.advance_step(&mut TaskContext {
+            observation: &located(2, "PewterCity", 17, 26),
+            state: &state,
+            events: &mut events,
+        });
+        assert_eq!(task.current(), Some(&buy));
+        tick(&mut task, &located(3, "PewterCity", 17, 26), &state);
+        assert_eq!(task.buy_at, Some(("ViridianCity_Mart".into(), 1)));
     }
 
     #[test]
@@ -2441,6 +2481,7 @@ mod tests {
             vec![StoryStep::Buy {
                 item: "ITEM_POKE_BALL".into(),
                 count: 3,
+                mart: None,
             }],
         );
         let mut o = located(1, "PewterCity_Mart", 4, 3);
