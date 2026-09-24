@@ -28,6 +28,21 @@
   header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 1px; font-weight: 800; }
   .stat { color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
   .stat b { color: var(--text); font-weight: 600; }
+  /* Instance tabs (behind the hub) and live thumbnails of the other instances */
+  #tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  #tabs:empty { display: none; }
+  #tabs a { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 10px;
+            border: 1px solid var(--line); color: var(--muted); font-size: 12px; text-decoration: none; white-space: nowrap; }
+  #tabs a:hover { color: var(--text); }
+  #tabs a.cur { color: var(--text); border-color: var(--accent); background: var(--panel2); }
+  #tabs i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  #tabs a.alive i { background: var(--event); }
+  #thumbs { position: fixed; right: 12px; bottom: 12px; z-index: 6; display: flex; flex-direction: column; gap: 8px; }
+  #thumbs a { display: block; width: 240px; height: 160px; position: relative; background: #000; border-radius: 8px;
+              border: 1px solid var(--line); overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+  #thumbs img { width: 100%; height: 100%; object-fit: contain; display: block; image-rendering: pixelated; }
+  #thumbs span { position: absolute; left: 6px; top: 4px; padding: 1px 6px; border-radius: 8px; background: rgba(0,0,0,.7);
+                 color: var(--text); font: 11px var(--mono); }
   #conn { margin-left: auto; display: flex; align-items: center; gap: 6px; }
   #conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--goal); display: inline-block; }
   #conn.live i { background: var(--event); box-shadow: 0 0 8px var(--event); }
@@ -211,6 +226,7 @@
     :root { font-size: 14px; }
     header { padding: 6px 10px; gap: 2px 10px; }
     header .opt { display: none; }
+    #thumbs a { width: 120px; height: 80px; }
     main { padding: 0 0 env(safe-area-inset-bottom); gap: 8px; }
     .card { border-radius: 0; border-left: 0; border-right: 0; padding: 10px; }
     #video-card { padding: 0 0 8px; position: sticky; top: var(--hdr, 38px); z-index: 4; border-top: 0; }
@@ -230,6 +246,7 @@
 <body>
 <header>
   <h1>POKéBOT</h1>
+  <nav id="tabs"></nav>
   <span class="stat">frame <b id="frame-id">–</b></span>
   <span class="stat">fps <b id="fps">–</b></span>
   <span class="stat opt">video <b id="video-src">–</b></span>
@@ -237,6 +254,7 @@
   <span class="stat">up <b id="uptime">–</b></span>
   <span class="stat" id="conn"><i></i><b>connecting</b></span>
 </header>
+<div id="thumbs"></div>
 <main>
   <div id="left">
   <section class="card" id="video-card">
@@ -266,8 +284,8 @@
       <label><input type="checkbox" id="show-pad" checked> gamepad</label>
       <label><input type="checkbox" id="pause"> pause</label>
       <span class="sp"></span>
-      <a href="/frame.png" target="_blank">frame.png</a>
-      <a href="/stream.mjpg" target="_blank">mjpeg</a>
+      <a href="frame.png" target="_blank">frame.png</a>
+      <a href="stream.mjpg" target="_blank">mjpeg</a>
     </div>
   </section>
 
@@ -562,7 +580,7 @@ function renderMon(m, i) {
   const hp = val(m.hp);
   const status = val(m.status);
   const fainted = status === 'Fainted' || (hp && hp[0] === 0);
-  const sprite = species ? `<img src="/sprite/${encodeURIComponent(species)}${shiny ? '?shiny=1' : ''}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : '';
+  const sprite = species ? `<img src="sprite/${encodeURIComponent(species)}${shiny ? '?shiny=1' : ''}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : '';
   const moves = (m.moves || []).filter(Boolean).map((s) => {
     const pp = val(s.pp);
     return `<span class="${pp && pp[0] === 0 ? 'nopp' : ''}">${esc(prettyConst(val(s.mv)))} <small>${pp ? `${pp[0]}/${pp[1]}` : '?'}</small></span>`;
@@ -661,7 +679,7 @@ const world = {
   data: null, region: new Image(), over: new Image(), trail: [], pose: null, stale: true,
   async load() {
     try {
-      const r = await fetch('/world/region_map.json');
+      const r = await fetch('world/region_map.json');
       if (!r.ok) throw new Error(r.status);
       this.data = await r.json();
     } catch (e) {
@@ -669,7 +687,7 @@ const world = {
       return;
     }
     this.region.onload = () => { this.key = null; this.update(this.lastK); };
-    this.region.src = '/world/region_map.png';
+    this.region.src = 'world/region_map.png';
     this.over.onload = () => this.drawBig();
   },
   outdoor: (m) => /TOWN|CITY|ROUTE/.test(m.type),
@@ -749,7 +767,7 @@ const world = {
   },
   drawBig() {
     if (!$('show-bigmap').checked || !this.data) return;
-    if (!this.over.src) { this.over.src = '/world/overworld.png'; return; }
+    if (!this.over.src) { this.over.src = 'world/overworld.png'; return; }
     if (!this.over.complete || !this.over.naturalWidth) return;
     const c = $('bigmap-canvas'), s = this.data.overworld.scale;
     if (c.width !== this.over.naturalWidth) { c.width = this.over.naturalWidth; c.height = this.over.naturalHeight; }
@@ -888,7 +906,7 @@ const frames = {
     const timer = setTimeout(() => ctl.abort(), 2500);
     let ok = false;
     try {
-      const r = await fetch(`/frame.png?f=${id}`, { cache: 'no-store', signal: ctl.signal });
+      const r = await fetch(`frame.png?f=${id}`, { cache: 'no-store', signal: ctl.signal });
       if (!r.ok) throw new Error(r.status);
       await drawFrame(await r.blob());
       this.shown = Number(r.headers.get('x-frame-id')) || id;
@@ -907,6 +925,72 @@ const frames = {
 };
 $('pause').addEventListener('change', () => frames.pump());
 
+// ---------------------------------------------------------------- instances
+
+/// Behind the hub (`pokebot hub`) the page lives at /<name>/ and
+/// ../api/instances lists every instance: show them as tabs. Standalone
+/// that request fails and there are no tabs. The Switch page also shows a
+/// live thumbnail of every other running instance.
+const instances = {
+  label: null, list: null,
+  setLabel(label) {
+    if (label === this.label) return;
+    this.label = label;
+    this.render();
+  },
+  async refresh() {
+    try {
+      const r = await fetch('../api/instances', { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.status);
+      const list = await r.json();
+      this.list = Array.isArray(list) ? list : null;
+    } catch (e) {
+      this.list = null;
+    }
+    this.render();
+  },
+  render() {
+    const list = this.list || [];
+    setHtml($('tabs'), list.map((e) => {
+      const cls = [e.alive ? 'alive' : '', e.label === this.label ? 'cur' : ''].join(' ');
+      const href = new URL(e.path, location.origin).href;
+      return `<a class="${cls}" href="${esc(href)}" title="${e.alive ? 'running' : 'stopped'}"><i></i>${esc(e.label)}</a>`;
+    }).join(''));
+    const others = this.label === 'Switch' ? list.filter((e) => e.alive && e.label !== this.label) : [];
+    const box = $('thumbs');
+    for (const a of [...box.children]) {
+      if (!others.some((e) => e.path === a.dataset.path)) a.remove();
+    }
+    for (const e of others) {
+      let a = [...box.children].find((x) => x.dataset.path === e.path);
+      if (!a) {
+        a = document.createElement('a');
+        a.dataset.path = e.path;
+        a.href = new URL(e.path, location.origin).href;
+        a.title = `open ${e.label}`;
+        a.innerHTML = `<img alt=""><span>${esc(e.label)}</span>`;
+        const img = a.querySelector('img');
+        // A dropped stream (restart, Wi-Fi) retries until the instance is gone.
+        img.onerror = () => setTimeout(() => { if (a.isConnected) this.connect(a); }, 2000);
+        box.append(a);
+      }
+      // A new run behind the same path starts a new stream.
+      if (a.dataset.run !== String(e.started_at)) {
+        a.dataset.run = String(e.started_at);
+        this.connect(a);
+      }
+    }
+  },
+  connect(a) {
+    a.querySelector('img').src = `..${a.dataset.path}stream.mjpg?t=${Date.now()}`;
+  },
+  reconnectAll() {
+    for (const a of $('thumbs').children) this.connect(a);
+  },
+};
+instances.refresh();
+setInterval(() => instances.refresh(), 5000);
+
 // ---------------------------------------------------------------- connection
 
 /// The server sends a ping every 2 s. If nothing arrives for a while the
@@ -918,13 +1002,14 @@ const link = {
   connect() {
     if (this.es) this.es.close();
     this.openedAt = this.lastMsg = performance.now();
-    const es = this.es = new EventSource('/api/stream');
+    const es = this.es = new EventSource('api/stream');
     const alive = () => { this.lastMsg = performance.now(); };
     es.onopen = () => {
       alive();
       this.state('live', 'live');
       // (Re)connected, possibly to a new run: reload the full snapshot.
-      fetch('/api/snapshot', { cache: 'no-store' }).then((r) => r.json()).then((snap) => {
+      fetch('api/snapshot', { cache: 'no-store' }).then((r) => r.json()).then((snap) => {
+        instances.setLabel(snap.instance_label);
         setStatus(snap.status);
         snap.log.forEach((e) => addEntry(e, false));
       }).catch(() => {});
@@ -960,9 +1045,10 @@ document.addEventListener('visibilitychange', () => {
   pad.releaseAll();
   if (performance.now() - link.lastMsg > 2500) link.connect();
   frames.pump();
+  instances.reconnectAll();
 });
-window.addEventListener('pageshow', (e) => { if (e.persisted) link.connect(); });
-window.addEventListener('online', () => link.connect());
+window.addEventListener('pageshow', (e) => { if (e.persisted) { link.connect(); instances.reconnectAll(); } });
+window.addEventListener('online', () => { link.connect(); instances.reconnectAll(); });
 </script>
 </body>
 </html>
