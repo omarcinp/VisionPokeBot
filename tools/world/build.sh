@@ -10,7 +10,7 @@ if [ ! -d "${PRET}/.git" ]; then
     git -C "${PRET}" sparse-checkout set data/maps data/layouts data/tilesets src include
 fi
 # Paths added after the first clone (no-op when already present).
-git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts
+git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts graphics/pokemon
 VENV="${ROOT}/.venv"
 if [ ! -x "${VENV}/bin/python" ]; then
     python3 -m venv "${VENV}"

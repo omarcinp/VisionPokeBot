@@ -151,13 +151,40 @@ pub fn damage(
     })
 }
 
+/// Catch multiplier ×10 for the balls the bot throws on its own. The Master
+/// Ball is never auto-used; balls with conditional bonuses (Net, Nest, …)
+/// count as a Poké Ball.
+pub fn ball_multiplier(item: &str) -> Option<u32> {
+    match item {
+        "ITEM_ULTRA_BALL" => Some(20),
+        "ITEM_GREAT_BALL" | "ITEM_SAFARI_BALL" => Some(15),
+        "ITEM_MASTER_BALL" => None,
+        i if i.ends_with("_BALL") => Some(10),
+        _ => None,
+    }
+}
+
 /// Probability that one Poké Ball throw catches a Pokémon at full HP with
 /// no status (Generation III shake-check formula). `ball` is ×10 (Poké Ball 10,
 /// Great 15, Ultra 20).
 pub fn catch_probability(catch_rate: u16, max_hp: u32, current_hp: u32, ball: u32) -> f64 {
+    catch_probability_status(catch_rate, max_hp, current_hp, ball, 10)
+}
+
+/// `catch_probability` with the status bonus ×10 (20 asleep or frozen, 15
+/// paralysed, poisoned or burned, 10 none).
+pub fn catch_probability_status(
+    catch_rate: u16,
+    max_hp: u32,
+    current_hp: u32,
+    ball: u32,
+    status_x10: u32,
+) -> f64 {
     let hp_term = (3 * max_hp).saturating_sub(2 * current_hp).max(1);
     let a = (f64::from(hp_term) * f64::from(catch_rate) * f64::from(ball) / 10.0)
-        / f64::from(3 * max_hp);
+        / f64::from(3 * max_hp)
+        * f64::from(status_x10)
+        / 10.0;
     if a >= 255.0 {
         return 1.0;
     }
@@ -193,5 +220,19 @@ mod tests {
         let low = catch_probability(45, 20, 1, 10);
         let hard_full = catch_probability(45, 20, 20, 10);
         assert!(low > 2.0 * hard_full);
+    }
+
+    #[test]
+    fn balls_and_status_raise_the_catch_chance() {
+        assert_eq!(ball_multiplier("ITEM_POKE_BALL"), Some(10));
+        assert_eq!(ball_multiplier("ITEM_GREAT_BALL"), Some(15));
+        assert_eq!(ball_multiplier("ITEM_ULTRA_BALL"), Some(20));
+        assert_eq!(ball_multiplier("ITEM_PREMIER_BALL"), Some(10));
+        assert_eq!(ball_multiplier("ITEM_MASTER_BALL"), None);
+        assert_eq!(ball_multiplier("ITEM_POTION"), None);
+        let plain = catch_probability_status(45, 30, 7, 10, 10);
+        assert_eq!(plain, catch_probability(45, 30, 7, 10));
+        assert!(catch_probability_status(45, 30, 7, 10, 20) > plain);
+        assert!(catch_probability_status(45, 30, 7, 15, 10) > plain);
     }
 }
