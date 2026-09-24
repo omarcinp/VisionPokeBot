@@ -2,7 +2,7 @@
 //! along straight runs (tap single tiles), and confirm by locating the player
 //! on screen. Holds are cancelled as soon as something interrupts the walk.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
@@ -108,9 +108,16 @@ pub struct Navigator {
     /// Moves left to make with taps instead of holds (after a short hold).
     single_steps: u32,
     pending: Option<(PlayerPose, Direction, (i32, i32))>,
-    /// First hop out of the current map toward the destination (cached per map).
-    hop: Option<(String, Hop)>,
+    /// First hop out of the current map toward the destination, or None to
+    /// walk on this map (planned on entering each map).
+    hop: Option<(String, Option<Hop>)>,
+    /// Map objects no longer there (items and fossils taken), by map and
+    /// local id: they don't block their tiles.
+    gone: Gone,
 }
+
+/// Map objects known to be gone, as (map, local id).
+pub type Gone = BTreeSet<(String, u32)>;
 
 impl Navigator {
     pub fn new(world: Arc<World>, destination: Destination) -> Self {
@@ -123,7 +130,14 @@ impl Navigator {
             single_steps: 0,
             pending: None,
             hop: None,
+            gone: Gone::new(),
         }
+    }
+
+    /// Objects known to be gone (taken items, fossils) don't block the way.
+    pub fn with_gone(mut self, gone: Gone) -> Self {
+        self.gone = gone;
+        self
     }
 
     pub fn next(&mut self, observation: &Observation) -> NavStatus {
@@ -144,25 +158,25 @@ impl Navigator {
                 return NavStatus::Arrived;
             }
         }
-        if pose.map != self.destination.map() {
-            let hop = match &self.hop {
-                Some((map, hop)) if *map == pose.map => Some(*hop),
-                _ => {
-                    let hop = route_from(&world, &pose, self.destination.map())
-                        .or_else(|| route_exit(&world, &pose.map, self.destination.map()));
-                    self.hop = hop.map(|h| (pose.map.clone(), h));
-                    hop
-                }
-            };
-            return match hop {
-                Some(Hop::Warp(warp)) => self.use_warp(map, &pose, warp),
-                Some(Hop::Edge(dir)) => self.cross_edge(&world, map, &pose, dir),
-                None => NavStatus::Fail(format!(
+        let hop = match &self.hop {
+            Some((map, hop)) if *map == pose.map => *hop,
+            _ => {
+                let hop = plan_hop(&world, &pose, &self.destination, &self.gone);
+                self.hop = Some((pose.map.clone(), hop));
+                hop
+            }
+        };
+        match hop {
+            Some(Hop::Warp(warp)) => return self.use_warp(map, &pose, warp),
+            Some(Hop::Edge(dir)) => return self.cross_edge(&world, map, &pose, dir),
+            None if pose.map != self.destination.map() => {
+                return NavStatus::Fail(format!(
                     "no known route from {} to {}",
                     pose.map,
                     self.destination.map()
-                )),
-            };
+                ))
+            }
+            None => {}
         }
         match self.destination.clone() {
             Destination::Tile { x, y, .. } => {
@@ -180,18 +194,7 @@ impl Navigator {
             Destination::Facing { x, y, .. } => {
                 // Talk from an adjacent tile, or across a counter (the tile
                 // between is a counter, e.g. Pokémon Center nurses, clerks).
-                let spots: Vec<((i32, i32), Direction)> = Direction::ALL
-                    .iter()
-                    .flat_map(|&dir| {
-                        let (dx, dy) = dir.delta();
-                        let adjacent = ((x - dx, y - dy), dir);
-                        let across = map
-                            .tile(x - dx, y - dy)
-                            .filter(|t| t.behavior == COUNTER)
-                            .map(|_| ((x - 2 * dx, y - 2 * dy), dir));
-                        std::iter::once(adjacent).chain(across)
-                    })
-                    .collect();
+                let spots = facing_spots(map, x, y);
                 if let Some((_, dir)) = spots.iter().find(|(p, _)| *p == (pose.x, pose.y)) {
                     if self.facing == Some(*dir) {
                         return NavStatus::Arrived;
@@ -256,16 +259,9 @@ impl Navigator {
     }
 
     fn obstacles(&self, map: &MapData) -> Obstacles {
-        let mut obstacles: Obstacles = self.learned.get(&map.name).cloned().unwrap_or_default();
-        // Stationary NPCs block their tiles; wanderers are learned when met.
-        for o in &map.objects {
-            let still = o
-                .movement
-                .as_deref()
-                .is_some_and(|m| m.contains("FACE") || m.contains("LOOK_AROUND"));
-            if let (true, Some(x), Some(y)) = (still, o.x, o.y) {
-                obstacles.insert((x, y));
-            }
+        let mut obstacles = object_obstacles(map, &self.gone);
+        if let Some(learned) = self.learned.get(&map.name) {
+            obstacles.extend(learned.iter().copied());
         }
         obstacles
     }
@@ -371,14 +367,9 @@ impl Navigator {
             return NavStatus::Fail(format!("{} has no warp {index}", map.name));
         };
         // A plain tile beside a marked warp to the same place: use that one.
-        if !warp_usable(map, index) {
-            if let Some(marked) = map.warps.iter().position(|w| {
-                w.dest_map == warp.dest_map
-                    && w.dest_warp == warp.dest_warp
-                    && warp_is_marked(map, w)
-            }) {
-                return self.use_warp(map, pose, marked);
-            }
+        let usable = usable_warp(map, index);
+        if usable != index {
+            return self.use_warp(map, pose, usable);
         }
         let (wx, wy) = (warp.x, warp.y);
         let tile = map.tile(wx, wy);
@@ -471,6 +462,92 @@ impl Navigator {
     }
 }
 
+/// Where to talk to `(x, y)` from: an adjacent tile, or across a counter
+/// (the tile between is a counter, e.g. Pokémon Center nurses, clerks), with
+/// the direction to face.
+fn facing_spots(map: &MapData, x: i32, y: i32) -> Vec<((i32, i32), Direction)> {
+    Direction::ALL
+        .iter()
+        .flat_map(|&dir| {
+            let (dx, dy) = dir.delta();
+            let adjacent = ((x - dx, y - dy), dir);
+            let across = map
+                .tile(x - dx, y - dy)
+                .filter(|t| t.behavior == COUNTER)
+                .map(|_| ((x - 2 * dx, y - 2 * dy), dir));
+            std::iter::once(adjacent).chain(across)
+        })
+        .collect()
+}
+
+/// Warp `index`, or the marked warp to the same place beside it when warp
+/// `index` sits on a plain tile that never fires.
+fn usable_warp(map: &MapData, index: usize) -> usize {
+    let Some(warp) = map.warps.get(index) else {
+        return index;
+    };
+    if warp_usable(map, index) {
+        return index;
+    }
+    map.warps
+        .iter()
+        .position(|w| {
+            w.dest_map == warp.dest_map && w.dest_warp == warp.dest_warp && warp_is_marked(map, w)
+        })
+        .unwrap_or(index)
+}
+
+/// The tile to stand on to take warp `index`: below a door, else the warp
+/// tile itself.
+fn warp_approach(map: &MapData, index: usize) -> Option<(i32, i32)> {
+    let w = map.warps.get(index)?;
+    let tile = map.tile(w.x, w.y);
+    let marked = tile.is_some_and(|t| {
+        arrow_warp(t.behavior)
+            .or_else(|| stair_warp(t.behavior))
+            .is_some()
+    });
+    let door = tile.is_some_and(|t| t.behavior == WARP_DOOR || t.collision != 0);
+    Some(if door && !marked {
+        (w.x, w.y + 1)
+    } else {
+        (w.x, w.y)
+    })
+}
+
+/// Tiles of the destination's map from which the destination is reached
+/// (the tile itself, the spots to talk from, or where a warp is taken).
+pub fn goal_tiles(world: &World, dest: &Destination) -> HashSet<(i32, i32)> {
+    let Some(map) = world.map(dest.map()) else {
+        return HashSet::new();
+    };
+    match *dest {
+        Destination::Tile { x, y, .. } => HashSet::from([(x, y)]),
+        Destination::Facing { x, y, .. } => facing_spots(map, x, y)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect(),
+        Destination::Warp { warp, .. } => warp_approach(map, usable_warp(map, warp))
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// First hop out of the player's map toward `dest`, None to walk on this map.
+/// Maps split into parts (Mt. Moon's floors) are entered through the warp
+/// that leads to the part holding the destination; when the destination
+/// isn't reachable from here at tile level, fall back to reaching its map.
+pub fn plan_hop(world: &World, pose: &PlayerPose, dest: &Destination, gone: &Gone) -> Option<Hop> {
+    let goals = goal_tiles(world, dest);
+    if let Some(hop) = route_search(world, pose, dest.map(), |p| goals.contains(&p), gone) {
+        return hop;
+    }
+    if pose.map == dest.map() {
+        return None;
+    }
+    route_from(world, pose, dest.map()).or_else(|| route_exit(world, &pose.map, dest.map()))
+}
+
 fn warp_is_marked(map: &MapData, warp: &pokebot_world::Warp) -> bool {
     map.tile(warp.x, warp.y).is_some_and(|t| {
         arrow_warp(t.behavior).is_some()
@@ -496,6 +573,11 @@ pub fn warp_usable(map: &MapData, index: usize) -> bool {
 /// Tiles blocked by objects that don't move: NPCs that only turn, cut trees,
 /// boulders, item balls. Wanderers are learned when met.
 pub fn static_obstacles(map: &MapData) -> Obstacles {
+    object_obstacles(map, &Gone::new())
+}
+
+/// [`static_obstacles`] without the objects in `gone`.
+pub fn object_obstacles(map: &MapData, gone: &Gone) -> Obstacles {
     map.objects
         .iter()
         .filter(|o| {
@@ -503,6 +585,7 @@ pub fn static_obstacles(map: &MapData) -> Obstacles {
                 .as_deref()
                 .is_some_and(|m| m.contains("FACE") || m.contains("LOOK_AROUND"))
         })
+        .filter(|o| !gone.contains(&(map.name.clone(), o.local_id)))
         .filter_map(|o| Some((o.x?, o.y?)))
         .collect()
 }
@@ -519,6 +602,19 @@ pub enum Hop {
 /// the player stands). Warps land on their destination warp tile; doors are
 /// entered from the tile below; edges continue into the neighbour.
 pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
+    route_search(world, pose, to, |_| true, &Gone::new()).flatten()
+}
+
+/// Breadth-first search over tiles across maps from `pose` to a tile of map
+/// `to` satisfying `goal`: None when no such tile is reachable, else the
+/// first hop out of the start map (None: walk there on the start map).
+pub fn route_search(
+    world: &World,
+    pose: &PlayerPose,
+    to: &str,
+    goal: impl Fn((i32, i32)) -> bool,
+    gone: &Gone,
+) -> Option<Option<Hop>> {
     type Node = (String, i32, i32);
     let mut blocked: std::collections::HashMap<String, Obstacles> =
         std::collections::HashMap::new();
@@ -529,8 +625,8 @@ pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
     while let Some(node) = queue.pop_front() {
         let (name, x, y) = node.clone();
         let hop_here = first[&node];
-        if name == to {
-            return hop_here;
+        if name == to && goal((x, y)) {
+            return Some(hop_here);
         }
         let Some(map) = world.map(&name) else {
             continue;
@@ -539,7 +635,7 @@ pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
         // Walking within the map.
         let obstacles = blocked
             .entry(name.clone())
-            .or_insert_with(|| static_obstacles(map));
+            .or_insert_with(|| object_obstacles(map, gone));
         for dir in Direction::ALL {
             if let Some(s) = pokebot_world::path::step(map, (x, y), dir, obstacles) {
                 next.push(((name.clone(), s.to.0, s.to.1), None));

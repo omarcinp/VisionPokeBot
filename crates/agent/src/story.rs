@@ -18,7 +18,7 @@ use crate::bag::PocketAudit;
 use crate::battle::{self, BattleMemory, BattlePolicy};
 use crate::catch;
 use crate::learn::MoveLearning;
-use crate::nav::{Destination, NavStatus, Navigator};
+use crate::nav::{Destination, Gone, NavStatus, Navigator};
 use crate::new_game::{advance_or_wait, select};
 use crate::party::{self, Party};
 use crate::shop::{is_mart_menu, nearest_mart, Purchase};
@@ -228,6 +228,10 @@ pub struct StoryTask {
     buy_at: Option<(String, u32)>,
     /// The mart a StockUp asked the Buy it spliced to use.
     buy_mart: Option<String>,
+    /// The current Talk step's conversation gave us an item.
+    talk_gained_item: bool,
+    /// Objects taken in this run (item balls, fossils): gone from the map.
+    taken: Gone,
     /// A mandatory ball buy was tried in this milestone (never retried:
     /// with no money it would loop).
     mandatory_buy_tried: bool,
@@ -319,6 +323,8 @@ impl StoryTask {
             buy_at: None,
             buy_mart: None,
             mandatory_buy_tried: false,
+            talk_gained_item: false,
+            taken: Gone::new(),
             unread_since: None,
             battle_text_frame: None,
         }
@@ -354,6 +360,7 @@ impl StoryTask {
         self.talk = TalkPhase::Approach;
         self.saw_dialogue = false;
         self.answers_used = 0;
+        self.talk_gained_item = false;
         self.battle_seen = false;
         self.spin_at = None;
         self.heal.reset();
@@ -390,6 +397,7 @@ impl StoryTask {
         self.talk = TalkPhase::Approach;
         self.saw_dialogue = false;
         self.answers_used = 0;
+        self.talk_gained_item = false;
         self.spin_at = None;
         self.heal.reset();
         self.audit = None;
@@ -405,11 +413,12 @@ impl StoryTask {
             ));
         }
         let world = Arc::clone(&self.world);
-        let nav = self
-            .nav
-            .get_or_insert_with(|| Navigator::new(world, dest.clone()));
+        let nav = self.nav.get_or_insert_with(|| {
+            Navigator::new(world, dest.clone()).with_gone(self.taken.clone())
+        });
         if nav.destination != *dest {
-            *nav = Navigator::new(Arc::clone(&self.world), dest.clone());
+            *nav =
+                Navigator::new(Arc::clone(&self.world), dest.clone()).with_gone(self.taken.clone());
         }
         if nav.stalled() >= 6 {
             return NavStatusOrDecision::Decision(Decision::Fail(format!(
@@ -659,6 +668,13 @@ impl Task for StoryTask {
                     self.tracker
                         .observe_page(&d.lines, &data, self.battle_memory.last_slot);
                 self.heal.observe(&tracked);
+                if matches!(self.current(), Some(StoryStep::Talk { .. }))
+                    && tracked
+                        .iter()
+                        .any(|e| matches!(e, GameEvent::ItemsChanged { delta, .. } if *delta > 0))
+                {
+                    self.talk_gained_item = true;
+                }
                 ctx.events.extend(tracked);
                 // The executor doesn't show the task the frames while its A
                 // press is pending: a page advanced on its first ready frame
@@ -1213,6 +1229,12 @@ impl StoryTask {
                     if matches!(self.current(), Some(StoryStep::Heal { .. })) {
                         ctx.events.extend(self.heal.finish());
                     }
+                    // An item ball or fossil whose item we got is gone:
+                    // its tile is free (the Helix Fossil opens the way
+                    // north on MtMoon_B2F).
+                    if self.talk_gained_item && vanishes_when_taken(&self.world, map, object) {
+                        self.taken.insert((map.to_owned(), object));
+                    }
                     self.advance_step(ctx);
                 }
                 Decision::Wait("conversation ending".into())
@@ -1511,6 +1533,15 @@ pub fn to_mt_moon() -> Vec<Milestone> {
             },
         ],
     )]
+}
+
+/// Objects that disappear once their item is taken: item balls and fossils.
+fn vanishes_when_taken(world: &World, map: &str, object: u32) -> bool {
+    world
+        .map(map)
+        .and_then(|m| m.objects.iter().find(|o| o.local_id == object))
+        .and_then(|o| o.graphics.as_deref())
+        .is_some_and(|g| matches!(g, "OBJ_EVENT_GFX_ITEM_BALL" | "OBJ_EVENT_GFX_FOSSIL"))
 }
 
 /// Mt. Moon's trainers: all are planning targets (some can be walked past,
@@ -2453,6 +2484,69 @@ mod tests {
             task.battle_memory.disabled.as_deref(),
             Some("MOVE_VINE_WHIP")
         );
+    }
+
+    /// Live: CrossMtMoon's way out after the Helix Fossil ran into the
+    /// fossils' tiles (static objects), so the router fell back to a ladder
+    /// into a part of MtMoon_B1F without the exit ("no path to warp").
+    #[test]
+    fn a_taken_fossil_no_longer_blocks_the_way() {
+        use pokebot_state::{DialogueKind, DialogueObservation, Region};
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut task = one_milestone(
+            world,
+            data,
+            vec![
+                StoryStep::Talk {
+                    map: "MtMoon_B2F".into(),
+                    object: 2,
+                    answers: vec![Answer::Yes],
+                },
+                StoryStep::Go(Destination::Warp {
+                    map: "MtMoon_B1F".into(),
+                    warp: 7,
+                }),
+            ],
+        );
+        let state = pokebot_state::GameState::default();
+        task.talk = TalkPhase::Talking;
+        let obtained = |f| {
+            let mut o = located(f, "MtMoon_B2F", 14, 8);
+            o.player = None;
+            o.screen.value = ScreenState::Dialogue;
+            o.dialogue = Some(DialogueObservation {
+                kind: DialogueKind::MessageBox,
+                region: Region::new(8, 119, 224, 34),
+                waiting_for_input: true,
+                arrow: Some(Region::new(220, 150, 8, 8)),
+                stable_frames: 10,
+                text_cells: vec![1; 4],
+                lines: vec!["RED obtained".into(), "the HELIX FOSSIL!".into()],
+                help: false,
+            });
+            o
+        };
+        tick_events(&mut task, &obtained(1), &state);
+        let (label, events) = tick_events(&mut task, &obtained(2), &state);
+        assert_eq!(label, "advance text");
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::ItemsChanged { item, delta: 1, .. } if item == "ITEM_HELIX_FOSSIL")),
+            "{events:?}"
+        );
+        let mut f = 3;
+        while task.step == 0 {
+            tick(&mut task, &located(f, "MtMoon_B2F", 14, 8), &state);
+            f += 1;
+            assert!(f < 400, "the talk never ended");
+        }
+        assert!(task.taken.contains(&("MtMoon_B2F".to_owned(), 2)));
+        // North through the fossil's tile, toward the ladder at (5, 10)
+        // that leads to B1F's exit part.
+        let label = tick(&mut task, &located(f, "MtMoon_B2F", 14, 8), &state);
+        assert!(label.contains("Up"), "{label}");
+        assert!(label.contains("(5, 10)"), "{label}");
     }
 
     #[test]
