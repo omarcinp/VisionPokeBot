@@ -9,5 +9,5 @@ pub mod prepare;
 
 pub use evaluate::{battle_vs_trainer, matchup, BattleEstimate, Combatant};
 pub use prepare::{
-    plan_preparation, plan_training, Area, PartyMember, PlanStep, PreparationPlan, Request,
+    plan_preparation, plan_training, Area, PartyMember, PlanStep, PreparationPlan, Request, OUR_IV,
 };

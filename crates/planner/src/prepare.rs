@@ -26,7 +26,8 @@ const STEP_SECONDS: f64 = 16.0 / 59.7275;
 const BATTLE_OVERHEAD_S: f64 = 18.0;
 const TURN_S: f64 = 7.0;
 /// IVs assumed for our own Pokémon (unknown; a modest value is conservative).
-const OUR_IV: u32 = 10;
+/// Everything that estimates our side's P(win) uses this one value.
+pub const OUR_IV: u32 = 10;
 /// Wild Pokémon average IV.
 const WILD_IV: u32 = 15;
 /// Levels above the current one considered per member.

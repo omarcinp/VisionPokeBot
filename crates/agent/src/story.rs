@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_planner::{plan_preparation, plan_training, Area, PartyMember, PlanStep, Request};
+use pokebot_planner::{
+    plan_preparation, plan_training, Area, PartyMember, PlanStep, Request, OUR_IV,
+};
 use pokebot_state::{GameEvent, Observation, Pocket, ScreenState, Status};
 use pokebot_world::behavior::TALL_GRASS;
 use pokebot_world::World;
@@ -43,6 +45,10 @@ const TRIGGER_TIMEOUT_FRAMES: u32 = 600;
 /// Training heals when wild battles have fewer attack PP than this to spend
 /// (a few battles' worth).
 const HEAL_BELOW_PP: u32 = 6;
+/// Status and pre-battle heals per story step: a lead that keeps getting
+/// worn down (a wild battle after each heal) must not walk to the Pokémon
+/// Center forever.
+const MAX_HEALS_PER_STEP: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Answer {
@@ -143,6 +149,8 @@ impl Milestone {
 }
 
 type Tile = (i32, i32);
+/// P(win) per target trainer.
+type PWin = Vec<(String, f64)>;
 
 /// Frames a page's text must stay unchanged to count as fully printed.
 const PAGE_PRINTED_FRAMES: u32 = 8;
@@ -237,6 +245,12 @@ pub struct StoryTask {
     /// The planned battle's "not ready even healed" warning was given in
     /// this step.
     readiness_warned: bool,
+    /// Status and pre-battle heals spliced before the current story step
+    /// (capped at [`MAX_HEALS_PER_STEP`]; the Heal steps themselves don't
+    /// reset it).
+    heals_this_step: u32,
+    /// The "heal cap reached" warning was given for the current story step.
+    heal_cap_warned: bool,
     /// Frame the Battle step first stood on its trigger (for its timeout).
     trigger_arrived_at: Option<u64>,
     policy: BattlePolicy,
@@ -349,6 +363,8 @@ impl StoryTask {
             lead_status: None,
             just_healed: false,
             readiness_warned: false,
+            heals_this_step: 0,
+            heal_cap_warned: false,
             trigger_arrived_at: None,
             policy: BattlePolicy::default(),
             battle_memory: BattleMemory::default(),
@@ -396,6 +412,10 @@ impl StoryTask {
 
     fn advance_step(&mut self, ctx: &mut TaskContext<'_>) {
         self.just_healed = matches!(self.current(), Some(StoryStep::Heal { .. }));
+        if !self.just_healed {
+            self.heals_this_step = 0;
+            self.heal_cap_warned = false;
+        }
         self.readiness_warned = false;
         self.trigger_arrived_at = None;
         self.step += 1;
@@ -425,6 +445,10 @@ impl StoryTask {
 
     /// Replaces the current step with `steps` (e.g. a plan, or heal + resume).
     fn splice(&mut self, steps: Vec<StoryStep>, keep_current: bool) {
+        if !keep_current {
+            self.heals_this_step = 0;
+            self.heal_cap_warned = false;
+        }
         let list = &mut self.milestones[self.milestone].steps;
         let at = if keep_current {
             self.step
@@ -522,17 +546,24 @@ impl StoryTask {
         spin_tile(&grass, m.width, m.height, near)
     }
 
+    /// The steps that make the lead ready for `targets`, and the lead-only
+    /// P(win) per target the chosen plan reaches.
+    ///
+    /// Only the lead fights (switching is out of scope: "change POKéMON?"
+    /// is answered NO and a lead faint fails the story), so readiness is
+    /// planned for the lead alone: caught members never count toward P(win).
     fn plan(
         &self,
         targets: &[String],
         areas: &[String],
         confidence: f64,
-    ) -> Result<Vec<StoryStep>, String> {
+    ) -> Result<(Vec<StoryStep>, PWin), String> {
         let data = self.data.as_ref().ok_or("planning needs game data")?;
         let party: Vec<PartyMember> = self
             .party
             .members
             .iter()
+            .take(1)
             .map(|m| PartyMember {
                 species: m.species.clone(),
                 level: m.level,
@@ -571,11 +602,7 @@ impl StoryTask {
         // train: accepted when the lead alone (no catch) reaches the
         // confidence, and trained to the level that plan needs.
         let lead_only = || {
-            let alone = Request {
-                party: request.party[..1].to_vec(),
-                ..request.clone()
-            };
-            let plans = plan_training(&alone, 1);
+            let plans = plan_training(&request, 1);
             let plan = plans
                 .first()
                 .ok_or("the plan catches; no lead-only plan found")?;
@@ -590,8 +617,40 @@ impl StoryTask {
                 .first()
                 .map_or(self.party.members[0].level, |(_, level, _)| *level))
         };
-        plan_to_steps(&plan.steps, lead, lead_only)
+        let steps = plan_to_steps(&plan.steps, lead, lead_only)?;
+        Ok((steps, plan.confidence.clone()))
     }
+}
+
+/// The lead's P(win) alone against `trainer` (the planner's model, with
+/// [`OUR_IV`]): at its current HP with only moves that have PP left, or
+/// `healed` (full HP, every move).
+fn lead_p_win(data: &GameData, lead: &party::Member, trainer: &str, healed: bool) -> f64 {
+    let moves: Vec<String> = if healed {
+        lead.moves.clone()
+    } else {
+        lead.moves
+            .iter()
+            .filter(|m| lead.pp_left(data, m) > 0)
+            .cloned()
+            .collect()
+    };
+    let hp = lead.hp.filter(|_| !healed).map(|(hp, _)| u32::from(hp));
+    pokebot_planner::Combatant::new(data, &lead.species, lead.level, moves, OUR_IV)
+        .and_then(|mut us| {
+            us.hp = hp.map_or(us.max_hp(), |hp| hp.min(us.max_hp()));
+            pokebot_planner::evaluate::battle_vs_trainer(data, std::slice::from_ref(&us), trainer)
+        })
+        .map_or(0.0, |e| e.p_win)
+}
+
+/// "P(win) vs T 0.953, …" for a plan's per-target confidence.
+fn format_p_win(p_win: &[(String, f64)]) -> String {
+    p_win
+        .iter()
+        .map(|(t, p)| format!("P(win) vs {t} {p:.3}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The planner's steps as story steps. Only the lead trains (switching is
@@ -990,13 +1049,26 @@ impl Task for StoryTask {
                 && !self.saw_dialogue;
         if walking && !self.just_healed {
             if let Some(status) = self.lead_status_major() {
-                ctx.events.push(GameEvent::GoalProgress {
-                    goal: "Story".into(),
-                    phase: "Heal".into(),
-                    detail: format!("the lead is {status:?}: healing"),
-                });
-                self.splice(vec![StoryStep::Heal { center: None }], true);
-                return Decision::Wait("healing a status condition".into());
+                if self.heals_this_step < MAX_HEALS_PER_STEP {
+                    self.heals_this_step += 1;
+                    ctx.events.push(GameEvent::GoalProgress {
+                        goal: "Story".into(),
+                        phase: "Heal".into(),
+                        detail: format!("the lead is {status:?}: healing"),
+                    });
+                    self.splice(vec![StoryStep::Heal { center: None }], true);
+                    return Decision::Wait("healing a status condition".into());
+                }
+                if !std::mem::replace(&mut self.heal_cap_warned, true) {
+                    ctx.events.push(GameEvent::GoalProgress {
+                        goal: "Story".into(),
+                        phase: "Warning".into(),
+                        detail: format!(
+                            "the lead is {status:?}, but {MAX_HEALS_PER_STEP} heals were \
+                             already made in this step: going on without healing"
+                        ),
+                    });
+                }
             }
         }
 
@@ -1047,13 +1119,13 @@ impl Task for StoryTask {
                 areas,
                 confidence,
             } => match self.plan(&targets, &areas, confidence) {
-                Ok(steps) => {
+                Ok((steps, p_win)) => {
                     self.upcoming = targets.clone();
                     ctx.events.push(GameEvent::GoalProgress {
                         goal: "Story".into(),
                         phase: "Plan".into(),
                         detail: if steps.is_empty() {
-                            "already ready".into()
+                            format!("already ready (lead alone): {}", format_p_win(&p_win))
                         } else {
                             format!("{steps:?}")
                         },
@@ -1079,20 +1151,11 @@ impl Task for StoryTask {
                     // not the trigger's battle.
                     self.battle_seen = false;
                 }
-                if self.battle_seen {
-                    self.trigger_arrived_at = None;
-                }
                 // The plan vouched for this battle with a healed party:
                 // don't walk into it (or the trainers on the way) weakened.
                 if !loss_ok {
-                    if let Some(reason) = self.unready_for(trainer.as_deref(), ctx.events) {
-                        ctx.events.push(GameEvent::GoalProgress {
-                            goal: "Story".into(),
-                            phase: "Heal".into(),
-                            detail: format!("healing before the battle: {reason}"),
-                        });
-                        self.splice(vec![StoryStep::Heal { center: None }], true);
-                        return Decision::Wait("healing before the battle".into());
+                    if let Some(d) = self.heal_before(trainer.as_deref(), "battle", ctx.events) {
+                        return d;
                     }
                 }
                 match self.navigate(&trigger, o) {
@@ -1327,14 +1390,8 @@ impl StoryTask {
                         .and_then(|d| d.map_trainers.get(map))
                         .and_then(|list| list.iter().find(|t| t.local_id == object))
                         .map(|t| t.trainer.clone());
-                    if let Some(reason) = self.unready_for(trainer.as_deref(), ctx.events) {
-                        ctx.events.push(GameEvent::GoalProgress {
-                            goal: "Story".into(),
-                            phase: "Heal".into(),
-                            detail: format!("healing before the challenge: {reason}"),
-                        });
-                        self.splice(vec![StoryStep::Heal { center: None }], true);
-                        return Decision::Wait("healing before the battle".into());
+                    if let Some(d) = self.heal_before(trainer.as_deref(), "challenge", ctx.events) {
+                        return d;
                     }
                 }
                 let Some((x, y)) = self
@@ -1447,29 +1504,11 @@ impl StoryTask {
             return (u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
                 .then(|| format!("{} at {hp}/{max} HP", lead.display_name()));
         };
-        let p_win = |moves: Vec<String>, hp: Option<u32>| {
-            pokebot_planner::Combatant::new(&data, &lead.species, lead.level, moves, 10)
-                .and_then(|mut us| {
-                    us.hp = hp.map_or(us.max_hp(), |hp| hp.min(us.max_hp()));
-                    pokebot_planner::evaluate::battle_vs_trainer(
-                        &data,
-                        std::slice::from_ref(&us),
-                        trainer,
-                    )
-                })
-                .map_or(0.0, |e| e.p_win)
-        };
-        let with_pp: Vec<String> = lead
-            .moves
-            .iter()
-            .filter(|m| lead.pp_left(&data, m) > 0)
-            .cloned()
-            .collect();
-        let p_now = p_win(with_pp, Some(u32::from(hp)));
+        let p_now = lead_p_win(&data, &lead, trainer, false);
         if p_now >= BATTLE_CONFIDENCE {
             return None;
         }
-        let p_full = p_win(lead.moves.clone(), None);
+        let p_full = lead_p_win(&data, &lead, trainer, true);
         if p_full < BATTLE_CONFIDENCE {
             if !self.readiness_warned {
                 self.readiness_warned = true;
@@ -1487,6 +1526,57 @@ impl StoryTask {
         Some(format!(
             "P(win) {p_now:.3} vs {trainer} at {hp}/{max} HP, {p_full:.3} healed"
         ))
+    }
+
+    /// Before a planned battle against `trainer`: heal when
+    /// [`Self::unready_for`] says so, at most [`MAX_HEALS_PER_STEP`] times
+    /// per story step. Past the cap the lead fights when its P(win) alone
+    /// now is at least [`BATTLE_CONFIDENCE`] (a status the model can't
+    /// weigh, say), and otherwise the step fails. `None`: go on.
+    fn heal_before(
+        &mut self,
+        trainer: Option<&str>,
+        what: &str,
+        events: &mut Vec<GameEvent>,
+    ) -> Option<Decision> {
+        let reason = self.unready_for(trainer, events)?;
+        if self.heals_this_step < MAX_HEALS_PER_STEP {
+            self.heals_this_step += 1;
+            events.push(GameEvent::GoalProgress {
+                goal: "Story".into(),
+                phase: "Heal".into(),
+                detail: format!("healing before the {what}: {reason}"),
+            });
+            self.splice(vec![StoryStep::Heal { center: None }], true);
+            return Some(Decision::Wait("healing before the battle".into()));
+        }
+        let p_now = match (trainer, self.data.clone(), self.party.lead()) {
+            (Some(trainer), Some(data), Some(lead)) => {
+                Some(lead_p_win(&data, lead, trainer, false))
+            }
+            _ => None,
+        };
+        match p_now {
+            Some(p) if p >= BATTLE_CONFIDENCE => {
+                if !std::mem::replace(&mut self.heal_cap_warned, true) {
+                    events.push(GameEvent::GoalProgress {
+                        goal: "Story".into(),
+                        phase: "Warning".into(),
+                        detail: format!(
+                            "{MAX_HEALS_PER_STEP} heals already made in this step ({reason}); \
+                             the lead alone has P(win) {p:.3} now: fighting"
+                        ),
+                    });
+                }
+                None
+            }
+            p => Some(Decision::Fail(format!(
+                "not ready for the {what} after {MAX_HEALS_PER_STEP} heals in this step: \
+                 {reason}{}",
+                p.map(|p| format!(" (lead-only P(win) now {p:.3})"))
+                    .unwrap_or_default()
+            ))),
+        }
     }
 
     /// Whether the last battle is the trigger's: it began with the player on
@@ -2071,6 +2161,80 @@ mod tests {
         assert!(err.contains("only reaches 80%"), "{err}");
     }
 
+    const MIGUEL: &str = "TRAINER_SUPER_NERD_MIGUEL";
+
+    /// Review (critical): the planner combined P(win) over the whole party,
+    /// so strong catches made a weak lead "already ready" — but only the
+    /// lead fights ("change POKéMON?" is NO; a lead faint fails the story).
+    #[test]
+    fn a_strong_party_does_not_make_a_weak_lead_ready() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        // IVYSAUR Lv18 with its default moves stays below 0.9 vs Miguel even
+        // healed; four Lv50 PIDGEOT behind it win for sure.
+        let lead = party::Member::new(&data, "SPECIES_IVYSAUR", 18);
+        let mut members = vec![lead.clone()];
+        for slot in 1..5 {
+            members.push(party::Member {
+                slot,
+                ..party::Member::new(&data, "SPECIES_PIDGEOT", 50)
+            });
+        }
+        let whole: Vec<_> = members
+            .iter()
+            .filter_map(|m| {
+                pokebot_planner::Combatant::new(&data, &m.species, m.level, m.moves.clone(), OUR_IV)
+            })
+            .collect();
+        let p_party = pokebot_planner::battle_vs_trainer(&data, &whole, MIGUEL).map(|e| e.p_win);
+        assert!(p_party.is_some_and(|p| p >= 0.9), "{p_party:?}");
+        assert!(lead_p_win(&data, &lead, MIGUEL, true) < 0.9);
+        let mut task = one_milestone(world, data, Vec::new());
+        task.party = Party { members };
+        match task.plan(&[MIGUEL.into()], &["MtMoon_1F".into()], 0.9) {
+            Ok((steps, p_win)) => {
+                assert!(!steps.is_empty(), "already ready with {p_win:?}");
+                assert!(steps
+                    .iter()
+                    .all(|s| matches!(s, StoryStep::Train { level, .. } if *level > 18)));
+            }
+            Err(e) => assert!(!e.is_empty()),
+        }
+    }
+
+    /// "already ready" says the lead-only P(win) per target.
+    #[test]
+    fn already_ready_logs_the_lead_only_p_win() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let state = party_state(&data, "SPECIES_IVYSAUR", 40);
+        let mut task = one_milestone(
+            world,
+            data,
+            vec![
+                StoryStep::Prepare {
+                    targets: vec![MIGUEL.into()],
+                    areas: vec!["MtMoon_1F".into()],
+                    confidence: 0.9,
+                },
+                StoryStep::Settle { frames: 100_000 },
+            ],
+        );
+        let (label, events) = tick_events(&mut task, &located(1, "MtMoon_1F", 18, 36), &state);
+        assert_eq!(label, "wait: planned");
+        let detail = events.iter().find_map(|e| match e {
+            GameEvent::GoalProgress { phase, detail, .. } if phase == "Plan" => Some(detail),
+            _ => None,
+        });
+        let detail = detail.expect("a Plan event");
+        assert!(
+            detail.starts_with("already ready (lead alone): P(win) vs TRAINER_SUPER_NERD_MIGUEL "),
+            "{detail}"
+        );
+    }
+
     #[test]
     fn training_another_member_still_fails() {
         let steps = plan_to_steps(
@@ -2592,6 +2756,24 @@ mod tests {
         o
     }
 
+    /// `species` at `level` as the only party member (full HP).
+    fn party_state(data: &GameData, species: &str, level: u8) -> pokebot_state::GameState {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let mut mon = party::starter_mon(data, species, level);
+        let max = mon.hp.value.map_or(100, |(_, max)| max);
+        mon.hp = pokebot_state::Knowledge::observed((max, max), 1);
+        DefaultReducer.reduce(
+            &with_balls(10),
+            &[EventRecord {
+                frame_id: 1,
+                event: GameEvent::PartyMonDerived {
+                    slot: 0,
+                    mon: Box::new(mon),
+                },
+            }],
+        )
+    }
+
     fn battle_task() -> Option<(StoryTask, pokebot_state::GameState)> {
         let (world, data) = story_fixture()?;
         let state = catch_state(&data);
@@ -3062,6 +3244,145 @@ mod tests {
         );
         assert!(matches!(task.current(), Some(StoryStep::Battle { .. })));
         assert_eq!(warnings, 1);
+    }
+
+    /// Ends the current (Heal) step as the nurse would, then forgets the
+    /// heal as a wild battle on the way back would.
+    fn heal_done_then_wild_battle(task: &mut StoryTask, state: &pokebot_state::GameState) {
+        assert_eq!(task.current(), Some(&StoryStep::Heal { center: None }));
+        let mut events = Vec::new();
+        task.advance_step(&mut TaskContext {
+            observation: &located(1, "MtMoon_B2F", 20, 20),
+            state,
+            events: &mut events,
+        });
+        task.just_healed = false;
+    }
+
+    /// Review: nothing capped the heal round trips before a battle. After
+    /// three in one step, a lead still below 0.9 alone fails the step.
+    #[test]
+    fn a_fourth_pre_battle_heal_fails_the_step() {
+        let Some((mut task, mut state)) = miguel_task() else {
+            return;
+        };
+        live_lead(&mut state, 20);
+        for f in 1..=3 {
+            let label = tick(&mut task, &located(f, "MtMoon_B2F", 20, 20), &state);
+            assert_eq!(label, "wait: healing before the battle", "heal {f}");
+            heal_done_then_wild_battle(&mut task, &state);
+        }
+        let label = tick(&mut task, &located(10, "MtMoon_B2F", 20, 20), &state);
+        assert!(
+            label.starts_with("fail: not ready for the battle after 3 heals in this step"),
+            "{label}"
+        );
+        assert!(label.contains("lead-only P(win) now"), "{label}");
+    }
+
+    /// Past the cap, a lead that is ready alone (here: paralyzed, which the
+    /// model doesn't weigh, but at full HP) fights, with one warning.
+    #[test]
+    fn past_the_heal_cap_a_ready_lead_fights() {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let Some((mut task, mut state)) = miguel_task() else {
+            return;
+        };
+        live_lead(&mut state, 60);
+        let state = DefaultReducer.reduce(
+            &state,
+            &[EventRecord {
+                frame_id: 2,
+                event: GameEvent::PartyObserved {
+                    slot: 0,
+                    species: None,
+                    nickname: None,
+                    level: None,
+                    hp: None,
+                    status: Some(Status::Paralyzed),
+                    held_item: None,
+                },
+            }],
+        );
+        for f in 1..=3 {
+            let label = tick(&mut task, &located(f, "MtMoon_B2F", 20, 20), &state);
+            assert!(label.starts_with("wait: healing"), "heal {f}: {label}");
+            heal_done_then_wild_battle(&mut task, &state);
+        }
+        let mut warnings = 0;
+        for f in 10..20 {
+            let (label, events) = tick_events(&mut task, &located(f, "MtMoon_B2F", 20, 20), &state);
+            assert!(!label.contains("heal"), "{label}");
+            assert!(!label.starts_with("fail"), "{label}");
+            warnings += events
+                .iter()
+                .filter(
+                    |e| matches!(e, GameEvent::GoalProgress { phase, .. } if phase == "Warning"),
+                )
+                .count();
+        }
+        assert!(matches!(task.current(), Some(StoryStep::Battle { .. })));
+        assert_eq!(task.heals_this_step, 3);
+        assert!(warnings >= 1, "no warning past the cap");
+    }
+
+    /// A status heal past the cap goes on without healing, with a warning.
+    #[test]
+    fn past_the_heal_cap_a_status_is_not_healed_again() {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut state = catch_state(&data);
+        live_lead(&mut state, 60);
+        let state = DefaultReducer.reduce(
+            &state,
+            &[EventRecord {
+                frame_id: 2,
+                event: GameEvent::PartyObserved {
+                    slot: 0,
+                    species: None,
+                    nickname: None,
+                    level: None,
+                    hp: None,
+                    status: Some(Status::Paralyzed),
+                    held_item: None,
+                },
+            }],
+        );
+        let mut task = one_milestone(
+            world,
+            data,
+            vec![StoryStep::Go(Destination::Tile {
+                map: "MtMoon_1F".into(),
+                x: 18,
+                y: 30,
+            })],
+        );
+        for f in 1..=3 {
+            let label = tick(&mut task, &located(f, "MtMoon_1F", 18, 36), &state);
+            assert_eq!(label, "wait: healing a status condition", "heal {f}");
+            let mut events = Vec::new();
+            task.advance_step(&mut TaskContext {
+                observation: &located(f, "MtMoon_1F", 18, 36),
+                state: &state,
+                events: &mut events,
+            });
+            task.just_healed = false;
+        }
+        let (label, events) = tick_events(&mut task, &located(10, "MtMoon_1F", 18, 36), &state);
+        assert_ne!(label, "wait: healing a status condition");
+        assert!(matches!(task.current(), Some(StoryStep::Go(_))));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::GoalProgress { phase, detail, .. }
+                if phase == "Warning" && detail.contains("going on without healing")
+        )));
+        // The warning is given once.
+        let (_, events) = tick_events(&mut task, &located(11, "MtMoon_1F", 18, 36), &state);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::GoalProgress { phase, .. } if phase == "Warning")));
     }
 
     /// Review: the trigger timeout counted quiet frames, so after a long
