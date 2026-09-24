@@ -162,4 +162,10 @@ existing detectors. Emits `FlagObserved(FLAG_BADGE0N_GET)`,
 ---
 
 ## Phase 3: campaign scheduler, NPC detector, Puzzle tool,
-party/PC tools, Archipelago oracle test — separate plan.
+party/PC tools, Archipelago oracle test, and **Stream B3 — per-Pokémon
+knowledge** (spec §3.4–§3.6): the transient/queryable source catalogue
+with `tracking_drift` records, heal/faint/level-up derivations, the
+entry audit of a new party member's summary pages, nicknames as `MonId`
+on catch (naming keyboard), fingerprints for unnamed Pokémon, IV
+intervals from inverted stat observations and tracked EVs, and the
+evaluator's worst/expected case from the intervals — separate plan.

@@ -276,6 +276,124 @@ each step a tool with its own expectations:
 Every event since then updates the belief, and every in-game save writes
 `state.json` as today.
 
+### 3.4 Where facts come from: transient and queryable sources
+
+Every fact the bot needs has two kinds of source, and the belief keeps
+track of both:
+
+- **Transient** (ephemeral): the fact is shown once, at the moment it
+  changes, and never again. Examples: "RED received the BOULDER BADGE!",
+  "You got ¥N for winning!", "Obtained TM39!", the level-up panel with the
+  old → new stats, "X learned M!", the nurse's "restored your POKéMON".
+  Missing the moment means the fact is lost until a queryable source is
+  consulted. Transient sources are free (the bot is already reading the
+  screen), so the perception pass reads every one of them on every frame,
+  whether or not the current tool expects them (`agent::track`, `learn`,
+  the dialogue tool's effect translation).
+- **Queryable**: a screen the bot can open at any time from the
+  overworld, at a cost, that shows the fact exactly. These are the probes
+  (§4.3, §7.5). The table below is the catalogue the planner and the audit
+  rule (§3.5) draw from:
+
+| Fact | Transient sources (free, once) | Queryable sources (cost) |
+|---|---|---|
+| Badges | "received the … BADGE" line; the leader's script path | Trainer Card (8 s) |
+| Pokédex counts, caught/seen per species | "Gotcha!", the registration page, wild HUD caught mark | Trainer Card: caught total (8 s); Pokédex list (60 s full, ~15 s for a range) |
+| Money | "got ¥N", purchase/sale totals, "paid ¥N" | Trainer Card, mart window, PC sale screen (8–10 s) |
+| Bag contents | "Obtained X", "used X", balls thrown, purchases | Bag pockets (10 s each) |
+| Party: species, level, HP, status | battle HUD, level-up panel, faint text | Party menu (6 s); each summary page (≈5 s per Pokémon) |
+| Party: moves, PP | move menu `PP a/b`, learn/forget pages | Summary moves page |
+| Party: nature, ability, met level/place, OT, ID No., stats | level-up panel (stats only) | Summary info/stats pages |
+| PC boxes | "transferred to BOX N" | PC box view (per box) |
+| Story flags | dialogue branches (recognised text), NPC present/absent, doors that open | none directly; only through their consequences (a gym guide's line, the Fly map, a blocked path) |
+| Position | localizer, every frame | Town Map |
+
+A fact that has only transient sources (most story flags) is planned with
+the `unless` mechanism (§4.3) rather than probed; a fact with a queryable
+source is probed when the expected cost of being wrong exceeds the probe.
+
+### 3.5 Update rules
+
+The reducer applies these uniformly, so the same fact can be fed from any
+source without the sources knowing about each other:
+
+1. **Absolute observations override.** A queryable screen, or a transient
+   line that states a value ("MONEY ¥3120", "HP 27/38"), sets the fact
+   `Observed` at that frame, replacing whatever was tracked or assumed.
+2. **Deltas adjust.** A transient line that states a change ("got ¥784",
+   "used 1 POKé BALL") adds to or subtracts from the current value and
+   marks it `Tracked`; applied to an `Unknown` value it leaves it
+   `Unknown` (no baseline to adjust).
+3. **Resets derive.** Events with a known outcome set derived values: a
+   heal makes every party member's HP = max HP and PP = max PP
+   (`Derived` from the species' data and the known PP Ups); a faint sets
+   HP = 0; a level-up recomputes max HP from the stat formula when the
+   panel wasn't read.
+4. **Consistency check.** When an absolute observation arrives for a fact
+   that was `Tracked`, the two are compared. Equal → the tracking model
+   is confirmed (logged at debug). Different → the observation wins, and a
+   `tracking_drift { fact, tracked, observed, since_frame }` record is
+   written to the session, because a drift means a transient source was
+   missed or misread; those records are the to-do list for the readers.
+5. **Audit on entry.** When a new individual enters the party (catch, gift,
+   withdrawal from the PC, hatch), an audit of its summary pages is
+   scheduled at the next quiet overworld moment (≈15 s): nature, ability,
+   stats, moves/PP, met level and place, OT and ID No. Until it runs, the
+   individual's stats are `Derived` ranges (§3.6). The same audit runs for
+   every party member once at bootstrap if the checkpoint has no observed
+   stats for it.
+
+### 3.6 Per-Pokémon knowledge: identity, stats, IVs and EVs
+
+**Identity.** Several Pokémon of one species must never be confused. The
+bot cannot see the personality value, so every individual gets a stable
+`MonId` and a **fingerprint**:
+
+- **Nickname as the identifier (preferred).** On every catch the bot
+  answers YES to the nickname prompt and types a unique short code with
+  the naming keyboard (already closed-loop): the species' first three
+  letters plus a two-digit counter (`RAT01`, `PIK02`; `RAT` + `01`… stays
+  under the 10-character limit and unambiguous in the HUD font). This
+  replaces the "no nickname" answer in the catching design. The code is
+  the `MonId`; it is read back from the party menu, the HUD and the PC,
+  which makes identity a plain observation.
+- **Fingerprint (fallback)** for Pokémon the bot didn't name (the starter,
+  gifts, trades, Pokémon from an older save): `(species, gender, met
+  level, met place, OT name, ID No.)` from the summary page, plus the
+  observed stats at a known level. Two individuals with an identical
+  fingerprint are told apart by their party/box slot until one of them is
+  nicknamed at the name rater (Lavender Town), which the audit schedules
+  when it finds a collision.
+
+`GameState.party[i]` and every box slot hold a `MonId`; events about a
+Pokémon (`MoveUsed`, `Evolved`, `PartyMonDerived`, …) carry the `MonId`,
+not a slot index, so a party reorder or a PC round trip never mislabels
+knowledge.
+
+**Stats, IVs and EVs.** Per individual, the belief keeps for each stat an
+interval `[lo, hi]` for the IV (0–31) and a tracked EV total (0–255 each,
+510 overall), with provenance:
+
+- Whenever a stat is observed at a known level with a known nature
+  (summary page, or the level-up panel's new values), the Gen III stat
+  formula (`gamedata::mechanics`) is inverted: every IV value whose
+  formula result matches the observed stat, given the current EV
+  estimate, stays in the interval; the rest are cut. Two or three
+  level-ups usually pin each IV to 1–3 values.
+- EVs are **tracked** from battles: each defeated species adds its EV
+  yield (from the species table) to the individual that took part; the
+  interval inversion above uses the EV estimate, and a level-up panel that
+  contradicts every IV in the interval means EVs were missed, so the
+  interval is widened again and a `tracking_drift` recorded.
+- Vitamins and the EV-reducing berries adjust the tracked EVs like any
+  other delta.
+
+The evaluator (`planner::evaluate`) takes the intervals: the worst case
+(lowest IVs) for the "no Pokémon may faint" rule and the expected case for
+readiness planning. Until an individual has any observation, the interval
+is the full range and the evaluator is pessimistic, which is why the
+entry audit (§3.5.5) is worth its 15 s.
+
 ## 4. Goal planner (`crates/planner::goals`)
 
 ### 4.1 Vocabulary
