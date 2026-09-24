@@ -32,7 +32,8 @@ const SETTLE_FRAMES: u32 = 90;
 /// A battle that starts this soon after dialogue is a trainer battle (the
 /// trainer talks first); wild battles start without any.
 const TRAINER_DIALOGUE_WINDOW: u64 = 600;
-/// Go heal when the lead's HP drops below this share (per mille) while training.
+/// Go heal when the lead's HP drops below this share (per mille) while
+/// training or on the way to a planned battle.
 const HEAL_BELOW: u32 = 500;
 /// Training heals when wild battles have fewer attack PP than this to spend
 /// (a few battles' worth).
@@ -204,6 +205,12 @@ pub struct StoryTask {
     quiet_frames: u32,
     announced: bool,
     battle_seen: bool,
+    /// Where the player last stood outside battle, and where the current
+    /// (or last) battle began: a Battle step's trigger battle begins on a
+    /// trigger tile; battles elsewhere (wild, trainers who spot us) don't
+    /// count as it.
+    last_pose: Option<pokebot_state::PlayerPose>,
+    battle_start_pose: Option<pokebot_state::PlayerPose>,
     policy: BattlePolicy,
     battle_memory: BattleMemory,
     /// Inside a battle right now (ended once the overworld is seen again).
@@ -284,6 +291,7 @@ impl StoryTask {
         }
         self.in_battle = true;
         self.battle_seen = true;
+        self.battle_start_pose = self.last_pose.clone();
         let trainer = self
             .last_dialogue_frame
             .is_some_and(|f| o.frame_id.saturating_sub(f) < TRAINER_DIALOGUE_WINDOW);
@@ -309,6 +317,8 @@ impl StoryTask {
             quiet_frames: SETTLE_FRAMES,
             announced: false,
             battle_seen: false,
+            last_pose: None,
+            battle_start_pose: None,
             policy: BattlePolicy::default(),
             battle_memory: BattleMemory::default(),
             in_battle: false,
@@ -628,6 +638,9 @@ impl Task for StoryTask {
     fn next(&mut self, ctx: &mut TaskContext<'_>) -> Decision {
         self.party = Party::from_state(ctx.state);
         let o = ctx.observation;
+        if let (Some(p), None) = (&o.player, &o.battle) {
+            self.last_pose = Some(p.pose.clone());
+        }
         let Some(milestone) = self.milestones.get(self.milestone) else {
             let names: Vec<&str> = self.milestones.iter().map(|m| m.name.as_str()).collect();
             return Decision::Done(format!("completed {}", names.join(", ")));
@@ -975,12 +988,23 @@ impl Task for StoryTask {
                 }
                 Err(e) => Decision::Fail(format!("planning failed: {e}")),
             },
-            StoryStep::Battle { trigger, .. } => {
+            StoryStep::Battle { trigger, loss_ok } => {
                 if self.battle_seen {
-                    if !self.in_battle && self.quiet_frames >= SETTLE_FRAMES {
-                        self.advance_step(ctx);
+                    if self.in_battle || self.battle_began_on_trigger(&trigger) {
+                        if !self.in_battle && self.quiet_frames >= SETTLE_FRAMES {
+                            self.advance_step(ctx);
+                        }
+                        return Decision::Wait("battle over; settling".into());
                     }
-                    return Decision::Wait("battle over; settling".into());
+                    // A wild battle or a trainer who spotted us on the way:
+                    // not the trigger's battle.
+                    self.battle_seen = false;
+                }
+                // The plan vouched for this battle with a healed party:
+                // don't walk into it (or the trainers on the way) weakened.
+                if !loss_ok && self.lead_needs_heal() {
+                    self.splice(vec![StoryStep::Heal { center: None }], true);
+                    return Decision::Wait("healing before the battle".into());
                 }
                 match self.navigate(&trigger, o) {
                     NavStatusOrDecision::Decision(d) => d,
@@ -1253,6 +1277,34 @@ impl StoryTask {
         }
     }
 
+    /// The lead's HP is below [`HEAL_BELOW`] (knowledge from the last
+    /// battle), or it has too few attack PP left for wild battles.
+    fn lead_needs_heal(&self) -> bool {
+        let Some(lead) = self.party.lead() else {
+            return false;
+        };
+        let out_of_pp = self.data.as_ref().is_some_and(|data| {
+            lead.wild_attack_pp(data, self.policy.wild_pp_reserve) < HEAL_BELOW_PP
+        });
+        out_of_pp
+            || lead
+                .hp
+                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
+    }
+
+    /// Whether the last battle began with the player on one of the trigger
+    /// map's trigger tiles (the scripted battle a Battle step waits for).
+    fn battle_began_on_trigger(&self, trigger: &Destination) -> bool {
+        let Some(pose) = &self.battle_start_pose else {
+            return false;
+        };
+        pose.map == trigger.map()
+            && self
+                .world
+                .map(trigger.map())
+                .is_some_and(|m| m.triggers.iter().any(|t| (t.x, t.y) == (pose.x, pose.y)))
+    }
+
     fn train(
         &mut self,
         map: &str,
@@ -1274,14 +1326,7 @@ impl StoryTask {
         }
         // Heal before continuing when HP is low (knowledge from the last
         // battle) or wild battles have no attack PP left to spend.
-        let out_of_pp = self.data.as_ref().is_some_and(|data| {
-            lead.wild_attack_pp(data, self.policy.wild_pp_reserve) < HEAL_BELOW_PP
-        });
-        if out_of_pp
-            || lead
-                .hp
-                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
-        {
+        if self.lead_needs_heal() {
             self.splice(vec![StoryStep::Heal { center: None }], true);
             return Decision::Wait("going to heal".into());
         }
@@ -2304,7 +2349,15 @@ mod tests {
 
     fn battle_task() -> Option<(StoryTask, pokebot_state::GameState)> {
         let (world, data) = story_fixture()?;
-        let state = catch_state(&data);
+        let mut state = catch_state(&data);
+        // Healthy, with TACKLE's PP to spend (the Lv18 default moves have
+        // VINE WHIP as the only attack).
+        if let Some(party) = state.party.value.as_mut() {
+            party[0].moves[0] = Some(pokebot_state::MoveSlot {
+                mv: pokebot_state::Knowledge::observed("MOVE_TACKLE".into(), 1),
+                pp: pokebot_state::Knowledge::observed((35, 35), 1),
+            });
+        }
         let task = one_milestone(world, data, vec![StoryStep::Settle { frames: 100_000 }]);
         Some((task, state))
     }
@@ -2576,6 +2629,88 @@ mod tests {
             cursor_y: 76,
         });
         assert_eq!(tick_events(&mut task, &ask, &state).0, "change Pokémon: NO");
+    }
+
+    fn miguel_task() -> Option<(StoryTask, pokebot_state::GameState)> {
+        let (world, data) = story_fixture()?;
+        let mut state = catch_state(&data);
+        // Healthy, with TACKLE's PP to spend (the Lv18 default moves have
+        // VINE WHIP as the only attack).
+        if let Some(party) = state.party.value.as_mut() {
+            party[0].moves[0] = Some(pokebot_state::MoveSlot {
+                mv: pokebot_state::Knowledge::observed("MOVE_TACKLE".into(), 1),
+                pp: pokebot_state::Knowledge::observed((35, 35), 1),
+            });
+        }
+        let task = one_milestone(
+            world,
+            data,
+            vec![
+                StoryStep::Battle {
+                    trigger: Destination::Tile {
+                        map: "MtMoon_B2F".into(),
+                        x: 14,
+                        y: 11,
+                    },
+                    loss_ok: false,
+                },
+                StoryStep::Settle { frames: 100_000 },
+            ],
+        );
+        Some((task, state))
+    }
+
+    /// Plays a battle that begins after `pose` and ends back there.
+    fn battle_from(
+        task: &mut StoryTask,
+        state: &pokebot_state::GameState,
+        pose: (&str, i32, i32),
+        from: u64,
+    ) -> u64 {
+        tick(task, &located(from, pose.0, pose.1, pose.2), state);
+        tick(task, &wild_frame(from + 1, None, &[]), state);
+        assert!(task.in_battle);
+        let mut f = from + 2;
+        while f < from + 2 + u64::from(SETTLE_FRAMES) + 5 {
+            tick(task, &located(f, pose.0, pose.1, pose.2), state);
+            f += 1;
+        }
+        f
+    }
+
+    /// Live: a wild battle on 1F (the first of the way) completed the Miguel
+    /// step, so the bot went for the fossil, crossed Miguel's trigger at
+    /// 6/60 HP and fainted.
+    #[test]
+    fn a_battle_away_from_the_trigger_is_not_the_trigger_battle() {
+        let Some((mut task, state)) = miguel_task() else {
+            return;
+        };
+        let f = battle_from(&mut task, &state, ("MtMoon_1F", 19, 27), 1);
+        assert_eq!(task.step, 0, "a wild battle on 1F ended the Miguel step");
+        assert!(!task.battle_seen);
+        // The battle that begins on (14, 11) is Miguel's.
+        battle_from(&mut task, &state, ("MtMoon_B2F", 14, 11), f);
+        assert_eq!(task.step, 1);
+    }
+
+    /// Live: the lead walked on to Miguel with 14/60 HP (catches and
+    /// trainers on the way) and fainted.
+    #[test]
+    fn a_weakened_lead_heals_before_a_planned_battle() {
+        let Some((mut task, mut state)) = miguel_task() else {
+            return;
+        };
+        if let Some(party) = state.party.value.as_mut() {
+            party[0].hp = pokebot_state::Knowledge::observed((14, 60), 1);
+        }
+        let label = tick(&mut task, &located(1, "MtMoon_B2F", 20, 20), &state);
+        assert_eq!(label, "wait: healing before the battle");
+        assert_eq!(task.current(), Some(&StoryStep::Heal { center: None }));
+        assert!(matches!(
+            task.milestones[0].steps[1],
+            StoryStep::Battle { .. }
+        ));
     }
 
     #[test]
