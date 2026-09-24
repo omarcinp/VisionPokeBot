@@ -1,0 +1,110 @@
+# Probe: Pewter Mart BUY flow (3 POKé BALLs + 1 POTION)
+# Replays ONLY against the route3-ready checkpoint (saves/route3-ready.sav, via a copy):
+#   cp saves/route3-ready.sav /tmp/probe/game.sav
+#   ./target/release/pokebot run --save /tmp/probe/game.sav --script tools/scripts/probe/mart.txt
+# Generated from walk-annotated sources by tools/probe/expand_walk.py; see README.md.
+# ---- 00-continue
+wait 1
+hold A+B+Start+Select 250ms
+wait 17
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 12
+press Start
+wait 169
+press A
+wait 102
+press A
+wait 33
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 71
+neutral
+# ---- 10-to-mart
+# Pewter PC (7,4) -> Pewter City (17,26) -> mart door (28,18) -> PewterCity_Mart (4,7)
+hold Down 1338ms
+wait 104
+wait 150
+hold Right 1338ms
+wait 104
+hold Up 1872ms
+wait 136
+hold Right 1605ms
+wait 120
+hold Up 268ms
+wait 40
+wait 150
+# ---- 20-mart
+# PewterCity_Mart: up to (4,3), face the clerk (object 3 at (2,3)) across the counter
+hold Up 1070ms
+wait 88
+press Left
+wait 30
+press A
+wait 180
+screenshot captures/fixtures/mart-menu.png
+# BUY
+press A
+wait 120
+screenshot captures/fixtures/mart-list.png
+# POKé BALL (row 0) -> quantity box
+press A
+wait 240
+screenshot captures/fixtures/mart-quantity-1.png
+press Up
+wait 30
+press Up
+wait 30
+screenshot captures/fixtures/mart-quantity-3.png
+press A
+wait 240
+screenshot captures/fixtures/mart-confirm.png
+# YES -> "Here you are! Thank you!" -> back to the list
+press A
+wait 240
+press A
+wait 90
+# also buy one POTION so the ITEMS pocket is not empty
+press Down
+wait 30
+press A
+wait 240
+press A
+wait 240
+press A
+wait 240
+press A
+wait 90
+# leave: B closes the list ("Is there anything else I can do?"), B = SEE YA!, A dismisses "Please come again!"
+press B
+wait 240
+press B
+wait 150
+press A
+wait 90
