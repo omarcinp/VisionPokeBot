@@ -114,6 +114,9 @@ pub struct Purchase {
     quoted: Option<(u16, u32)>,
     /// (count, total) answered YES to: the next list read settles it.
     paid: Option<(u16, u32)>,
+    /// The clerk's "Here you are!" was read after YES: the purchase went
+    /// through whatever the money window reads.
+    handed_over: bool,
     /// The quantity box's maximum, learned from an Up that wrapped.
     max_quantity: Option<u16>,
     /// The count an Up was pressed from (to spot a wrap).
@@ -149,6 +152,7 @@ impl Purchase {
             money_seen: false,
             quoted: None,
             paid: None,
+            handed_over: false,
             max_quantity: None,
             up_from: None,
             finished: false,
@@ -237,11 +241,15 @@ impl Purchase {
             Phase::Quantity => self.quantity(o, events),
             Phase::Confirm => self.confirm(o, events),
             Phase::Text => self.text(o),
-            Phase::Outside if self.finished => Decision::Done(if self.summary.is_empty() {
-                "left the mart".to_owned()
-            } else {
-                self.summary.join("; ")
-            }),
+            // Only after SEE YA!: a dropped frame between the list closing
+            // and the menu coming back can show the overworld.
+            Phase::Outside if self.finished && self.leaves > 0 => {
+                Decision::Done(if self.summary.is_empty() {
+                    "left the mart".to_owned()
+                } else {
+                    self.summary.join("; ")
+                })
+            }
             Phase::Outside => self.wait(o, "waiting for the mart menu"),
             Phase::Other => self.wait(o, "waiting for a mart screen"),
         }
@@ -294,7 +302,10 @@ impl Purchase {
             return self.wait(o, "reading the money");
         };
         let rows = rows_of(data, &shop.items);
-        if let Some(wait) = self.confirmed(o, format!("list ¥{money} ▶{cursor} {rows:?}")) {
+        // Only what the decision uses is confirmed: the money, the ▶ and the
+        // item's row (flicker on other rows must not burn retries).
+        let item_row = rows.iter().position(|(key, _)| *key == self.item);
+        if let Some(wait) = self.confirmed(o, format!("list ¥{money} ▶{cursor} {item_row:?}")) {
             return wait;
         }
         if !self.money_seen {
@@ -433,8 +444,10 @@ impl Purchase {
             .get(&self.item)
             .and_then(|i| i.pocket.as_deref())
             .and_then(Pocket::from_decomp);
-        // Money went down: the purchase went through.
-        if money < before {
+        // Money went down, or the clerk handed the items over: the purchase
+        // went through.
+        let handed_over = std::mem::take(&mut self.handed_over);
+        if money < before || handed_over {
             if let Some(pocket) = pocket {
                 events.push(GameEvent::ItemsChanged {
                     pocket,
@@ -572,6 +585,9 @@ impl Purchase {
     fn text(&mut self, o: &Observation) -> Decision {
         let d = o.dialogue.as_ref().expect("text phase");
         let page = d.lines.join(" ");
+        if self.paid.is_some() && page.contains("Here you are") {
+            self.handed_over = true;
+        }
         if QUESTION_PAGES.iter().any(|q| page.contains(q)) {
             return self.wait(o, "a question: waiting for its box");
         }
@@ -1115,6 +1131,88 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::MoneyChanged { .. })));
+    }
+
+    #[test]
+    fn an_overworld_frame_before_see_ya_does_not_finish() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POKE_BALL", 0).with_stock(Some(3));
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        let a = act(twice(&mut p, list(2, 700, 0), &data, &mut events));
+        assert_eq!(pressed(&a), Button::B);
+        // A dropped frame between the list and "Is there anything else…".
+        assert!(matches!(
+            p.next(&overworld(4), &data, &mut events),
+            Decision::Wait(_)
+        ));
+        leave(&mut p, &data, &mut events, 5);
+    }
+
+    #[test]
+    fn here_you_are_proves_the_purchase_when_the_money_lags() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POKE_BALL", 3);
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        act(twice(&mut p, list(2, 3000, 0), &data, &mut events));
+        act(twice(&mut p, quantity(4, 3000, 1), &data, &mut events));
+        act(twice(&mut p, quantity(6, 3000, 2), &data, &mut events));
+        act(twice(&mut p, quantity(8, 3000, 3), &data, &mut events));
+        act(twice(&mut p, confirm(10, 3, 600), &data, &mut events));
+        act(p.next(
+            &text(12, &["Here you are!", "Thank you!"]),
+            &data,
+            &mut events,
+        ));
+        // The MONEY window still reads the old amount on two frames.
+        act(twice(&mut p, list(13, 3000, 0), &data, &mut events));
+        assert_eq!(
+            events[1],
+            GameEvent::ItemsChanged {
+                pocket: pokebot_state::Pocket::PokeBalls,
+                item: "ITEM_POKE_BALL".into(),
+                delta: 3,
+                reason: "bought".into(),
+            }
+        );
+        assert_eq!(events[2], GameEvent::MoneyObserved { amount: 3000 });
+        assert!(matches!(&events[3], GameEvent::GoalProgress { .. }));
+        assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn no_here_you_are_and_unchanged_money_is_no_purchase() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POKE_BALL", 1);
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        act(twice(&mut p, list(2, 3000, 0), &data, &mut events));
+        act(twice(&mut p, quantity(4, 3000, 1), &data, &mut events));
+        act(twice(&mut p, confirm(6, 1, 200), &data, &mut events));
+        act(twice(&mut p, list(8, 3000, 0), &data, &mut events));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ItemsChanged { .. })));
+    }
+
+    #[test]
+    fn flicker_on_other_rows_is_not_a_misread() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POKE_BALL", 1);
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        assert!(matches!(
+            p.next(&list(2, 3000, 0), &data, &mut events),
+            Decision::Wait(_)
+        ));
+        // BURN HEAL reads differently on the next frame: the money, ▶ and
+        // POKé BALL's row still agree, so A goes out.
+        let mut flicker = list(3, 3000, 0);
+        flicker.shop.as_mut().unwrap().items[5] = ("BURN H??L".into(), Some(25));
+        let a = act(p.next(&flicker, &data, &mut events));
+        assert_eq!(a.expect, Expectation::ShopQuantity(1));
+        assert_eq!(p.total_retries, 0);
     }
 
     #[test]
