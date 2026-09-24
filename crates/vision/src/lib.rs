@@ -104,6 +104,19 @@ impl PerceptionSystem for FireRedPerception {
             observation.move_list = Some(list);
             return observation;
         }
+        if let (Some(font), Some(small_font)) = (&self.font, &self.small_font) {
+            if let Some(bag) = detect::bag::detect(image, font, small_font) {
+                let state = if bag.prompt.is_some() {
+                    ScreenState::BattleBag
+                } else {
+                    ScreenState::Bag
+                };
+                let mut observation =
+                    Observation::bare(frame.frame_id, screen(state, "bag-screen"), metrics);
+                observation.bag = Some(bag);
+                return observation;
+            }
+        }
         let mut dialogue = detect::dialogue::detect(image);
         match &mut dialogue {
             Some(d) => {

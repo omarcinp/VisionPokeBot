@@ -855,6 +855,13 @@ fn describe_observation(o: &Observation) -> String {
     if let Some(l) = &o.move_list {
         parts.push(format!("moves {:?}, selected {:?}", l.moves, l.selected));
     }
+    if let Some(b) = &o.bag {
+        let mut s = format!("bag: {} {:?} ▶{:?}", b.pocket, b.rows, b.cursor);
+        if let Some((opts, row)) = &b.prompt {
+            s.push_str(&format!(" prompt {opts:?} ▶{row}"));
+        }
+        parts.push(s);
+    }
     if let Some(n) = &o.naming {
         parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));
     }

@@ -114,6 +114,22 @@ pub struct MoveListObservation {
     pub selected: Option<u8>,
 }
 
+/// The bag screen (field or battle): pocket title, rows, cursor and the
+/// USE/CANCEL prompt over a battle bag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BagObservation {
+    /// Pocket title as read ("POKé BALLS"), `?` for unknown glyphs.
+    pub pocket: String,
+    /// Visible rows, top to bottom: (name as read, count). CANCEL reads as
+    /// ("CANCEL", None).
+    pub rows: Vec<(String, Option<u16>)>,
+    /// Index into `rows` of the ▶.
+    pub cursor: Option<u8>,
+    /// The USE/…/CANCEL action window is open; its options as read and the
+    /// ▶ row.
+    pub prompt: Option<(Vec<String>, u8)>,
+}
+
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleMenu {
@@ -178,6 +194,8 @@ pub struct Observation {
     pub battle: Option<BattleObservation>,
     #[serde(default)]
     pub move_list: Option<MoveListObservation>,
+    #[serde(default)]
+    pub bag: Option<BagObservation>,
 }
 
 impl DialogueObservation {
@@ -204,6 +222,7 @@ impl Observation {
             player: None,
             battle: None,
             move_list: None,
+            bag: None,
         }
     }
 }
