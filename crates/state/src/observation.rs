@@ -176,6 +176,25 @@ pub struct BattleObservation {
     /// The four move cells of the move menu (menu order, "" when empty).
     #[serde(default)]
     pub move_names: Vec<String>,
+    /// The caught-ball icon beside the opponent's HUD: the species is
+    /// already registered as caught. Read only when the HUD name was read.
+    #[serde(default)]
+    pub opponent_caught: Option<bool>,
+    /// The opponent's sprite matched against its normal and shiny
+    /// palettes. Only when palettes are loaded, the HUD name resolves to a
+    /// species and the sprite is fully on screen (the HP bar shows).
+    #[serde(default)]
+    pub opponent_shiny: Option<ShinyReading>,
+}
+
+/// Whether a sprite's colours match the species' normal or shiny palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShinyReading {
+    Normal,
+    Shiny,
+    /// Neither palette clearly dominates (the agent treats it as not shiny
+    /// and logs it).
+    Unclear,
 }
 
 /// Where the naming screen's cursor is.
@@ -216,6 +235,9 @@ pub struct Observation {
     pub bag: Option<BagObservation>,
     #[serde(default)]
     pub shop: Option<ShopObservation>,
+    /// The Pokédex entry page shown after catching a new species (A leaves).
+    #[serde(default)]
+    pub pokedex_page: bool,
 }
 
 impl DialogueObservation {
@@ -244,6 +266,7 @@ impl Observation {
             move_list: None,
             bag: None,
             shop: None,
+            pokedex_page: false,
         }
     }
 }

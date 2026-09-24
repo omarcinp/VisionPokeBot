@@ -53,6 +53,15 @@ pub const MOVE_NAME_CELLS: [Region; 4] = [
     },
 ];
 
+/// The game's 64×64 opponent front-sprite box (bottom on the platform).
+/// Species sprites sit at different heights inside it.
+pub const OPPONENT_SPRITE: Region = Region {
+    x: 144,
+    y: 8,
+    width: 64,
+    height: 64,
+};
+
 /// HP bars: left edge, row, 48 px wide.
 const OPPONENT_BAR: (u32, u32) = (52, 34);
 const PLAYER_BAR: (u32, u32) = (174, 92);
@@ -90,6 +99,7 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
     }
     let player = player_hp.and_then(|_| super::hud::player_line(image));
     let opponent = opponent_hp.and_then(|_| super::hud::opponent_line(image));
+    let opponent_caught = opponent.as_ref().map(|_| caught_icon(image));
     Some(BattleObservation {
         menu,
         player_name: player.as_ref().map(|l| l.name.clone()),
@@ -101,7 +111,35 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
         opponent_hp,
         move_pp: None,
         move_names: Vec::new(),
+        opponent_caught,
+        opponent_shiny: None,
     })
+}
+
+/// The caught-ball icon: a 7×7 Poké Ball at x 20..=26, y 31..=37, under
+/// the opponent's name. Checked one pixel wider on every side so a capture
+/// that lands a pixel off still counts.
+const CAUGHT_ICON: Region = Region {
+    x: 19,
+    y: 30,
+    width: 9,
+    height: 9,
+};
+const ICON_OUTLINE: Rgb = [74, 65, 90];
+const ICON_ORANGE: Rgb = [255, 178, 66];
+const ICON_RED: Rgb = [222, 105, 90];
+/// Shares (per mille of the 9×9 probe): the icon has 16 outline and 7
+/// orange/red pixels (198‰ and 86‰); the empty HUD has none.
+const ICON_OUTLINE_SHARE: u32 = 120;
+const ICON_TOP_SHARE: u32 = 50;
+
+/// The caught-ball icon under the opponent's name (the species is caught).
+/// Needs the outline and the orange/red top half: HUD ink alone (the name
+/// line) is close to the outline colour but never orange.
+pub fn caught_icon(image: &RgbImage) -> bool {
+    share(image, CAUGHT_ICON, ICON_OUTLINE, 1) >= ICON_OUTLINE_SHARE
+        && share(image, CAUGHT_ICON, ICON_ORANGE, 1) + share(image, CAUGHT_ICON, ICON_RED, 1)
+            >= ICON_TOP_SHARE
 }
 
 /// Top-left of the first battle ▶ whose top row is in `rows`.

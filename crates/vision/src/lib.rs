@@ -7,6 +7,7 @@
 
 pub mod color;
 pub mod detect;
+pub mod shiny;
 pub mod text;
 
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub struct FireRedPerception {
     small_font: Option<Arc<text::Font>>,
     /// Last text read and the text cells it was read from.
     last_read: Option<(Vec<u8>, Vec<String>)>,
+    /// Species sprite palettes for the opponent's shiny check.
+    palettes: Option<Arc<shiny::SpritePalettes>>,
 }
 
 /// Frames between whole-world searches while the player can't be located.
@@ -94,6 +97,15 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
             observation.menu = Some(menu);
+            return observation;
+        }
+        if detect::pokedex::is_page(image) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "pokedex-page"),
+                metrics,
+            );
+            observation.pokedex_page = true;
             return observation;
         }
         if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
@@ -163,6 +175,9 @@ impl PerceptionSystem for FireRedPerception {
                     .collect();
             }
         }
+        if let (Some(b), Some(palettes)) = (&mut battle, &self.palettes) {
+            b.opponent_shiny = opponent_shiny(image, b, palettes);
+        }
         let battle_menu = battle.as_ref().and_then(|b| b.menu);
         // In battle, list menus appear only over battle text (YES/NO
         // questions such as "Delete a move…?").
@@ -222,6 +237,13 @@ impl FireRedPerception {
     /// Reads small-font text (battle move names).
     pub fn with_small_font(mut self, font: Arc<text::Font>) -> Self {
         self.small_font = Some(font);
+        self
+    }
+
+    /// Checks the opponent's sprite against these palettes (keyed by the
+    /// species name the HUD prints).
+    pub fn with_palettes(mut self, palettes: Arc<shiny::SpritePalettes>) -> Self {
+        self.palettes = Some(palettes);
         self
     }
 
@@ -300,6 +322,25 @@ impl FireRedPerception {
             changed_pixels,
         }
     }
+}
+
+/// The opponent's shiny reading: only once the sprite is fully on screen
+/// (the HP bar shows) and the HUD name resolves to one palette entry.
+fn opponent_shiny(
+    image: &RgbImage,
+    battle: &pokebot_state::BattleObservation,
+    palettes: &shiny::SpritePalettes,
+) -> Option<pokebot_state::ShinyReading> {
+    battle.opponent_hp?;
+    let name = battle.opponent_name.as_deref()?;
+    let key = detect::hud::resolve(name, palettes.keys().map(String::as_str))?;
+    let (normal, shiny_palette) = &palettes[key];
+    Some(shiny::classify(
+        image,
+        detect::battle::OPPONENT_SPRITE,
+        normal,
+        shiny_palette,
+    ))
 }
 
 /// "a/b" → (a, b).
@@ -503,6 +544,79 @@ mod tests {
             d.lines,
             vec!["Okay, I’ll take your POKéMON for a", "few seconds."]
         );
+    }
+
+    /// Normal/small fonts and RATTATA's palettes from the game data.
+    fn catch_perception() -> Option<FireRedPerception> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let normal = text::Font::load(root.join("data/world/font_normal.json")).ok()?;
+        let small = text::Font::load(root.join("data/world/font_small.json")).ok()?;
+        let data = pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")).ok()?;
+        let p = data.species.get("SPECIES_RATTATA")?.palettes.clone()?;
+        let mut palettes = shiny::SpritePalettes::new();
+        palettes.insert(
+            "RATTATA".into(),
+            (p.normal.try_into().ok()?, p.shiny.try_into().ok()?),
+        );
+        Some(
+            FireRedPerception::default()
+                .with_font(std::sync::Arc::new(normal))
+                .with_small_font(std::sync::Arc::new(small))
+                .with_palettes(std::sync::Arc::new(palettes)),
+        )
+    }
+
+    fn fixture(name: &str) -> Option<RgbImage> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        pokebot_video::png::load(root.join("captures/fixtures").join(name)).ok()
+    }
+
+    #[test]
+    fn caught_icon_and_shiny_reading_on_wild_battles() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        for (name, caught) in [
+            ("battle-wild-uncaught.png", false),
+            ("battle-wild-caught.png", true),
+        ] {
+            let Some(image) = fixture(name) else { return };
+            let b = p.observe(&frame(0, image)).battle.expect(name);
+            assert_eq!(b.opponent_name.as_deref(), Some("RATTATA"), "{name}");
+            assert_eq!(b.opponent_caught, Some(caught), "{name}");
+            assert_eq!(
+                b.opponent_shiny,
+                Some(pokebot_state::ShinyReading::Normal),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_shiny_reading_without_palettes() {
+        let Some(image) = fixture("battle-wild-uncaught.png") else {
+            return;
+        };
+        let b = FireRedPerception::default()
+            .observe(&frame(0, image))
+            .battle
+            .unwrap();
+        assert_eq!(b.opponent_shiny, None);
+    }
+
+    #[test]
+    fn pokedex_page_is_flagged() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        for (name, page) in [
+            ("pokedex-page.png", true),
+            ("battle-gotcha.png", false),
+            ("mart-list.png", false),
+        ] {
+            let Some(image) = fixture(name) else { return };
+            assert_eq!(p.observe(&frame(0, image)).pokedex_page, page, "{name}");
+        }
     }
 
     #[test]

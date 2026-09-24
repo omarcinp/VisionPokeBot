@@ -283,6 +283,8 @@ mod tests {
                 "LEECH SEED".into(),
                 "VINE WHIP".into(),
             ],
+            opponent_caught: None,
+            opponent_shiny: None,
         }
     }
 

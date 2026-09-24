@@ -525,9 +525,14 @@ fn story(
             small_font_path.display()
         )
     })?;
+    let data = Arc::new(
+        pokebot_gamedata::GameData::load(options.world.join("gamedata.json"))
+            .context("loading gamedata.json (run tools/world/build.sh)")?,
+    );
     let perception = FireRedPerception::with_world(Arc::clone(&world))
         .with_font(Arc::new(font))
         .with_small_font(Arc::new(small_font))
+        .with_palettes(Arc::new(sprite_palettes(&data)))
         .with_global_search(matches!(start, StoryStart::AsIs));
     let devices = devices::open(args)?;
     let (video_name, controller_name) =
@@ -543,10 +548,6 @@ fn story(
         latency_frames: args.latency_frames(),
         ..Executor::default()
     };
-    let data = Arc::new(
-        pokebot_gamedata::GameData::load(options.world.join("gamedata.json"))
-            .context("loading gamedata.json (run tools/world/build.sh)")?,
-    );
     let state_path = checkpoint::path_for(&options.progress);
     let result = (|| -> Result<String> {
         let mut progress = match (&start, previous) {
@@ -871,6 +872,12 @@ fn inspect(
         .exists()
         .then(|| pokebot_vision::text::Font::load(&small_font_path).map(Arc::new))
         .transpose()?;
+    let gamedata_path = small_font_path.with_file_name("gamedata.json");
+    let palettes = gamedata_path
+        .exists()
+        .then(|| pokebot_gamedata::GameData::load(&gamedata_path))
+        .transpose()?
+        .map(|data| Arc::new(sprite_palettes(&data)));
     for path in paths {
         let image = pokebot_video::png::load(&path)?;
         let locator = match viewport.as_deref() {
@@ -905,6 +912,9 @@ fn inspect(
         }
         if let Some(small_font) = &small_font {
             perception = perception.with_small_font(Arc::clone(small_font));
+        }
+        if let Some(palettes) = &palettes {
+            perception = perception.with_palettes(Arc::clone(palettes));
         }
         let observation = perception.observe(&normalized);
         println!(
@@ -943,6 +953,31 @@ fn inspect(
     Ok(())
 }
 
+/// Species sprite palettes keyed by the name the battle HUD prints
+/// (`party::display_name`). Names shared by several species (NIDORAN ♀/♂)
+/// are left out: the HUD name can't tell their palettes apart.
+fn sprite_palettes(data: &pokebot_gamedata::GameData) -> pokebot_vision::shiny::SpritePalettes {
+    let mut species: Vec<_> = data.species.iter().collect();
+    species.sort_by(|a, b| a.0.cmp(b.0));
+    let mut palettes = pokebot_vision::shiny::SpritePalettes::new();
+    let mut ambiguous = std::collections::BTreeSet::new();
+    for (constant, s) in species {
+        let Some(p) = &s.palettes else { continue };
+        let (Ok(normal), Ok(shiny)) = (p.normal.clone().try_into(), p.shiny.clone().try_into())
+        else {
+            continue;
+        };
+        let name = party::display_name(constant);
+        if palettes.insert(name.clone(), (normal, shiny)).is_some() {
+            ambiguous.insert(name);
+        }
+    }
+    for name in ambiguous {
+        palettes.remove(&name);
+    }
+    palettes
+}
+
 fn describe_observation(o: &Observation) -> String {
     let mut parts = vec![format!("{:?}", o.screen.value)];
     if let Some(d) = &o.dialogue {
@@ -979,6 +1014,15 @@ fn describe_observation(o: &Observation) -> String {
             b.opponent_level,
             b.opponent_hp
         ));
+        if b.opponent_caught.is_some() || b.opponent_shiny.is_some() {
+            parts.push(format!(
+                "opponent caught {:?} shiny {:?}",
+                b.opponent_caught, b.opponent_shiny
+            ));
+        }
+    }
+    if o.pokedex_page {
+        parts.push("pokedex page".into());
     }
     if let Some(l) = &o.move_list {
         parts.push(format!("moves {:?}, selected {:?}", l.moves, l.selected));
