@@ -21,7 +21,11 @@ const WARP_TIMEOUT: u64 = 180;
 /// One walking step: 16 GBA frames.
 const TILE_MS: u64 = 268;
 /// Times per map the learned obstacles may be forgotten to retry a path.
-const MAX_FORGETS: u32 = 3;
+/// In MtMoon_B2F's bottom corridor the view is the same for x = 21..28, so
+/// each unseen step right is learned as a block and forgotten again (about
+/// one forget per tile, live): 3 stranded the walk to the ladder; 8 lets it
+/// cross the ambiguous stretch and still bounds a real unmodelled block.
+const MAX_FORGETS: u32 = 8;
 /// Longest straight run walked with one hold.
 const MAX_RUN: usize = 8;
 
