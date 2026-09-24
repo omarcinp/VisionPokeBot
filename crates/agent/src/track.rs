@@ -1,5 +1,6 @@
 //! Facts in dialogue text that change the bag, money or party: money won,
-//! items found or received, the nurse's heal, and an empty move.
+//! items found or received (and the mart's Premier Ball bonus), the nurse's
+//! heal, and an empty move.
 
 use pokebot_gamedata::GameData;
 use pokebot_state::{GameEvent, Pocket};
@@ -45,6 +46,15 @@ impl TextTracker {
                     });
                 }
             }
+        }
+        // Buying 10+ Poké Balls at once: "I'll throw in a PREMIER BALL, too."
+        if page.contains("PREMIER BALL, too") {
+            events.push(GameEvent::ItemsChanged {
+                pocket: Pocket::PokeBalls,
+                item: "ITEM_PREMIER_BALL".into(),
+                delta: 1,
+                reason: "bonus".into(),
+            });
         }
         if let Some(badge) = badge_received(&page) {
             events.push(GameEvent::BadgeEarned {
@@ -183,6 +193,37 @@ mod tests {
                 move_slot: 2
             }]
         );
+    }
+
+    #[test]
+    fn premier_ball_bonus_page_is_tracked() {
+        let Some(d) = data() else { return };
+        let mut t = TextTracker::default();
+        let bonus = GameEvent::ItemsChanged {
+            pocket: Pocket::PokeBalls,
+            item: "ITEM_PREMIER_BALL".into(),
+            delta: 1,
+            reason: "bonus".into(),
+        };
+        assert_eq!(
+            t.observe_page(&lines("I'll throw in a PREMIER\nBALL, too."), &d, None),
+            vec![bonus.clone()]
+        );
+        // Another purchase later: the same page is a new bonus.
+        assert!(t
+            .observe_page(&lines("Here you are!\nThank you!"), &d, None)
+            .is_empty());
+        assert_eq!(
+            t.observe_page(&lines("I'll throw in a\nPREMIER BALL, too."), &d, None),
+            vec![bonus]
+        );
+        // The purchase's own pages change nothing.
+        for page in [
+            "Here you are!\nThank you!",
+            "POKé BALL, and you want 10.\nThat will be ¥2000. Okay?",
+        ] {
+            assert!(t.observe_page(&lines(page), &d, None).is_empty(), "{page}");
+        }
     }
 
     #[test]

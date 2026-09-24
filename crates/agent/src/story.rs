@@ -20,6 +20,8 @@ use crate::learn::MoveLearning;
 use crate::nav::{Destination, NavStatus, Navigator};
 use crate::new_game::{advance_or_wait, select};
 use crate::party::{self, Party};
+use crate::shop::{is_mart_menu, nearest_mart, Purchase};
+use crate::stock::{ball_count, must_buy, should_buy};
 use crate::track::TextTracker;
 use crate::{Action, Decision, Expectation, Outcome, Task, TaskContext};
 
@@ -94,6 +96,14 @@ pub enum StoryStep {
     /// Open the bag from the Start menu, read this pocket (`PocketObserved`)
     /// and close every menu again.
     AuditPocket(Pocket),
+    /// Buy `count` of `item` at the nearest mart selling it (the clerk is
+    /// approached like `Talk`, then [`Purchase`] runs the mart). `count: 0`
+    /// means "decide on the list": the ball stock policy's count for the
+    /// money read there, possibly none.
+    Buy { item: String, count: u16 },
+    /// Audit if needed, then Buy up to the target at `mart` (or the nearest
+    /// one selling balls).
+    StockUp { mart: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +218,15 @@ pub struct StoryTask {
     heal: HealWatch,
     /// The current AuditPocket step's flow.
     audit: Option<PocketAudit>,
+    /// The current Buy step's mart flow (from the first mart screen on).
+    purchase: Option<Purchase>,
+    /// The current Buy step's mart map and clerk.
+    buy_at: Option<(String, u32)>,
+    /// The mart a StockUp asked the Buy it spliced to use.
+    buy_mart: Option<String>,
+    /// A mandatory ball buy was tried in this milestone (never retried:
+    /// with no money it would loop).
+    mandatory_buy_tried: bool,
 }
 
 /// Whether the nurse's "restored your POKéMON" was read during the current
@@ -269,6 +288,10 @@ impl StoryTask {
             upcoming: Vec::new(),
             heal: HealWatch::default(),
             audit: None,
+            purchase: None,
+            buy_at: None,
+            buy_mart: None,
+            mandatory_buy_tried: false,
         }
     }
 
@@ -306,6 +329,9 @@ impl StoryTask {
         self.spin_at = None;
         self.heal.reset();
         self.audit = None;
+        self.purchase = None;
+        self.buy_at = None;
+        self.buy_mart = None;
         if self.step >= self.milestones[self.milestone].steps.len() {
             ctx.events.push(GameEvent::GoalProgress {
                 goal: "Story".into(),
@@ -315,6 +341,7 @@ impl StoryTask {
             self.milestone += 1;
             self.step = 0;
             self.announced = false;
+            self.mandatory_buy_tried = false;
         }
     }
 
@@ -337,6 +364,9 @@ impl StoryTask {
         self.spin_at = None;
         self.heal.reset();
         self.audit = None;
+        self.purchase = None;
+        self.buy_at = None;
+        self.buy_mart = None;
     }
 
     fn navigate(&mut self, dest: &Destination, observation: &Observation) -> NavStatusOrDecision {
@@ -622,6 +652,23 @@ impl Task for StoryTask {
                 return self.audit_pocket(*pocket, o, ctx);
             }
         }
+        // Once the clerk talks (or any mart screen shows), the purchase
+        // drives every screen until the mart is left: its menu and YES/NO
+        // questions would otherwise be unexpected questions below.
+        if let StoryStep::Buy { item, count } = &step {
+            if self.purchase.is_some()
+                || self.talk == TalkPhase::Talking
+                || o.shop.is_some()
+                || is_mart_menu(o)
+            {
+                if o.dialogue.is_some() || o.menu.is_some() || o.shop.is_some() {
+                    self.quiet_frames = 0;
+                } else {
+                    self.quiet_frames = self.quiet_frames.saturating_add(1);
+                }
+                return self.shop(item, *count, o, ctx);
+            }
+        }
         // Dialogue and menus interrupt whatever the step is doing.
         if o.dialogue.is_some() || (o.menu.is_some() && o.screen.value == ScreenState::Dialogue) {
             self.quiet_frames = 0;
@@ -654,6 +701,34 @@ impl Task for StoryTask {
             return Decision::Wait("screen transition".into());
         }
         self.quiet_frames = self.quiet_frames.saturating_add(1);
+
+        // Below the shiny reserve: buy balls before going on (once per
+        // milestone; a buy that finds no money is not retried).
+        let starts_out = match &step {
+            StoryStep::Go(_) | StoryStep::Train { .. } => true,
+            StoryStep::GoUntil { .. } => !self.saw_dialogue,
+            StoryStep::Battle { .. } | StoryStep::Challenge { .. } => {
+                !self.battle_seen && self.talk == TalkPhase::Approach
+            }
+            _ => false,
+        };
+        if starts_out
+            && !self.mandatory_buy_tried
+            && self.data.is_some()
+            && must_buy(ball_count(ctx.state))
+        {
+            self.mandatory_buy_tried = true;
+            ctx.events.push(GameEvent::GoalProgress {
+                goal: "Story".into(),
+                phase: "Mart".into(),
+                detail: format!(
+                    "{} Poké Balls, under the reserve: buying before going on",
+                    ball_count(ctx.state).unwrap_or(0)
+                ),
+            });
+            self.splice(vec![StoryStep::StockUp { mart: None }], true);
+            return Decision::Wait("going to buy Poké Balls".into());
+        }
 
         match step {
             StoryStep::Go(dest) => self.go(&dest, o, ctx),
@@ -734,6 +809,8 @@ impl Task for StoryTask {
                 }
             }
             StoryStep::AuditPocket(pocket) => self.audit_pocket(pocket, o, ctx),
+            StoryStep::Buy { item, count } => self.go_to_clerk(&item, count, o, ctx),
+            StoryStep::StockUp { mart } => self.stock_up(mart, ctx),
             StoryStep::Settle { frames } => {
                 if self.quiet_frames >= frames {
                     self.advance_step(ctx);
@@ -800,6 +877,112 @@ impl StoryTask {
                 });
                 self.advance_step(ctx);
                 Decision::Wait("pocket audited".into())
+            }
+            decision => decision,
+        }
+    }
+
+    /// Audits a stale or unknown Poké Balls pocket first, skips a full
+    /// stock, and otherwise buys on the list (`count: 0`).
+    fn stock_up(&mut self, mart: Option<String>, ctx: &mut TaskContext<'_>) -> Decision {
+        let stale = ctx
+            .state
+            .bag
+            .pockets
+            .get(&Pocket::PokeBalls)
+            .is_none_or(|k| k.needs_audit());
+        if stale {
+            self.splice(vec![StoryStep::AuditPocket(Pocket::PokeBalls)], true);
+            return Decision::Wait("auditing the Poké Balls before buying".into());
+        }
+        let stock = ball_count(ctx.state);
+        if !should_buy(stock) {
+            ctx.events.push(GameEvent::GoalProgress {
+                goal: "Story".into(),
+                phase: "Mart".into(),
+                detail: format!("{} Poké Balls: no need to buy", stock.unwrap_or(0)),
+            });
+            self.advance_step(ctx);
+            return Decision::Wait("stocked up".into());
+        }
+        self.splice(
+            vec![StoryStep::Buy {
+                item: "ITEM_POKE_BALL".into(),
+                count: 0,
+            }],
+            false,
+        );
+        self.buy_mart = mart;
+        Decision::Wait("going to buy Poké Balls".into())
+    }
+
+    /// Walks to the mart's clerk and talks (the purchase takes over once
+    /// the clerk's text shows).
+    fn go_to_clerk(
+        &mut self,
+        item: &str,
+        count: u16,
+        o: &Observation,
+        ctx: &mut TaskContext<'_>,
+    ) -> Decision {
+        let Some(data) = self.data.clone() else {
+            return Decision::Fail("buying needs game data".into());
+        };
+        let Some(pose) = &o.player else {
+            return Decision::Wait("locating".into());
+        };
+        if self.buy_at.is_none() {
+            self.buy_at = match &self.buy_mart {
+                Some(map) => self.world.map(map).and_then(|m| {
+                    m.objects
+                        .iter()
+                        .filter(|ob| ob.graphics.as_deref() == Some("OBJ_EVENT_GFX_CLERK"))
+                        .map(|ob| (map.clone(), ob.local_id))
+                        .min_by_key(|(_, id)| *id)
+                }),
+                None => nearest_mart(&self.world, &data, &pose.pose.map, item),
+            };
+        }
+        let Some((map, clerk)) = self.buy_at.clone() else {
+            if count == 0 {
+                // A stock-up (mandatory or not) goes on without balls.
+                ctx.events.push(GameEvent::GoalProgress {
+                    goal: "Story".into(),
+                    phase: "Mart".into(),
+                    detail: format!("no mart selling {item} found: not buying"),
+                });
+                self.advance_step(ctx);
+                return Decision::Wait("no mart".into());
+            }
+            return Decision::Fail(format!("no mart selling {item} found"));
+        };
+        self.talk_to(&map, clerk, false, o, ctx)
+    }
+
+    /// Runs the purchase until the mart is left.
+    fn shop(
+        &mut self,
+        item: &str,
+        count: u16,
+        o: &Observation,
+        ctx: &mut TaskContext<'_>,
+    ) -> Decision {
+        let Some(data) = self.data.clone() else {
+            return Decision::Fail("buying needs game data".into());
+        };
+        let stock = ball_count(ctx.state);
+        let purchase = self
+            .purchase
+            .get_or_insert_with(|| Purchase::new(item, count).with_stock(stock));
+        match purchase.next(o, &data, ctx.events) {
+            Decision::Done(summary) => {
+                ctx.events.push(GameEvent::GoalProgress {
+                    goal: "Story".into(),
+                    phase: "Mart".into(),
+                    detail: summary,
+                });
+                self.advance_step(ctx);
+                Decision::Wait("left the mart".into())
             }
             decision => decision,
         }
@@ -1411,5 +1594,190 @@ mod tests {
         // The next Heal step starts over.
         watch.reset();
         assert_eq!(watch.finish()[0], GameEvent::Healed);
+    }
+
+    fn story_fixture() -> Option<(World, GameData)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        Some((
+            World::load(root.join("data/world")).ok()?,
+            GameData::load(root.join("data/world/gamedata.json")).ok()?,
+        ))
+    }
+
+    fn located(frame: u64, map: &str, x: i32, y: i32) -> Observation {
+        use pokebot_state::{Observed, PlayerPose, PoseObservation};
+        let mut o = Observation::bare(
+            frame,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation {
+            pose: PlayerPose {
+                map: map.into(),
+                x,
+                y,
+            },
+            score: 980,
+        });
+        o
+    }
+
+    fn with_balls(n: u16) -> pokebot_state::GameState {
+        use pokebot_state::{DefaultReducer, EventRecord, GameState, StateReducer};
+        DefaultReducer.reduce(
+            &GameState::default(),
+            &[EventRecord {
+                frame_id: 1,
+                event: GameEvent::PocketObserved {
+                    pocket: Pocket::PokeBalls,
+                    items: vec![("ITEM_POKE_BALL".into(), n)],
+                },
+            }],
+        )
+    }
+
+    fn tick(task: &mut StoryTask, o: &Observation, state: &pokebot_state::GameState) -> String {
+        let mut events = Vec::new();
+        match task.next(&mut TaskContext {
+            observation: o,
+            state,
+            events: &mut events,
+        }) {
+            Decision::Act(a) => a.label,
+            Decision::Wait(r) => format!("wait: {r}"),
+            Decision::Done(r) => format!("done: {r}"),
+            Decision::Fail(r) => format!("fail: {r}"),
+        }
+    }
+
+    fn one_milestone(world: World, data: GameData, steps: Vec<StoryStep>) -> StoryTask {
+        StoryTask::new(Arc::new(world), vec![Milestone::new("Test", "test", steps)])
+            .with_data(Arc::new(data))
+    }
+
+    #[test]
+    fn stock_up_audits_a_stale_or_unknown_pocket_first() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut task = one_milestone(world, data, vec![StoryStep::StockUp { mart: None }]);
+        let state = pokebot_state::GameState::default();
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &state);
+        assert_eq!(
+            task.current(),
+            Some(&StoryStep::AuditPocket(Pocket::PokeBalls))
+        );
+        assert_eq!(
+            task.milestones[0].steps[1],
+            StoryStep::StockUp { mart: None }
+        );
+    }
+
+    #[test]
+    fn stock_up_skips_a_full_stock_and_buys_otherwise() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let steps = vec![
+            StoryStep::StockUp { mart: None },
+            StoryStep::Settle { frames: 1 },
+        ];
+        let mut task = one_milestone(world, data, steps.clone());
+        tick(
+            &mut task,
+            &located(1, "PewterCity", 17, 26),
+            &with_balls(15),
+        );
+        assert_eq!(task.current(), Some(&StoryStep::Settle { frames: 1 }));
+
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut task = one_milestone(world, data, steps);
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &with_balls(3));
+        assert_eq!(
+            task.current(),
+            Some(&StoryStep::Buy {
+                item: "ITEM_POKE_BALL".into(),
+                count: 0
+            })
+        );
+    }
+
+    #[test]
+    fn mandatory_buy_is_tried_once_per_milestone() {
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let go = StoryStep::Go(Destination::Tile {
+            map: "PewterCity".into(),
+            x: 20,
+            y: 26,
+        });
+        let mut task = one_milestone(world, data, vec![go.clone()]);
+        let state = with_balls(2);
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &state);
+        assert_eq!(task.current(), Some(&StoryStep::StockUp { mart: None }));
+        // The buy ended (say it bought nothing): the Go step runs, no retry.
+        let mut events = Vec::new();
+        task.advance_step(&mut TaskContext {
+            observation: &located(2, "PewterCity", 17, 26),
+            state: &state,
+            events: &mut events,
+        });
+        assert_eq!(task.current(), Some(&go));
+        tick(&mut task, &located(3, "PewterCity", 17, 26), &state);
+        assert_eq!(task.current(), Some(&go));
+        // Enough balls: no buy at all.
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut task = one_milestone(world, data, vec![go.clone()]);
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &with_balls(5));
+        assert_eq!(task.current(), Some(&go));
+    }
+
+    #[test]
+    fn buy_step_hands_the_mart_menu_to_the_purchase() {
+        use pokebot_state::{DialogueKind, DialogueObservation, MenuObservation, Region};
+        let Some((world, data)) = story_fixture() else {
+            return;
+        };
+        let mut task = one_milestone(
+            world,
+            data,
+            vec![StoryStep::Buy {
+                item: "ITEM_POKE_BALL".into(),
+                count: 3,
+            }],
+        );
+        let mut o = located(1, "PewterCity_Mart", 4, 3);
+        o.player = None;
+        o.screen.value = ScreenState::Dialogue;
+        o.dialogue = Some(DialogueObservation {
+            kind: DialogueKind::MessageBox,
+            region: Region::new(8, 118, 224, 36),
+            waiting_for_input: false,
+            arrow: None,
+            stable_frames: 60,
+            text_cells: vec![1; 4],
+            lines: vec!["Hi, there!".into(), "May I help you?".into()],
+            help: false,
+        });
+        o.menu = Some(MenuObservation {
+            window: Region::new(14, 6, 100, 52),
+            rows: 3,
+            cursor_row: 0,
+            cursor_y: 12,
+        });
+        o.menu_lines = ["BUY", "SELL", "SEE YA!"].map(String::from).to_vec();
+        // Not "unexpected question": the purchase answers the mart menu.
+        assert_eq!(
+            tick(&mut task, &o, &pokebot_state::GameState::default()),
+            "mart: BUY"
+        );
     }
 }

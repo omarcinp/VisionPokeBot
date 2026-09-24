@@ -19,7 +19,7 @@ const POCKETS: [(Pocket, &str); 3] = [
 ];
 
 /// `read` could be `name`: same length, `?` matches any character.
-fn fits(name: &str, read: &str) -> bool {
+pub(crate) fn fits(name: &str, read: &str) -> bool {
     name.chars().count() == read.chars().count()
         && name
             .chars()

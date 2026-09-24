@@ -91,6 +91,13 @@ pub enum Expectation {
     BagCursorAt(u8),
     /// Neither the bag nor a menu is showing.
     BagClosed,
+    /// The mart list's ▶ is on this visible row.
+    ShopCursorAt(u8),
+    /// The mart's quantity box reads this count (not just any count: an
+    /// Up that wrapped past the maximum, or overshot, is not met).
+    ShopQuantity(u16),
+    /// The mart is left: no mart window, menu or dialogue is showing.
+    ShopClosed,
     /// Nothing to verify; only wait for the inputs to finish.
     InputsDone,
 }
@@ -157,6 +164,20 @@ impl Expectation {
                 .as_ref()
                 .is_some_and(|b| b.cursor == Some(*row)),
             Expectation::BagClosed => observation.bag.is_none() && observation.menu.is_none(),
+            Expectation::ShopCursorAt(row) => observation
+                .shop
+                .as_ref()
+                .is_some_and(|s| s.cursor == Some(*row)),
+            Expectation::ShopQuantity(count) => observation
+                .shop
+                .as_ref()
+                .and_then(|s| s.quantity)
+                .is_some_and(|(n, _)| n == *count),
+            Expectation::ShopClosed => {
+                observation.shop.is_none()
+                    && observation.menu.is_none()
+                    && observation.dialogue.is_none()
+            }
             Expectation::InputsDone => true,
         }
     }
