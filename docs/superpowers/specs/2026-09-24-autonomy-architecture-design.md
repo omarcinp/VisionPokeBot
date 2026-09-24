@@ -523,12 +523,13 @@ of event emission), not only when walking:
   when its tile changes, and an absent NPC that should be visible produces
   `NpcAbsent`, which feeds the belief (`FLAG_HIDE_*`, §3.2).
 
-The detector is written so it can run on the GPU (an RTX 2080 is
-available): residual, thresholding and blob snapping are per-pixel /
-per-tile operations, implemented once in Rust with a `wgpu` compute path
-and a CPU fallback selected at start-up; results must be bit-identical
-between the two, which a test enforces on recorded frames. GPU use is
-optional and only for throughput; nothing else in the pipeline moves.
+The detector runs on the CPU. Measured on 2026-09-25, the whole
+`FireRedPerception::observe` pass takes about 1.3 ms (p50) per 240×160
+frame on this machine, so a GPU round trip (upload, dispatch, readback)
+would cost about as much as the work it replaced; the earlier idea of a
+`wgpu` compute path with a bit-identical CPU fallback is dropped. If
+throughput is ever needed, split the work over threads the way
+`locate_anywhere` was (PR #8: ~150 ms → ~10 ms on 32 cores).
 
 **Control.** The motion controller keeps, per visible NPC,
 `(tile, facing, frames since last move)`. Before every hold and every 4
@@ -804,7 +805,7 @@ until the interrupt wrapper reads the belief; A and B need nothing.
 | Stream | Deliverables | Verified by |
 |---|---|---|
 | A. Data | `compile_events.py` (front-end + IR), `events.json`, `dialogue.json`, `places.json` (incl. forced-movement endpoints and boulder solutions), `obtain.json`, `methods.json`, NPC movement areas, overlay + hot reload, ROM versioning | Unit tests on hand-checked scripts (Brock, Oak, Gym guy, Cut tree); the compiled Brock path matches §2.1; every `msgbox` in the maps we've played resolves through `dialogue.json` from the recorded frames in `captures/`; `obtain.json` names a method for all 151 Kanto species; **oracle:** a test loads Archipelago's `pokemon_frlg` region/entrance data (MIT, fetched at test time, not vendored) and checks that every location it marks reachable under the vanilla progression is reachable in our compiled graph, and every unreachable one is not |
-| B. Belief | `WorldBelief`, events, inference rules, priors, trainer-card / fly-map / Pokédex readers, NPC detector (CPU + GPU, bit-identical), bootstrap | Reducer replay tests; the checkpoint from `saves/route3-ready` yields `FLAG_BADGE01_GET = Observed true` after one trainer-card probe; the NPC detector finds the Pallet Town sign lady on recorded frames |
+| B. Belief | `WorldBelief`, events, inference rules, priors, trainer-card / fly-map / Pokédex readers, NPC detector (CPU, threaded if needed), bootstrap | Reducer replay tests; the checkpoint from `saves/route3-ready` yields `FLAG_BADGE01_GET = Observed true` after one trainer-card probe; the NPC detector finds the Pallet Town sign lady on recorded frames |
 | C. Planners | goal planner, route planner with gated edges, priors and probes, campaign scheduler with reachable-set report, `pokebot goal --dry-run` | The §9.1 plans, printed deterministically; "win the League" expands to the eight gyms with the right HM subgoals; the §9.2 report lists the unreachable species with reasons; the Master Ball is reserved for Mewtwo |
 | D. Motion + tools | `Syncer`, `Walker`, predictive tracking, NPC replanning, `Tool` trait, interrupt wrapper, `Unstick`, `Fly`/`Surf`, party/PC tools, Safari policy | The existing milestones through `PrepareForRoute3` run unchanged as a regression script; timing model converges on the emulator and shows a different profile on the Switch; a staged wandering NPC on Route 1 causes a local replan, seen in the recording |
 

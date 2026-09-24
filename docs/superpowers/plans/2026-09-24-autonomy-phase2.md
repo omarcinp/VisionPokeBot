@@ -161,5 +161,5 @@ existing detectors. Emits `FlagObserved(FLAG_BADGE0N_GET)`,
 
 ---
 
-## Phase 3: campaign scheduler, NPC detector (CPU+GPU), Puzzle tool,
+## Phase 3: campaign scheduler, NPC detector, Puzzle tool,
 party/PC tools, Archipelago oracle test — separate plan.
