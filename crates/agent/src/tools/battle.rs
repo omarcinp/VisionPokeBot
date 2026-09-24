@@ -216,6 +216,13 @@ impl ToolStep for BattleStep {
                 return decision;
             }
             if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+                // The box may belong to the page before (the nickname
+                // question's YES/NO stays while the next page prints):
+                // read the question once it is printed (flash-5: "It"
+                // of "It was placed in BOX…" taken for an unknown one).
+                if !d.ready_for_a() && d.stable_frames < PAGE_PRINTED_FRAMES {
+                    return Decision::Wait("the question is printing".into());
+                }
                 let page = d.lines.join(" ");
                 // After a catch: "Give a nickname to the captured X?" → No.
                 if catch::is_nickname_question(&page) {

@@ -903,6 +903,12 @@ impl Task for StoryTask {
                 }
             }
             if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+                // The box may belong to the page before (the nickname
+                // question's YES/NO stays while the next page prints):
+                // read the question once it is printed.
+                if !d.ready_for_a() && d.stable_frames < PAGE_PRINTED_FRAMES {
+                    return Decision::Wait("the question is printing".into());
+                }
                 // After a catch: "Give a nickname to the captured X?" → No
                 // (B answers No).
                 if catch::is_nickname_question(&d.lines.join(" ")) {
@@ -3543,6 +3549,26 @@ mod tests {
             !label.starts_with("fail:"),
             "the transfer text is not a question: {label}"
         );
+    }
+
+    /// flash-5, Route 22 with a full party: "It was placed in BOX…" read
+    /// as "It" while printing under the lingering YES/NO box (fixture
+    /// `captures/fixtures/emu-catch-placed-in-box-printing.png`).
+    #[test]
+    fn a_page_printing_under_the_lingering_box_is_waited_for() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut page = wild_frame(1, None, &["It"]);
+        page.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        page.dialogue.as_mut().unwrap().stable_frames = 1;
+        let (label, _) = tick_events(&mut task, &page, &state);
+        assert!(label.starts_with("wait:"), "{label}");
     }
 
     #[test]

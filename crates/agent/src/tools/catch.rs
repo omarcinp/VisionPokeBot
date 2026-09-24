@@ -111,11 +111,27 @@ impl HuntStep {
         }
     }
 
-    /// Whether the hunt is over, given the party knowledge.
-    fn reached(&self, party: &Party, caught: Option<&str>) -> Option<String> {
+    /// Whether the hunt is over, given the party knowledge, the species
+    /// the last battle caught and the Pokédex's caught marks (a catch a
+    /// failed battle step didn't report shows as the mark on the next
+    /// encounter's HUD; flash-5 hunted a MANKEY already caught).
+    fn reached(
+        &self,
+        party: &Party,
+        caught: Option<&str>,
+        state: &pokebot_state::GameState,
+    ) -> Option<String> {
         match &self.hunt {
             Hunt::Species(species) => {
-                (caught == Some(species.as_str())).then(|| format!("caught {species}"))
+                if caught == Some(species.as_str()) {
+                    return Some(format!("caught {species}"));
+                }
+                let marked = state
+                    .pokedex
+                    .caught
+                    .get(species)
+                    .is_some_and(|k| k.value == Some(true));
+                marked.then(|| format!("{species} is marked caught in the Pokédex"))
             }
             Hunt::Level(level) => party.lead().filter(|l| l.level >= *level).map(|l| {
                 format!(
@@ -156,7 +172,7 @@ impl ToolStep for HuntStep {
                 self.go = None;
                 // The state the step sees was cloned before this battle's
                 // last events; the caught species is read from the battle.
-                if let Some(done) = self.reached(&party, caught.as_deref()) {
+                if let Some(done) = self.reached(&party, caught.as_deref(), ctx.state) {
                     return Decision::Done(done);
                 }
                 if self.encounters >= self.max_encounters() {
@@ -173,7 +189,7 @@ impl ToolStep for HuntStep {
             }
             return decision;
         }
-        if let Some(done) = self.reached(&party, None) {
+        if let Some(done) = self.reached(&party, None, ctx.state) {
             return Decision::Done(done);
         }
         if o.battle.is_some() {
