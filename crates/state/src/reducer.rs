@@ -61,6 +61,13 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::MapChanged { to, .. } => {
                     state.player.pose = Knowledge::observed(to.clone(), record.frame_id);
                 }
+                GameEvent::BadgeEarned { badge } => {
+                    let mut badges = state.progression.badges.value.take().unwrap_or_default();
+                    if !badges.contains(badge) {
+                        badges.push(badge.clone());
+                    }
+                    state.progression.badges = Knowledge::observed(badges, record.frame_id);
+                }
                 GameEvent::GameSaved => {}
                 GameEvent::BattleStarted => state.in_battle = true,
                 GameEvent::BattleEnded => state.in_battle = false,

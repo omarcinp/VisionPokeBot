@@ -169,6 +169,11 @@ pub enum GameEvent {
     ShinySeen {
         species: String,
     },
+    /// "RED received the BOULDERBADGE from BROCK." (decomp name, e.g.
+    /// `BOULDERBADGE`).
+    BadgeEarned {
+        badge: String,
+    },
     /// The knowledge stored with the save that was just loaded.
     CheckpointRestored {
         knowledge: Box<SavedKnowledge>,

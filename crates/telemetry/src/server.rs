@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -16,7 +18,7 @@ use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use pokebot_core::{Error, Result, RgbImage};
 use serde_json::json;
-use tokio_stream::wrappers::{BroadcastStream, WatchStream};
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream, WatchStream};
 use tokio_stream::StreamExt;
 
 use crate::hub::FrameSnapshot;
@@ -26,6 +28,17 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const STATUS_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MJPEG_SCALE: u32 = 3;
+/// The page reconnects when it hears nothing for a few of these.
+const PING_INTERVAL: Duration = Duration::from_secs(2);
+/// Species folders (`front.png`, `shiny.pal`) from the decompilation.
+const SPRITE_DIR: &str = "data/pret-pokefirered/graphics/pokemon";
+/// Map views built by `tools/world/extract_region_map.py`.
+const WORLD_DIR: &str = "data/world";
+const WORLD_FILES: [(&str, &str); 3] = [
+    ("region_map.png", "image/png"),
+    ("overworld.png", "image/png"),
+    ("region_map.json", "application/json"),
+];
 
 /// A running web UI. Dropping it does not stop the server; it runs until the
 /// process exits.
@@ -47,11 +60,14 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route("/frame.png", get(frame_png))
         .route("/stream.mjpg", get(mjpeg))
+        .route("/sprite/{species}", get(sprite))
+        .route("/world/{file}", get(world_file))
         .route("/api/snapshot", get(snapshot))
         .route("/api/stream", get(sse))
         .with_state(AppState {
             telemetry,
             png_cache: Arc::new(Mutex::new(None)),
+            sprites: Arc::new(Mutex::new(HashMap::new())),
         });
     std::thread::Builder::new()
         .name("pokebot-web".into())
@@ -72,10 +88,14 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
     Ok(WebServer { addr })
 }
 
+/// (folder, shiny) → PNG, or `None` if the species has no sprite.
+type SpriteCache = HashMap<(String, bool), Option<Bytes>>;
+
 #[derive(Clone)]
 struct AppState {
     telemetry: Telemetry,
     png_cache: Arc<Mutex<Option<(u64, Bytes)>>>,
+    sprites: Arc<Mutex<SpriteCache>>,
 }
 
 async fn frame_png(State(app): State<AppState>) -> Response {
@@ -160,12 +180,162 @@ async fn sse(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event
     let log = BroadcastStream::new(inner.log_tx.subscribe())
         .filter_map(|entry| entry.ok()) // lagging clients skip entries; they can reload the snapshot
         .map(|entry| Event::default().event("log").json_data(entry));
+    let ping = IntervalStream::new(tokio::time::interval(PING_INTERVAL))
+        .map(|_| Ok(Event::default().event("ping").data("")));
     let events = status
         .merge(frames)
         .merge(log)
+        .merge(ping)
         .filter_map(|event: std::result::Result<Event, axum::Error>| event.ok())
         .map(Ok);
     Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+#[derive(serde::Deserialize)]
+struct SpriteQuery {
+    /// `1` or `true`.
+    shiny: Option<String>,
+}
+
+/// Front sprite of a species (`SPECIES_PIDGEY` or `pidgey`), transparent
+/// background, optionally in its shiny palette.
+async fn sprite(
+    State(app): State<AppState>,
+    UrlPath(species): UrlPath<String>,
+    Query(query): Query<SpriteQuery>,
+) -> Response {
+    let folder = species
+        .trim_end_matches(".png")
+        .trim_start_matches("SPECIES_")
+        .to_ascii_lowercase();
+    if folder.is_empty()
+        || !folder
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return (StatusCode::BAD_REQUEST, "bad species").into_response();
+    }
+    let shiny = matches!(query.shiny.as_deref(), Some("1" | "true"));
+    let key = (folder, shiny);
+    let cached = app
+        .sprites
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .cloned();
+    let png = match cached {
+        Some(png) => png,
+        None => {
+            let png = load_sprite(&key.0, key.1).map(Bytes::from);
+            app.sprites
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, png.clone());
+            png
+        }
+    };
+    match png {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "no sprite").into_response(),
+    }
+}
+
+/// The region map, the stitched overworld and where each map lies on them.
+async fn world_file(UrlPath(file): UrlPath<String>) -> Response {
+    let Some((name, mime)) = WORLD_FILES.iter().find(|(name, _)| *name == file) else {
+        return (StatusCode::NOT_FOUND, "unknown file").into_response();
+    };
+    match data_dir(WORLD_DIR).and_then(|dir| std::fs::read(dir.join(name)).ok()) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, *mime),
+                (header::CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "run tools/world/build.sh to build the map views",
+        )
+            .into_response(),
+    }
+}
+
+/// A repository data directory, from the working directory or the source
+/// tree.
+fn data_dir(relative: &str) -> Option<PathBuf> {
+    [
+        PathBuf::from(relative),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative),
+    ]
+    .into_iter()
+    .find(|p| p.is_dir())
+}
+
+fn load_sprite(folder: &str, shiny: bool) -> Option<Vec<u8>> {
+    let mut dir = data_dir(SPRITE_DIR)?.join(folder);
+    // Forms (Unown) keep their sprites one level down.
+    if !dir.join("front.png").is_file() {
+        dir = dir.join("a");
+    }
+    let png = std::fs::read(dir.join("front.png")).ok()?;
+    if !shiny {
+        return Some(png);
+    }
+    let palette = std::fs::read_to_string(dir.join("shiny.pal")).ok()?;
+    Some(replace_palette(&png, &parse_jasc(&palette)).unwrap_or(png))
+}
+
+/// RGB triples of a JASC-PAL file.
+fn parse_jasc(text: &str) -> Vec<u8> {
+    text.lines()
+        .skip(3)
+        .flat_map(|line| line.split_whitespace().filter_map(|v| v.parse::<u8>().ok()))
+        .collect()
+}
+
+/// Swaps the colours of an indexed PNG's `PLTE` chunk, keeping its size.
+fn replace_palette(png: &[u8], rgb: &[u8]) -> Option<Vec<u8>> {
+    let mut out = png.get(..8)?.to_vec();
+    let mut at = 8;
+    while at + 12 <= png.len() {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().ok()?) as usize;
+        let end = at + 12 + len;
+        let chunk = png.get(at..end)?;
+        if &chunk[4..8] == b"PLTE" {
+            let mut body = chunk[4..8 + len].to_vec();
+            let n = rgb.len().min(len);
+            body[4..4 + n].copy_from_slice(&rgb[..n]);
+            out.extend_from_slice(&chunk[..4]);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+        } else {
+            out.extend_from_slice(chunk);
+        }
+        at = end;
+    }
+    Some(out)
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
+        }
+    }
+    !crc
 }
 
 fn encode_png(image: &RgbImage) -> Vec<u8> {
@@ -199,4 +369,28 @@ fn encode_jpeg(image: &RgbImage, scale: u32) -> Vec<u8> {
         ExtendedColorType::Rgb8,
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_matches_png_reference() {
+        assert_eq!(crc32(b"IEND"), 0xAE42_6082);
+    }
+
+    #[test]
+    fn shiny_sprite_is_a_valid_png_with_new_colours() {
+        let (Some(normal), Some(shiny)) =
+            (load_sprite("pidgey", false), load_sprite("pidgey", true))
+        else {
+            return; // decompilation graphics not checked out
+        };
+        assert_ne!(normal, shiny);
+        let decoded = image::load_from_memory(&shiny).expect("valid png");
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
+        assert!(load_sprite("unown", false).is_some());
+        assert!(load_sprite("nidoran_f", false).is_some());
+    }
 }

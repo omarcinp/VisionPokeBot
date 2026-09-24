@@ -34,6 +34,9 @@ pub struct Progression {
     pub rival_name: Knowledge<String>,
     /// The player has been seen in control of the character.
     pub in_control: Knowledge<bool>,
+    /// Gym badges earned, in the order they were received.
+    #[serde(default)]
+    pub badges: Knowledge<Vec<String>>,
 }
 
 /// The goal the bot is pursuing and where it is in it.
