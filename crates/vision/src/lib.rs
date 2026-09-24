@@ -112,6 +112,37 @@ impl PerceptionSystem for FireRedPerception {
             observation.pokedex_page = true;
             return observation;
         }
+        if let Some(card) = detect::trainer_card::detect(image) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "trainer-card"),
+                metrics,
+            );
+            observation.trainer_card = Some(card);
+            return observation;
+        }
+        if let Some(map) = detect::fly_map::detect(image) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "region-map"),
+                metrics,
+            );
+            observation.fly_map = Some(map);
+            return observation;
+        }
+        if let Some(list) = self
+            .font
+            .as_deref()
+            .and_then(|font| detect::pokedex::list(image, font))
+        {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "pokedex-list"),
+                metrics,
+            );
+            observation.pokedex_list = Some(list);
+            return observation;
+        }
         if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -805,6 +836,39 @@ mod tests {
                     "{dir}{name}"
                 );
             }
+        }
+    }
+
+    /// The probe screens (Stream B2): trainer card, region map, Pokédex list.
+    #[test]
+    fn probe_screens_are_observed() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        if let Some(image) = fixture("emu-trainer-card.png") {
+            let o = p.observe(&frame(0, image));
+            assert_eq!(o.screen.detector, "trainer-card");
+            assert_eq!(o.trainer_card.unwrap().badges, vec![1]);
+            assert!(o.pokedex_list.is_none() && o.fly_map.is_none());
+        }
+        if let Some(image) = fixture("synthetic-fly-map.png") {
+            let o = p.observe(&frame(1, image));
+            assert_eq!(o.screen.detector, "region-map");
+            let map = o.fly_map.unwrap();
+            assert_eq!(map.lit, vec!["PewterCity", "ViridianCity", "PalletTown"]);
+            assert_eq!(map.lit.len() + map.dark.len(), 13);
+        }
+        if let Some(image) = fixture("emu-pokedex.png") {
+            let o = p.observe(&frame(2, image));
+            assert_eq!(o.screen.detector, "pokedex-list");
+            assert!(!o.pokedex_page);
+            let list = o.pokedex_list.unwrap();
+            assert_eq!(list.rows[0], ("BULBASAUR".to_owned(), true));
+            assert_eq!(list.cursor, Some(0));
+        }
+        if let Some(image) = fixture("emu-pokedex-contents.png") {
+            let o = p.observe(&frame(3, image));
+            assert!(o.pokedex_list.is_none() && o.trainer_card.is_none());
         }
     }
 

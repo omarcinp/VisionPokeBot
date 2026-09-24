@@ -134,6 +134,34 @@ pub struct BagObservation {
     pub prompt: Option<(Vec<String>, u8)>,
 }
 
+/// The Trainer Card's front: which badges are drawn on its badge row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainerCardObservation {
+    /// Badge numbers (1–8) shown, ascending.
+    pub badges: Vec<u8>,
+}
+
+/// The region map (the Fly destination map, or the Town Map): which fly spots
+/// carry the fly icon. On the Town Map no icon is ever drawn, so every spot
+/// is `dark` there; only the Fly map's `dark` spots mean "not visited".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlyMapObservation {
+    /// Fly spots (map names, as in `places.json`) whose icon is drawn.
+    pub lit: Vec<String>,
+    /// Fly spots whose cell shows no icon.
+    pub dark: Vec<String>,
+}
+
+/// The Pokédex numerical list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PokedexListObservation {
+    /// Visible rows, top to bottom: (species name as read — `-----` for a
+    /// species never seen — and whether the caught Poké Ball mark is shown).
+    pub rows: Vec<(String, bool)>,
+    /// Index into `rows` of the ▶.
+    pub cursor: Option<u8>,
+}
+
 /// The mart screen: the MONEY window, the item list, the ▶ cursor and the
 /// quantity box.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +270,15 @@ pub struct Observation {
     /// The Pokédex entry page shown after catching a new species (A leaves).
     #[serde(default)]
     pub pokedex_page: bool,
+    /// The Trainer Card's front (Start → the trainer's name).
+    #[serde(default)]
+    pub trainer_card: Option<TrainerCardObservation>,
+    /// The region map: Fly's destination map or the Town Map.
+    #[serde(default)]
+    pub fly_map: Option<FlyMapObservation>,
+    /// The Pokédex numerical list.
+    #[serde(default)]
+    pub pokedex_list: Option<PokedexListObservation>,
 }
 
 impl DialogueObservation {
@@ -272,6 +309,9 @@ impl Observation {
             bag: None,
             shop: None,
             pokedex_page: false,
+            trainer_card: None,
+            fly_map: None,
+            pokedex_list: None,
         }
     }
 }

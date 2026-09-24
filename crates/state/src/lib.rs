@@ -29,8 +29,9 @@ pub use inventory::{Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, SavedKnow
 pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BagObservation, BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction,
-    FrameMetrics, KeyboardFocus, MenuObservation, MoveListObservation, NamingObservation,
-    Observation, Observed, PlayerPose, PoseObservation, Region, ShinyReading, ShopObservation,
+    FlyMapObservation, FrameMetrics, KeyboardFocus, MenuObservation, MoveListObservation,
+    NamingObservation, Observation, Observed, PlayerPose, PokedexListObservation, PoseObservation,
+    Region, ShinyReading, ShopObservation, TrainerCardObservation,
 };
 pub use party::{MoveSlot, PartyMon, Status};
 pub use priors::{PriorRule, Priors};
