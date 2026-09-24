@@ -4,8 +4,6 @@
 use pokebot_gamedata::GameData;
 use pokebot_state::{GameEvent, Pocket};
 
-use crate::party::Party;
-
 #[derive(Debug, Default)]
 pub struct TextTracker {
     last_page: String,
@@ -18,7 +16,6 @@ impl TextTracker {
         &mut self,
         lines: &[String],
         data: &GameData,
-        _party: &Party,
         last_move: Option<(u8, u8)>,
     ) -> Vec<GameEvent> {
         let page = lines.join(" ");
@@ -112,17 +109,16 @@ mod tests {
     #[test]
     fn text_becomes_money_item_and_heal_events() {
         let Some(d) = data() else { return };
-        let party = Party::default();
         let mut t = TextTracker::default();
         assert_eq!(
-            t.observe_page(&lines("RED got ¥1,200\nfor winning!"), &d, &party, None),
+            t.observe_page(&lines("RED got ¥1,200\nfor winning!"), &d, None),
             vec![GameEvent::MoneyChanged {
                 delta: 1200,
                 reason: "won a battle".into()
             }]
         );
         assert_eq!(
-            t.observe_page(&lines("RED found a POTION!"), &d, &party, None),
+            t.observe_page(&lines("RED found a POTION!"), &d, None),
             vec![GameEvent::ItemsChanged {
                 pocket: Pocket::Items,
                 item: "ITEM_POTION".into(),
@@ -134,7 +130,6 @@ mod tests {
             t.observe_page(
                 &lines("We've restored your POKéMON\nto full health."),
                 &d,
-                &party,
                 None
             ),
             vec![GameEvent::Healed]
@@ -144,7 +139,6 @@ mod tests {
             .observe_page(
                 &lines("We've restored your POKéMON\nto full health."),
                 &d,
-                &party,
                 None
             )
             .is_empty());
@@ -158,7 +152,6 @@ mod tests {
             t.observe_page(
                 &lines("There's no PP left for\nthis move!"),
                 &d,
-                &Party::default(),
                 Some((0, 2))
             ),
             vec![GameEvent::MoveOutOfPp {

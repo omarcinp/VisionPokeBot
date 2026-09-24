@@ -476,12 +476,9 @@ impl Task for StoryTask {
                         detail,
                     });
                 }
-                let tracked = self.tracker.observe_page(
-                    &d.lines,
-                    &data,
-                    &self.party,
-                    self.battle_memory.last_slot,
-                );
+                let tracked =
+                    self.tracker
+                        .observe_page(&d.lines, &data, self.battle_memory.last_slot);
                 self.heal.observe(&tracked);
                 ctx.events.extend(tracked);
             }
