@@ -58,7 +58,8 @@ stop_process() {
 # Replace only this instance. The pre-hub name pokebot-webrun was the Switch
 # view and held port 8080 itself.
 stop_process "${NAME}"
-if [[ "${INSTANCE}" == switch ]]; then
+if [[ "${INSTANCE}" == switch ]] && pgrep -x pokebot-webrun >/dev/null; then
+  echo "note: replacing the legacy pokebot-webrun (port ${HUB_PORT}); the Switch view is now at /switch/"
   stop_process pokebot-webrun
 fi
 
