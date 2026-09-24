@@ -20,6 +20,8 @@ const STEP_TIMEOUT: u64 = 30;
 const WARP_TIMEOUT: u64 = 180;
 /// One walking step: 16 GBA frames.
 const TILE_MS: u64 = 268;
+/// Times per map the learned obstacles may be forgotten to retry a path.
+const MAX_FORGETS: u32 = 3;
 /// Longest straight run walked with one hold.
 const MAX_RUN: usize = 8;
 
@@ -101,6 +103,8 @@ pub struct Navigator {
     pub destination: Destination,
     /// Tiles learned to be blocked at runtime (NPCs, scripts), per map.
     learned: HashMap<String, Obstacles>,
+    /// Times the learned tiles were forgotten, per map.
+    forgets: HashMap<String, u32>,
     /// Direction the player is believed to face (after a move or turn).
     facing: Option<Direction>,
     /// Taps in a row that did not move the player.
@@ -125,6 +129,7 @@ impl Navigator {
             world,
             destination,
             learned: HashMap::new(),
+            forgets: HashMap::new(),
             facing: None,
             stalled: 0,
             single_steps: 0,
@@ -253,6 +258,19 @@ impl Navigator {
         }
     }
 
+    /// Drops the obstacles learned on `map`, at most [`MAX_FORGETS`] times
+    /// per map (a real block the world model lacks would otherwise be
+    /// learned and forgotten forever). Whether anything was forgotten.
+    fn forget_learned(&mut self, map: &str) -> bool {
+        let count = self.forgets.entry(map.to_owned()).or_insert(0);
+        if *count >= MAX_FORGETS || !self.learned.contains_key(map) {
+            return false;
+        }
+        *count += 1;
+        self.learned.remove(map);
+        true
+    }
+
     /// How many taps in a row failed to move the player.
     pub fn stalled(&self) -> u32 {
         self.stalled
@@ -279,7 +297,7 @@ impl Navigator {
         let heuristic = |p: (i32, i32)| (p.0 - toward.0).abs() + (p.1 - toward.1).abs();
         let Some(path) = find_path(map, (pose.x, pose.y), &obstacles, &goal, heuristic) else {
             // Learned blocks may be stale (a wandering NPC moved on).
-            if self.learned.remove(&map.name).is_some() {
+            if self.forget_learned(&map.name) {
                 return NavStatus::Wait(format!("no path {what}; forgetting learned obstacles"));
             }
             return NavStatus::Fail(format!("no path {what} on {}", map.name));
@@ -460,7 +478,7 @@ impl Navigator {
             // Learned blocks may be stale (a wandering NPC moved on, or a
             // step in a featureless corridor that did happen but couldn't
             // be seen).
-            _ if self.learned.remove(&map.name).is_some() => {
+            _ if self.forget_learned(&map.name) => {
                 NavStatus::Wait(format!("no path {label}; forgetting learned obstacles"))
             }
             _ => NavStatus::Fail(format!("no path {label} on {}", map.name)),
@@ -851,6 +869,18 @@ mod tests {
                 assert!(a.label.starts_with("walk to warp (25, 21)"), "{}", a.label)
             }
             _ => panic!("expected a step"),
+        }
+        // A block that keeps coming back is forgotten at most MAX_FORGETS
+        // times on a map; then the walk fails instead of cycling.
+        let blocked = || Obstacles::from([(28, 38), (28, 37), (27, 37)]);
+        for _ in 1..MAX_FORGETS {
+            nav.learned.insert("MtMoon_B2F".into(), blocked());
+            assert!(matches!(nav.next(&o), NavStatus::Wait(_)));
+        }
+        nav.learned.insert("MtMoon_B2F".into(), blocked());
+        match nav.next(&o) {
+            NavStatus::Fail(r) => assert!(r.contains("no path to warp"), "{r}"),
+            _ => panic!("expected the walk to fail"),
         }
     }
 
