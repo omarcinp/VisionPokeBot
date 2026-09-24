@@ -1,4 +1,5 @@
 mod devices;
+mod goal;
 mod hub;
 mod plan;
 mod script;
@@ -177,6 +178,10 @@ enum Command {
     /// Readiness planning: chance to beat a trainer now, and the cheapest
     /// training/catching plan to reach the confidence target.
     Plan(plan::PlanArgs),
+    /// Goal planning: the intents that establish a goal predicate from a
+    /// checkpoint (`--dry-run` prints them; execution arrives with the goal
+    /// loop).
+    Goal(goal::GoalArgs),
     /// Serve every instance's web UI under one address: /switch/, /emu/.
     Hub(hub::HubArgs),
     /// Run the emulator as a stand-alone virtual console.
@@ -314,6 +319,7 @@ fn main() -> Result<()> {
             story(&devices, &output, start, &options, &stop)
         }
         Command::Plan(args) => plan::run(args),
+        Command::Goal(args) => goal::run(args),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),
