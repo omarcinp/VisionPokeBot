@@ -613,7 +613,7 @@ impl Task for StoryTask {
                 );
             }
             // The throw's result, the foe's status and the PC box, from text.
-            self.battle_memory.catch.observe(o);
+            catch::observe(&mut self.battle_memory, o);
             let loss_ok = matches!(step, StoryStep::Battle { loss_ok: true, .. });
             if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !loss_ok {
                 return Decision::Fail(format!(

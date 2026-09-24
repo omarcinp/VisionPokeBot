@@ -382,6 +382,8 @@ pub struct CatchMemory {
     pub box_index: Option<u8>,
     /// An attempt was abandoned for its risk: RUN.
     pub flee: bool,
+    /// "The TRAINER blocked the BALL!": this is a trainer battle.
+    pub blocked: bool,
     /// The current throw through the battle bag.
     pub thrower: Option<Thrower>,
     /// The move being chosen is the status opener.
@@ -406,6 +408,12 @@ impl CatchMemory {
         // The battle is back after USE: that throw is over.
         if o.battle.is_some() && self.thrower.as_ref().is_some_and(Thrower::used) {
             self.thrower = None;
+        }
+        // A battle frame without a menu (text, animation) ends the turn's
+        // menu: the next menu's HUD must be confirmed afresh, never by a
+        // reading from before the turn.
+        if o.battle.as_ref().is_some_and(|b| b.menu.is_none()) {
+            self.hud = None;
         }
         let Some(d) = &o.dialogue else { return };
         let page = d.lines.join(" ");
@@ -446,6 +454,12 @@ impl CatchMemory {
         if let Some(index) = box_from_text(&page) {
             self.box_index = Some(index);
         }
+        // Only a trainer blocks a ball: no catch in this battle.
+        if page.contains("blocked the BALL") {
+            self.blocked = true;
+            self.attempt = None;
+            self.thrower = None;
+        }
     }
 
     /// A move choice was confirmed: the opener, if it was one, is used.
@@ -465,6 +479,15 @@ impl CatchMemory {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// Reads battle text into the battle's memory ([`CatchMemory::observe`]);
+/// a blocked ball marks the battle as a trainer's.
+pub fn observe(memory: &mut BattleMemory, o: &Observation) {
+    memory.catch.observe(o);
+    if memory.catch.blocked {
+        memory.trainer = true;
     }
 }
 
@@ -2386,5 +2409,142 @@ mod tests {
         }
         assert!(memory.catch.attempt.is_none());
         assert_eq!(last, "choose FIGHT");
+    }
+
+    #[test]
+    fn box_index_from_the_pret_pages() {
+        // data/text/pc_transfer.inc, joined across lines with " ".
+        let pages = |list: &[&str]| -> Option<u8> {
+            let mut memory = CatchMemory::default();
+            for (i, page) in list.iter().enumerate() {
+                let mut o = Observation::bare(
+                    0,
+                    pokebot_state::Observed {
+                        value: pokebot_state::ScreenState::BattleText,
+                        detector: "test".into(),
+                    },
+                    Default::default(),
+                );
+                o.dialogue = Some(battle_text(&page.split('\n').collect::<Vec<_>>()));
+                for f in 0..2 {
+                    o.frame_id = 10 * i as u64 + f;
+                    memory.observe(&o);
+                }
+            }
+            memory.box_index
+        };
+        assert_eq!(
+            pages(&[
+                "PIDGEY was transferred to\nSomeone's PC.",
+                "It was placed in \nBOX “BOX 1.”"
+            ]),
+            Some(0)
+        );
+        assert_eq!(
+            pages(&[
+                "PIDGEY was transferred to\nBILL'S PC.",
+                "It was placed in \nBOX “BOX 1.”"
+            ]),
+            Some(0)
+        );
+        assert_eq!(
+            pages(&[
+                "BOX “BOX 1” on\nSomeone's PC was full.",
+                "PIDGEY was transferred to\nBOX “BOX 2.”"
+            ]),
+            Some(1)
+        );
+        assert_eq!(box_from_text("BOX “BOX 1” on Someone's PC was full."), None);
+        assert_eq!(box_from_text("PIDGEY was transferred to BILL'S PC."), None);
+        assert_eq!(box_from_text("It was placed in  BOX “BOX 12.”"), Some(11));
+    }
+
+    #[test]
+    fn a_blocked_ball_means_a_trainer_battle() {
+        let Some(data) = data() else { return };
+        let party = Party {
+            members: vec![ivysaur(&data)],
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let mut memory = BattleMemory::default();
+        let mut events = Vec::new();
+        let command = BattleMenu::Command { column: 0, row: 0 };
+        for f in [1, 2] {
+            identify(
+                &wild(f, command, 1000),
+                &data,
+                &state,
+                &party,
+                &mut memory,
+                &mut events,
+            );
+        }
+        assert!(memory.catch.attempt.is_some());
+        let mut text = wild(3, command, 1000);
+        text.battle.as_mut().unwrap().menu = None;
+        text.dialogue = Some(battle_text(&["The TRAINER blocked the BALL!"]));
+        observe(&mut memory, &text);
+        text.frame_id = 4;
+        observe(&mut memory, &text);
+        assert!(memory.trainer);
+        assert!(memory.catch.attempt.is_none());
+        // The battle goes on as a trainer battle: FIGHT, no RUN.
+        assert_eq!(
+            decide_on(&data, &party, &mut memory, &wild(5, command, 1000)),
+            "choose FIGHT"
+        );
+    }
+
+    #[test]
+    fn a_new_turn_confirms_the_hud_afresh() {
+        let Some(data) = data() else { return };
+        let party = Party {
+            members: vec![ivysaur(&data)],
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let mut memory = BattleMemory::default();
+        let mut events = Vec::new();
+        let command = BattleMenu::Command { column: 0, row: 0 };
+        for f in [1, 2] {
+            identify(
+                &wild(f, command, 1000),
+                &data,
+                &state,
+                &party,
+                &mut memory,
+                &mut events,
+            );
+        }
+        assert_eq!(
+            decide_on(&data, &party, &mut memory, &wild(3, command, 1000)),
+            "choose FIGHT"
+        );
+        // The turn's text, then the next command menu with the same HUD.
+        let mut text = wild(5, command, 1000);
+        text.battle.as_mut().unwrap().menu = None;
+        text.dialogue = Some(battle_text(&["Wild PIDGEY used", "TACKLE!"]));
+        memory.catch.observe(&text);
+        let policy = crate::battle::BattlePolicy::default();
+        let first = crate::battle::decide(
+            &wild(6, command, 1000),
+            &policy,
+            &mut memory,
+            &party,
+            &data,
+            &mut events,
+        );
+        assert!(
+            matches!(first, Some(crate::Decision::Wait(ref r)) if r.contains("confirming the HUD")),
+            "a stale reading confirmed a new menu"
+        );
+        let second = crate::battle::decide(
+            &wild(7, command, 1000),
+            &policy,
+            &mut memory,
+            &party,
+            &data,
+            &mut events,
+        );
+        assert!(matches!(second, Some(crate::Decision::Act(_))));
     }
 }
