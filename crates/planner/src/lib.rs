@@ -8,4 +8,6 @@ pub mod evaluate;
 pub mod prepare;
 
 pub use evaluate::{battle_vs_trainer, matchup, BattleEstimate, Combatant};
-pub use prepare::{plan_preparation, Area, PartyMember, PlanStep, PreparationPlan, Request};
+pub use prepare::{
+    plan_preparation, plan_training, Area, PartyMember, PlanStep, PreparationPlan, Request,
+};

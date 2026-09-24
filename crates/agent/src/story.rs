@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_planner::{plan_preparation, Area, PartyMember, PlanStep, Request};
+use pokebot_planner::{plan_preparation, plan_training, Area, PartyMember, PlanStep, Request};
 use pokebot_state::{GameEvent, Observation, Pocket, ScreenState};
 use pokebot_world::behavior::TALL_GRASS;
 use pokebot_world::World;
@@ -436,15 +436,11 @@ impl StoryTask {
         Some((map, nurse))
     }
 
-    /// Two neighbouring tall-grass tiles on `map` to pace between, closest to
-    /// `near` (deterministic: row-major order breaks ties).
-    /// Where to spin on `map` for encounters, near `near`.
+    /// Where to spin on `map` for encounters (tall grass or cave floor),
+    /// near `near`.
     fn grass_spot(&self, map: &str, near: Tile) -> Option<Tile> {
         let m = self.world.map(map)?;
-        let grass = |x: i32, y: i32| {
-            m.tile(x, y)
-                .is_some_and(|t| t.behavior == TALL_GRASS && t.collision == 0)
-        };
+        let grass = |x: i32, y: i32| m.tile(x, y).is_some_and(|t| encounter_tile(&t));
         spin_tile(&grass, m.width, m.height, near)
     }
 
@@ -493,20 +489,76 @@ impl StoryTask {
             ));
         }
         let lead = &self.party.members[0].species;
-        let mut steps = Vec::new();
-        for step in &plan.steps {
-            match step {
-                PlanStep::Train {
-                    species, to, map, ..
-                } if species == lead => steps.push(StoryStep::Train {
-                    map: map.clone(),
-                    level: *to,
-                }),
-                other => return Err(format!("plan step not supported yet: {other:?}")),
+        // Switching is out of scope, so a catch only helps as a place to
+        // train: accepted when the lead alone (no catch) reaches the
+        // confidence, and trained to the level that plan needs.
+        let lead_only = || {
+            let alone = Request {
+                party: request.party[..1].to_vec(),
+                ..request.clone()
+            };
+            let plans = plan_training(&alone, 1);
+            let plan = plans
+                .first()
+                .ok_or("the plan catches; no lead-only plan found")?;
+            if plan.min_confidence() < confidence {
+                return Err(format!(
+                    "the plan catches, and without catching the lead alone only reaches {:.0}%",
+                    plan.min_confidence() * 100.0
+                ));
             }
-        }
-        Ok(steps)
+            Ok(plan
+                .party
+                .first()
+                .map_or(self.party.members[0].level, |(_, level, _)| *level))
+        };
+        plan_to_steps(&plan.steps, lead, lead_only)
     }
+}
+
+/// The planner's steps as story steps. Only the lead trains (switching is
+/// out of scope): training another member fails. A catch becomes training
+/// at the catch's area to the level `lead_only` says the lead alone needs
+/// (or its error), and the caught species' own training is dropped with it.
+fn plan_to_steps(
+    plan: &[PlanStep],
+    lead: &str,
+    mut lead_only: impl FnMut() -> Result<u8, String>,
+) -> Result<Vec<StoryStep>, String> {
+    let mut caught: Vec<&str> = Vec::new();
+    let mut steps = Vec::new();
+    for step in plan {
+        match step {
+            PlanStep::Train {
+                species, to, map, ..
+            } if species == lead => steps.push(StoryStep::Train {
+                map: map.clone(),
+                level: *to,
+            }),
+            PlanStep::Train { species, .. } if caught.contains(&species.as_str()) => {}
+            PlanStep::Catch { species, map, .. } => {
+                let level = lead_only()?;
+                caught.push(species);
+                steps.push(StoryStep::Train {
+                    map: map.clone(),
+                    level,
+                });
+            }
+            other => return Err(format!("plan step not supported yet: {other:?}")),
+        }
+    }
+    Ok(steps)
+}
+
+/// Where wild Pokémon appear on foot: tall grass, or cave floor (plain or
+/// `MB_CAVE`/`MB_SAND_CAVE`) with land encounters. Never ladders, warps or
+/// water.
+fn encounter_tile(t: &pokebot_world::Tile) -> bool {
+    const CAVE: u16 = 0x08;
+    const SAND_CAVE: u16 = 0x2B;
+    t.collision == 0
+        && (t.behavior == TALL_GRASS
+            || (t.encounter == 1 && matches!(t.behavior, 0x00 | CAVE | SAND_CAVE)))
 }
 
 enum NavStatusOrDecision {
@@ -1404,11 +1456,147 @@ pub fn to_mt_moon() -> Vec<Milestone> {
     )]
 }
 
+/// Mt. Moon's trainers: all are planning targets (some can be walked past,
+/// but the plan shouldn't depend on that).
+const MT_MOON_TRAINERS: [&str; 12] = [
+    "TRAINER_LASS_IRIS",
+    "TRAINER_BUG_CATCHER_ROBBY",
+    "TRAINER_SUPER_NERD_JOVAN",
+    "TRAINER_LASS_MIRIAM",
+    "TRAINER_BUG_CATCHER_KENT",
+    "TRAINER_YOUNGSTER_JOSH",
+    "TRAINER_HIKER_MARCOS",
+    // Floor trigger at MtMoon_B2F (14, 11); not in map_trainers.
+    "TRAINER_SUPER_NERD_MIGUEL",
+    "TRAINER_TEAM_ROCKET_GRUNT",
+    "TRAINER_TEAM_ROCKET_GRUNT_2",
+    "TRAINER_TEAM_ROCKET_GRUNT_3",
+    "TRAINER_TEAM_ROCKET_GRUNT_4",
+];
+
+const ROUTE4_CENTER: &str = "Route4_PokemonCenter_1F";
+const CERULEAN_CENTER: &str = "CeruleanCity_PokemonCenter_1F";
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// From Pewter City (Boulder Badge, ready for Route 3) to the Cascade Badge:
+/// stock up on balls, cross Route 3 and Mt. Moon (Miguel, the Helix Fossil),
+/// then Cerulean City and Misty.
+///
+/// Training areas are the ones reachable without Nugget Bridge: Route 24's
+/// grass (and Route 25 beyond it) is only reachable across the bridge's
+/// trainers, which are out of scope.
+pub fn to_cerulean() -> Vec<Milestone> {
+    vec![
+        Milestone::new(
+            "StockUpPewter",
+            "buy Poké Balls at the Pewter Mart before Route 3",
+            vec![StoryStep::StockUp {
+                mart: Some("PewterCity_Mart".into()),
+            }],
+        ),
+        Milestone::new(
+            "CrossRoute3",
+            "cross Route 3 (its trainers can't be walked around) to the Route 4 Pokémon Center",
+            vec![StoryStep::Heal {
+                center: Some(ROUTE4_CENTER.into()),
+            }],
+        ),
+        Milestone::new(
+            "PrepareForMtMoon",
+            "ask the planner what it takes to beat Mt. Moon's trainers, then train",
+            vec![
+                StoryStep::Prepare {
+                    targets: names(&MT_MOON_TRAINERS),
+                    areas: names(&["Route3", "Route4", "MtMoon_1F"]),
+                    confidence: 0.9,
+                },
+                StoryStep::Heal {
+                    center: Some(ROUTE4_CENTER.into()),
+                },
+            ],
+        ),
+        Milestone::new(
+            "CrossMtMoon",
+            "beat Miguel, take the Helix Fossil and leave Mt. Moon for Route 4",
+            vec![
+                // Miguel: the floor trigger in front of the fossils.
+                StoryStep::Battle {
+                    trigger: Destination::Tile {
+                        map: "MtMoon_B2F".into(),
+                        x: 14,
+                        y: 11,
+                    },
+                    loss_ok: false,
+                },
+                // The Helix Fossil: "You want the HELIX FOSSIL?" → YES.
+                StoryStep::Talk {
+                    map: "MtMoon_B2F".into(),
+                    object: 2,
+                    answers: vec![Answer::Yes],
+                },
+                // Miguel walks up to the Dome Fossil and takes it.
+                StoryStep::Settle { frames: 180 },
+                StoryStep::Go(Destination::Warp {
+                    map: "MtMoon_B1F".into(),
+                    warp: 7,
+                }),
+            ],
+        ),
+        Milestone::new(
+            "ReachCerulean",
+            "Route 4 to Cerulean City; heal and stock up on Poké Balls",
+            vec![
+                StoryStep::Heal {
+                    center: Some(CERULEAN_CENTER.into()),
+                },
+                StoryStep::StockUp {
+                    mart: Some("CeruleanCity_Mart".into()),
+                },
+            ],
+        ),
+        Milestone::new(
+            "PrepareForMisty",
+            "ask the planner what it takes to beat the Cerulean Gym, then train",
+            vec![
+                StoryStep::Prepare {
+                    targets: names(&[
+                        "TRAINER_SWIMMER_MALE_LUIS",
+                        "TRAINER_PICNICKER_DIANA",
+                        "TRAINER_LEADER_MISTY",
+                    ]),
+                    // Route24/Route25 dropped: their grass is behind the
+                    // Nugget Bridge trainers.
+                    areas: names(&["Route4", "Route3", "MtMoon_1F"]),
+                    confidence: 0.9,
+                },
+                StoryStep::Heal {
+                    center: Some(CERULEAN_CENTER.into()),
+                },
+            ],
+        ),
+        Milestone::new(
+            "BeatMisty",
+            "challenge Misty in the Cerulean Gym and win",
+            vec![
+                StoryStep::Challenge {
+                    map: "CeruleanCity_Gym".into(),
+                    object: 3,
+                },
+                StoryStep::Settle { frames: 180 },
+            ],
+        ),
+    ]
+}
+
 /// Every milestone implemented so far, in order.
 pub fn all_milestones(starter: Starter) -> Vec<Milestone> {
     let mut list = opening(starter);
     list.extend(to_brock());
     list.extend(to_mt_moon());
+    list.extend(to_cerulean());
     list
 }
 
@@ -1433,6 +1621,112 @@ mod tests {
         // The centre of the 3×3 patch beats the lone tile next to us.
         assert_eq!(spin_tile(&g, 8, 5, (0, 0)), Some((5, 3)));
         assert_eq!(spin_tile(&grid(&["...."]), 4, 1, (0, 0)), None);
+    }
+
+    fn tile(collision: u8, behavior: u16, encounter: u8) -> pokebot_world::Tile {
+        pokebot_world::Tile {
+            collision,
+            elevation: 3,
+            behavior,
+            encounter,
+        }
+    }
+
+    #[test]
+    fn cave_floor_with_encounters_counts_for_training() {
+        // Mt. Moon: MB_CAVE floor (0x08) with land encounters, and plain floor.
+        assert!(encounter_tile(&tile(0, 0x08, 1)));
+        assert!(encounter_tile(&tile(0, 0x00, 1)));
+        assert!(encounter_tile(&tile(0, TALL_GRASS, 1)));
+        // Blocked, water encounters, no encounters, ladders.
+        assert!(!encounter_tile(&tile(1, 0x08, 1)));
+        assert!(!encounter_tile(&tile(0, 0x15, 2)));
+        assert!(!encounter_tile(&tile(0, 0x00, 0)));
+        assert!(!encounter_tile(&tile(0, 0x61, 1)));
+    }
+
+    fn catch(species: &str, map: &str) -> PlanStep {
+        PlanStep::Catch {
+            species: species.into(),
+            map: map.into(),
+            level: 8,
+            minutes: 3.0,
+            balls: 2,
+        }
+    }
+
+    fn train_plan(species: &str, to: u8, map: &str) -> PlanStep {
+        PlanStep::Train {
+            species: species.into(),
+            from: 14,
+            to,
+            map: map.into(),
+            minutes: 5.0,
+            battles: 10,
+        }
+    }
+
+    #[test]
+    fn lead_training_becomes_train_steps() {
+        let steps = plan_to_steps(
+            &[train_plan("SPECIES_BULBASAUR", 16, "Route3")],
+            "SPECIES_BULBASAUR",
+            || panic!("no catch: the lead-only plan is not needed"),
+        );
+        assert_eq!(
+            steps,
+            Ok(vec![StoryStep::Train {
+                map: "Route3".into(),
+                level: 16
+            }])
+        );
+    }
+
+    #[test]
+    fn catch_step_trains_the_lead_there_when_the_lead_alone_is_enough() {
+        let steps = plan_to_steps(
+            &[
+                catch("SPECIES_ZUBAT", "MtMoon_1F"),
+                train_plan("SPECIES_ZUBAT", 12, "MtMoon_1F"),
+                train_plan("SPECIES_BULBASAUR", 16, "Route3"),
+            ],
+            "SPECIES_BULBASAUR",
+            || Ok(17),
+        );
+        assert_eq!(
+            steps,
+            Ok(vec![
+                StoryStep::Train {
+                    map: "MtMoon_1F".into(),
+                    level: 17
+                },
+                StoryStep::Train {
+                    map: "Route3".into(),
+                    level: 16
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn catch_step_fails_when_the_lead_alone_falls_short() {
+        let steps = plan_to_steps(
+            &[catch("SPECIES_ZUBAT", "MtMoon_1F")],
+            "SPECIES_BULBASAUR",
+            || Err("the lead alone only reaches 80%".into()),
+        );
+        let err = steps.unwrap_err();
+        assert!(err.contains("only reaches 80%"), "{err}");
+    }
+
+    #[test]
+    fn training_another_member_still_fails() {
+        let steps = plan_to_steps(
+            &[train_plan("SPECIES_PIDGEY", 12, "Route3")],
+            "SPECIES_BULBASAUR",
+            || Ok(20),
+        );
+        assert!(steps.is_err());
     }
 
     #[test]

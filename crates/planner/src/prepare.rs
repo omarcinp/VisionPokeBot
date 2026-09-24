@@ -219,6 +219,16 @@ fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(
 /// Returns up to `alternatives` plans, cheapest first; the first meets the
 /// confidence target if any plan does.
 pub fn plan_preparation(request: &Request<'_>, alternatives: usize) -> Vec<PreparationPlan> {
+    plan(request, alternatives, true)
+}
+
+/// Like [`plan_preparation`], but only training the party as it is (no
+/// catches).
+pub fn plan_training(request: &Request<'_>, alternatives: usize) -> Vec<PreparationPlan> {
+    plan(request, alternatives, false)
+}
+
+fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<PreparationPlan> {
     let data = request.data;
     // Team compositions: as is, or plus one catchable species.
     let mut catchable: BTreeSet<String> = BTreeSet::new();
@@ -230,7 +240,7 @@ pub fn plan_preparation(request: &Request<'_>, alternatives: usize) -> Vec<Prepa
     let ball_price = data.items.get(POKE_BALL).map_or(200, |i| i.price);
     let mut compositions: Vec<(Vec<PartyMember>, Vec<PlanStep>, f64)> =
         vec![(request.party.clone(), Vec::new(), 0.0)];
-    if request.party.len() < 6 {
+    if catching && request.party.len() < 6 {
         for species in &catchable {
             let best = request
                 .areas

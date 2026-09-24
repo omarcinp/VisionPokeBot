@@ -30,4 +30,7 @@ pub use executor::{Decision, Executor, ExecutorError, Outcome, Task, TaskContext
 pub use new_game::{NewGameConfig, NewGameTask, RIVAL_PRESETS};
 pub use progress::Progress;
 pub use save::{ContinueTask, SaveGameTask};
-pub use story::{all_milestones, opening, to_brock, Milestone, Starter, StoryStep, StoryTask};
+pub use story::{
+    all_milestones, opening, to_brock, to_cerulean, to_mt_moon, Milestone, Starter, StoryStep,
+    StoryTask,
+};
