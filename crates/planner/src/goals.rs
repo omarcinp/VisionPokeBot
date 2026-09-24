@@ -889,6 +889,26 @@ impl<'p, 'a> Session<'p, 'a> {
         self.base.with_established(established.clone())
     }
 
+    /// What a route needs of the plan: the requirements of its legs that
+    /// the base knowledge doesn't meet (unknown ones, and the ones met only
+    /// by facts the plan establishes). They become the step's
+    /// preconditions, so it is ordered after them (flash-5: a trip to
+    /// Diglett's Cave priced with Cut established was placed first and
+    /// walked into the Route 2 Cut tree).
+    fn route_needs(&self, route: &RouteResult, into: &mut Vec<GoalPredicate>) {
+        for leg in &route.legs {
+            for p in &leg.requires {
+                if self.base.eval(p) == Truth::True {
+                    continue;
+                }
+                let g = GoalPredicate::World(p.clone());
+                if !into.contains(&g) {
+                    into.push(g);
+                }
+            }
+        }
+    }
+
     fn context<'c>(&'c self, belief: &'c StateBelief<'a>) -> PlanContext<'c> {
         PlanContext {
             world: self.planner.world,
@@ -1762,6 +1782,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 .cloned()
                 .map(GoalPredicate::World)
                 .collect();
+            self.route_needs(&route, &mut c.preconditions);
             for leg in &route.legs {
                 if !matches!(leg.kind, EdgeKind::Walk { .. }) || leg.from.map != leg.to.map {
                     continue;
@@ -1997,6 +2018,7 @@ impl<'p, 'a> Session<'p, 'a> {
                     c.preconditions.push(p);
                 }
             }
+            self.route_needs(&route, &mut c.preconditions);
             route.cost_s
         } else {
             c.preconditions.insert(0, GoalPredicate::at(map));
@@ -2232,6 +2254,12 @@ impl<'p, 'a> Session<'p, 'a> {
         let mut steps: Vec<Step> = Vec::new();
         let mut cost = 0.0;
         let mut throws_total = 0;
+        // What the trips need (a gate's Cut, a trainer on the way) and
+        // assume, kept from every species' own candidate: without them
+        // the trip was ordered before what opens it (flash-5: Diglett's
+        // Cave through the Route 2 Cut tree, 24 steps before Cut).
+        let mut preconditions = vec![GoalPredicate::has_item(&ball, 0)];
+        let mut assumes = Vec::new();
         for (_, area) in &areas {
             let mut first = true;
             for (_, _, map, throws, c) in &options {
@@ -2248,15 +2276,24 @@ impl<'p, 'a> Session<'p, 'a> {
                 }
                 first = false;
                 throws_total += throws;
+                for pre in &c.preconditions {
+                    if !preconditions.contains(pre) {
+                        preconditions.push(pre.clone());
+                    }
+                }
+                for a in &c.assumes {
+                    if !assumes.contains(a) {
+                        assumes.push(a.clone());
+                    }
+                }
             }
         }
+        preconditions[0] =
+            GoalPredicate::has_item(&ball, throws_total + self.planner.params.ball_reserve);
         let mut c = Candidate {
             steps,
-            preconditions: vec![GoalPredicate::has_item(
-                &ball,
-                throws_total + self.planner.params.ball_reserve,
-            )],
-            assumes: Vec::new(),
+            preconditions,
+            assumes,
             cost,
         };
         c.add_effect(p.clone());

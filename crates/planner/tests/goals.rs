@@ -480,6 +480,35 @@ fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
     assert_eq!(plan, again);
 }
 
+/// flash-5: from Viridian Forest (no Cut, one badge) the plan started with
+/// Go(DiglettsCave_B1F) through the Route 2 Cut tree, priced with the Cut
+/// the plan taught 24 steps later. A trip through a gate comes after the
+/// steps that open it.
+#[test]
+fn a_trip_through_a_cut_tree_comes_after_cut_is_taught() {
+    let Some(f) = fixture() else { return };
+    let options = PlanOptions {
+        budget_s: 180.0,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = checkpoint("viridian_forest_state.json");
+    let goal = parse_goal("item ITEM_HM05 1").unwrap();
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 60);
+    let cut = position(&plan, |i| matches!(i, Intent::Teach { .. }));
+    for (i, step) in plan.intents.iter().enumerate() {
+        let through_tree = step.route.iter().any(|leg| leg.contains("gate:cut_tree"));
+        assert!(
+            !through_tree || i > cut,
+            "step {} {} cuts a tree before Teach (step {})",
+            i + 1,
+            step.intent,
+            cut + 1
+        );
+    }
+}
+
 #[test]
 fn cerulean_from_route2_returns_within_the_budget_with_the_fossil() {
     let Some(f) = fixture() else { return };
