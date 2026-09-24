@@ -190,7 +190,15 @@ mod tests {
 
     #[test]
     fn other_screens_are_not_bags() {
-        for name in ["move-select.png", "learn-list-row0.png", "mart-list.png"] {
+        for name in [
+            "move-select.png",
+            "learn-list-row0.png",
+            "mart-list.png",
+            "mart-menu.png",
+            "mart-quantity-1.png",
+            "mart-quantity-3.png",
+            "mart-confirm.png",
+        ] {
             let Some((image, font, small_font)) = fixture(name) else {
                 continue;
             };

@@ -990,6 +990,12 @@ fn describe_observation(o: &Observation) -> String {
         }
         parts.push(s);
     }
+    if let Some(s) = &o.shop {
+        parts.push(format!(
+            "shop: money {:?} {:?} ▶{:?} qty {:?}",
+            s.money, s.items, s.cursor, s.quantity
+        ));
+    }
     if let Some(n) = &o.naming {
         parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));
     }

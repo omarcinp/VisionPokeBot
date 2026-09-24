@@ -117,6 +117,15 @@ impl PerceptionSystem for FireRedPerception {
                 observation.bag = Some(bag);
                 return observation;
             }
+            if let Some(shop) = detect::shop::detect(image, font, small_font) {
+                let mut observation = Observation::bare(
+                    frame.frame_id,
+                    screen(ScreenState::Shop, "shop-screen"),
+                    metrics,
+                );
+                observation.shop = Some(shop);
+                return observation;
+            }
         }
         let mut dialogue = detect::dialogue::detect(image);
         match &mut dialogue {

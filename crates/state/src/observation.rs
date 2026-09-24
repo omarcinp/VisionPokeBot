@@ -134,6 +134,20 @@ pub struct BagObservation {
     pub prompt: Option<(Vec<String>, u8)>,
 }
 
+/// The mart screen: the MONEY window, the item list, the ▶ cursor and the
+/// quantity box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShopObservation {
+    /// MONEY window amount, when shown.
+    pub money: Option<u32>,
+    /// Item list rows as read (name, price); CANCEL reads as ("CANCEL", None).
+    pub items: Vec<(String, Option<u32>)>,
+    /// ▶ row in the item list.
+    pub cursor: Option<u8>,
+    /// Quantity box: (count, total price).
+    pub quantity: Option<(u16, u32)>,
+}
+
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleMenu {
@@ -200,6 +214,8 @@ pub struct Observation {
     pub move_list: Option<MoveListObservation>,
     #[serde(default)]
     pub bag: Option<BagObservation>,
+    #[serde(default)]
+    pub shop: Option<ShopObservation>,
 }
 
 impl DialogueObservation {
@@ -227,6 +243,7 @@ impl Observation {
             battle: None,
             move_list: None,
             bag: None,
+            shop: None,
         }
     }
 }
