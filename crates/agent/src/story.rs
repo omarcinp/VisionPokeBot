@@ -647,12 +647,15 @@ impl StoryTask {
             if let Some(data) = &self.data {
                 battle::observe_page(&mut self.battle_memory, &page, &self.party, data);
             }
-            // The lead's major status, from text (the HUD badge isn't read).
+            // The lead's major status, from text (the HUD badge isn't read);
+            // once per change (the page is seen on many frames).
             if let Some(status) = self
                 .party
                 .lead()
                 .and_then(|lead| battle::lead_status_text(&page, &lead.display_name()))
+                .filter(|s| self.lead_status != Some(*s))
             {
+                self.lead_status = Some(status);
                 events.push(GameEvent::PartyObserved {
                     slot: 0,
                     species: None,
@@ -2999,27 +3002,54 @@ mod tests {
         assert_eq!(task.current(), Some(&StoryStep::Heal { center: None }));
     }
 
-    /// The lead's status is read from battle text into the state.
+    /// The lead's status is read from battle text into the state, once:
+    /// live, every longer prefix of the printing page ("IVYSAUR is paral",
+    /// "IVYSAUR is paralyzed!", …) was a new page and emitted it again.
     #[test]
     fn our_paralysis_in_battle_text_becomes_a_party_status() {
-        let Some((mut task, state)) = battle_task() else {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let Some((mut task, mut state)) = battle_task() else {
             return;
         };
-        let page = &["IVYSAUR is paralyzed!", "It may be unable to move!"];
-        let mut events = Vec::new();
-        for f in 1..=3 {
-            events.extend(tick_events(&mut task, &wild_frame(f, None, page), &state).1);
+        let full = ["IVYSAUR is paralyzed!", "It may be unable to move!"];
+        let mut pages: Vec<Vec<String>> = Vec::new();
+        for n in [16, 18, 21] {
+            pages.push(vec![full[0][..n].to_owned()]);
         }
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                GameEvent::PartyObserved {
-                    slot: 0,
-                    status: Some(Status::Paralyzed),
-                    ..
-                }
-            )),
-            "{events:?}"
+        for n in [5, 12, 25] {
+            pages.push(vec![full[0].to_owned(), full[1][..n].to_owned()]);
+        }
+        let mut statuses = 0;
+        let mut f = 1;
+        for page in &pages {
+            for _ in 0..2 {
+                let lines: Vec<&str> = page.iter().map(String::as_str).collect();
+                let events = tick_events(&mut task, &wild_frame(f, None, &lines), &state).1;
+                statuses += events
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            GameEvent::PartyObserved {
+                                slot: 0,
+                                status: Some(Status::Paralyzed),
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                let records: Vec<EventRecord> = events
+                    .into_iter()
+                    .map(|event| EventRecord { frame_id: f, event })
+                    .collect();
+                state = DefaultReducer.reduce(&state, &records);
+                f += 1;
+            }
+        }
+        assert_eq!(statuses, 1);
+        assert_eq!(
+            state.party.value.as_ref().unwrap()[0].status.value,
+            Some(Status::Paralyzed)
         );
     }
 
