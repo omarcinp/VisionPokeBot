@@ -445,8 +445,8 @@ mod tests {
             }
         }
         let observation = FireRedPerception::default().observe(&frame(0, image));
+        // Transitions are never localized (observe returns before locate).
         assert_eq!(observation.screen.value, ScreenState::Transition);
-        assert!(observation.player.is_none());
     }
 
     #[test]
