@@ -4,11 +4,16 @@
 use std::collections::BTreeMap;
 
 use pokebot_gamedata::GameData;
-use pokebot_state::{BattleMenu, BattleObservation};
+use pokebot_state::{
+    BattleMenu, BattleObservation, GameEvent, GameState, Knowledge, MoveSlot, PartyMon,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
+    /// Party slot (0 = lead).
+    #[serde(default)]
+    pub slot: u8,
     pub species: String,
     pub level: u8,
     /// Moves in menu order (the order they were learned).
@@ -24,6 +29,7 @@ impl Member {
     /// A freshly obtained Pokémon at `level` with its default moves.
     pub fn new(data: &GameData, species: &str, level: u8) -> Self {
         Self {
+            slot: 0,
             species: species.to_owned(),
             level,
             moves: data.default_moves(species, level),
@@ -40,36 +46,6 @@ impl Member {
     pub fn pp_left(&self, data: &GameData, mv: &str) -> u8 {
         let max = data.move_(mv).map_or(0, |m| m.pp);
         max.saturating_sub(*self.pp_used.get(mv).unwrap_or(&0))
-    }
-
-    /// Applies a level seen on screen: learn moves gained since while a slot
-    /// is free (appended in learning order). With four moves known the game
-    /// asks which to forget, and evolution can be cancelled: both are
-    /// recorded from the screen (`learn`, the HUD name), not assumed here.
-    pub fn observe_level(&mut self, data: &GameData, level: u8) -> Vec<String> {
-        let mut learned = Vec::new();
-        if level <= self.level {
-            return learned;
-        }
-        {
-            let species = self.species.clone();
-            for (lvl, mv) in data
-                .species(&species)
-                .map(|s| s.learnset.clone())
-                .unwrap_or_default()
-            {
-                if lvl > self.level
-                    && lvl <= level
-                    && !self.moves.contains(&mv)
-                    && self.moves.len() < 4
-                {
-                    self.moves.push(mv.clone());
-                    learned.push(mv);
-                }
-            }
-        }
-        self.level = level;
-        learned
     }
 
     /// PP that wild battles may spend on damaging moves: moves with 30+ PP
@@ -113,40 +89,122 @@ impl Party {
         self.members.first()
     }
 
-    /// Updates the member shown in a battle HUD. Returns newly learned moves.
-    pub fn observe_battle(&mut self, data: &GameData, battle: &BattleObservation) -> Vec<String> {
-        let Some(name) = &battle.player_name else {
-            return Vec::new();
-        };
-        // The HUD shows an evolved name once the member has evolved.
-        let Some((member, species)) = self
-            .members
-            .iter_mut()
-            .find_map(|m| seen_as(data, &m.species, name).map(|s| (m, s)))
-        else {
-            return Vec::new();
-        };
-        member.species = species;
-        if let Some(hp) = battle.player_hp_numbers {
-            member.hp = Some(hp);
+    /// The party as the state knows it (members with a known species).
+    pub fn from_state(state: &GameState) -> Party {
+        let members = state
+            .party
+            .value
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(slot, m)| {
+                let species = m.species.value.clone()?;
+                let moves: Vec<&MoveSlot> = m.moves.iter().flatten().collect();
+                Some(Member {
+                    slot: slot as u8,
+                    species,
+                    level: m.level.value.unwrap_or(0),
+                    moves: moves
+                        .iter()
+                        .map(|s| s.mv.value.clone().unwrap_or_else(|| "?".into()))
+                        .collect(),
+                    hp: m.hp.value,
+                    pp_used: moves
+                        .iter()
+                        .filter_map(|s| Some((s.mv.value.clone()?, s.pp.value?)))
+                        .map(|(mv, (cur, max))| (mv, max.saturating_sub(cur)))
+                        .collect(),
+                })
+            })
+            .collect();
+        Party { members }
+    }
+}
+
+/// A newly obtained Pokémon, known from game data (default moves, full PP).
+pub fn starter_mon(data: &GameData, species: &str, level: u8) -> PartyMon {
+    let mut mon = PartyMon {
+        species: Knowledge::derived(species.to_owned(), 0),
+        level: Knowledge::derived(level, 0),
+        ..PartyMon::default()
+    };
+    for (i, mv) in data
+        .default_moves(species, level)
+        .into_iter()
+        .enumerate()
+        .take(4)
+    {
+        let max = data.move_(&mv).map_or(0, |m| m.pp);
+        mon.moves[i] = Some(MoveSlot {
+            mv: Knowledge::derived(mv, 0),
+            pp: Knowledge::derived((max, max), 0),
+        });
+    }
+    mon
+}
+
+/// Events for what the battle HUD and move menu show that the party view
+/// doesn't know yet. Nothing is emitted for unchanged or ambiguous readings.
+pub fn battle_events(data: &GameData, party: &Party, battle: &BattleObservation) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    let Some(name) = &battle.player_name else {
+        return events;
+    };
+    let Some((member, species)) = party
+        .members
+        .iter()
+        .find_map(|m| seen_as(data, &m.species, name).map(|s| (m, s)))
+    else {
+        return events;
+    };
+    let slot = member.slot;
+    if species != member.species {
+        events.push(GameEvent::Evolved { slot, species });
+    }
+    let level = battle.player_level.filter(|l| *l != member.level);
+    let hp = battle.player_hp_numbers.filter(|hp| Some(*hp) != member.hp);
+    if level.is_some() || hp.is_some() {
+        events.push(GameEvent::PartyObserved {
+            slot,
+            species: None,
+            nickname: None,
+            level,
+            hp,
+            status: None,
+            held_item: None,
+        });
+    }
+    if let Some(BattleMenu::Moves { column, row }) = battle.menu {
+        let names: Option<Vec<String>> = battle
+            .move_names
+            .iter()
+            .filter(|n| !n.is_empty() && n.as_str() != "-")
+            .map(|n| data.move_named(n).map(str::to_owned))
+            .collect();
+        let mut moves = member.moves.clone();
+        if let Some(names) = names.filter(|n| !n.is_empty() && *n != member.moves) {
+            events.push(GameEvent::MovesObserved {
+                slot,
+                moves: names.clone(),
+            });
+            moves = names;
         }
-        // The move menu shows the PP of the move under the ▶.
-        if let (Some(BattleMenu::Moves { column, row }), Some((left, max))) =
-            (battle.menu, battle.move_pp)
-        {
-            if let Some(mv) = member.moves.get(usize::from(row * 2 + column)).cloned() {
-                member.pp_used.insert(mv, max.saturating_sub(left));
+        let at = usize::from(row * 2 + column);
+        if let (Some((cur, max)), Some(mv)) = (battle.move_pp, moves.get(at)) {
+            let known = member.moves.get(at) == Some(mv)
+                && data.move_(mv).is_some_and(|m| m.pp == max)
+                && member.pp_left(data, mv) == cur;
+            if !known {
+                events.push(GameEvent::MovePpObserved {
+                    slot,
+                    move_slot: at as u8,
+                    cur,
+                    max,
+                });
             }
         }
-        match battle.player_level {
-            Some(level) => member.observe_level(data, level),
-            None => Vec::new(),
-        }
     }
-
-    pub fn heal_all(&mut self) {
-        self.members.iter_mut().for_each(Member::heal);
-    }
+    events
 }
 
 /// `species` itself or the evolution of it whose name matches `read`.
@@ -169,4 +227,124 @@ pub fn names_match(name: &str, read: &str) -> bool {
             .chars()
             .zip(read.chars())
             .all(|(a, b)| b == '?' || a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use pokebot_state::{
+        BattleMenu, BattleObservation, DefaultReducer, EventRecord, GameState, StateReducer,
+    };
+
+    use super::*;
+
+    fn data() -> Option<GameData> {
+        GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))
+            .ok()
+    }
+
+    fn state_with(data: &GameData, species: &str, level: u8) -> GameState {
+        let event = GameEvent::PartyMonDerived {
+            slot: 0,
+            mon: Box::new(starter_mon(data, species, level)),
+        };
+        DefaultReducer.reduce(&GameState::default(), &[EventRecord { frame_id: 1, event }])
+    }
+
+    fn hud(name: &str, level: u8) -> BattleObservation {
+        BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
+            player_name: Some(name.into()),
+            player_level: Some(level),
+            player_hp_numbers: Some((28, 49)),
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: Some(562),
+            opponent_hp: None,
+            move_pp: Some((12, 35)),
+            move_names: vec![
+                "TACKLE".into(),
+                "GROWL".into(),
+                "LEECH SEED".into(),
+                "VINE WHIP".into(),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_view_follows_the_state() {
+        let Some(d) = data() else { return };
+        let party = Party::from_state(&state_with(&d, "SPECIES_BULBASAUR", 10));
+        let lead = party.lead().unwrap();
+        assert_eq!(lead.species, "SPECIES_BULBASAUR");
+        assert_eq!(
+            lead.moves,
+            vec![
+                "MOVE_TACKLE",
+                "MOVE_GROWL",
+                "MOVE_LEECH_SEED",
+                "MOVE_VINE_WHIP"
+            ]
+        );
+        assert_eq!(lead.pp_left(&d, "MOVE_TACKLE"), 35);
+    }
+
+    #[test]
+    fn hud_and_move_menu_become_events() {
+        let Some(d) = data() else { return };
+        let state = state_with(&d, "SPECIES_BULBASAUR", 15);
+        let party = Party::from_state(&state);
+        let events = battle_events(&d, &party, &hud("I?YSAUR", 16));
+        assert!(events.contains(&GameEvent::Evolved {
+            slot: 0,
+            species: "SPECIES_IVYSAUR".into()
+        }));
+        assert!(events.contains(&GameEvent::MovePpObserved {
+            slot: 0,
+            move_slot: 0,
+            cur: 12,
+            max: 35
+        }));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PartyObserved {
+                level: Some(16),
+                hp: Some((28, 49)),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn unchanged_hud_emits_nothing() {
+        let Some(d) = data() else { return };
+        let state = state_with(&d, "SPECIES_BULBASAUR", 10);
+        let events = battle_events(&d, &Party::from_state(&state), &hud("BULBASAUR", 10));
+        let state = DefaultReducer.reduce(
+            &state,
+            &events
+                .into_iter()
+                .map(|event| EventRecord { frame_id: 2, event })
+                .collect::<Vec<_>>(),
+        );
+        assert!(battle_events(&d, &Party::from_state(&state), &hud("BULBASAUR", 10)).is_empty());
+    }
+
+    #[test]
+    fn ambiguous_move_name_emits_nothing() {
+        let Some(d) = data() else { return };
+        let state = state_with(&d, "SPECIES_BULBASAUR", 10);
+        let mut obs = hud("BULBASAUR", 10);
+        obs.move_names = vec![
+            "?????".into(),
+            "GROWL".into(),
+            "LEECH SEED".into(),
+            "VINE WHIP".into(),
+        ];
+        let events = battle_events(&d, &Party::from_state(&state), &obs);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::MovesObserved { .. })));
+    }
 }

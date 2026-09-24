@@ -466,20 +466,8 @@ impl Task for StoryTask {
                 ctx.events.push(GameEvent::BattleStarted);
             }
             if let Some(data) = &self.data {
-                let learned = self.party.observe_battle(data, battle);
-                for mv in learned {
-                    ctx.events.push(GameEvent::GoalProgress {
-                        goal: "Story".into(),
-                        phase: "Party".into(),
-                        detail: format!(
-                            "{} knows {} now",
-                            self.party
-                                .lead()
-                                .map_or(String::new(), |m| m.display_name()),
-                            mv.trim_start_matches("MOVE_")
-                        ),
-                    });
-                }
+                ctx.events
+                    .extend(crate::party::battle_events(data, &self.party, battle));
             }
             if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) {
                 return Decision::Fail(format!(
@@ -726,9 +714,6 @@ impl StoryTask {
                     return Decision::Wait("waiting for the battle to start".into());
                 }
                 if self.quiet_frames >= SETTLE_FRAMES {
-                    if matches!(self.current(), Some(StoryStep::Heal { .. })) {
-                        self.party.heal_all();
-                    }
                     self.advance_step(ctx);
                 }
                 Decision::Wait("conversation ending".into())

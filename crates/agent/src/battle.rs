@@ -203,8 +203,6 @@ fn step_toward(
 mod tests {
     use std::path::Path;
 
-    use pokebot_state::BattleObservation;
-
     use super::*;
     use crate::party::Member;
 
@@ -245,28 +243,5 @@ mod tests {
         // No damaging PP at all: nothing to choose (the battle policy runs).
         let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
         assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
-    }
-
-    #[test]
-    fn the_hud_and_move_menu_update_species_and_pp() {
-        let Some(data) = data() else { return };
-        let mut party = ivysaur(&data, &[]);
-        party.members[0].species = "SPECIES_BULBASAUR".into();
-        let battle = BattleObservation {
-            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
-            player_name: Some("I?YSAUR".into()),
-            player_level: Some(16),
-            player_hp_numbers: Some((28, 49)),
-            opponent_name: None,
-            opponent_level: None,
-            player_hp: Some(562),
-            opponent_hp: None,
-            move_pp: Some((12, 35)),
-            move_names: Vec::new(),
-        };
-        party.observe_battle(&data, &battle);
-        let lead = party.lead().unwrap();
-        assert_eq!(lead.species, "SPECIES_IVYSAUR");
-        assert_eq!(lead.pp_left(&data, "MOVE_TACKLE"), 12);
     }
 }

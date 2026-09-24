@@ -89,6 +89,7 @@ mod tests {
 
     fn bulbasaur(moves: &[&str]) -> Member {
         Member {
+            slot: 0,
             species: "SPECIES_BULBASAUR".into(),
             level: 15,
             moves: moves.iter().map(|m| (*m).to_owned()).collect(),
