@@ -20,6 +20,7 @@ mod talk;
 mod unstick;
 
 use pokebot_state::{GameEvent, PlayerPose, Pocket};
+use pokebot_world::World;
 use serde::{Deserialize, Serialize};
 
 pub use context::{AsStep, Expects, StepContext, ToolContext, ToolStep, SETTLE_FRAMES};
@@ -56,12 +57,20 @@ pub enum Dest {
         map: String,
         warp: usize,
     },
+    /// Any tile of `map` (the planner's `Go { dest: map }`): the leg is done
+    /// once the player stands on it.
+    Map {
+        map: String,
+    },
 }
 
 impl Dest {
     pub fn map(&self) -> &str {
         match self {
-            Dest::Tile { map, .. } | Dest::Facing { map, .. } | Dest::Warp { map, .. } => map,
+            Dest::Tile { map, .. }
+            | Dest::Facing { map, .. }
+            | Dest::Warp { map, .. }
+            | Dest::Map { map } => map,
         }
     }
 }
@@ -72,6 +81,9 @@ impl From<&Dest> for Destination {
             Dest::Tile { map, x, y } => Destination::Tile { map, x, y },
             Dest::Facing { map, x, y } => Destination::Facing { map, x, y },
             Dest::Warp { map, warp } => Destination::Warp { map, warp },
+            // The navigator's cross-map routing only needs some tile of the
+            // map; `GoTool` stops on arrival on the map, whichever tile.
+            Dest::Map { map } => Destination::Tile { map, x: 0, y: 0 },
         }
     }
 }
@@ -138,10 +150,19 @@ pub enum Intent {
         #[serde(default)]
         policy: BattlePlan,
     },
-    /// Walk the encounter tiles of the current map until `species` is
-    /// caught.
+    /// Walk the encounter tiles of `map` (the current map when `None`)
+    /// until `species` is caught.
     Catch {
         species: String,
+        #[serde(default)]
+        map: Option<String>,
+    },
+    /// Fight wild battles on `map` until the lead (`species`) reaches
+    /// `level`.
+    Train {
+        map: String,
+        species: String,
+        level: u8,
     },
     /// Buy `count` of `item` at the nearest mart selling it (0: the ball
     /// stock policy decides).
@@ -168,11 +189,148 @@ impl Intent {
             Intent::Heal { .. } => "Heal",
             Intent::Battle { .. } => "Battle",
             Intent::Catch { .. } => "Catch",
+            Intent::Train { .. } => "Train",
             Intent::Buy { .. } => "Buy",
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
         }
+    }
+
+    /// The tool intent for a planner intent (spec §4.1 → §7.2). `Beat`
+    /// becomes a `Talk` to the object on `map` whose script fights the
+    /// trainer (found in the compiled events, so it needs the world);
+    /// `Teach`, the party probe and `Unsupported` have no tool yet and fail
+    /// as `Unsupported`.
+    pub fn from_planned(
+        intent: &pokebot_planner::Intent,
+        world: Option<&World>,
+    ) -> Result<Intent, ToolError> {
+        use pokebot_planner::Intent as P;
+        Ok(match intent {
+            P::Go { dest } => Intent::Go {
+                dest: Dest::Map { map: dest.clone() },
+            },
+            P::Talk {
+                map,
+                object,
+                answers,
+            } => Intent::Talk {
+                map: map.clone(),
+                object: *object,
+                answers: parse_answers(answers),
+            },
+            P::RunScript {
+                script,
+                path,
+                answers,
+                ..
+            } => Intent::RunScript {
+                script: script.clone(),
+                path: Some(*path),
+                answers: parse_answers(answers),
+            },
+            P::Heal { center } => Intent::Heal {
+                center: Some(center.clone()),
+            },
+            P::Battle { policy } => Intent::Battle {
+                policy: match policy.as_str() {
+                    "fight" => BattlePlan::Fight,
+                    "flee" => BattlePlan::Flee,
+                    _ => BattlePlan::Auto,
+                },
+            },
+            P::Beat { trainer, map } => {
+                let object = world
+                    .and_then(|w| trainer_object(w, map, trainer))
+                    .ok_or_else(|| {
+                        ToolError::Unsupported(format!("no object on {map} fights {trainer}"))
+                    })?;
+                Intent::Talk {
+                    map: map.clone(),
+                    object,
+                    answers: Vec::new(),
+                }
+            }
+            P::Train {
+                map,
+                species,
+                level,
+            } => Intent::Train {
+                map: map.clone(),
+                species: species.clone(),
+                level: *level,
+            },
+            P::Catch { species, map, .. } => Intent::Catch {
+                species: species.clone(),
+                map: Some(map.clone()),
+            },
+            P::Buy { item, count, .. } => Intent::Buy {
+                item: item.clone(),
+                count: u16::try_from(*count).unwrap_or(u16::MAX),
+            },
+            P::Teach { hm, mon } => {
+                return Err(ToolError::Unsupported(format!(
+                    "teaching {hm} to {mon}: no tool yet"
+                )))
+            }
+            P::Probe { fact } => Intent::Probe {
+                fact: match fact {
+                    pokebot_planner::ProbeFact::TrainerCard => ProbeFact::TrainerCard,
+                    pokebot_planner::ProbeFact::BagPocket(pocket) => {
+                        ProbeFact::Pocket { pocket: *pocket }
+                    }
+                    pokebot_planner::ProbeFact::FlyMap => ProbeFact::FlyMap,
+                    pokebot_planner::ProbeFact::Pokedex => ProbeFact::Pokedex,
+                    pokebot_planner::ProbeFact::Party => {
+                        return Err(ToolError::Unsupported("party probe: no tool yet".into()))
+                    }
+                },
+            },
+            P::Save => Intent::Save,
+            P::Unstick => Intent::Unstick,
+            P::Unsupported { reason, .. } => return Err(ToolError::Unsupported(reason.clone())),
+        })
+    }
+}
+
+/// The planner's `YES`/`NO` answers; menu choices (`choice=N`) are not
+/// answers to questions and are left out.
+fn parse_answers(answers: &[String]) -> Vec<Answer> {
+    answers
+        .iter()
+        .filter_map(|a| match a.to_ascii_uppercase().as_str() {
+            "YES" => Some(Answer::Yes),
+            "NO" => Some(Answer::No),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The object of `map` whose compiled script battles `trainer`.
+fn trainer_object(world: &World, map: &str, trainer: &str) -> Option<u32> {
+    let events = world.events()?;
+    let mut objects: Vec<&pokebot_world::events::ObjectRef> =
+        events.objects.iter().filter(|o| o.map == map).collect();
+    objects.sort_by_key(|o| o.local_id);
+    objects.into_iter().find_map(|o| {
+        let script = events.script(o.script.as_deref()?)?;
+        script
+            .paths
+            .iter()
+            .flat_map(|p| p.does.iter())
+            .any(|e| matches!(e, pokebot_world::events::Effect::Battle { battle, .. } if battle == trainer))
+            .then_some(o.local_id)
+    })
+}
+
+/// Context-free conversion: everything but `Beat` (which needs the world
+/// to find the trainer's object).
+impl TryFrom<&pokebot_planner::Intent> for Intent {
+    type Error = ToolError;
+
+    fn try_from(intent: &pokebot_planner::Intent) -> Result<Intent, ToolError> {
+        Intent::from_planned(intent, None)
     }
 }
 
@@ -191,7 +349,15 @@ impl std::fmt::Display for Intent {
             },
             Intent::Heal { center } => write!(f, "Heal {}", center.as_deref().unwrap_or("nearest")),
             Intent::Battle { policy } => write!(f, "Battle {policy:?}"),
-            Intent::Catch { species } => write!(f, "Catch {species}"),
+            Intent::Catch { species, map } => match map {
+                Some(map) => write!(f, "Catch {species} on {map}"),
+                None => write!(f, "Catch {species}"),
+            },
+            Intent::Train {
+                map,
+                species,
+                level,
+            } => write!(f, "Train {species} to Lv{level} on {map}"),
             Intent::Buy { item, count } => write!(f, "Buy {item} x{count}"),
             Intent::Probe { fact } => write!(f, "Probe {fact:?}"),
             Intent::Save => write!(f, "Save"),
@@ -301,6 +467,7 @@ impl Default for Toolbox {
             Box::new(heal::HealTool),
             Box::new(battle::BattleTool),
             Box::new(catch::CatchTool),
+            Box::new(catch::TrainTool),
             Box::new(buy::BuyTool),
             Box::new(probe::ProbeTool),
             Box::new(save::SaveTool),
@@ -400,6 +567,17 @@ mod tests {
             },
             Intent::Catch {
                 species: "SPECIES_RATTATA".into(),
+                map: Some("Route1".into()),
+            },
+            Intent::Train {
+                map: "Route1".into(),
+                species: "SPECIES_IVYSAUR".into(),
+                level: 20,
+            },
+            Intent::Go {
+                dest: Dest::Map {
+                    map: "Route4".into(),
+                },
             },
             Intent::Buy {
                 item: "ITEM_POKE_BALL".into(),

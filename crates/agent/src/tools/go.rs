@@ -1,6 +1,12 @@
 //! `Go`: walk to a destination with the navigator (route across maps,
-//! holds and taps within one), settling after any cutscene first.
+//! holds and taps within one), settling after any cutscene first. A
+//! `Dest::Map` leg ends on arrival on the map, whichever tile.
+//!
+//! Motion loops (spec §8): a leg that visits the same tile four times
+//! without getting closer to its goal fails, so the goal loop replans
+//! instead of bouncing off an NPC forever.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pokebot_state::PlayerPose;
@@ -10,11 +16,14 @@ use super::{
     Dest, Expects, Intent, StepContext, Tool, ToolContext, ToolOutcome, ToolStep, SETTLE_FRAMES,
 };
 use crate::motion::SyncerHandle;
-use crate::nav::{Destination, Gone, NavStatus, Navigator};
+use crate::nav::{goal_tiles, Destination, Gone, NavStatus, Navigator};
 use crate::{Action, Decision, Outcome};
 
 /// Taps in a row that failed to move the player before the leg fails.
 const MAX_STALLED: u32 = 6;
+/// Acts issued from the same tile, without the leg getting closer to its
+/// goal, before it counts as a loop.
+pub const MAX_TILE_VISITS: u32 = 4;
 
 pub struct GoTool;
 
@@ -22,6 +31,14 @@ pub struct GoTool;
 pub struct GoStep {
     nav: Navigator,
     dest: Destination,
+    world: Arc<World>,
+    /// Done as soon as the player stands on the destination's map.
+    any_tile: bool,
+    /// Acts issued per tile since the leg last got closer to its goal.
+    visits: HashMap<(String, i32, i32), u32>,
+    /// Closest the leg has been to its goal tiles on the destination map.
+    best: Option<i32>,
+    last_map: Option<String>,
 }
 
 /// What a navigator is built from: the world, the objects known to be
@@ -55,13 +72,85 @@ impl GoStep {
             Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
             None => nav,
         };
-        Self { nav, dest }
+        Self {
+            nav,
+            dest,
+            world: Arc::clone(&parts.world),
+            any_tile: false,
+            visits: HashMap::new(),
+            best: None,
+            last_map: None,
+        }
+    }
+
+    /// A leg to any tile of `map`: routed to a walkable tile near its
+    /// middle, done on arrival on the map.
+    pub fn to_map(parts: &NavParts, map: &str) -> Self {
+        let (x, y) = map_tile(&parts.world, map).unwrap_or((0, 0));
+        let mut step = Self::with(
+            parts,
+            Destination::Tile {
+                map: map.to_owned(),
+                x,
+                y,
+            },
+        );
+        step.any_tile = true;
+        step
     }
 
     /// Where the walk ends.
     pub fn destination(&self) -> &Destination {
         &self.dest
     }
+
+    /// Records an act issued from `pose`; `true` when the leg loops.
+    fn note_visit(&mut self, pose: &PlayerPose) -> bool {
+        if self.last_map.as_deref() != Some(pose.map.as_str()) {
+            self.last_map = Some(pose.map.clone());
+            self.visits.clear();
+            self.best = None;
+        }
+        let dist = if pose.map == self.dest.map() {
+            goal_tiles(&self.world, &self.dest)
+                .into_iter()
+                .map(|(x, y)| (x - pose.x).abs() + (y - pose.y).abs())
+                .min()
+        } else {
+            None
+        };
+        if let Some(d) = dist {
+            if self.best.is_none_or(|b| d < b) {
+                self.best = Some(d);
+                self.visits.clear();
+                return false;
+            }
+        }
+        let n = self
+            .visits
+            .entry((pose.map.clone(), pose.x, pose.y))
+            .or_insert(0);
+        *n += 1;
+        *n >= MAX_TILE_VISITS
+    }
+}
+
+/// A walkable tile of `map` near its middle.
+fn map_tile(world: &World, map: &str) -> Option<(i32, i32)> {
+    let m = world.map(map)?;
+    let (cx, cy) = (m.width / 2, m.height / 2);
+    let mut best: Option<(i32, (i32, i32))> = None;
+    for y in 0..m.height {
+        for x in 0..m.width {
+            if m.tile(x, y).is_some_and(|t| t.collision == 0) {
+                let d = (x - cx).abs() + (y - cy).abs();
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, (x, y)));
+                }
+            }
+        }
+    }
+    best.map(|(_, t)| t)
 }
 
 impl ToolStep for GoStep {
@@ -69,12 +158,26 @@ impl ToolStep for GoStep {
         if ctx.quiet_frames < SETTLE_FRAMES {
             return Decision::Wait("letting the scene settle".into());
         }
+        let pose = ctx.observation.player.as_ref().map(|p| p.pose.clone());
+        if self.any_tile && pose.as_ref().is_some_and(|p| p.map == self.dest.map()) {
+            return Decision::Done(format!("arrived on {}", self.dest.map()));
+        }
         if self.nav.stalled() >= MAX_STALLED {
             return Decision::Fail(format!("cannot move toward {:?}", self.dest));
         }
         match self.nav.next(ctx.observation) {
             NavStatus::Arrived => Decision::Done(format!("arrived at {:?}", self.dest)),
-            NavStatus::Act(action) => Decision::Act(action),
+            NavStatus::Act(action) => {
+                if let Some(pose) = &pose {
+                    if self.note_visit(pose) {
+                        return Decision::Fail(format!(
+                            "looping at {pose}: {MAX_TILE_VISITS} acts from the same tile without progress toward {:?}",
+                            self.dest
+                        ));
+                    }
+                }
+                Decision::Act(action)
+            }
             NavStatus::Wait(reason) => Decision::Wait(reason),
             NavStatus::Fail(reason) => Decision::Fail(reason),
         }
@@ -99,6 +202,16 @@ pub fn go(
     Ok(ctx.pose())
 }
 
+/// Walks onto `map`; the pose reached.
+pub fn go_to_map(
+    ctx: &mut ToolContext<'_>,
+    map: &str,
+) -> Result<Option<PlayerPose>, super::ToolError> {
+    let mut step = GoStep::to_map(&NavParts::of(ctx), map);
+    ctx.drive(&mut step)?;
+    Ok(ctx.pose())
+}
+
 impl Tool for GoTool {
     fn name(&self) -> &str {
         "Go"
@@ -112,8 +225,11 @@ impl Tool for GoTool {
         let Intent::Go { dest } = intent else {
             return ToolOutcome::failed("not a Go");
         };
-        let dest: Destination = Destination::from(dest);
-        match go(ctx, dest) {
+        let walked = match dest {
+            Dest::Map { map } => go_to_map(ctx, map),
+            other => go(ctx, Destination::from(other)),
+        };
+        match walked {
             Ok(pose) => ToolOutcome {
                 pose,
                 ..ToolOutcome::ok()
@@ -130,5 +246,70 @@ impl From<&Destination> for Dest {
             Destination::Facing { map, x, y } => Dest::Facing { map, x, y },
             Destination::Warp { map, warp } => Dest::Warp { map, warp },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn world() -> Option<Arc<World>> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        World::load(&dir).ok().map(Arc::new)
+    }
+
+    #[test]
+    fn four_acts_from_one_tile_without_progress_fail_the_leg() {
+        let Some(world) = world() else { return };
+        let parts = NavParts {
+            world,
+            gone: Gone::new(),
+            syncer: None,
+        };
+        let mut step = GoStep::with(
+            &parts,
+            Destination::Tile {
+                map: "PalletTown".into(),
+                x: 10,
+                y: 10,
+            },
+        );
+        let at = |x, y| PlayerPose {
+            map: "PalletTown".into(),
+            x,
+            y,
+        };
+        // Getting closer resets the count.
+        assert!(!step.note_visit(&at(5, 5)));
+        assert!(!step.note_visit(&at(6, 5)));
+        for _ in 0..MAX_TILE_VISITS - 1 {
+            assert!(!step.note_visit(&at(6, 5)));
+        }
+        assert!(
+            step.note_visit(&at(6, 5)),
+            "the fourth act without progress loops"
+        );
+        // Progress from a new tile clears it again.
+        assert!(!step.note_visit(&at(7, 5)));
+        assert!(!step.note_visit(&at(7, 5)));
+        // On another map every tile counts, and a map change resets.
+        let other = PlayerPose {
+            map: "Route1".into(),
+            x: 1,
+            y: 1,
+        };
+        for _ in 0..MAX_TILE_VISITS - 1 {
+            assert!(!step.note_visit(&other));
+        }
+        assert!(step.note_visit(&other));
+    }
+
+    #[test]
+    fn a_map_destination_is_a_walkable_tile_near_the_middle() {
+        let Some(world) = world() else { return };
+        let (x, y) = map_tile(&world, "PalletTown").expect("a tile");
+        let m = world.map("PalletTown").unwrap();
+        assert_eq!(m.tile(x, y).unwrap().collision, 0);
+        assert!((x - m.width / 2).abs() + (y - m.height / 2).abs() < 6);
     }
 }

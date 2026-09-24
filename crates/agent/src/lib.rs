@@ -14,6 +14,7 @@ pub mod catch;
 pub mod checkpoint;
 pub mod console;
 mod executor;
+pub mod goal;
 pub mod keyboard;
 pub mod learn;
 pub mod motion;

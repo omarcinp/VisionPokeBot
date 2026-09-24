@@ -110,6 +110,14 @@
   #goal-card { border-left: 4px solid var(--goal); }
   #goal { font-size: 18px; font-weight: 700; color: var(--goal); }
   #goal-phase { color: var(--text); margin-top: 2px; }
+  #plan-card { margin-top: 6px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 6px; font-size: 12px; }
+  .plan-head { display: flex; justify-content: space-between; color: var(--muted); }
+  ol.plan { margin: 4px 0 0 0; padding-left: 20px; font-family: var(--mono); font-size: 11px; }
+  ol.plan li.done { color: var(--muted); text-decoration: line-through; }
+  ol.plan li.now { color: var(--goal); font-weight: 600; }
+  .plan-assumes { margin-top: 4px; color: var(--muted); }
+  .plan-assumes span { margin-right: 8px; white-space: nowrap; }
+  .plan-assumes .True { color: var(--event); } .plan-assumes .False { color: var(--error); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .chip { font: 11px var(--mono); padding: 2px 8px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line);
           color: var(--muted); white-space: nowrap; }
@@ -313,6 +321,11 @@
     <section class="card" id="goal-card">
       <div id="goal">idle</div>
       <div id="goal-phase">–</div>
+      <div id="plan-card" hidden>
+        <div class="plan-head"><span id="plan-step">–</span><span class="right" id="plan-no"></span></div>
+        <ol class="plan" id="plan-steps"></ol>
+        <div class="plan-assumes" id="plan-assumes"></div>
+      </div>
       <div class="chips">
         <span class="chip" id="chip-screen">screen <b>–</b></span>
         <span class="chip" id="chip-sync">sync <b>–</b></span>
@@ -870,9 +883,27 @@ function setStatus(status) {
     setText('obs-text', ob.dialogue && ob.dialogue.lines && ob.dialogue.lines.length ? ob.dialogue.lines.join(' / ') : '–');
   }
   renderTiming(status.timing);
+  renderPlan(status.plan);
   // Serializing the whole state is costly on phones: only when looked at.
   if ($('state-details').open) setText('state-json', JSON.stringify(st, null, 2));
   if ($('obs-details').open) setText('obs-json', JSON.stringify(ob, null, 2));
+}
+
+/// The goal loop's plan: steps done, the current one, and what it assumes.
+function renderPlan(plan) {
+  const card = $('plan-card');
+  if (!plan || !plan.goal) { card.hidden = true; return; }
+  card.hidden = false;
+  const step = plan.step || 0;
+  setText('plan-step', step ? `step ${step}/${plan.steps}: ${plan.phase} — ${plan.detail}` : `${plan.phase} — ${plan.detail}`);
+  setText('plan-no', `plan ${plan.plan_no} (${plan.reason})`);
+  $('plan-steps').innerHTML = (plan.plan || []).map((s, i) => {
+    const cls = i + 1 < step ? 'done' : i + 1 === step ? 'now' : '';
+    return `<li class="${cls}">${esc(s.replace(/^\d+\. /, ''))}</li>`;
+  }).join('');
+  $('plan-assumes').innerHTML = (plan.assumes || []).length
+    ? 'assumes ' + plan.assumes.map(a => `<span class="${a.truth}" title="${esc(a.source)}">${esc(a.predicate)} <i class="dot ${esc(a.source)}"></i></span>`).join('')
+    : '';
 }
 
 /// The timing model: one row per input kind, learned values in bold.

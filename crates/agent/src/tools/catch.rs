@@ -1,7 +1,9 @@
-//! `Catch { species }`: spin on an encounter tile of the current map until
-//! a battle starts, play it with the catch policy, and repeat until the
-//! species is caught. The battle is embedded rather than an interrupt so
-//! the step can read what was caught.
+//! `Catch { species }` and `Train { level }`: spin on an encounter tile of
+//! the map until a battle starts, play it (the catch policy for a catch,
+//! fight for training), and repeat until the species is caught or the lead
+//! reaches the level. The battle is embedded rather than an interrupt so
+//! the step can read what was caught. A weakened lead heals at the nearest
+//! Pokémon Center and the hunt resumes.
 
 use std::sync::Arc;
 
@@ -9,80 +11,159 @@ use pokebot_core::ControllerCommand;
 
 use super::battle::BattleStep;
 use super::go::{GoStep, NavParts};
-use super::lookup::grass_spot;
+use super::lookup::{encounter_tile, grass_spot};
 use super::{
     progress, BattlePlan, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
 };
-use crate::nav::Destination;
+use crate::nav::{nearest_reachable, Destination};
 use crate::party::Party;
 use crate::story::spin_sequence;
 use crate::{Action, Decision, Expectation, Outcome};
 
 /// Direction changes per spin action (~2.4 s; a battle cancels it early).
 const SPIN_TURNS: usize = 24;
-/// Battles before the hunt is given up.
-const MAX_ENCOUNTERS: u32 = 40;
+/// Battles before a catch hunt is given up.
+const MAX_CATCH_ENCOUNTERS: u32 = 40;
+/// Battles before a training hunt is given up.
+const MAX_TRAIN_ENCOUNTERS: u32 = 150;
 /// The lead heals below this share of its HP (per mille).
 const HEAL_BELOW: u32 = 500;
+/// Heals per hunt before it counts as not working.
+const MAX_HEALS: u32 = 3;
+/// How the step reports a lead that must heal before going on.
+const HEAL_FIRST: &str = "heal first";
 
 pub struct CatchTool;
+pub struct TrainTool;
 
-pub struct CatchStep {
-    species: String,
+/// What the hunt is after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hunt {
+    Species(String),
+    Level(u8),
+}
+
+pub struct HuntStep {
+    hunt: Hunt,
+    /// The map to hunt on (the current one when `None`).
+    map: Option<String>,
     data: Arc<pokebot_gamedata::GameData>,
     battle: Option<BattleStep>,
     go: Option<GoStep>,
     spin_at: Option<(i32, i32)>,
     encounters: u32,
-    caught: bool,
     nav: NavParts,
 }
 
-impl ToolStep for CatchStep {
+impl HuntStep {
+    pub fn new(ctx: &ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Self {
+        Self {
+            hunt,
+            map: map.map(str::to_owned),
+            data: Arc::clone(&ctx.data),
+            battle: None,
+            go: None,
+            spin_at: None,
+            encounters: 0,
+            nav: NavParts::of(ctx),
+        }
+    }
+
+    fn max_encounters(&self) -> u32 {
+        match self.hunt {
+            Hunt::Species(_) => MAX_CATCH_ENCOUNTERS,
+            Hunt::Level(_) => MAX_TRAIN_ENCOUNTERS,
+        }
+    }
+
+    fn plan(&self) -> BattlePlan {
+        match self.hunt {
+            Hunt::Species(_) => BattlePlan::Auto,
+            Hunt::Level(_) => BattlePlan::Fight,
+        }
+    }
+
+    fn phase(&self) -> &'static str {
+        match self.hunt {
+            Hunt::Species(_) => "Catch",
+            Hunt::Level(_) => "Train",
+        }
+    }
+
+    /// Whether the hunt is over, given the party knowledge.
+    fn reached(&self, party: &Party, caught: Option<&str>) -> Option<String> {
+        match &self.hunt {
+            Hunt::Species(species) => {
+                (caught == Some(species.as_str())).then(|| format!("caught {species}"))
+            }
+            Hunt::Level(level) => party.lead().filter(|l| l.level >= *level).map(|l| {
+                format!(
+                    "{} reached Lv{} (target Lv{level})",
+                    l.display_name(),
+                    l.level
+                )
+            }),
+        }
+    }
+
+    /// Walks to the grass of `map` (from another map) or to the spin tile.
+    fn walk(&mut self, ctx: &mut StepContext<'_>, dest: Destination) -> Decision {
+        if self.go.as_ref().is_none_or(|go| *go.destination() != dest) {
+            self.go = Some(GoStep::with(&self.nav, dest));
+        }
+        match self.go.as_mut().expect("set above").next(ctx) {
+            Decision::Done(_) => Decision::Wait("at the grass".into()),
+            d => d,
+        }
+    }
+}
+
+impl ToolStep for HuntStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         let o = ctx.observation;
+        let party = Party::from_state(ctx.state);
         if let Some(battle) = &mut self.battle {
             let decision = battle.next(ctx);
             if let Decision::Done(summary) = &decision {
                 self.encounters += 1;
                 let caught = battle.caught().map(str::to_owned);
                 ctx.events.push(progress(
-                    "Catch",
-                    format!("{summary} ({}/{MAX_ENCOUNTERS})", self.encounters),
+                    self.phase(),
+                    format!("{summary} ({}/{})", self.encounters, self.max_encounters()),
                 ));
                 self.battle = None;
                 self.go = None;
-                if caught.as_deref() == Some(self.species.as_str()) {
-                    self.caught = true;
-                    return Decision::Done(format!("caught {}", self.species));
+                // The state the step sees was cloned before this battle's
+                // last events; the caught species is read from the battle.
+                if let Some(done) = self.reached(&party, caught.as_deref()) {
+                    return Decision::Done(done);
                 }
-                if self.encounters >= MAX_ENCOUNTERS {
+                if self.encounters >= self.max_encounters() {
                     return Decision::Fail(format!(
-                        "{} not caught in {MAX_ENCOUNTERS} battles",
-                        self.species
+                        "{:?} not reached in {} battles",
+                        self.hunt,
+                        self.max_encounters()
                     ));
                 }
                 return Decision::Wait("battle over".into());
             }
             return decision;
         }
+        if let Some(done) = self.reached(&party, None) {
+            return Decision::Done(done);
+        }
         if o.battle.is_some() {
-            self.battle = Some(BattleStep::new(
-                Arc::clone(&self.data),
-                BattlePlan::Auto,
-                false,
-            ));
+            self.battle = Some(BattleStep::new(Arc::clone(&self.data), self.plan(), false));
             return Decision::Wait("a battle starts".into());
         }
-        let party = Party::from_state(ctx.state);
         if let Some(lead) = party.lead() {
             if lead
                 .hp
                 .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
             {
                 return Decision::Fail(format!(
-                    "the lead is at {}/{} HP: heal first",
+                    "{HEAL_FIRST}: the lead is at {}/{} HP",
                     lead.hp.map_or(0, |h| h.0),
                     lead.hp.map_or(0, |h| h.1)
                 ));
@@ -94,12 +175,31 @@ impl ToolStep for CatchStep {
         let Some(pose) = o.player.as_ref().map(|p| p.pose.clone()) else {
             return Decision::Wait("locating".into());
         };
+        if let Some(map) = self.map.clone().filter(|m| *m != pose.map) {
+            // Another map: head for its grass first.
+            let Some(m) = self.nav.world.map(&map) else {
+                return Decision::Fail(format!("unknown map {map}"));
+            };
+            let Some((x, y)) = grass_spot(&self.nav.world, &map, (m.width / 2, m.height / 2))
+            else {
+                return Decision::Fail(format!("no encounter tiles on {map}"));
+            };
+            return self.walk(ctx, Destination::Tile { map, x, y });
+        }
         let target = match self.spin_at {
             Some(t) => t,
             None => {
                 let Some(t) = grass_spot(&self.nav.world, &pose.map, (pose.x, pose.y)) else {
                     return Decision::Fail(format!("no encounter tiles on {}", pose.map));
                 };
+                // A map split in parts (Route 4 around Mt. Moon) may keep
+                // all its grass on the other side: say so before walking.
+                if !encounter_tiles_reachable(&self.nav, &pose) {
+                    return Decision::Fail(format!(
+                        "no encounter tile of {} is reachable from {pose}",
+                        pose.map
+                    ));
+                }
                 self.spin_at = Some(t);
                 t
             }
@@ -121,13 +221,7 @@ impl ToolStep for CatchStep {
             x: target.0,
             y: target.1,
         };
-        if self.go.as_ref().is_none_or(|go| *go.destination() != dest) {
-            self.go = Some(GoStep::with(&self.nav, dest));
-        }
-        match self.go.as_mut().expect("set above").next(ctx) {
-            Decision::Done(_) => Decision::Wait("at the spin tile".into()),
-            d => d,
-        }
+        self.walk(ctx, dest)
     }
 
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
@@ -144,24 +238,48 @@ impl ToolStep for CatchStep {
     }
 }
 
-impl CatchStep {
-    fn new(ctx: &ToolContext<'_>, species: &str) -> Self {
-        Self {
-            species: species.to_owned(),
-            data: Arc::clone(&ctx.data),
-            battle: None,
-            go: None,
-            spin_at: None,
-            encounters: 0,
-            caught: false,
-            nav: NavParts::of(ctx),
+/// Whether any encounter tile of the player's map can be walked to.
+fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -> bool {
+    let Some(m) = nav.world.map(&pose.map) else {
+        return false;
+    };
+    let tiles: std::collections::HashSet<(i32, i32)> = (0..m.height)
+        .flat_map(|y| (0..m.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| encounter_tile(&t)))
+        .collect();
+    let goals = std::collections::BTreeMap::from([(pose.map.clone(), tiles)]);
+    !nearest_reachable(&nav.world, pose, &goals, &nav.gone).is_empty()
+}
+
+/// Runs the hunt, healing at the nearest Center (and coming back) when the
+/// lead is too weak to go on.
+fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), ToolError> {
+    let mut heals = 0;
+    loop {
+        let mut step = HuntStep::new(ctx, hunt.clone(), map);
+        match ctx.drive(&mut step) {
+            Ok(_) => return Ok(()),
+            Err(ToolError::Failed(reason)) if reason.starts_with(HEAL_FIRST) => {
+                heals += 1;
+                if heals > MAX_HEALS {
+                    return Err(ToolError::Failed(format!(
+                        "{reason}; healed {MAX_HEALS} times already"
+                    )));
+                }
+                ctx.emit(progress(step.phase(), format!("{reason}: healing")))?;
+                ctx.invoke(&Intent::Heal { center: None }).result?;
+            }
+            Err(e) => return Err(e),
         }
     }
 }
 
-pub fn catch(ctx: &mut ToolContext<'_>, species: &str) -> Result<(), ToolError> {
-    let mut step = CatchStep::new(ctx, species);
-    ctx.drive(&mut step).map(|_| ())
+pub fn catch(ctx: &mut ToolContext<'_>, species: &str, map: Option<&str>) -> Result<(), ToolError> {
+    hunt(ctx, Hunt::Species(species.to_owned()), map)
+}
+
+pub fn train(ctx: &mut ToolContext<'_>, map: &str, level: u8) -> Result<(), ToolError> {
+    hunt(ctx, Hunt::Level(level), Some(map))
 }
 
 impl Tool for CatchTool {
@@ -174,9 +292,55 @@ impl Tool for CatchTool {
     }
 
     fn run(&mut self, intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
-        let Intent::Catch { species } = intent else {
+        let Intent::Catch { species, map } = intent else {
             return ToolOutcome::failed("not a Catch");
         };
-        catch(ctx, species).into()
+        catch(ctx, species, map.as_deref()).into()
+    }
+}
+
+impl Tool for TrainTool {
+    fn name(&self) -> &str {
+        "Train"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::Train { .. })
+    }
+
+    fn run(&mut self, intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        let Intent::Train { map, level, .. } = intent else {
+            return ToolOutcome::failed("not a Train");
+        };
+        train(ctx, map, *level).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nav::Gone;
+    use pokebot_state::PlayerPose;
+    use pokebot_world::World;
+
+    #[test]
+    fn route_4_grass_is_out_of_reach_from_its_west_part() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let nav = NavParts {
+            world: Arc::new(world),
+            gone: Gone::new(),
+            syncer: None,
+        };
+        let at = |map: &str, x, y| PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        // The Pokémon Center door: west of Mt. Moon, no grass this side.
+        assert!(!encounter_tiles_reachable(&nav, &at("Route4", 12, 5)));
+        // Route 2 has grass south of Viridian Forest's gate.
+        assert!(encounter_tiles_reachable(&nav, &at("Route2", 8, 60)));
+        assert!(encounter_tiles_reachable(&nav, &at("Route1", 8, 20)));
     }
 }

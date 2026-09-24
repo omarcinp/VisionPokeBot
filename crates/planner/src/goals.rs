@@ -1022,6 +1022,16 @@ impl<'p, 'a> Session<'p, 'a> {
                 .collect(),
         };
         out.retain(|c| c.cost.is_finite());
+        // Intents that failed this session the same way twice (spec §8,
+        // `IntentInfeasible`) are left to the other branches.
+        let infeasible = &belief.knowledge.world.infeasible;
+        if !infeasible.is_empty() {
+            out.retain(|c| {
+                !c.steps
+                    .iter()
+                    .any(|s| infeasible.contains(&s.planned.intent.to_string()))
+            });
+        }
         out.sort_by_key(Candidate::sort_key);
         out.dedup_by(|a, b| a.preconditions == b.preconditions && a.effects() == b.effects());
         if let Some(best) = out.first() {

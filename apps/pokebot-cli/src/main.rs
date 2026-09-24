@@ -43,7 +43,7 @@ struct Cli {
 }
 
 #[derive(Debug, clap::Args)]
-struct OutputArgs {
+pub(crate) struct OutputArgs {
     /// Serve the web UI (default address 127.0.0.1:8080)
     #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:8080")]
     web: Option<SocketAddr>,
@@ -319,7 +319,7 @@ fn main() -> Result<()> {
             story(&devices, &output, start, &options, &stop)
         }
         Command::Plan(args) => plan::run(args),
-        Command::Goal(args) => goal::run(args),
+        Command::Goal(args) => goal::run(args, &stop),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),
@@ -347,19 +347,21 @@ fn start_runtime(
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::new(devices);
-    let telemetry = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    let (telemetry, _) = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     Ok((runtime, telemetry))
 }
 
 /// Attaches the web UI and the recorder; the telemetry hub, if any, so
-/// other publishers (the timing model) can reach the UI too.
+/// other publishers (the timing model) can reach the UI too, and the
+/// session directory recorded to.
 fn attach_outputs(
     runtime: &mut Runtime,
     output: &OutputArgs,
     video_name: &str,
     controller_name: &str,
-) -> Result<Option<Telemetry>> {
+) -> Result<(Option<Telemetry>, Option<PathBuf>)> {
     let mut hub = None;
+    let mut session = None;
     if let Some(addr) = output.web {
         let telemetry = Telemetry::new(video_name, controller_name);
         let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
@@ -368,9 +370,11 @@ fn attach_outputs(
         hub = Some(telemetry);
     }
     if let Some(dir) = &output.record {
-        runtime.record_to(&fresh_record_dir(dir), output.record_raw)?;
+        let dir = fresh_record_dir(dir);
+        runtime.record_to(&dir, output.record_raw)?;
+        session = Some(dir);
     }
-    Ok(hub)
+    Ok((hub, session))
 }
 
 /// How often the timing model is written to its file while a run lasts.
@@ -681,7 +685,7 @@ fn story(
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::with_perception(devices, perception);
-    let telemetry = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    let (telemetry, _) = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
     let syncer = args.syncer()?;
     let _timing = TimingKeeper::start(Arc::clone(&syncer), args.timing.clone(), telemetry);
