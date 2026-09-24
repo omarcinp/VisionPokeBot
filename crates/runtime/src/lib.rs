@@ -61,9 +61,17 @@ impl Runtime {
     }
 
     pub fn with_perception(devices: Devices, perception: FireRedPerception) -> Self {
+        Self::with_perception_system(devices, Box::new(perception))
+    }
+
+    /// Any perception (tests script observations through one).
+    pub fn with_perception_system(
+        devices: Devices,
+        perception: Box<dyn PerceptionSystem + Send>,
+    ) -> Self {
         Self {
             devices,
-            perception: Box::new(perception),
+            perception,
             extractor: EventExtractor::default(),
             reducer: DefaultReducer,
             state: GameState::default(),
@@ -193,6 +201,12 @@ impl Runtime {
     /// Tells perception where the player is believed to be.
     pub fn set_pose_hint(&mut self, pose: pokebot_state::PlayerPose) {
         self.perception.set_pose_hint(pose);
+    }
+
+    /// Forgets where the player was believed to be: the next frames are
+    /// located from scratch (the goal loop's `locate_anywhere`).
+    pub fn clear_pose_hint(&mut self) {
+        self.perception.clear_pose_hint();
     }
 
     /// Observation of the most recent frame.
@@ -409,6 +423,9 @@ fn summarize(event: &GameEvent) -> String {
         } => format!("Withdrew box {} slot {box_slot}", box_index + 1),
         GameEvent::SpeciesSeen { species } => format!("Seen {species}"),
         GameEvent::SpeciesCaught { species } => format!("Caught {species}"),
+        GameEvent::PokedexCountObserved { seen, caught } => {
+            format!("Pokédex {seen} seen, {caught} caught")
+        }
         GameEvent::ShinySeen { species } => format!("SHINY {species}!"),
         GameEvent::BadgeEarned { badge } => format!("Badge earned: {badge}"),
         GameEvent::CheckpointRestored { .. } => "Checkpoint knowledge restored".into(),

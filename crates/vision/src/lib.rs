@@ -25,6 +25,10 @@ pub trait PerceptionSystem {
     /// Where the player is believed to be (from story knowledge); narrows the
     /// localization search. Wrong hints only cost search time.
     fn set_pose_hint(&mut self, _pose: PlayerPose) {}
+
+    /// Forgets the hint so the next frame is located from scratch (the
+    /// goal loop's relocalisation: `locate_anywhere`).
+    fn clear_pose_hint(&mut self) {}
 }
 
 /// FireRed/LeafGreen perception.
@@ -112,7 +116,7 @@ impl PerceptionSystem for FireRedPerception {
             observation.pokedex_page = true;
             return observation;
         }
-        if let Some(card) = detect::trainer_card::detect(image) {
+        if let Some(card) = detect::trainer_card::detect(image, self.font.as_deref()) {
             let mut observation = Observation::bare(
                 frame.frame_id,
                 screen(ScreenState::Unknown, "trainer-card"),
@@ -255,6 +259,14 @@ impl PerceptionSystem for FireRedPerception {
 
     fn set_pose_hint(&mut self, pose: PlayerPose) {
         self.hint = Some(pose);
+    }
+
+    /// Drops the hint and searches every map on the next frame (global
+    /// search is switched on: without it nothing could be located again).
+    fn clear_pose_hint(&mut self) {
+        self.hint = None;
+        self.global_search = true;
+        self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
     }
 }
 

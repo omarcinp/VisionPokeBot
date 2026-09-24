@@ -139,6 +139,11 @@ pub struct BagObservation {
 pub struct TrainerCardObservation {
     /// Badge numbers (1–8) shown, ascending.
     pub badges: Vec<u8>,
+    /// The POKéDEX row's number: species caught (`trainer_card.c`
+    /// `caughtMonsCount`). `None` without a font, without the Pokédex, or
+    /// when the digits didn't read.
+    #[serde(default)]
+    pub pokedex_count: Option<u16>,
 }
 
 /// The region map (the Fly destination map, or the Town Map): which fly spots
