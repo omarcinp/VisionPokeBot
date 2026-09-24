@@ -28,7 +28,7 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 - Processes that may still be running: `/tmp/pokebot-live emulator serve --no-save` (the virtual console) and `/tmp/pokebot-webrun …` (the last live run, holding port 8080). Kill them by exact name: `pkill -INT -x pokebot-webrun`. Never use `pkill -f` with patterns that match your own shell command.
 
 ## Current game state (checkpoint)
-- `saves/progress.json` plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4).
+- `saves/progress.json` plus `saves/state.json` (party/bag/money/PC knowledge with provenance, written after every in-game save and restored on `--continue` and on a faint retry — see "Global state" in `docs/architecture.md`) plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4).
   - Party: IVYSAUR Lv 18 with Tackle, Sleep Powder, Leech Seed, Vine Whip.
   - Player RED (Boy), rival GREEN, Boulder Badge.
 - Backups (copy both files over the ROM's `.sav` and `saves/progress.json` to restore one):
@@ -106,5 +106,6 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 2. Catching in the executor plus Poké Ball shopping, so `Prepare` can run catch plans. Then build a team for Misty (the planner will likely pick Vine Whip/levels or a catch).
 3. Milestones: Route 3 → Mt. Moon (trainers, Zubat caves: check localization in `MtMoon_*`) → Cerulean → Misty. Make derived reachability part of this.
 4. Dynamic world overlay, then Cut (S.S. Anne) → Lt. Surge (trash-can puzzle).
+5. Global-state Phase 1 own audits (their own plans, not covered by the just-finished global-state task): the bag menu (use items, teach TM/HM) and its `ItemsChanged`/`PocketObserved` events; the party menu and Pokémon summary screen (switch, use a field move) feeding `PartyObserved`; money read from the overworld/mart HUD (`MoneyObserved`) rather than only from battle-win text; and the PC box UI (`BoxObserved`, `PcItemsObserved`, deposit/withdraw). Also the caught-icon and shiny detectors that emit `SpeciesCaught`/`ShinySeen` (the reducer already supports them).
 
 Keep the working style: small vertical slices, test with deterministic replays and `pokebot inspect`, run live via `tools/live-run.sh`, verify with contact sheets, keep `cargo fmt`, `clippy` and the tests green, and update `docs/architecture.md`.
