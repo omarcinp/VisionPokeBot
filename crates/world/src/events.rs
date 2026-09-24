@@ -36,6 +36,14 @@ impl Val {
     }
 }
 
+/// Which Pokédex count a [`Condition::Pokedex`] compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DexCount {
+    Seen,
+    Caught,
+}
+
 /// A comparison against a value; exactly one operator is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Cmp {
@@ -86,6 +94,39 @@ pub enum Condition {
         coins: String,
         #[serde(flatten)]
         cmp: Cmp,
+    },
+    /// The player's money (`checkmoney N` → `{"money": "player", "ge": N}`).
+    Money {
+        money: String,
+        #[serde(flatten)]
+        cmp: Cmp,
+    },
+    /// The Pokédex count (`GetPokedexCount`): species seen or caught, Kanto
+    /// unless `national`.
+    Pokedex {
+        #[serde(rename = "pokedex")]
+        which: DexCount,
+        #[serde(default)]
+        national: bool,
+        #[serde(flatten)]
+        cmp: Cmp,
+    },
+    /// `HasAllKantoMons` / `HasAllMons`: `"kanto"` or `"national"`.
+    PokedexComplete {
+        pokedex_complete: String,
+        is: bool,
+    },
+    /// The party count (`getpartysize`, `CalculatePlayerPartyCount`):
+    /// `"size"` counts eggs, `"non_egg"` doesn't.
+    PartySize {
+        party: String,
+        #[serde(flatten)]
+        cmp: Cmp,
+    },
+    /// A species (or egg) is in the party (`DoesPlayerPartyContainSpecies`).
+    InParty {
+        in_party: Val,
+        is: bool,
     },
     /// `VAR_RESULT` as written by a `special`.
     Special {

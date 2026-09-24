@@ -89,6 +89,59 @@ Fixture_EventScript_Clerk::
 	pokemart Fixture_Items
 	end
 
+@ A Pokédex aide, as in Route2_EastBuilding: the dex count lands in
+@ VAR_0x8005 (seen) and VAR_0x8006 (caught) and is copied around.
+Fixture_EventScript_Aide::
+	lock
+	setvar VAR_0x8004, 0
+	specialvar VAR_RESULT, GetPokedexCount
+	copyvar VAR_0x8008, VAR_0x8005
+	copyvar VAR_0x8009, VAR_0x8006
+	buffernumberstring STR_VAR_3, VAR_0x8006
+	goto_if_lt VAR_0x8009, 10, Fixture_EventScript_NotEnough
+	goto_if_eq VAR_RESULT, TRUE, Fixture_EventScript_National
+	compare VAR_0x8008, 20
+	goto_if_ge Fixture_EventScript_SeenPlenty
+	giveitem ITEM_HM05
+	release
+	end
+
+Fixture_EventScript_NotEnough::
+	msgbox Fixture_Text_NoRoom
+	release
+	end
+
+Fixture_EventScript_National::
+	setvar VAR_0x8004, 1
+	specialvar VAR_RESULT, GetPokedexCount
+	goto_if_lt VAR_0x8006, 60, Fixture_EventScript_NotEnough
+	release
+	end
+
+Fixture_EventScript_SeenPlenty::
+	copyvar VAR_0x8009, 5
+	goto_if_eq VAR_0x8009, 5, Fixture_EventScript_NotEnough
+	release
+	end
+
+@ Money, party size, coins in a temp var, a species in the party.
+Fixture_EventScript_Vendor::
+	checkmoney 500
+	goto_if_eq VAR_RESULT, FALSE, Fixture_EventScript_NotEnough
+	getpartysize
+	goto_if_eq VAR_RESULT, PARTY_SIZE, Fixture_EventScript_NotEnough
+	checkcoins VAR_TEMP_1
+	goto_if_ge VAR_TEMP_1, 9990, Fixture_EventScript_NotEnough
+	setvar VAR_0x8004, SPECIES_MAGIKARP
+	specialvar VAR_RESULT, DoesPlayerPartyContainSpecies
+	goto_if_eq VAR_RESULT, FALSE, Fixture_EventScript_NotEnough
+	specialvar VAR_RESULT, CountPartyNonEggMons
+	goto_if_eq VAR_RESULT, 1, Fixture_EventScript_NotEnough
+	specialvar VAR_RESULT, HasAllKantoMons
+	goto_if_eq VAR_RESULT, TRUE, Fixture_EventScript_NotEnough
+	release
+	end
+
 	.align 2
 Fixture_Items::
 	.2byte ITEM_POKE_BALL

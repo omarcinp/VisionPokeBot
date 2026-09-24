@@ -250,6 +250,33 @@ IGNORED_SPECIALS = set(
     """.split()
 )
 
+# Semantic quantities. A command with a known meaning types the var it
+# writes (`state.typed[var]`); `copyvar` carries the type along; any other
+# write drops it; a comparison on a typed var becomes a typed condition
+# instead of `{"var": ...}`. A type is `("count", base)` for a number
+# (the operator and value are added: `{"pokedex": "caught", "ge": 10}`) or
+# `("bool", cond)` for TRUE/FALSE (`cond` when TRUE, its negation when
+# FALSE). Specials not listed here are reported at the end of the run.
+NATIONAL_DEX = {"flag": "FLAG_SYS_NATIONAL_DEX", "is": True}
+SPECIAL_QUANTITIES = {
+    # VAR_0x8004 = 0 (Kanto) / 1 (National); returns IsNationalPokedexEnabled.
+    "GetPokedexCount": {
+        "VAR_0x8005": ("count", {"pokedex": "seen"}),
+        "VAR_0x8006": ("count", {"pokedex": "caught"}),
+        "VAR_RESULT": ("bool", NATIONAL_DEX),
+    },
+    "IsNationalPokedexEnabled": {"VAR_RESULT": ("bool", NATIONAL_DEX)},
+    # Every Kanto species but Mew caught; HasAllMons also wants the others.
+    "HasAllKantoMons": {"VAR_RESULT": ("bool", {"pokedex_complete": "kanto", "is": True})},
+    "HasAllMons": {"VAR_RESULT": ("bool", {"pokedex_complete": "national", "is": True})},
+    "CalculatePlayerPartyCount": {"VAR_RESULT": ("count", {"party": "size"})},
+    "CountPartyNonEggMons": {"VAR_RESULT": ("count", {"party": "non_egg"})},
+    # VAR_0x8004 = the species.
+    "DoesPlayerPartyContainSpecies": {"VAR_RESULT": ("bool", {"in_party": "VAR_0x8004", "is": True})},
+    # Money >= VAR_0x8005.
+    "IsEnoughForCostInVar0x8005": {"VAR_RESULT": ("bool", {"money": "player", "ge": "VAR_0x8005"})},
+}
+
 
 def value_of(token, env=None):
     """Numeric literals and known constants become ints; a var with a value
@@ -307,6 +334,7 @@ class PathState:
     does: list = field(default_factory=list)
     opaque: list = field(default_factory=list)
     env: dict = field(default_factory=dict)  # var -> value set on this path
+    typed: dict = field(default_factory=dict)  # var -> ("count"|"bool", base) quantity it holds
     result: tuple = None  # what last wrote VAR_RESULT (checkitem, msgbox yesno...)
     compare: tuple = None  # last `compare`/`checkflag`/`checktrainerflag`
     trail: frozenset = frozenset()  # labels entered by goto (loop cut)
@@ -315,7 +343,7 @@ class PathState:
 
     def fork(self):
         return PathState(
-            list(self.when), list(self.does), list(self.opaque), dict(self.env),
+            list(self.when), list(self.does), list(self.opaque), dict(self.env), dict(self.typed),
             self.result, self.compare, self.trail, self.stack,
         )
 
@@ -334,7 +362,11 @@ class Compiler:
         self.label_map = label_map or {}  # label -> map name (for LOCALID resolution)
         self.map_names = map_names or {}  # MAP_X id -> map name
         self.unmodelled = Counter()  # command -> distinct sites reached
+        self.typed_sites = Counter()  # quantity ("pokedex caught") -> distinct comparison sites
+        self.untyped_specials = Counter()  # "specialvar VAR_X, Name" -> distinct sites
         self._sites = set()
+        self._typed_sites = set()
+        self.site = None  # (label, index) of the command being compiled
 
     # -- helpers --
 
@@ -346,11 +378,49 @@ class Compiler:
     def set_result(state, source):
         state.result = source
         state.env.pop("VAR_RESULT", None)
+        state.typed.pop("VAR_RESULT", None)
+
+    @staticmethod
+    def write_var(state, var):
+        """`var` was written by something without a known meaning."""
+        state.env.pop(var, None)
+        state.typed.pop(var, None)
+        if var == "VAR_RESULT":
+            state.result = None
+
+    @staticmethod
+    def set_typed(state, var, kind, base):
+        """`var` now holds the quantity `base`; vars named in `base` are
+        resolved to what this path set them to (`{"in_party": "VAR_0x8004"}`)."""
+        Compiler.write_var(state, var)
+        state.typed[var] = (kind, {k: value_of(v, state.env) if isinstance(v, str) else v for k, v in base.items()})
+
+    def typed_condition(self, state, var, op, value):
+        typed = state.typed.get(var)
+        if not typed:
+            return None
+        kind, base = typed
+        if kind == "count":
+            cond = {**base, op: value}
+        elif op in ("eq", "ne") and value in (0, 1):
+            cond = dict(base) if (value == 1) == (op == "eq") else negate(base)
+        else:
+            return None
+        k, v = next(iter(base.items()))  # the key naming the quantity
+        key = f"{k} {v}" if isinstance(v, str) and not v.startswith(("SPECIES_", "VAR_")) else k
+        if (self.site, key) not in self._typed_sites:
+            self._typed_sites.add((self.site, key))
+            self.typed_sites[key] += 1
+        return cond
 
     def condition(self, state, var, op, value):
-        """A comparison of `var` against `value`, reading VAR_RESULT through
-        whatever wrote it last on this path."""
+        """A comparison of `var` against `value`, reading a typed var (see
+        SPECIAL_QUANTITIES) or VAR_RESULT through whatever wrote it last on
+        this path."""
         value = value_of(value, state.env)
+        typed = self.typed_condition(state, var, op, value)
+        if typed is not None:
+            return typed
         if var == "VAR_RESULT" and state.result:
             kind, *rest = state.result
             if kind == "item":
@@ -367,8 +437,6 @@ class Compiler:
                 return {"answer": "yes" if yes else "no"}
             if kind == "choice":
                 return {"choice": rest[0], op: value}
-            if kind == "coins":
-                return {"coins": "player", op: value}
             if kind == "special":
                 return {"special": rest[0], op: value}
             return {"result": kind, op: value}
@@ -445,6 +513,11 @@ class Compiler:
             self._sites.add((label, i))
             self.unmodelled[name] += 1
 
+    def untyped_special(self, name):
+        if (self.site, name) not in self._sites:
+            self._sites.add((self.site, name))
+            self.untyped_specials[name] += 1
+
     # -- the walk --
 
     def run(self, label, i, state):
@@ -457,6 +530,7 @@ class Compiler:
                 return
             cmd = cmds[i]
             name, a = cmd.name, cmd.args
+            self.site = (label, i)
             i += 1
             if name in IGNORED:
                 continue
@@ -488,8 +562,8 @@ class Compiler:
                 if len(a) == 3:
                     cond = self.condition(state, a[0], op, a[1])
                     target = a[2]
-                elif state.compare:
-                    cond = self.condition(state, state.compare[0], op, state.compare[1])
+                elif state.compare and state.compare[0] == "var":
+                    cond = self.condition(state, state.compare[1], op, state.compare[2])
                     target = a[0]
                 else:
                     state.opaque.append(name)
@@ -552,22 +626,40 @@ class Compiler:
                 self.set_result(state, ("choice", a[2]))
                 continue
             if name == "checkcoins":
-                self.set_result(state, ("coins",))
+                self.set_typed(state, a[0], "count", {"coins": "player"})
+                continue
+            if name == "checkmoney":
+                self.set_typed(state, "VAR_RESULT", "bool", {"money": "player", "ge": value_of(a[0], state.env)})
+                continue
+            if name == "getpartysize":
+                self.set_typed(state, "VAR_RESULT", "count", {"party": "size"})
                 continue
             if name == "specialvar":
-                if a[0] == "VAR_RESULT":
+                writes = SPECIAL_QUANTITIES.get(a[1])
+                if writes:
+                    # The counts are National when VAR_0x8004 = 1 (GetPokedexCount).
+                    national = a[1] == "GetPokedexCount" and state.env.get("VAR_0x8004") == 1
+                    for var, (kind, base) in writes.items():
+                        if national and "pokedex" in base:
+                            base = {**base, "national": True}
+                        self.set_typed(state, var, kind, base)
+                    if a[0] not in writes:
+                        self.write_var(state, a[0])
+                elif a[0] == "VAR_RESULT":
                     self.set_result(state, ("special", a[1]))
+                    self.untyped_special(f"specialvar {a[0]}, {a[1]}")
                 else:
-                    state.env.pop(a[0], None)
+                    self.write_var(state, a[0])
+                    self.untyped_special(f"specialvar {a[0]}, {a[1]}")
                 continue
             if name == "random":
                 self.set_result(state, ("random", a[0]))
                 continue
             if name == "getplayerxy":
                 for var in a:
-                    state.env.pop(var, None)
+                    self.write_var(state, var)
                 continue
-            if name in ("getpartysize", "checkplayergender", "checkmoney", "checkdecor", "checkdecorspace",
+            if name in ("checkplayergender", "checkdecor", "checkdecorspace",
                         "checkpcitem", "checkitemtype", "countgiftmons"):
                 self.set_result(state, (name.removeprefix("check").removeprefix("get"),))
                 continue
@@ -591,23 +683,21 @@ class Compiler:
                 continue
             if name == "setvar":
                 v = value_of(a[1], state.env)
+                self.write_var(state, a[0])
                 state.env[a[0]] = v
-                if a[0] == "VAR_RESULT":
-                    state.result = None
                 state.does.append({"var": a[0], "eq": v})
                 continue
             if name in ("addvar", "subvar"):
-                state.env.pop(a[0], None)
+                self.write_var(state, a[0])
                 state.does.append({"var": a[0], "add" if name == "addvar" else "sub": value_of(a[1], state.env)})
                 continue
             if name in ("copyvar", "setorcopyvar"):
                 src = value_of(a[1], state.env)
+                self.write_var(state, a[0])
                 if isinstance(src, int) or not src.startswith("VAR_"):
                     state.env[a[0]] = src
-                else:
-                    state.env.pop(a[0], None)
-                if a[0] == "VAR_RESULT":
-                    state.result = None
+                elif src in state.typed:
+                    state.typed[a[0]] = state.typed[src]
                 continue
             if name in ("giveitem", "additem", "finditem"):
                 effect = {"give": a[0], "count": value_of(a[1]) if len(a) > 1 else 1}
@@ -793,7 +883,8 @@ def none_if_zero(value):
 
 
 def compile_events(world):
-    """Compiles every entry script. Returns (events, unmodelled counter)."""
+    """Compiles every entry script. Returns (events, unmodelled counter,
+    typing report: {"typed": quantity -> sites, "untyped_specials": specialvar -> sites})."""
     compiler = Compiler(world.labels, world.data, world.local_ids, world.label_map, world.map_names)
     entries = {}  # label -> (kind, map, local_id) of its first reference
 
@@ -863,7 +954,8 @@ def compile_events(world):
         "rom": ROM, "sha1": world.sha1,
         "scripts": scripts, "map_scripts": map_scripts, "triggers": triggers, "objects": objects,
     }
-    return events, compiler.unmodelled
+    typing = {"typed": compiler.typed_sites, "untyped_specials": compiler.untyped_specials}
+    return events, compiler.unmodelled, typing
 
 
 def compile_dialogue(world):
@@ -1196,7 +1288,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     world = load_world(args.pret)
-    events, unmodelled = compile_events(world)
+    events, unmodelled, typing = compile_events(world)
     dialogue = compile_dialogue(world)
     places = compile_places(world, events, out)
     obtain = compile_obtain(world, events)
@@ -1218,6 +1310,12 @@ def main():
     )
     print(f"unmodelled commands (distinct sites on paths), top {args.report}:", file=sys.stderr)
     for name, count in unmodelled.most_common(args.report):
+        print(f"{count:5d}  {name}", file=sys.stderr)
+    print("typed quantities (distinct comparison sites):", file=sys.stderr)
+    for name, count in sorted(typing["typed"].items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"{count:5d}  {name}", file=sys.stderr)
+    print(f"specialvar targets left untyped (distinct sites), top {args.report}:", file=sys.stderr)
+    for name, count in typing["untyped_specials"].most_common(args.report):
         print(f"{count:5d}  {name}", file=sys.stderr)
 
 

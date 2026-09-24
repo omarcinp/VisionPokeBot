@@ -91,6 +91,63 @@ fn brock_paths_are_compiled() {
 }
 
 #[test]
+fn pokedex_aide_gate_is_typed() {
+    use pokebot_world::events::{Condition, DexCount, Effect};
+    let Ok(world) = World::load(data_dir()) else {
+        return;
+    };
+    let Some(events) = world.events() else {
+        return;
+    };
+    let aide = &events.scripts["Route2_EastBuilding_EventScript_Aide"];
+    let give = aide
+        .paths
+        .iter()
+        .find(|p| {
+            p.does
+                .iter()
+                .any(|e| matches!(e, Effect::Give { give, .. } if give == "ITEM_HM05"))
+        })
+        .expect("give path");
+    assert!(
+        give.when.iter().any(|c| matches!(
+            c,
+            Condition::Pokedex { which: DexCount::Caught, national: false, cmp }
+            if cmp.ge == Some(10.into()) && cmp.lt.is_none()
+        )),
+        "{:?}",
+        give.when
+    );
+    for path in &aide.paths {
+        for c in &path.when {
+            assert!(
+                !matches!(c, Condition::Other(_) | Condition::Var { .. }),
+                "{c:?}"
+            );
+        }
+    }
+    // The same quantities elsewhere: money, party size, the National Dex.
+    let all = || {
+        events
+            .scripts
+            .values()
+            .flat_map(|s| s.paths.iter())
+            .flat_map(|p| p.when.iter())
+    };
+    assert!(all().any(|c| matches!(c, Condition::Money { money, cmp } if money == "player" && cmp.ge == Some(500.into()))));
+    assert!(all().any(|c| matches!(c, Condition::PartySize { party, cmp } if party == "size" && cmp.eq == Some(6.into()))));
+    assert!(all().any(|c| matches!(c, Condition::PokedexComplete { pokedex_complete, is: true } if pokedex_complete == "kanto")));
+    assert!(all().any(|c| matches!(c, Condition::InParty { in_party, is: true } if in_party == &pokebot_world::events::Val::Sym("SPECIES_MAGIKARP".into()))));
+    assert!(all().any(
+        |c| matches!(c, Condition::Flag { flag, is: false } if flag == "FLAG_SYS_NATIONAL_DEX")
+    ));
+    assert_eq!(
+        all().filter(|c| matches!(c, Condition::Other(_))).count(),
+        0
+    );
+}
+
+#[test]
 fn dialogue_identifies_lines_with_wildcards() {
     let Ok(world) = World::load(data_dir()) else {
         return;

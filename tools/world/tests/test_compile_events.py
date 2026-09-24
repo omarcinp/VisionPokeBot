@@ -144,6 +144,47 @@ def test_mart_items(compiler):
     assert paths[0]["does"] == [{"mart": ["ITEM_POKE_BALL", "ITEM_POTION"]}]
 
 
+def test_specialvar_quantities_are_typed(compiler):
+    paths = compiler.compile("Fixture_EventScript_Aide")["paths"]
+    whens = [p["when"] for p in paths]
+    # VAR_0x8006 (caught) copied into VAR_0x8009 keeps its meaning.
+    assert whens[0] == [{"pokedex": "caught", "lt": 10}]
+    # GetPokedexCount returns whether the National Dex is enabled; with
+    # VAR_0x8004 = 1 the counts are National.
+    assert whens[1] == [
+        {"pokedex": "caught", "ge": 10},
+        {"flag": "FLAG_SYS_NATIONAL_DEX", "is": True},
+        {"pokedex": "caught", "national": True, "lt": 60},
+    ]
+    # `compare` + `goto_if_ge` on the seen copy.
+    assert whens[3] == [
+        {"pokedex": "caught", "ge": 10},
+        {"flag": "FLAG_SYS_NATIONAL_DEX", "is": False},
+        {"pokedex": "seen", "ge": 20},
+    ]
+    # Overwriting the copy with a constant drops the meaning (and decides
+    # the branch statically: only the taken path exists).
+    plenty = [p for p in paths if p["when"][-1] == {"pokedex": "seen", "ge": 20}]
+    assert len(plenty) == 1 and plenty[0]["does"][-1] == {"say": "Fixture_Text_NoRoom"}
+    give = [p for p in paths if {"give": "ITEM_HM05", "count": 1} in p["does"]]
+    assert [p["when"][-1] for p in give] == [{"pokedex": "seen", "lt": 20}]
+    assert not any("var" in c for p in paths for c in p["when"])
+
+
+def test_money_party_coins_typed(compiler):
+    paths = compiler.compile("Fixture_EventScript_Vendor")["paths"]
+    whens = [p["when"] for p in paths]
+    assert whens[0] == [{"money": "player", "lt": 500}]
+    assert whens[1] == [{"money": "player", "ge": 500}, {"party": "size", "eq": 6}]
+    assert whens[2][-1] == {"coins": "player", "ge": 9990}
+    assert whens[3][-1] == {"in_party": "SPECIES_MAGIKARP", "is": False}
+    assert whens[4][-1] == {"party": "non_egg", "eq": 1}
+    assert whens[5][-1] == {"pokedex_complete": "kanto", "is": True}
+    assert whens[6][-1] == {"pokedex_complete": "kanto", "is": False}
+    assert compiler.typed_sites["pokedex_complete kanto"] == 1
+    assert compiler.typed_sites["money player"] == 1
+
+
 # -- the real decompilation --
 
 
@@ -197,6 +238,30 @@ def test_brock_three_paths(events):
 def json_key(value):
     import json
     return json.dumps(value, sort_keys=True)
+
+
+def test_pokedex_aides_are_typed(events):
+    gates = {
+        "Route2_EastBuilding_EventScript_Aide": ("ITEM_HM05", 10),
+        "Route11_EastEntrance_2F_EventScript_Aide": ("ITEM_ITEMFINDER", 30),
+        "Route15_WestEntrance_2F_EventScript_Aide": ("ITEM_EXP_SHARE", 50),
+        "Route16_NorthEntrance_2F_EventScript_Aide": ("ITEM_AMULET_COIN", 40),
+        "Route10_PokemonCenter_1F_EventScript_Aide": ("ITEM_EVERSTONE", 20),
+    }
+    for label, (item, need) in gates.items():
+        paths = events["scripts"][label]["paths"]
+        give = [p for p in paths if any(e.get("give") == item for e in p["does"])]
+        assert len(give) == 1, label
+        assert {"pokedex": "caught", "ge": need} in give[0]["when"], label
+        assert not any("var" in c or "special" in c for p in paths for c in p["when"]), label
+    scene = events["scripts"]["PalletTown_EventScript_OakRatingScene"]["paths"]
+    assert {"pokedex": "caught", "ge": 60} in [c for p in scene for c in p["when"]]
+    # Oak's rating: the National Dex check is the flag behind
+    # IsNationalPokedexEnabled, completion is HasAllMons.
+    oak = events["scripts"]["PalletTown_ProfessorOaksLab_EventScript_ProfOak"]["paths"]
+    conds = [c for p in oak for c in p["when"]]
+    assert {"flag": "FLAG_SYS_NATIONAL_DEX", "is": False} in conds
+    assert {"pokedex_complete": "national", "is": True} in conds
 
 
 def test_sign_lady_branches(events):
