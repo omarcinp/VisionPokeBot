@@ -201,12 +201,12 @@ crates/state         Observation, events, reducer, GameState with provenance
 crates/vision        perception: title, info pages, message box + ▼ arrow, menus + ▶ cursor, naming keyboard
 crates/runtime       the bot loop: video → normalize → perceive → events → state
 crates/agent         closed-loop tasks: NewGame, Story (milestones), navigation, battles
-crates/world         world model (maps, collision, warps, connections), localization, A*
+crates/world         world model (maps, collision, warps, connections), compiled scripts/dialogue/places, localization, A*
 crates/telemetry     live hub + embedded web UI
 adapters/emulator-libretro   mGBA core host: video out + joypad in
 adapters/capture-card        V4L2 capture (UVC cards, v4l2loopback): RGB24/BGR24/YUYV/MJPEG
 adapters/pabotbase           PABotBase2 protocol, PC client + device-side peer
 adapters/virtual-console     emulator → V4L2 output + virtual ESP32 on a pseudo-terminal
 apps/pokebot-cli     `pokebot` binary: new-game / run / play / emulator serve / inspect / replay
-tools/               emulator download, virtual camera, world model build (tools/world), live-run.sh
+tools/               emulator download, virtual camera, world model and script compiler (tools/world), live-run.sh
 ```

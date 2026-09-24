@@ -3,8 +3,11 @@
 //! pathfinding over it.
 
 pub mod behavior;
+pub mod dialogue;
+pub mod events;
 pub mod localize;
 pub mod path;
+pub mod places;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +17,10 @@ use pokebot_core::{Error, Result, RgbImage};
 use pokebot_state::Direction;
 use serde::Deserialize;
 
+pub use dialogue::Dialogue;
+pub use events::Events;
 pub use localize::Localizer;
+pub use places::Places;
 
 /// Pixels per map block (metatile).
 pub const BLOCK: i32 = 16;
@@ -65,9 +71,29 @@ pub struct ObjectEvent {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub movement: Option<String>,
+    /// Wanderers stay within ±range of their spawn tile (0 for NPCs that
+    /// never move). Missing in data built before the fields existed.
+    #[serde(default)]
+    pub range_x: i32,
+    #[serde(default)]
+    pub range_y: i32,
     pub script: Option<String>,
     pub flag: Option<String>,
     pub trainer_type: Option<String>,
+}
+
+impl ObjectEvent {
+    /// The rectangle `(x0, y0, x1, y1)` (inclusive) the object may occupy;
+    /// its spawn tile when it has no position.
+    pub fn area(&self) -> (i32, i32, i32, i32) {
+        let (x, y) = (self.x.unwrap_or(0), self.y.unwrap_or(0));
+        (
+            x - self.range_x,
+            y - self.range_y,
+            x + self.range_x,
+            y + self.range_y,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,10 +173,17 @@ impl MapData {
     }
 }
 
-/// All maps, keyed by name (e.g. `PalletTown_PlayersHouse_2F`).
+/// All maps, keyed by name (e.g. `PalletTown_PlayersHouse_2F`), plus the
+/// compiled event data when the data dir has it.
 pub struct World {
     maps: HashMap<String, MapData>,
     by_id: HashMap<String, String>,
+    // One loader for the whole data dir keeps callers to a single path and
+    // a single error site; the files are optional so data dirs built before
+    // `compile_events.py` existed keep loading.
+    events: Option<Events>,
+    dialogue: Option<Dialogue>,
+    places: Option<Places>,
 }
 
 impl World {
@@ -208,7 +241,26 @@ impl World {
                 maps_dir.display()
             )));
         }
-        Ok(World { maps, by_id })
+        Ok(World {
+            maps,
+            by_id,
+            events: events::load_optional(&dir.join("events.json"))?,
+            dialogue: events::load_optional(&dir.join("dialogue.json"))?,
+            places: events::load_optional(&dir.join("places.json"))?,
+        })
+    }
+
+    /// Compiled scripts (`events.json`), when the data dir has them.
+    pub fn events(&self) -> Option<&Events> {
+        self.events.as_ref()
+    }
+
+    pub fn dialogue(&self) -> Option<&Dialogue> {
+        self.dialogue.as_ref()
+    }
+
+    pub fn places(&self) -> Option<&Places> {
+        self.places.as_ref()
     }
 
     pub fn map(&self, name: &str) -> Option<&MapData> {

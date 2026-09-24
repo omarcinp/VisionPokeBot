@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fetches the pret/pokefirered decompilation (map, tileset and font data) and
-# builds data/world/ (map renders, world model, gamedata.json; local,
-# gitignored). Safe to re-run.
+# Fetches the pret/pokefirered decompilation (map, tileset, script and font
+# data) and builds data/world/ (map renders, world model, gamedata.json, the
+# compiled events/dialogue/places/obtain tables; local, gitignored). Safe to
+# re-run.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRET="${ROOT}/data/pret-pokefirered"
@@ -22,3 +23,6 @@ cd "${ROOT}"
 "${VENV}/bin/python" tools/gamedata/extract_gamedata.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py --font small
+# Last: reads data/world/maps for the water tiles. Ends with the report of
+# script commands the compiler doesn't model yet.
+"${VENV}/bin/python" tools/world/compile_events.py
