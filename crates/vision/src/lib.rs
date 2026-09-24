@@ -551,18 +551,25 @@ mod tests {
         );
     }
 
-    /// Normal/small fonts and RATTATA's palettes from the game data.
+    /// Normal/small fonts and the palettes of the fixtures' wild species
+    /// (RATTATA in the emulator's, PIDGEY in the Switch's) from the game data.
     fn catch_perception() -> Option<FireRedPerception> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let normal = text::Font::load(root.join("data/world/font_normal.json")).ok()?;
         let small = text::Font::load(root.join("data/world/font_small.json")).ok()?;
         let data = pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")).ok()?;
-        let p = data.species.get("SPECIES_RATTATA")?.palettes.clone()?;
         let mut palettes = shiny::SpritePalettes::new();
-        palettes.insert(
-            "RATTATA".into(),
-            (p.normal.try_into().ok()?, p.shiny.try_into().ok()?),
-        );
+        for name in ["RATTATA", "PIDGEY"] {
+            let p = data
+                .species
+                .get(&format!("SPECIES_{name}"))?
+                .palettes
+                .clone()?;
+            palettes.insert(
+                name.into(),
+                (p.normal.try_into().ok()?, p.shiny.try_into().ok()?),
+            );
+        }
         Some(
             FireRedPerception::default()
                 .with_font(std::sync::Arc::new(normal))
@@ -576,8 +583,10 @@ mod tests {
         pokebot_video::png::load(root.join("captures/fixtures").join(name)).ok()
     }
 
-    #[test]
-    fn caught_icon_and_shiny_reading_on_wild_battles() {
+    /// Wild battles on the command menu: the opponent, whether the caught
+    /// icon shows, and a normal-palette reading. `dir` is the fixture
+    /// source ("" = emulator, "switch/" = the physical Switch).
+    fn wild_battles(dir: &str, species: &str) {
         let Some(mut p) = catch_perception() else {
             return;
         };
@@ -585,30 +594,92 @@ mod tests {
             ("battle-wild-uncaught.png", false),
             ("battle-wild-caught.png", true),
         ] {
-            let Some(image) = fixture(name) else { return };
+            let Some(image) = fixture(&format!("{dir}{name}")) else {
+                continue;
+            };
             let b = p.observe(&frame(0, image)).battle.expect(name);
-            assert_eq!(b.opponent_name.as_deref(), Some("RATTATA"), "{name}");
-            assert_eq!(b.opponent_caught, Some(caught), "{name}");
+            assert_eq!(b.opponent_name.as_deref(), Some(species), "{dir}{name}");
+            assert_eq!(b.opponent_caught, Some(caught), "{dir}{name}");
             assert_eq!(
                 b.opponent_shiny,
                 Some(pokebot_state::ShinyReading::Normal),
-                "{name}"
+                "{dir}{name}"
             );
         }
     }
 
     #[test]
-    fn shiny_is_read_only_on_the_command_menu() {
-        // "Gotcha!": the HUD and HP bar still show, the platform is empty.
+    fn caught_icon_and_shiny_reading_on_wild_battles() {
+        wild_battles("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_caught_icon_and_shiny_reading_on_wild_battles() {
+        wild_battles("switch/", "PIDGEY");
+    }
+
+    /// "Gotcha!": the HUD and HP bar still show, the platform is empty.
+    fn shiny_only_on_command_menu(dir: &str, species: &str) {
         let Some(mut p) = catch_perception() else {
             return;
         };
-        let Some(image) = fixture("battle-gotcha.png") else {
+        let Some(image) = fixture(&format!("{dir}battle-gotcha.png")) else {
             return;
         };
         let b = p.observe(&frame(0, image)).battle.unwrap();
-        assert_eq!(b.opponent_name.as_deref(), Some("RATTATA"));
-        assert_eq!(b.opponent_shiny, None);
+        assert_eq!(b.opponent_name.as_deref(), Some(species), "{dir}");
+        assert_eq!(b.opponent_shiny, None, "{dir}");
+    }
+
+    #[test]
+    fn shiny_is_read_only_on_the_command_menu() {
+        shiny_only_on_command_menu("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_shiny_is_read_only_on_the_command_menu() {
+        shiny_only_on_command_menu("switch/", "PIDGEY");
+    }
+
+    /// The catch flow's battle texts, as the battle text box reads them.
+    fn catch_texts(dir: &str, species: &str) {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        let gotcha = format!("{species} was caught!");
+        for (name, lines) in [
+            ("battle-throw.png", ["RED used", "POKé BALL!"]),
+            (
+                "battle-broke-free.png",
+                ["Oh, no!", "The POKéMON broke free!"],
+            ),
+            (
+                "battle-broke-free-aww.png",
+                ["Aww!", "It appeared to be caught!"],
+            ),
+            (
+                "battle-broke-free-shoot.png",
+                ["Shoot!", "It was so close, too!"],
+            ),
+            ("battle-broke-free-aargh.png", ["Aargh!", "Almost had it!"]),
+            ("battle-gotcha.png", ["Gotcha!", gotcha.as_str()]),
+        ] {
+            let Some(image) = fixture(&format!("{dir}{name}")) else {
+                continue;
+            };
+            let d = p.observe(&frame(0, image)).dialogue.expect(name);
+            assert_eq!(d.lines, lines, "{dir}{name}");
+        }
+    }
+
+    #[test]
+    fn catch_texts_are_read() {
+        catch_texts("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_catch_texts_are_read() {
+        catch_texts("switch/", "PIDGEY");
     }
 
     #[test]
@@ -628,13 +699,21 @@ mod tests {
         let Some(mut p) = catch_perception() else {
             return;
         };
-        for (name, page) in [
-            ("pokedex-page.png", true),
-            ("battle-gotcha.png", false),
-            ("mart-list.png", false),
-        ] {
-            let Some(image) = fixture(name) else { return };
-            assert_eq!(p.observe(&frame(0, image)).pokedex_page, page, "{name}");
+        for dir in ["", "switch/"] {
+            for (name, page) in [
+                ("pokedex-page.png", true),
+                ("battle-gotcha.png", false),
+                ("mart-list.png", false),
+            ] {
+                let Some(image) = fixture(&format!("{dir}{name}")) else {
+                    continue;
+                };
+                assert_eq!(
+                    p.observe(&frame(0, image)).pokedex_page,
+                    page,
+                    "{dir}{name}"
+                );
+            }
         }
     }
 

@@ -375,3 +375,103 @@ to close the texts. No wild encounters happened on this path.
 | `mtmoon-entry-intro.png` | first-entry MT. MOON intro | `mtmoon.txt` |
 | `mtmoon-1f.png` | `MtMoon_1F` (18,35) overworld | `mtmoon.txt` |
 | `mtmoon-1f-b.png` | `MtMoon_1F` (18,33) overworld | `mtmoon.txt` |
+
+---
+
+## Switch captures (2026-09-24, Task 3b)
+
+Captured on the physical Switch (standalone FireRed, Hagibis MS2109 capture,
+`--viewport 180,5,1560,1040 --card-controls switch`, ESP32 controller). The
+frames are the runtime's normalized 240×160 frames. They are saved as
+`captures/fixtures/switch/<same name as the emulator fixture>.png` (gitignored).
+
+**Game state:** Switch save at `BeatBrock` (`PewterCity_Gym` (6,6)), with RED,
+BULBASAUR ♂ Lv14 at 32/37 HP, ¥4880, 5 POKé BALLs, and a Pokédex of 1. The
+mart and bag values are the same as in the emulator's route3-ready save (¥4880,
+IN BAG 5, POKé BALL ×8 after buying 3, POTION ×1), so the mart and bag
+assertions are identical. **The wild species is PIDGEY, not RATTATA:** PIDGEY ♂
+Lv3 (uncaught), then PIDGEY ♀ Lv3 (caught), both at `Route2` (7..10,3). The
+battle, catch and Pokédex assertions use PIDGEY: `No016 PIDGEY`, "Forest
+POKéMON", and `TINY BIRD POKéMON`. The game was soft-reset afterwards, and the
+cartridge save was unchanged (CONTINUE: TIME 0:49, POKéDEX 1).
+
+**Driving:** each step was a short `run --script` through `tools/live-run.sh
+--instance switch`, with generous waits and a `screenshot`. The position was
+checked with `pokebot inspect --world data/world --map <Map>` between steps.
+Walking used held directions of about 267 ms per tile plus 120 ms, re-planned
+after each segment from the located position (BFS over the world model's
+collision and ledges). The mart and bag paths are the emulator's, with waits of
+about 1.5× (300 frames after A for mart texts). None of the button paths
+differed from the emulator's.
+
+| Fixture | Shows |
+|---|---|
+| `mart-menu.png` | BUY/SELL/SEE YA! + "Hi, there! / May I help you?" |
+| `mart-list.png` | list (▶ POKé BALL), MONEY ¥4880 |
+| `mart-quantity-1.png` / `mart-quantity-3.png` | ×01 ¥200 / ×03 ¥600, IN BAG 5 |
+| `mart-confirm.png` | "POKé BALL, and you want 3. / That will be ¥600. Okay?" YES/NO |
+| `bag-items.png` | ITEMS: POTION ×1, CANCEL (▶ row 0) |
+| `bag-pokeballs.png` / `bag-pokeballs-cursor1.png` | POKé BALL ×8, CANCEL, ▶ row 0 / row 1 |
+| `bag-use-prompt.png` | battle bag, "POKé BALL is selected.", USE/CANCEL |
+| `battle-wild-uncaught.png` | PIDGEY ♂ Lv3, no ball icon, command menu |
+| `battle-throw.png` | "RED used / POKé BALL!" |
+| `battle-broke-free-aww.png` | "Aww! / It appeared to be caught!" |
+| `battle-gotcha.png` | "Gotcha! / PIDGEY was caught!" ▼, empty platform |
+| `pokedex-page.png` | No016 PIDGEY page |
+| `nickname-prompt.png` | "Give a nickname to the / captured PIDGEY?" Yes/No |
+| `battle-wild-caught.png` | PIDGEY ♀ Lv3 with the caught-ball icon, command menu |
+
+**Missing:** `battle-broke-free.png` ("Oh, no!", 0 shakes),
+`battle-broke-free-aargh.png` and `battle-broke-free-shoot.png`. Eight throws
+gave four "Shoot!", one "Aww!" and three "Gotcha!". The only "Shoot!" frame
+kept was taken while the text was still printing ("It was so"), so it was
+discarded. The Mt. Moon fixtures were out of scope.
+
+**Colour offsets (Switch − mGBA).** These were measured on pixels whose four
+neighbours share the emulator colour, in same-content windows (mart, bag,
+prompt) and in reference-colour areas (HUD, battle box, Pokédex):
+
+| Colour | mGBA | mean offset (R,G,B) | max abs |
+|---|---|---|---|
+| white | (255,251,255) | (0, +4, 0) | 18 |
+| mart cream | (255,251,214) | (0, +4, −1) | 11 |
+| bag cream | (255,251,206) | (0, +4, −1) | 8 |
+| bag orange | (247,203,115) | (0, +6, −3) | 12 |
+| description blue | (0,121,198) | (0, +4, 0) | 28 |
+| list ink | (99,97,99) | (+1, +3, 0) | 13 |
+| arrow red | (255,81,0) | (0, +1, 0) | 9 |
+| HUD cream | (255,251,222) | (0, +4, 0) | 12 |
+| battle box | (41,81,107) | (−3, +3, +1) | 18 |
+| Pokédex tan | (198,178,140) | (−2, +5, −2) | 20 |
+| Pokédex lower | (231,219,198) | (−1, +6, −3) | 20 |
+| black | (0,0,0) | (0, 0, +1) | 20 |
+
+Over whole windows, the per-pixel max-channel difference has a median of 4, a
+p95 of 7–12 and a p99 of 10–17. The maximum is 19–37, at glyph and frame edges
+(chroma blur). There is no geometric offset: windows, rows, cursors and the
+caught icon sit on the same pixels as in mGBA.
+The only content differences are the bobbing ▲▼/◀ arrows. The caught icon's
+outline reads (64..87, 57..76, 65..108) and its top half reads (255,179..184,51..74)
+and (222..227,104..115,74..86). Detector margins on the Switch: icon outline
+209‰ (threshold 120‰), top 86‰ (threshold 50‰). The shiny matcher gets
+n = 385 normal-only and s = 15 shiny-only pixels for PIDGEY (Normal needs n ≥ 40
+and n ≥ 4·s).
+
+**Readers:** the bag, mart, caught-icon, shiny and Pokédex-page readers passed
+on the Switch frames unchanged. Tolerances, share thresholds and alignment did
+not need to change. One pre-existing bug surfaced, on **both** sources: the
+battle text box was read through the field message box's text region
+`(8, 118, 224, 36)`. Its top and bottom rows (y 118, y 153) are the battle
+box's frame (231,219,231). Those 448 frame pixels outnumber the text, so the
+ink cluster centres on the frame colour and the second line scores out: only
+"RED used", "Gotcha!" and "Delete a move to make" were read. The battle text
+now uses its interior `BATTLE_TEXT = (8, 119, 224, 34)` (x 8..231, y 119..152),
+which reads both lines on the emulator and Switch fixtures, for example
+"Gotcha! / PIDGEY was caught!" and "Delete a move to make / room for
+POISONPOWDER?".
+
+**Switch timing notes:** in a wild battle, the broke-free text stays up for about
+60 frames. The wild mon's move then follows without an A press. A throw's
+result text is fully printed 280–360 frames after the A on USE (the number of
+shakes varies), and the "Gotcha!" ▼ appears about 460 frames after USE. The Pokédex page
+was up 300 frames after the A on "…data was added to the POKéDEX."

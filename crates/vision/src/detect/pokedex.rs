@@ -61,6 +61,10 @@ mod tests {
         pokebot_video::png::load(root.join("captures/fixtures").join(name)).ok()
     }
 
+    /// Fixture sources: the emulator's (`captures/fixtures/`) and the
+    /// physical Switch's (`captures/fixtures/switch/`).
+    const SOURCES: [&str; 2] = ["", "switch/"];
+
     #[test]
     fn the_entry_page_is_found() {
         let Some(image) = fixture("pokedex-page.png") else {
@@ -70,20 +74,30 @@ mod tests {
     }
 
     #[test]
+    fn switch_the_entry_page_is_found() {
+        let Some(image) = fixture("switch/pokedex-page.png") else {
+            return;
+        };
+        assert!(is_page(&image));
+    }
+
+    #[test]
     fn other_screens_are_not_the_entry_page() {
-        for name in [
-            "battle-gotcha.png",
-            "mart-list.png",
-            "battle-wild-caught.png",
-            "nickname-prompt.png",
-            "bag-items.png",
-            "mtmoon-1f.png",
-            "mtmoon-entry-intro.png",
-        ] {
-            let Some(image) = fixture(name) else {
-                continue;
-            };
-            assert!(!is_page(&image), "{name}");
+        for dir in SOURCES {
+            for name in [
+                "battle-gotcha.png",
+                "mart-list.png",
+                "battle-wild-caught.png",
+                "nickname-prompt.png",
+                "bag-items.png",
+                "mtmoon-1f.png",
+                "mtmoon-entry-intro.png",
+            ] {
+                let Some(image) = fixture(&format!("{dir}{name}")) else {
+                    continue;
+                };
+                assert!(!is_page(&image), "{dir}{name}");
+            }
         }
     }
 }

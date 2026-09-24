@@ -172,51 +172,78 @@ mod tests {
         Some((image, font, small_font))
     }
 
-    #[test]
-    fn reads_the_item_list_and_money() {
-        let Some((image, font, small_font)) = fixture("mart-list.png") else {
+    /// Fixture sources: the emulator's (`captures/fixtures/`) and the
+    /// physical Switch's (`captures/fixtures/switch/`), taken of the same
+    /// screens. Each test runs its assertions on every source it finds.
+    const SOURCES: [&str; 2] = ["", "switch/"];
+
+    fn item_list_and_money(dir: &str) {
+        let Some((image, font, small_font)) = fixture(&format!("{dir}mart-list.png")) else {
             return;
         };
         let shop = detect(&image, &font, &small_font).expect("shop");
-        assert_eq!(shop.money, Some(4880));
+        assert_eq!(shop.money, Some(4880), "{dir}");
         assert_eq!(
             shop.items.first(),
-            Some(&("POKé BALL".to_owned(), Some(200)))
+            Some(&("POKé BALL".to_owned(), Some(200))),
+            "{dir}"
         );
-        assert_eq!(shop.cursor, Some(0));
-        assert_eq!(shop.quantity, None);
+        assert_eq!(shop.cursor, Some(0), "{dir}");
+        assert_eq!(shop.quantity, None, "{dir}");
+    }
+
+    #[test]
+    fn reads_the_item_list_and_money() {
+        item_list_and_money("");
+    }
+
+    #[test]
+    fn switch_reads_the_item_list_and_money() {
+        item_list_and_money("switch/");
+    }
+
+    fn quantity_box(dir: &str) {
+        for (name, quantity) in [
+            ("mart-quantity-1.png", (1, 200)),
+            ("mart-quantity-3.png", (3, 600)),
+        ] {
+            let Some((image, font, small_font)) = fixture(&format!("{dir}{name}")) else {
+                continue;
+            };
+            let shop = detect(&image, &font, &small_font).expect("shop");
+            assert_eq!(shop.quantity, Some(quantity), "{dir}{name}");
+        }
     }
 
     #[test]
     fn reads_the_quantity_box() {
-        let Some((image, font, small_font)) = fixture("mart-quantity-1.png") else {
-            return;
-        };
-        let shop = detect(&image, &font, &small_font).expect("shop");
-        assert_eq!(shop.quantity, Some((1, 200)));
+        quantity_box("");
+    }
 
-        let Some((image, font, small_font)) = fixture("mart-quantity-3.png") else {
-            return;
-        };
-        let shop = detect(&image, &font, &small_font).expect("shop");
-        assert_eq!(shop.quantity, Some((3, 600)));
+    #[test]
+    fn switch_reads_the_quantity_box() {
+        quantity_box("switch/");
     }
 
     #[test]
     fn other_screens_are_not_shops() {
-        for name in [
-            "bag-pokeballs.png",
-            "bag-items.png",
-            "bag-pokeballs-cursor1.png",
-            "bag-use-prompt.png",
-            "move-select.png",
-            "mart-menu.png",
-            "mart-confirm.png",
-        ] {
-            let Some((image, font, small_font)) = fixture(name) else {
-                continue;
-            };
-            assert!(detect(&image, &font, &small_font).is_none(), "{name}");
+        for dir in SOURCES {
+            for name in [
+                "bag-pokeballs.png",
+                "bag-items.png",
+                "bag-pokeballs-cursor1.png",
+                "bag-use-prompt.png",
+                "move-select.png",
+                "mart-menu.png",
+                "mart-confirm.png",
+                "battle-wild-uncaught.png",
+                "pokedex-page.png",
+            ] {
+                let Some((image, font, small_font)) = fixture(&format!("{dir}{name}")) else {
+                    continue;
+                };
+                assert!(detect(&image, &font, &small_font).is_none(), "{dir}{name}");
+            }
         }
     }
 }
