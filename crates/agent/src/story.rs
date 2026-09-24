@@ -9,11 +9,12 @@ use std::sync::Arc;
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
 use pokebot_planner::{plan_preparation, Area, PartyMember, PlanStep, Request};
-use pokebot_state::{GameEvent, Observation, ScreenState};
+use pokebot_state::{GameEvent, Observation, Pocket, ScreenState};
 use pokebot_world::behavior::TALL_GRASS;
 use pokebot_world::World;
 use serde::Serialize;
 
+use crate::bag::PocketAudit;
 use crate::battle::{self, BattleMemory, BattlePolicy};
 use crate::learn::MoveLearning;
 use crate::nav::{Destination, NavStatus, Navigator};
@@ -90,6 +91,9 @@ pub enum StoryStep {
         areas: Vec<String>,
         confidence: f64,
     },
+    /// Open the bag from the Start menu, read this pocket (`PocketObserved`)
+    /// and close every menu again.
+    AuditPocket(Pocket),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +206,8 @@ pub struct StoryTask {
     upcoming: Vec<String>,
     /// Whether the current Heal step's heal was read on screen.
     heal: HealWatch,
+    /// The current AuditPocket step's flow.
+    audit: Option<PocketAudit>,
 }
 
 /// Whether the nurse's "restored your POKéMON" was read during the current
@@ -262,6 +268,7 @@ impl StoryTask {
             tracker: TextTracker::default(),
             upcoming: Vec::new(),
             heal: HealWatch::default(),
+            audit: None,
         }
     }
 
@@ -298,6 +305,7 @@ impl StoryTask {
         self.battle_seen = false;
         self.spin_at = None;
         self.heal.reset();
+        self.audit = None;
         if self.step >= self.milestones[self.milestone].steps.len() {
             ctx.events.push(GameEvent::GoalProgress {
                 goal: "Story".into(),
@@ -328,6 +336,7 @@ impl StoryTask {
         self.answers_used = 0;
         self.spin_at = None;
         self.heal.reset();
+        self.audit = None;
     }
 
     fn navigate(&mut self, dest: &Destination, observation: &Observation) -> NavStatusOrDecision {
@@ -591,6 +600,14 @@ impl Task for StoryTask {
             self.in_battle = false;
             ctx.events.push(GameEvent::BattleEnded);
         }
+        // The pocket audit drives the Start menu and the bag itself (both
+        // would otherwise be closed as unexpected menus below); dialogue
+        // without a menu still goes to the dialogue handling.
+        if let StoryStep::AuditPocket(pocket) = &step {
+            if o.dialogue.is_none() || o.menu.is_some() {
+                return self.audit_pocket(*pocket, o, ctx);
+            }
+        }
         // Dialogue and menus interrupt whatever the step is doing.
         if o.dialogue.is_some() || (o.menu.is_some() && o.screen.value == ScreenState::Dialogue) {
             self.quiet_frames = 0;
@@ -702,6 +719,7 @@ impl Task for StoryTask {
                     NavStatusOrDecision::Nav(status) => nav_decision(status),
                 }
             }
+            StoryStep::AuditPocket(pocket) => self.audit_pocket(pocket, o, ctx),
             StoryStep::Settle { frames } => {
                 if self.quiet_frames >= frames {
                     self.advance_step(ctx);
@@ -740,6 +758,30 @@ impl Task for StoryTask {
 }
 
 impl StoryTask {
+    fn audit_pocket(
+        &mut self,
+        pocket: Pocket,
+        o: &Observation,
+        ctx: &mut TaskContext<'_>,
+    ) -> Decision {
+        let Some(data) = self.data.clone() else {
+            return Decision::Fail("the pocket audit needs game data".into());
+        };
+        let audit = self.audit.get_or_insert_with(|| PocketAudit::new(pocket));
+        match audit.next(o, &data, ctx.events) {
+            Decision::Done(summary) => {
+                ctx.events.push(GameEvent::GoalProgress {
+                    goal: "Story".into(),
+                    phase: "Bag".into(),
+                    detail: summary,
+                });
+                self.advance_step(ctx);
+                Decision::Wait("pocket audited".into())
+            }
+            decision => decision,
+        }
+    }
+
     fn go(&mut self, dest: &Destination, o: &Observation, ctx: &mut TaskContext<'_>) -> Decision {
         match self.navigate(dest, o) {
             NavStatusOrDecision::Decision(d) => d,
@@ -1149,6 +1191,110 @@ mod tests {
             // Shorter than a turn (8 frames at 59.7 Hz = 134 ms).
             assert!(pair[0].duration.as_millis() < 134);
         }
+    }
+
+    #[test]
+    fn audit_pocket_step_reads_the_pocket_and_moves_on() {
+        use pokebot_state::{
+            BagObservation, GameState, MenuObservation, Observed, PlayerPose, PoseObservation,
+            Region,
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(data)) = (
+            World::load(root.join("data/world")),
+            GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let mut task = StoryTask::new(
+            Arc::new(world),
+            vec![Milestone::new(
+                "Audit",
+                "read the POKé BALLS pocket",
+                vec![
+                    StoryStep::AuditPocket(Pocket::PokeBalls),
+                    StoryStep::Settle { frames: 1 },
+                ],
+            )],
+        )
+        .with_data(Arc::new(data));
+        let bare = |frame, value| {
+            Observation::bare(
+                frame,
+                Observed {
+                    value,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            )
+        };
+        let overworld = |frame| {
+            let mut o = bare(frame, ScreenState::Unknown);
+            o.player = Some(PoseObservation {
+                pose: PlayerPose {
+                    map: "PewterCity".into(),
+                    x: 17,
+                    y: 26,
+                },
+                score: 980,
+            });
+            o
+        };
+        let mut start = bare(2, ScreenState::Menu);
+        start.menu = Some(MenuObservation {
+            window: Region::new(174, 6, 60, 108),
+            rows: 6,
+            cursor_row: 2,
+            cursor_y: 40,
+        });
+        start.menu_lines = ["POKéDEX", "POKéMON", "BAG", "RED", "SAVE", "OPTION", "EXIT"]
+            .map(String::from)
+            .to_vec();
+        let mut bag = bare(3, ScreenState::Bag);
+        bag.bag = Some(BagObservation {
+            pocket: "POKé BALLS".into(),
+            rows: vec![("POKé BALL".into(), Some(5)), ("CANCEL".into(), None)],
+            cursor: Some(0),
+            prompt: None,
+        });
+        let state = GameState::default();
+        let mut labels = Vec::new();
+        let mut events = Vec::new();
+        for o in [overworld(1), start.clone(), bag, start, overworld(5)] {
+            let decision = task.next(&mut TaskContext {
+                observation: &o,
+                state: &state,
+                events: &mut events,
+            });
+            labels.push(match decision {
+                Decision::Act(a) => a.label,
+                Decision::Wait(r) => format!("wait: {r}"),
+                Decision::Done(r) => format!("done: {r}"),
+                Decision::Fail(r) => panic!("failed: {r}"),
+            });
+        }
+        assert_eq!(
+            labels,
+            [
+                "open the Start menu",
+                "open the BAG",
+                "close the bag",
+                "close the Start menu",
+                "wait: pocket audited",
+            ]
+        );
+        let observed: Vec<&GameEvent> = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PocketObserved { .. }))
+            .collect();
+        assert_eq!(
+            observed,
+            [&GameEvent::PocketObserved {
+                pocket: Pocket::PokeBalls,
+                items: vec![("ITEM_POKE_BALL".into(), 5)],
+            }]
+        );
+        assert_eq!(task.current(), Some(&StoryStep::Settle { frames: 1 }));
     }
 
     #[test]

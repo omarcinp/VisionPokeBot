@@ -159,6 +159,19 @@ BAG). B again closes the start menu.
 - The existing detector reports "menu 1 rows, cursor 0 at (88,12)". The ▶ is
   found, but the window and rows are wrong.
 
+### `start-menu.png`, `start-menu-bag.png` (Task 7)
+- **Start menu:** the menu detector finds the window at `(174, 6)`, height
+  108 (7 rows at a 15 px pitch). The ▶ is at `y = 10 + 15r` (4 px below its
+  row). The font reads the window, with the ▶ cell left out, as `POKéDEX`,
+  `POKéMON`, `BAG`, `RED`, `SAVE`, `OPTION`, `EXIT`
+  (`Observation.menu_lines`). The ▶ row is `(cursor_y − window.y) / 15`.
+- The blue help line under the Start menu (`Equipped with pockets…` on BAG)
+  is **not** detected as dialogue.
+- The menu is drawn over 2 frames: the first ones show "menu 1 rows" with no
+  full reading. The same happens as the bag fades in (the list ▶ shows as a
+  1-row menu at (88,12) for 2 frames). While the pocket slides, the title
+  and rows read empty with no ▶.
+
 ---
 
 ## 3. Battle: bag, throw, catch

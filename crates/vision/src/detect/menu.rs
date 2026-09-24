@@ -46,6 +46,25 @@ pub fn detect(image: &RgbImage) -> Option<MenuObservation> {
     })
 }
 
+/// The ▶'s cell in `menu` (to leave out when reading the menu's text): the
+/// first gray pixel on the ▶'s widest row, from the window's left edge.
+pub fn cursor_region(image: &RgbImage, menu: &MenuObservation) -> Region {
+    let widest = menu.cursor_y + CURSOR_ROWS / 2;
+    let x = (menu.window.x..menu.window.x + menu.window.width)
+        .find(|&x| {
+            x < image.width()
+                && widest < image.height()
+                && near(px(image, x, widest), TEXT_GRAY, TOLERANCE)
+        })
+        .unwrap_or(menu.window.x);
+    Region::new(
+        x.saturating_sub(1),
+        menu.cursor_y.saturating_sub(1),
+        CURSOR_ROWS / 2 + 3,
+        CURSOR_ROWS + 2,
+    )
+}
+
 /// Top-left of the ▶ cursor: a gray triangle whose rows are 1,2,3,4,5,4,3,2,1
 /// pixels wide, with no gray immediately left or right of each row.
 pub fn find_cursor(image: &RgbImage) -> Option<(u32, u32)> {

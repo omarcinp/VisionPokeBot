@@ -7,6 +7,7 @@
 //! worked; every effect is checked from video.
 
 mod action;
+pub mod bag;
 pub mod battle;
 pub mod catch;
 pub mod checkpoint;

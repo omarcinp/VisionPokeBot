@@ -225,6 +225,10 @@ pub struct Observation {
     pub metrics: FrameMetrics,
     pub dialogue: Option<DialogueObservation>,
     pub menu: Option<MenuObservation>,
+    /// The menu window's text lines as read (Start menu: `POKéDEX`, `BAG`,
+    /// …); empty without a menu or a font.
+    #[serde(default)]
+    pub menu_lines: Vec<String>,
     pub naming: Option<NamingObservation>,
     /// Player position, when the overworld could be matched to the map.
     pub player: Option<PoseObservation>,
@@ -260,6 +264,7 @@ impl Observation {
             metrics,
             dialogue: None,
             menu: None,
+            menu_lines: Vec::new(),
             naming: None,
             player: None,
             battle: None,

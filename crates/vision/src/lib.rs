@@ -204,6 +204,10 @@ impl PerceptionSystem for FireRedPerception {
             (None, None) => screen(ScreenState::Unknown, "none"),
         };
         let mut observation = Observation::bare(frame.frame_id, state, metrics);
+        if let (Some(m), Some(font)) = (&menu, &self.font) {
+            let cursor = detect::menu::cursor_region(image, m);
+            observation.menu_lines = font.read(image, m.window, &[cursor]);
+        }
         observation.dialogue = dialogue;
         observation.menu = menu;
         let in_battle = battle.is_some();
@@ -451,6 +455,44 @@ mod tests {
             let d = p.observe(&frame(0, image)).dialogue.unwrap();
             assert_eq!(d.help, help, "{fixture}");
         }
+    }
+
+    #[test]
+    fn start_menu_rows_are_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        // Emulator, Pewter mart: the ▶ on POKéDEX, then on BAG (15 px pitch).
+        for (fixture, cursor_y) in [("start-menu", 10), ("start-menu-bag", 40)] {
+            let Ok(image) =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{fixture}.png")))
+            else {
+                return;
+            };
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            let o = p.observe(&frame(0, image));
+            assert_eq!(o.screen.value, ScreenState::Menu, "{fixture}");
+            assert!(
+                o.dialogue.is_none(),
+                "{fixture}: the help line is not dialogue"
+            );
+            let menu = o.menu.unwrap();
+            assert_eq!((menu.window.y, menu.cursor_y), (6, cursor_y), "{fixture}");
+            assert_eq!(
+                o.menu_lines,
+                ["POKéDEX", "POKéMON", "BAG", "RED", "SAVE", "OPTION", "EXIT"],
+                "{fixture}"
+            );
+        }
+        // Without a menu there is nothing to read.
+        let Ok(image) = pokebot_video::png::load(root.join("captures/fixtures/bag-items.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default().with_font(font);
+        assert!(p.observe(&frame(0, image)).menu_lines.is_empty());
     }
 
     #[test]

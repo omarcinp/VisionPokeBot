@@ -1001,9 +1001,12 @@ fn describe_observation(o: &Observation) -> String {
     }
     if let Some(m) = &o.menu {
         parts.push(format!(
-            "menu {} rows, cursor {} at ({},{})",
-            m.rows, m.cursor_row, m.window.x, m.window.y
+            "menu {} rows, cursor {} at ({},{}) y {}",
+            m.rows, m.cursor_row, m.window.x, m.window.y, m.cursor_y
         ));
+    }
+    if !o.menu_lines.is_empty() {
+        parts.push(format!("menu text {:?}", o.menu_lines));
     }
     if let Some(b) = &o.battle {
         parts.push(format!(

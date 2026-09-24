@@ -83,6 +83,14 @@ pub enum Expectation {
     MoveListAt(u8),
     /// The KNOWN MOVES list is gone.
     MoveListClosed,
+    /// The bag is open on a pocket whose title reads like this one (the
+    /// same pocket through [`crate::bag::pocket_from_title`], or the same
+    /// text); an empty title accepts any pocket.
+    BagPocket(String),
+    /// The bag list's ▶ is on this visible row.
+    BagCursorAt(u8),
+    /// Neither the bag nor a menu is showing.
+    BagClosed,
     /// Nothing to verify; only wait for the inputs to finish.
     InputsDone,
 }
@@ -138,6 +146,17 @@ impl Expectation {
                 .as_ref()
                 .is_some_and(|l| l.selected == Some(*row)),
             Expectation::MoveListClosed => observation.move_list.is_none(),
+            Expectation::BagPocket(title) => observation.bag.as_ref().is_some_and(|b| {
+                title.is_empty()
+                    || b.pocket == *title
+                    || crate::bag::pocket_from_title(&b.pocket)
+                        .is_some_and(|p| crate::bag::pocket_from_title(title) == Some(p))
+            }),
+            Expectation::BagCursorAt(row) => observation
+                .bag
+                .as_ref()
+                .is_some_and(|b| b.cursor == Some(*row)),
+            Expectation::BagClosed => observation.bag.is_none() && observation.menu.is_none(),
             Expectation::InputsDone => true,
         }
     }
