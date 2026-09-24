@@ -231,56 +231,12 @@ pub struct StoryTask {
     /// A mandatory ball buy was tried in this milestone (never retried:
     /// with no money it would loop).
     mandatory_buy_tried: bool,
-    /// The page waiting for A that is not yet read on two frames.
-    unread: Option<UnreadPage>,
+    /// First frame of the current wait for a menu-less page waiting for A
+    /// to be read on two frames: one wait per dialogue box, whatever the
+    /// readings (a misread flicker must not restart it).
+    unread_since: Option<u64>,
     /// Last frame whose battle text went to the battle's readers.
     battle_text_frame: Option<u64>,
-}
-
-/// A page waiting for A that hasn't been read on two frames yet: since
-/// when, and its reading. A page flickering between two readings (`alt`) is
-/// still the same page, so its wait stays bounded; any other text is a new
-/// page with a wait of its own.
-#[derive(Debug)]
-struct UnreadPage {
-    since: u64,
-    page: String,
-    alt: Option<String>,
-}
-
-impl UnreadPage {
-    /// Frames `page` has waited, restarting for a new page.
-    fn waited(slot: &mut Option<UnreadPage>, page: &str, frame: u64) -> u64 {
-        let same = slot
-            .as_ref()
-            .is_some_and(|u| u.page == page || u.alt.as_deref() == Some(page));
-        match slot {
-            Some(u) if same => {
-                if u.page != page {
-                    u.alt = Some(std::mem::replace(&mut u.page, page.to_owned()));
-                }
-            }
-            Some(u) if u.alt.is_none() && is_prefix_flicker(&u.page, page) => {
-                u.alt = Some(std::mem::replace(&mut u.page, page.to_owned()));
-            }
-            _ => {
-                *slot = Some(UnreadPage {
-                    since: frame,
-                    page: page.to_owned(),
-                    alt: None,
-                });
-            }
-        }
-        frame.saturating_sub(slot.as_ref().map_or(frame, |u| u.since))
-    }
-}
-
-/// Two readings of one page that differ in a character or so (a misread),
-/// as opposed to a different page.
-fn is_prefix_flicker(a: &str, b: &str) -> bool {
-    let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-    let longest = a.chars().count().max(b.chars().count());
-    longest > 0 && longest - common <= 2
 }
 
 /// Whether the nurse's "restored your POKéMON" was read during the current
@@ -363,7 +319,7 @@ impl StoryTask {
             buy_at: None,
             buy_mart: None,
             mandatory_buy_tried: false,
-            unread: None,
+            unread_since: None,
             battle_text_frame: None,
         }
     }
@@ -710,10 +666,8 @@ impl Task for StoryTask {
                 // Wait for a second reading first (questions, with a menu,
                 // are answered instead).
                 if d.ready_for_a() && o.menu.is_none() && !self.tracker.applied(&d.lines) {
-                    let page = d.lines.join(" ");
-                    if UnreadPage::waited(&mut self.unread, &page, o.frame_id)
-                        < PAGE_READ_WAIT_FRAMES
-                    {
+                    let since = *self.unread_since.get_or_insert(o.frame_id);
+                    if o.frame_id.saturating_sub(since) < PAGE_READ_WAIT_FRAMES {
                         // The battle's readers (catch results, DISABLE) need
                         // this frame too.
                         if o.battle.is_some() {
@@ -723,9 +677,10 @@ impl Task for StoryTask {
                         return Decision::Wait("reading the page on a second frame".into());
                     }
                     // Given up: advance it; the next page waits afresh.
-                    self.unread = None;
+                    self.unread_since = None;
                 } else {
-                    self.unread = None;
+                    // Read (applied), or not a page waiting for A.
+                    self.unread_since = None;
                 }
             }
             if let Some(list) = &o.move_list {
@@ -2422,6 +2377,32 @@ mod tests {
             tick_events(&mut task, &flicker(f), &state).0,
             "advance text"
         );
+        // A reading that alternates in a middle character every frame
+        // (¥80 / ¥8O) is still advanced within the bounded wait.
+        let middle = |f: u64| {
+            let mut o = money(f);
+            o.dialogue.as_mut().unwrap().lines = [
+                if f % 2 == 0 {
+                    "RED got ¥80"
+                } else {
+                    "RED got ¥8O"
+                },
+                "for winning!",
+            ]
+            .map(String::from)
+            .to_vec();
+            o
+        };
+        let start = f + 10;
+        let mut advanced = None;
+        for g in start..=start + PAGE_READ_WAIT_FRAMES {
+            if tick_events(&mut task, &middle(g), &state).0 == "advance text" {
+                advanced = Some(g - start);
+                break;
+            }
+        }
+        assert_eq!(advanced, Some(PAGE_READ_WAIT_FRAMES));
+        let f = start + PAGE_READ_WAIT_FRAMES;
         // The next page (after the executor's pending A) still waits for
         // its own second reading: the timed-out wait doesn't carry over.
         let next = |f: u64| {
