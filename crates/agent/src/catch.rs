@@ -67,13 +67,10 @@ pub struct CatchPlan {
     pub shiny: bool,
 }
 
-/// The Poké Balls pocket, `None` when unknown or stale (needs an audit).
+/// The Poké Balls pocket, `None` when unknown. A tracked list (e.g. after a
+/// throw) counts as known.
 pub fn balls_held(state: &GameState) -> Option<Vec<(String, u16)>> {
-    let pocket = state.bag.pockets.get(&Pocket::PokeBalls)?;
-    if pocket.needs_audit() {
-        return None;
-    }
-    pocket.value.clone()
+    state.bag.pockets.get(&Pocket::PokeBalls)?.value.clone()
 }
 
 /// The held ball with the highest multiplier; ties: cheapest, then name.
@@ -215,9 +212,7 @@ fn estimate(
         .flatten();
     let attack = weaken.then(|| weakening_move(data, lead, foe)).flatten();
     let target = if attack.is_some() {
-        hp_now
-            .min(max * u32::from(WEAKENED_PER_MILLE) / 1000)
-            .max(1)
+        throw_hp(data, lead, foe, max).min(hp_now).max(1)
     } else {
         hp_now
     };
@@ -237,7 +232,7 @@ fn estimate(
         MAX_THROWS
     };
     let attack_turns = attack.map_or(0, |(_, m)| {
-        weakening_turns(data, lead, foe, &m, hp_now, max)
+        weakening_turns(data, lead, foe, &m, hp_now, target)
     });
     Ok(Attempt {
         turns: u32::from(opener.is_some()) + attack_turns,
@@ -246,17 +241,36 @@ fn estimate(
     })
 }
 
-/// Attacks of `mv` to bring the foe from `hp_now` to a quarter of `max`,
-/// with pessimistic mean damage (our iv 0 vs foe iv 31), capped.
+/// HP at which weakening stops: [`WEAKENED_PER_MILLE`] of `max`, or higher
+/// where even the least damaging attack with PP could faint the foe on a
+/// crit (its critical maximum + 1 + one bar pixel).
+fn throw_hp(data: &GameData, lead: &Lead, foe: &Foe, max: u32) -> u32 {
+    let weakened = max * u32::from(WEAKENED_PER_MILLE) / 1000;
+    let (Some(us), Some(them)) = (our_combatant(data, lead, 31), foe_combatant(data, foe, 0))
+    else {
+        return weakened;
+    };
+    let least_crit = lead
+        .member
+        .moves
+        .iter()
+        .filter(|m| lead.member.pp_left(data, m) > 0)
+        .filter_map(|m| rolls(data, m, &us, &them)?.critical.iter().max().copied())
+        .min();
+    least_crit.map_or(weakened, |c| weakened.max(c + 1 + max / 48))
+}
+
+/// Attacks of `mv` to bring the foe from `hp_now` down to `target`, with
+/// pessimistic mean damage (our iv 0 vs foe iv 31), capped.
 fn weakening_turns(
     data: &GameData,
     lead: &Lead,
     foe: &Foe,
     mv: &str,
     hp_now: u32,
-    max: u32,
+    target: u32,
 ) -> u32 {
-    let excess = hp_now.saturating_sub(max / 4);
+    let excess = hp_now.saturating_sub(target);
     if excess == 0 {
         return 0;
     }
@@ -307,7 +321,7 @@ fn rolls(data: &GameData, mv: &str, from: &Combatant, to: &Combatant) -> Option<
 mod tests {
     use std::path::Path;
 
-    use pokebot_gamedata::mechanics::damage;
+    use pokebot_gamedata::mechanics::{catch_probability_status, damage};
     use pokebot_gamedata::GameData;
     use pokebot_state::{DefaultReducer, EventRecord, GameEvent, Pocket, StateReducer};
 
@@ -411,7 +425,7 @@ mod tests {
         let pidgey = foe("SPECIES_PIDGEY", 6);
         assert_eq!(balls_held(&GameState::default()), None);
         assert!(plan_catch(&data, &GameState::default(), &lead, &pidgey, false).is_err());
-        // A stale (tracked) pocket counts as unknown too.
+        // A tracked (stale) list, e.g. after a throw, is still a known count.
         let state = DefaultReducer.reduce(
             &with_balls(&[("ITEM_POKE_BALL", 10)]),
             &[EventRecord {
@@ -424,8 +438,8 @@ mod tests {
                 },
             }],
         );
-        assert_eq!(balls_held(&state), None);
-        assert!(plan_catch(&data, &state, &lead, &pidgey, false).is_err());
+        assert_eq!(balls_held(&state), Some(vec![("ITEM_POKE_BALL".into(), 9)]));
+        assert!(plan_catch(&data, &state, &lead, &pidgey, false).is_ok());
     }
 
     #[test]
@@ -560,6 +574,48 @@ mod tests {
             };
             assert_eq!(weakening_move(&data, &lead, &low), None);
         }
+    }
+
+    #[test]
+    fn throws_are_estimated_where_weakening_must_stop() {
+        let Some(data) = data() else { return };
+        let member = ivysaur(&data);
+        let lead = Lead {
+            member: &member,
+            hp: (54, 54),
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let zubat = foe("SPECIES_ZUBAT", 9);
+        let plan = plan_catch(&data, &state, &lead, &zubat, false).unwrap();
+        // Oracle: the least damaging move stays crit-safe down to its crit
+        // max + 1 + one bar pixel; weakening can't go below that (nor 25 %).
+        let max = Combatant::new(&data, "SPECIES_ZUBAT", 9, vec![], 0)
+            .unwrap()
+            .max_hp();
+        let least_crit = ["MOVE_TACKLE", "MOVE_VINE_WHIP"]
+            .iter()
+            .map(|m| crit_max_and_floor(&data, m, &zubat).0)
+            .min()
+            .unwrap();
+        let throw_hp = (max * 250 / 1000).max(least_crit + 1 + max / 48);
+        assert!(throw_hp > max / 4, "{throw_hp} vs {max}");
+        let rate = data.species("SPECIES_ZUBAT").unwrap().catch_rate;
+        // Sleep Powder opener: status ×2.
+        let p = catch_probability_status(rate, max, throw_hp, 10, 20);
+        let expected = ((1.0 / p).ceil() as u32).clamp(1, 20);
+        assert_eq!(plan.expected_throws, expected, "p {p} at {throw_hp}/{max}");
+        // Already paralysed (×1.5, no opener): at 25 % one throw would do,
+        // at the real stopping HP it takes more.
+        let paralyzed = Foe {
+            status: FoeStatus::Paralyzed,
+            ..zubat
+        };
+        let plan = plan_catch(&data, &state, &lead, &paralyzed, false).unwrap();
+        let p = catch_probability_status(rate, max, throw_hp, 10, 15);
+        let expected = ((1.0 / p).ceil() as u32).clamp(1, 20);
+        assert_eq!(catch_probability_status(rate, max, max / 4, 10, 15), 1.0);
+        assert!(expected > 1, "p {p}");
+        assert_eq!(plan.expected_throws, expected, "p {p} at {throw_hp}/{max}");
     }
 
     #[test]

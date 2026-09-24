@@ -2,8 +2,8 @@
 //!
 //! The bot keeps a reserve of [`SHINY_RESERVE`] balls that only a shiny may
 //! use, restocks toward [`TARGET_STOCK`] whenever it can, and never spends
-//! the money needed for [`POTIONS_KEPT`] Potions. A ball count read from a
-//! stale or unknown pocket is `None`: the caller audits before relying on it.
+//! the money needed for [`POTIONS_KEPT`] Potions. An unknown pocket gives
+//! a `None` count: the caller audits before relying on it.
 
 use pokebot_gamedata::mechanics::ball_multiplier;
 use pokebot_gamedata::GameData;
@@ -19,7 +19,7 @@ pub const TARGET_STOCK: u16 = 15;
 pub const POTIONS_KEPT: u32 = 2;
 
 /// All balls in the Poké Balls pocket (the Master Ball excluded); `None`
-/// when the pocket is unknown or stale.
+/// when the pocket is unknown. A tracked (stale) list counts as known.
 pub fn ball_count(state: &GameState) -> Option<u16> {
     let balls = balls_held(state)?;
     Some(
@@ -31,14 +31,15 @@ pub fn ball_count(state: &GameState) -> Option<u16> {
 }
 
 /// Poké Balls to buy to reach [`TARGET_STOCK`], keeping the price of
-/// [`POTIONS_KEPT`] Potions.
+/// [`POTIONS_KEPT`] Potions. 0 when either price is missing from the data.
 pub fn buy_count(data: &GameData, stock: u16, money: u32) -> u16 {
-    let price = |item: &str| data.items.get(item).map_or(0, |i| i.price);
-    let need = TARGET_STOCK.saturating_sub(stock);
-    let budget = money.saturating_sub(POTIONS_KEPT * price("ITEM_POTION"));
-    let Some(affordable) = budget.checked_div(price("ITEM_POKE_BALL")) else {
+    let price = |item: &str| data.items.get(item).map(|i| i.price).filter(|p| *p > 0);
+    let (Some(potion), Some(ball)) = (price("ITEM_POTION"), price("ITEM_POKE_BALL")) else {
         return 0;
     };
+    let need = TARGET_STOCK.saturating_sub(stock);
+    let budget = money.saturating_sub(POTIONS_KEPT * potion);
+    let affordable = budget / ball;
     need.min(u16::try_from(affordable).unwrap_or(u16::MAX))
 }
 
@@ -86,6 +87,15 @@ mod tests {
         let Some(data) = data() else { return };
         assert_eq!(buy_count(&data, 3, 500), 0);
         assert_eq!(buy_count(&data, 3, 0), 0);
+        // Unknown prices: buy nothing rather than drop the Potion reserve.
+        let mut no_potion = data;
+        no_potion.items.remove("ITEM_POTION");
+        assert_eq!(buy_count(&no_potion, 3, 99_999), 0);
+        let Some(mut no_ball) = self::data() else {
+            return;
+        };
+        no_ball.items.remove("ITEM_POKE_BALL");
+        assert_eq!(buy_count(&no_ball, 3, 99_999), 0);
     }
 
     #[test]
@@ -106,7 +116,7 @@ mod tests {
             }],
         );
         assert_eq!(ball_count(&state), Some(6));
-        // A tracked (stale) count is not trusted.
+        // A tracked (stale) count is still a known count.
         let state = DefaultReducer.reduce(
             &state,
             &[EventRecord {
@@ -119,7 +129,7 @@ mod tests {
                 },
             }],
         );
-        assert_eq!(ball_count(&state), None);
+        assert_eq!(ball_count(&state), Some(5));
     }
 
     #[test]
