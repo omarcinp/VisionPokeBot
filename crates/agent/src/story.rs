@@ -145,6 +145,41 @@ pub struct StoryTask {
     tracker: TextTracker,
     /// Trainers the last plan prepared for (values moves when learning).
     upcoming: Vec<String>,
+    /// Whether the current Heal step's heal was read on screen.
+    heal: HealWatch,
+}
+
+/// Whether the nurse's "restored your POKéMON" was read during the current
+/// Heal step. The nurse always heals, so a missed line is inferred when the
+/// conversation ends: otherwise the bot would keep going back to heal.
+#[derive(Debug, Default)]
+struct HealWatch {
+    seen: bool,
+}
+
+impl HealWatch {
+    fn observe(&mut self, events: &[GameEvent]) {
+        self.seen |= events.contains(&GameEvent::Healed);
+    }
+
+    fn reset(&mut self) {
+        self.seen = false;
+    }
+
+    /// Events for the end of the Heal step's conversation.
+    fn finish(&mut self) -> Vec<GameEvent> {
+        if std::mem::replace(&mut self.seen, true) {
+            return Vec::new();
+        }
+        vec![
+            GameEvent::Healed,
+            GameEvent::GoalProgress {
+                goal: "Story".into(),
+                phase: "Party".into(),
+                detail: "heal inferred: the nurse's text was not read".into(),
+            },
+        ]
+    }
 }
 
 impl StoryTask {
@@ -171,6 +206,7 @@ impl StoryTask {
             learning: MoveLearning::default(),
             tracker: TextTracker::default(),
             upcoming: Vec::new(),
+            heal: HealWatch::default(),
         }
     }
 
@@ -206,6 +242,7 @@ impl StoryTask {
         self.answers_used = 0;
         self.battle_seen = false;
         self.pacing = None;
+        self.heal.reset();
         if self.step >= self.milestones[self.milestone].steps.len() {
             ctx.events.push(GameEvent::GoalProgress {
                 goal: "Story".into(),
@@ -235,6 +272,7 @@ impl StoryTask {
         self.saw_dialogue = false;
         self.answers_used = 0;
         self.pacing = None;
+        self.heal.reset();
     }
 
     fn navigate(&mut self, dest: &Destination, observation: &Observation) -> NavStatusOrDecision {
@@ -438,12 +476,14 @@ impl Task for StoryTask {
                         detail,
                     });
                 }
-                ctx.events.extend(self.tracker.observe_page(
+                let tracked = self.tracker.observe_page(
                     &d.lines,
                     &data,
                     &self.party,
                     self.battle_memory.last_slot,
-                ));
+                );
+                self.heal.observe(&tracked);
+                ctx.events.extend(tracked);
             }
             if let Some(list) = &o.move_list {
                 self.quiet_frames = 0;
@@ -726,6 +766,9 @@ impl StoryTask {
                     return Decision::Wait("waiting for the battle to start".into());
                 }
                 if self.quiet_frames >= SETTLE_FRAMES {
+                    if matches!(self.current(), Some(StoryStep::Heal { .. })) {
+                        ctx.events.extend(self.heal.finish());
+                    }
                     self.advance_step(ctx);
                 }
                 Decision::Wait("conversation ending".into())
@@ -1018,4 +1061,35 @@ pub fn all_milestones(starter: Starter) -> Vec<Milestone> {
     list.extend(to_brock());
     list.extend(to_mt_moon());
     list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heal_is_inferred_when_the_nurse_text_was_missed() {
+        let mut watch = HealWatch::default();
+        let events = watch.finish();
+        assert_eq!(events[0], GameEvent::Healed);
+        assert!(matches!(
+            &events[1],
+            GameEvent::GoalProgress { detail, .. }
+                if detail == "heal inferred: the nurse's text was not read"
+        ));
+    }
+
+    #[test]
+    fn heal_seen_in_text_is_not_repeated() {
+        let mut watch = HealWatch::default();
+        watch.observe(&[GameEvent::MoneyChanged {
+            delta: 1,
+            reason: "x".into(),
+        }]);
+        watch.observe(&[GameEvent::Healed]);
+        assert!(watch.finish().is_empty());
+        // The next Heal step starts over.
+        watch.reset();
+        assert_eq!(watch.finish()[0], GameEvent::Healed);
+    }
 }
