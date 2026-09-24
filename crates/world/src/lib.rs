@@ -6,8 +6,11 @@ pub mod behavior;
 pub mod dialogue;
 pub mod events;
 pub mod localize;
+pub mod obstacles;
 pub mod path;
 pub mod places;
+pub mod predicate;
+pub mod route;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

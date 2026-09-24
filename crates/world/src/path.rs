@@ -24,6 +24,14 @@ fn walkable_elevation(a: u8, b: u8) -> bool {
     any(a) || any(b) || a == b
 }
 
+/// How the grid is walked: tiles to avoid, and whether water is walkable
+/// (Surf, once the route planner knows the party can use it).
+#[derive(Debug, Clone, Copy)]
+pub struct Walk<'a> {
+    pub obstacles: &'a Obstacles,
+    pub surf: bool,
+}
+
 /// The tile reached by pressing `dir` from `from`, if the move is legal.
 pub fn step(
     map: &MapData,
@@ -31,6 +39,19 @@ pub fn step(
     dir: Direction,
     obstacles: &Obstacles,
 ) -> Option<Step> {
+    step_with(
+        map,
+        from,
+        dir,
+        &Walk {
+            obstacles,
+            surf: false,
+        },
+    )
+}
+
+/// [`step`] with the walking rules in `walk`.
+pub fn step_with(map: &MapData, from: (i32, i32), dir: Direction, walk: &Walk) -> Option<Step> {
     let here = map.tile(from.0, from.1)?;
     let (dx, dy) = dir.delta();
     let to = (from.0 + dx, from.1 + dy);
@@ -42,16 +63,19 @@ pub fn step(
         }
         let land = (to.0 + dx, to.1 + dy);
         let landing = map.tile(land.0, land.1)?;
-        return (landing.collision == 0 && !obstacles.contains(&land))
+        return (landing.collision == 0 && !walk.obstacles.contains(&land))
             .then_some(Step { dir, to: land });
     }
+    // Water sits one elevation below the shore; surfing on and off it is
+    // the one elevation change the game allows.
+    let shore = walk.surf && (is_water(here.behavior) || is_water(target.behavior));
     let blocked = target.collision != 0
         || target.behavior == COUNTER
-        || is_water(target.behavior)
-        || obstacles.contains(&to)
+        || (is_water(target.behavior) && !walk.surf)
+        || walk.obstacles.contains(&to)
         || blocks_edge(here.behavior, dir)
         || blocks_edge(target.behavior, dir.opposite())
-        || !walkable_elevation(here.elevation, target.elevation);
+        || !(shore || walkable_elevation(here.elevation, target.elevation));
     (!blocked).then_some(Step { dir, to })
 }
 
@@ -69,26 +93,99 @@ pub fn find_path(
     goal: impl Fn((i32, i32)) -> bool,
     heuristic: impl Fn((i32, i32)) -> i32,
 ) -> Option<Vec<Step>> {
+    find_path_with(
+        map,
+        start,
+        &Walk {
+            obstacles,
+            surf: false,
+        },
+        |_| 0,
+        goal,
+        heuristic,
+    )
+}
+
+/// [`find_path`] with the walking rules in `walk` and an extra cost per tile
+/// entered (`extra`, e.g. for NPC wander areas) on top of the grass penalty.
+pub fn find_path_with(
+    map: &MapData,
+    start: (i32, i32),
+    walk: &Walk,
+    extra: impl Fn((i32, i32)) -> i32,
+    goal: impl Fn((i32, i32)) -> bool,
+    heuristic: impl Fn((i32, i32)) -> i32,
+) -> Option<Vec<Step>> {
+    let (reach, found) = search(map, start, walk, &extra, &goal, &heuristic);
+    reach.path(found?)
+}
+
+/// Every tile reachable from a start tile, with the cheapest way there
+/// (the same costs as [`find_path`]).
+#[derive(Debug, Clone)]
+pub struct Reach {
+    start: (i32, i32),
+    came: HashMap<(i32, i32), ((i32, i32), Step)>,
+    cost: HashMap<(i32, i32), i32>,
+}
+
+impl Reach {
+    /// Weighted cost (tiles plus penalties) to `to`; `None` if unreachable.
+    pub fn cost(&self, to: (i32, i32)) -> Option<i32> {
+        self.cost.get(&to).copied()
+    }
+
+    /// The steps to `to`; empty for the start tile, `None` if unreachable.
+    pub fn path(&self, to: (i32, i32)) -> Option<Vec<Step>> {
+        if to != self.start && !self.came.contains_key(&to) {
+            return None;
+        }
+        let mut steps = Vec::new();
+        let mut at = to;
+        while let Some((prev, s)) = self.came.get(&at) {
+            steps.push(*s);
+            at = *prev;
+        }
+        steps.reverse();
+        Some(steps)
+    }
+}
+
+/// Cheapest ways from `start` to every reachable tile (a flood with the
+/// [`find_path`] costs, so one run prices a whole map's places).
+pub fn reach(
+    map: &MapData,
+    start: (i32, i32),
+    walk: &Walk,
+    extra: impl Fn((i32, i32)) -> i32,
+) -> Reach {
+    search(map, start, walk, &extra, &|_| false, &|_| 0).0
+}
+
+fn search(
+    map: &MapData,
+    start: (i32, i32),
+    walk: &Walk,
+    extra: &dyn Fn((i32, i32)) -> i32,
+    goal: &dyn Fn((i32, i32)) -> bool,
+    heuristic: &dyn Fn((i32, i32)) -> i32,
+) -> (Reach, Option<(i32, i32)>) {
     let mut open = BinaryHeap::new();
-    let mut came: HashMap<(i32, i32), ((i32, i32), Step)> = HashMap::new();
-    let mut cost: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut reach = Reach {
+        start,
+        came: HashMap::new(),
+        cost: HashMap::new(),
+    };
     let mut counter = 0u64;
-    cost.insert(start, 0);
+    reach.cost.insert(start, 0);
     open.push(Reverse((heuristic(start), counter, start)));
     while let Some(Reverse((_, _, pos))) = open.pop() {
         if goal(pos) {
-            let mut steps = Vec::new();
-            let mut at = pos;
-            while let Some((prev, s)) = came.get(&at) {
-                steps.push(*s);
-                at = *prev;
-            }
-            steps.reverse();
-            return Some(steps);
+            return (reach, Some(pos));
         }
-        let g = cost[&pos];
+        let g = reach.cost[&pos];
         for dir in Direction::ALL {
-            let Some(s) = step(map, pos, dir, obstacles) else {
+            let Some(s) = step_with(map, pos, dir, walk) else {
                 continue;
             };
             let grass = map
@@ -97,16 +194,17 @@ pub fn find_path(
             let ng = g
                 + (s.to.0 - pos.0).abs()
                 + (s.to.1 - pos.1).abs()
-                + if grass { GRASS_PENALTY } else { 0 };
-            if cost.get(&s.to).is_none_or(|&old| ng < old) {
-                cost.insert(s.to, ng);
-                came.insert(s.to, (pos, s));
+                + if grass { GRASS_PENALTY } else { 0 }
+                + extra(s.to);
+            if reach.cost.get(&s.to).is_none_or(|&old| ng < old) {
+                reach.cost.insert(s.to, ng);
+                reach.came.insert(s.to, (pos, s));
                 counter += 1;
                 open.push(Reverse((ng + heuristic(s.to), counter, s.to)));
             }
         }
     }
-    None
+    (reach, None)
 }
 
 /// Path to a specific tile.
