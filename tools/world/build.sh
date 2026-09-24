@@ -10,7 +10,7 @@ if [ ! -d "${PRET}/.git" ]; then
     git -C "${PRET}" sparse-checkout set data/maps data/layouts data/tilesets src include
 fi
 # Paths added after the first clone (no-op when already present).
-git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts
+git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts graphics/pokemon graphics/region_map
 VENV="${ROOT}/.venv"
 if [ ! -x "${VENV}/bin/python" ]; then
     python3 -m venv "${VENV}"
@@ -18,6 +18,7 @@ if [ ! -x "${VENV}/bin/python" ]; then
 fi
 cd "${ROOT}"
 "${VENV}/bin/python" tools/world/extract_world.py "$@"
+"${VENV}/bin/python" tools/world/extract_region_map.py
 "${VENV}/bin/python" tools/gamedata/extract_gamedata.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py --font small
