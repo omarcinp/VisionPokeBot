@@ -38,6 +38,11 @@ const TRAIN_HEAL_BELOW: u32 = 500;
 const MAX_HEALS: u32 = 3;
 /// How the step reports a lead that must heal before going on.
 const HEAL_FIRST: &str = "heal first";
+/// How the step reports a catch on the way (another species than the
+/// target, or one while training): the hunt saves the game before it
+/// goes on (spec §8: a save after every belief-changing step; flash-4
+/// lost a PIKACHU caught while hunting WEEDLE when the hunt failed later).
+const SAVE_FIRST: &str = "save first";
 
 pub struct CatchTool;
 pub struct TrainTool;
@@ -160,6 +165,9 @@ impl ToolStep for HuntStep {
                         self.hunt,
                         self.max_encounters()
                     ));
+                }
+                if let Some(species) = caught {
+                    return Decision::Done(format!("{SAVE_FIRST}: caught {species}"));
                 }
                 return Decision::Wait("battle over".into());
             }
@@ -297,12 +305,27 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
 }
 
 /// Runs the hunt, healing at the nearest Center (and coming back) when the
-/// lead is too weak to go on.
+/// lead is too weak to go on, and saving after a catch on the way when
+/// the context keeps a checkpoint (`--save-game`).
 fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), ToolError> {
     let mut heals = 0;
+    let mut encounters = 0;
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
-        match ctx.drive(&mut step) {
+        step.encounters = encounters;
+        let result = ctx.drive(&mut step);
+        encounters = step.encounters;
+        match result {
+            Ok(summary) if summary.starts_with(SAVE_FIRST) => {
+                if ctx.checkpoint.is_some() {
+                    ctx.emit(progress(step.phase(), format!("{summary}: saving")))?;
+                    match ctx.invoke(&Intent::Save).result {
+                        Ok(()) => {}
+                        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                        Err(e) => ctx.info(format!("save after a catch: {e}; hunting on")),
+                    }
+                }
+            }
             Ok(_) => return Ok(()),
             Err(ToolError::Failed(reason)) if reason.starts_with(HEAL_FIRST) => {
                 heals += 1;
