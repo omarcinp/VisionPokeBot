@@ -64,15 +64,8 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<BagObs
         let count_text = small_font.read(image, count_region, &[]).join(" ");
         rows.push((name, parse_count(&count_text)));
     }
-    let (cx, cy) = super::menu::find_cursor(image).unzip();
-    let cursor = cx.zip(cy).and_then(|(x, y)| {
-        if LIST_CURSOR_X.contains(&x) && y >= LIST_CURSOR_Y0 {
-            let row = (y - LIST_CURSOR_Y0) / ROW_PITCH;
-            (row < rows.len() as u32).then_some(row as u8)
-        } else {
-            None
-        }
-    });
+    let found = super::menu::find_cursor(image);
+    let cursor = cursor_row(found, LIST_CURSOR_X, LIST_CURSOR_Y0, ROW_PITCH, rows.len());
     let prompt = if crate::color::near(
         super::px(image, PROMPT_MESSAGE_PROBE.0, PROMPT_MESSAGE_PROBE.1),
         crate::color::WHITE,
@@ -83,14 +76,14 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<BagObs
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect();
-        let row = cx.zip(cy).and_then(|(x, y)| {
-            if PROMPT_CURSOR_X.contains(&x) && y >= PROMPT_CURSOR_Y0 {
-                Some((y - PROMPT_CURSOR_Y0) / PROMPT_ROW_PITCH)
-            } else {
-                None
-            }
-        });
-        row.map(|row| (opts, row as u8))
+        let row = cursor_row(
+            found,
+            PROMPT_CURSOR_X,
+            PROMPT_CURSOR_Y0,
+            PROMPT_ROW_PITCH,
+            opts.len(),
+        );
+        row.map(|row| (opts, row))
     } else {
         None
     };
@@ -100,6 +93,25 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<BagObs
         cursor,
         prompt,
     })
+}
+
+/// A cursor hit at `(x, y)` turned into a row index: `x` must fall in
+/// `x_range`, `y` must be at or below the first row's top `y0`, and the
+/// resulting row must be within `count` rows (a misread option/row list
+/// must not produce an out-of-range index).
+fn cursor_row(
+    found: Option<(u32, u32)>,
+    x_range: std::ops::Range<u32>,
+    y0: u32,
+    pitch: u32,
+    count: usize,
+) -> Option<u8> {
+    let (x, y) = found?;
+    if !x_range.contains(&x) || y < y0 {
+        return None;
+    }
+    let row = (y - y0) / pitch;
+    (row < count as u32).then_some(row as u8)
 }
 
 fn is_bag_frame(image: &RgbImage) -> bool {
@@ -230,6 +242,35 @@ mod tests {
             ]
         );
         assert_eq!(bag.cursor, Some(0));
+        assert_eq!(bag.prompt, None);
+    }
+
+    /// A misread options list (only "USE" recognised, no "CANCEL") with the
+    /// cursor sitting on the second row must not report a row index past
+    /// the end of `opts` — the prompt reads as absent rather than panicking
+    /// or handing back an out-of-range row.
+    #[test]
+    fn prompt_cursor_past_the_read_options_is_not_reported() {
+        let Some((font, small_font)) = fonts() else {
+            return;
+        };
+        let mut image = RgbImage::filled(240, 160, [107, 203, 198]);
+        fill(&mut image, 6, 4, 230, 103, FRAME_ORANGE);
+        fill(&mut image, 8, 4, 76, 16, FRAME_ORANGE);
+        fill(&mut image, 8, 19, 71, 4, TITLE_UNDERLINE);
+        fill(&mut image, 88, 8, 143, 95, [255, 251, 206]);
+        font.render(&mut image, 8, 4, "POKé BALLS", WHITE, [214, 211, 206]);
+        font.render(&mut image, 96, 8, "CANCEL", TEXT_GRAY, [214, 211, 206]);
+        // The prompt's message window (white interior) marks the bag as a
+        // battle bag with the USE/CANCEL prompt open.
+        fill(&mut image, 45, 117, 118, 37, WHITE);
+        // Only "USE" is legible; "CANCEL" is left unrendered to simulate a
+        // misread that finds one option where the game shows two.
+        font.render(&mut image, 182, 118, "USE", TEXT_GRAY, [214, 211, 206]);
+        // The ▶ sits on the (missing) second row.
+        crate::detect::testing::draw_cursor(&mut image, 177, 140);
+
+        let bag = detect(&image, font, small_font).expect("bag");
         assert_eq!(bag.prompt, None);
     }
 }
