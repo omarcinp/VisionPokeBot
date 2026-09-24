@@ -356,6 +356,12 @@ impl<'a> ToolContext<'a> {
             }
             self.expects = step.expects();
             if self.interrupt(&o)? {
+                // The interrupt ran another tool (a trainer battle can take
+                // minutes): the step's wait starts over from the screen it
+                // sees next (flash-2: Unstick failed "stuck waiting:
+                // conversation ending" the frame after a 95 s battle).
+                *waiting_since = None;
+                *nudged = false;
                 continue;
             }
             let frame = o.frame_id;

@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 
 use pokebot_agent::tools::effects::{path_events, translate, LabelIndex, Skipped};
 use pokebot_agent::tools::{
-    dialogue, identify, Answer, BattlePlan, Dest, Intent, Tool, ToolContext, ToolOutcome, Toolbox,
+    dialogue, identify, Answer, BattlePlan, Dest, Expects, Intent, StepContext, Tool, ToolContext,
+    ToolOutcome, ToolStep, Toolbox,
 };
-use pokebot_agent::{Action, Executor, Expectation, InputKind, Outcome, Syncer};
+use pokebot_agent::{Action, Decision, Executor, Expectation, InputKind, Outcome, Syncer};
 use pokebot_core::{
     CapturedFrame, Controller, ControllerCommand, ControllerReceipt, RgbImage, VideoSource,
 };
@@ -334,6 +335,76 @@ fn a_trainers_challenge_during_a_catch_hunt_runs_unstick() {
         .expect_err("the refused Unstick fails the hunt");
     assert!(err.to_string().contains("refused"), "{err}");
     assert_eq!(*seen.lock().unwrap(), vec![Intent::Unstick]);
+}
+
+/// A step that waits `waits` frames, then is done.
+struct Waiter {
+    waits: usize,
+}
+
+impl ToolStep for Waiter {
+    fn next(&mut self, _ctx: &mut StepContext<'_>) -> Decision {
+        if self.waits == 0 {
+            return Decision::Done("waited".into());
+        }
+        self.waits -= 1;
+        Decision::Wait("conversation ending".into())
+    }
+
+    fn on_outcome(&mut self, _action: &Action, _outcome: Outcome, _ctx: &mut StepContext<'_>) {}
+
+    fn expects(&self) -> Expects {
+        Expects::NONE
+    }
+}
+
+/// flash-2: Unstick waited for a trainer's intro to end, the battle ran as
+/// an interrupt for 95 s, and the frame after it the wait counted the
+/// whole battle ("stuck waiting: conversation ending"). A handled
+/// interrupt starts the step's wait over.
+#[test]
+fn a_handled_interrupt_restarts_the_steps_wait() {
+    let Some(d) = data() else { return };
+    let (Some(overworld), Some(battle)) = (
+        fixture("emu-tools-overworld.png"),
+        fixture("emu-tools-battle-command.png"),
+    ) else {
+        return;
+    };
+    let frames = vec![overworld.clone(), battle, overworld.clone(), overworld];
+    let (mut runtime, _) = runtime(&d, frames);
+    runtime.set_pose_hint(pose(FIXTURE_POSE.0, FIXTURE_POSE.1, FIXTURE_POSE.2));
+    let executor = Executor {
+        max_wait_frames: 2,
+        ..Executor::default()
+    };
+    let stop = AtomicBool::new(false);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(Toolbox::new(vec![Box::new(Recorder {
+        seen: Arc::clone(&seen),
+    })]));
+    // Frame 1: wait. Frame 2: the battle interrupt. Frames 3 and 4: wait
+    // again, 3 frames after the first (over the limit of 2 unless the wait
+    // restarted at frame 3). Frame 5: done.
+    let mut step = Waiter { waits: 3 };
+    let result = ctx.drive(&mut step);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Intent::Battle {
+            policy: BattlePlan::Auto
+        }]
+    );
+    assert_eq!(
+        result.expect("the wait restarted after the battle"),
+        "waited"
+    );
 }
 
 #[test]
