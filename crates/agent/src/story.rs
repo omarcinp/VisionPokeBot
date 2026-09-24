@@ -2587,7 +2587,8 @@ mod tests {
                 arrow: Some(Region::new(220, 150, 8, 8)),
                 stable_frames: 10,
                 text_cells: vec![1; 4],
-                lines: vec!["RED obtained".into(), "the HELIX FOSSIL!".into()],
+                // As read live.
+                lines: vec!["Obtained the HELIX FOSSIL!".into()],
                 help: false,
             });
             o

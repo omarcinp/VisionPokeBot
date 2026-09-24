@@ -146,15 +146,21 @@ fn badge_received(page: &str) -> Option<&'static str> {
         .flatten()
 }
 
-/// "RED found a POTION!" / "received the TOWN MAP." / "obtained a X!"
+/// "RED found a POTION!" / "received the TOWN MAP." / "obtained a X!", and
+/// the Mt. Moon fossil's "Obtained the HELIX FOSSIL!" (no name before it).
 fn item_gained(page: &str) -> Option<(String, String)> {
     for (verb, reason) in [
         (" found ", "found"),
         (" received ", "received"),
         (" obtained ", "obtained"),
     ] {
-        if let Some(at) = page.find(verb) {
-            let rest = &page[at + verb.len()..];
+        let leading = format!("{}{}", verb[1..2].to_uppercase(), &verb[2..]);
+        let at = page
+            .find(verb)
+            .map(|at| at + verb.len())
+            .or_else(|| page.starts_with(&leading).then_some(leading.len()));
+        if let Some(at) = at {
+            let rest = &page[at..];
             let rest = ["a ", "an ", "the ", "one "]
                 .iter()
                 .find_map(|p| rest.strip_prefix(p))
@@ -214,6 +220,24 @@ mod tests {
                 reason: "found".into()
             }]
         );
+        // Live, the Helix Fossil: the page starts with the verb.
+        assert_eq!(
+            read(&mut t, "Obtained the HELIX FOSSIL!", &d, None),
+            vec![GameEvent::ItemsChanged {
+                pocket: Pocket::KeyItems,
+                item: "ITEM_HELIX_FOSSIL".into(),
+                delta: 1,
+                reason: "obtained".into()
+            }]
+        );
+        // Its follow-up page adds nothing.
+        assert!(read(
+            &mut t,
+            "RED put the HELIX FOSSIL\nin the KEY ITEMS POCKET.",
+            &d,
+            None
+        )
+        .is_empty());
         assert_eq!(
             read(
                 &mut t,
