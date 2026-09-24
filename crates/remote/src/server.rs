@@ -21,7 +21,7 @@ use crate::protocol::{
     ClientMessage, CommandRequest, DeviceInfo, DeviceMessage, Status, CONTROLLER_KIND,
     PROTOCOL_VERSION,
 };
-use crate::queue::{Accepted, Finished, InputQueue, Rejected};
+use crate::queue::{Accepted, Finished, InputQueue, Keepalive, Rejected};
 
 const MAX_CLIENTS: usize = 4;
 const MAX_LINE_BYTES: u64 = 16 * 1024;
@@ -40,7 +40,16 @@ pub trait HidSink: Send + 'static {
     fn send(&mut self, report: &SwitchReport) -> bool;
     /// A host has configured the device.
     fn mounted(&self) -> bool;
+    /// The host suspended the bus (the Switch is asleep).
+    fn suspended(&self) -> bool {
+        false
+    }
+    /// Asks a suspended host to wake up (USB remote wakeup), if it allows.
+    fn wake(&mut self) {}
 }
+
+/// Least time between two remote-wakeup requests.
+const WAKE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct DeviceConfig {
@@ -54,6 +63,9 @@ pub struct DeviceConfig {
     /// Executor period.
     pub tick: Duration,
     pub profile: PressProfile,
+    /// Input played after a stretch without any, so the Switch never dims
+    /// or sleeps. Off by default; the firmware turns it on.
+    pub keepalive: Option<Keepalive>,
 }
 
 impl DeviceConfig {
@@ -66,6 +78,7 @@ impl DeviceConfig {
             http_port,
             tick: Duration::from_millis(1),
             profile: PressProfile::default(),
+            keepalive: None,
         }
     }
 }
@@ -82,6 +95,7 @@ struct Shared {
     clients: Mutex<Vec<Client>>,
     next_client: AtomicU32,
     usb_mounted: AtomicBool,
+    usb_suspended: AtomicBool,
     info: DeviceInfo,
     profile: PressProfile,
 }
@@ -112,11 +126,14 @@ impl Device {
         let control = TcpListener::bind((config.bind, config.control_port))?;
         let http = TcpListener::bind((config.bind, config.http_port))?;
         let (control_addr, http_addr) = (control.local_addr()?, http.local_addr()?);
+        let mut queue = InputQueue::new();
+        queue.set_keepalive(config.keepalive);
         let shared = Arc::new(Shared {
-            queue: Mutex::new(InputQueue::new()),
+            queue: Mutex::new(queue),
             clients: Mutex::new(Vec::new()),
             next_client: AtomicU32::new(0),
             usb_mounted: AtomicBool::new(sink.mounted()),
+            usb_suspended: AtomicBool::new(sink.suspended()),
             info: DeviceInfo {
                 name: config.name,
                 firmware: config.firmware,
@@ -196,6 +213,9 @@ impl Shared {
             idle: queue.is_idle(),
             pending: queue.pending(),
             usb_mounted: self.usb_mounted.load(Ordering::Relaxed),
+            usb_suspended: self.usb_suspended.load(Ordering::Relaxed),
+            keepalive_secs: queue.keepalive().map(|k| k.after.as_secs()),
+            keepalives: queue.keepalives(),
         }
     }
 }
@@ -206,14 +226,27 @@ fn executor(
     tick: Duration,
     mut on_finished: impl FnMut(Finished),
 ) {
+    let mut last_wake: Option<Instant> = None;
     loop {
+        let now = Instant::now();
         let (state, finished) = {
             let mut queue = shared.queue();
-            let state = queue.tick(Instant::now());
+            let state = queue.tick(now);
             (state, queue.take_finished())
         };
+        let suspended = sink.suspended();
+        // A pressed button (not a stick: the keepalive only nudges one)
+        // wakes a sleeping Switch, as HOME on a real wired pad does.
+        if suspended
+            && !state.buttons.is_empty()
+            && last_wake.is_none_or(|t| now.duration_since(t) >= WAKE_INTERVAL)
+        {
+            sink.wake();
+            last_wake = Some(now);
+        }
         sink.send(&SwitchReport::from_state(&state));
         shared.usb_mounted.store(sink.mounted(), Ordering::Relaxed);
+        shared.usb_suspended.store(suspended, Ordering::Relaxed);
         finished.into_iter().for_each(&mut on_finished);
         thread::sleep(tick);
     }
@@ -414,6 +447,8 @@ fn route(shared: &Shared, request: &Request) -> Response {
             Err(e) => Response::json(400, &error_body(&format!("bad command: {e}"))),
         },
         ("POST", "/api/neutral") => execute_response(shared, &SwitchCommand::Neutral, None),
+        ("GET", "/api/keepalive") => Response::json(200, &keepalive_body(&shared.queue())),
+        ("POST", "/api/keepalive") => set_keepalive(&mut shared.queue(), &request.body),
         ("OPTIONS", _) => Response {
             status: 204,
             content_type: "text/plain",
@@ -435,6 +470,43 @@ fn execute_response(
         ),
         Err(e) => Response::json(429, &error_body(&e.to_string())),
     }
+}
+
+/// `POST /api/keepalive`: `{"after_secs": 240}` sets the idle time and
+/// `{"after_secs": null}` turns the keepalive off; `routine` (a
+/// `SwitchCommand`) replaces the input. Omitted fields keep their value.
+fn set_keepalive(queue: &mut InputQueue, body: &[u8]) -> Response {
+    let request = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(map)) => map,
+        Ok(_) => return Response::json(400, &error_body("bad keepalive: expected an object")),
+        Err(e) => return Response::json(400, &error_body(&format!("bad keepalive: {e}"))),
+    };
+    let current = queue.keepalive().cloned();
+    let after = match request.get("after_secs") {
+        None => current.as_ref().map(|k| k.after),
+        Some(serde_json::Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(secs) => Some(Duration::from_secs(secs.max(1))),
+            None => return Response::json(400, &error_body("bad keepalive: after_secs")),
+        },
+    };
+    let routine = match request.get("routine") {
+        None => current.map_or_else(Keepalive::right_stick_nudge, |k| k.routine),
+        Some(v) => match serde_json::from_value::<SwitchCommand>(v.clone()) {
+            Ok(routine) => routine,
+            Err(e) => return Response::json(400, &error_body(&format!("bad routine: {e}"))),
+        },
+    };
+    queue.set_keepalive(after.map(|after| Keepalive { after, routine }));
+    Response::json(200, &keepalive_body(queue))
+}
+
+fn keepalive_body(queue: &InputQueue) -> serde_json::Value {
+    serde_json::json!({
+        "after_secs": queue.keepalive().map(|k| k.after.as_secs()),
+        "routine": queue.keepalive().map(|k| &k.routine),
+        "played": queue.keepalives(),
+    })
 }
 
 fn error_body(message: &str) -> serde_json::Value {

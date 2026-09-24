@@ -28,6 +28,13 @@ esp_err_t switch_hid_init(const switch_hid_config_t *config);
 // True while a host (the Switch) has the device configured.
 bool switch_hid_mounted(void);
 
+// True while the host has suspended the bus (the Switch is asleep).
+bool switch_hid_suspended(void);
+
+// Asks a suspended host to resume (USB remote wakeup). Does nothing unless
+// the host enabled remote wakeup for this device.
+void switch_hid_wake(void);
+
 // Queues one input report. Returns false if the endpoint is still busy with
 // the previous one; the caller retries on its next tick.
 bool switch_hid_send(const uint8_t *report, size_t len);

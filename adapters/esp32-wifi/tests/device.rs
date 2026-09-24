@@ -243,3 +243,287 @@ fn old_protocol_is_refused() {
         .expect("protocol 1 must be refused");
     assert!(err.to_string().contains("protocol 1"), "{err}");
 }
+
+// ---- keepalive ----
+
+/// One HTTP request to the device; the response body.
+fn http(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: device\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn keepalive_nudges_an_idle_switch_and_steps_aside_for_the_bot() {
+    let log = Log::default();
+    let mut config = DeviceConfig::new("test", [127, 0, 0, 1].into(), 0, 0);
+    config.keepalive = Some(pokebot_remote::Keepalive {
+        after: Duration::from_millis(300),
+        routine: pokebot_remote::Keepalive::right_stick_nudge(),
+    });
+    let device = Device::start(config, Recorder(Arc::clone(&log))).unwrap();
+    let mut controller =
+        Esp32WifiController::connect(Esp32WifiConfig::new(device.control_addr().to_string()))
+            .unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    let up = SwitchState {
+        right_stick: Stick::UP,
+        ..SwitchState::NEUTRAL
+    };
+    assert!(
+        states(&log).contains(&up),
+        "no keepalive: {:?}",
+        states(&log)
+    );
+    assert!(states(&log).iter().all(|s| s.buttons.is_empty()));
+    assert!(device.status().keepalives >= 1);
+    assert_eq!(device.status().keepalive_secs, Some(0));
+
+    // The bot's commands still complete (keepalives are never reported to
+    // it as finished commands of its own).
+    controller
+        .execute(SwitchCommand::Press(SwitchButton::A))
+        .unwrap();
+    wait_idle(|| controller.is_idle().unwrap(), Duration::from_secs(2));
+
+    // Turned off over HTTP: no more nudges.
+    let body = http(
+        device.http_addr(),
+        "POST",
+        "/api/keepalive",
+        r#"{"after_secs": null}"#,
+    );
+    assert!(body.contains(r#""after_secs":null"#), "{body}");
+    let played = device.status().keepalives;
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(device.status().keepalives, played);
+
+    // And back on, keeping the routine.
+    let body = http(
+        device.http_addr(),
+        "POST",
+        "/api/keepalive",
+        r#"{"after_secs": 240}"#,
+    );
+    assert!(body.contains(r#""after_secs":240"#), "{body}");
+    assert!(body.contains("right_stick"), "{body}");
+    let status = http(device.http_addr(), "GET", "/api/status", "");
+    assert!(status.contains(r#""keepalive_secs":240"#), "{status}");
+}
+
+// ---- console link, remote wakeup, reconnection ----
+
+/// A sink whose host can be put to sleep; counts wakeup requests.
+struct Sleepy {
+    suspended: Arc<std::sync::atomic::AtomicBool>,
+    wakes: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl HidSink for Sleepy {
+    fn send(&mut self, _: &SwitchReport) -> bool {
+        true
+    }
+
+    fn mounted(&self) -> bool {
+        true
+    }
+
+    fn suspended(&self) -> bool {
+        self.suspended.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn wake(&mut self) {
+        self.wakes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn console_link_and_remote_wakeup_on_a_button_only() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    let suspended = Arc::new(AtomicBool::new(false));
+    let wakes = Arc::new(AtomicU32::new(0));
+    let device = Device::start(
+        DeviceConfig::new("test", [127, 0, 0, 1].into(), 0, 0),
+        Sleepy {
+            suspended: Arc::clone(&suspended),
+            wakes: Arc::clone(&wakes),
+        },
+    )
+    .unwrap();
+    let mut controller =
+        Esp32WifiController::connect(Esp32WifiConfig::new(device.control_addr().to_string()))
+            .unwrap();
+    assert_eq!(
+        controller.console_link().unwrap(),
+        pokebot_core::ConsoleLink::Attached
+    );
+
+    suspended.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        controller.console_link().unwrap(),
+        pokebot_core::ConsoleLink::Suspended
+    );
+    // A stick move (what the keepalive sends) doesn't wake it...
+    controller
+        .execute(SwitchCommand::Hold {
+            state: SwitchState {
+                right_stick: Stick::UP,
+                ..SwitchState::NEUTRAL
+            },
+            duration: Duration::from_millis(50),
+        })
+        .unwrap();
+    wait_idle(|| controller.is_idle().unwrap(), Duration::from_secs(2));
+    assert_eq!(wakes.load(Ordering::Relaxed), 0);
+    // ...a button does, at most once per 100 ms while held.
+    controller
+        .execute(SwitchCommand::Press(SwitchButton::Home))
+        .unwrap();
+    wait_idle(|| controller.is_idle().unwrap(), Duration::from_secs(2));
+    assert_eq!(wakes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_dropped_connection_is_reopened_on_the_next_command() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    use pokebot_remote::protocol::{ClientMessage, DeviceInfo, DeviceMessage, PROTOCOL_VERSION};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hello = DeviceMessage::Hello(DeviceInfo {
+        name: "fake".into(),
+        firmware: "0".into(),
+        protocol: PROTOCOL_VERSION,
+        controller: "fake".into(),
+    });
+    let line = |m: &DeviceMessage| format!("{}\n", serde_json::to_string(m).unwrap());
+    let server = std::thread::spawn(move || {
+        // First connection: hello, then the "board reboots".
+        let (mut first, _) = listener.accept().unwrap();
+        first.write_all(line(&hello).as_bytes()).unwrap();
+        drop(first);
+        // Second connection: hello, then accept and finish one command.
+        let (mut second, _) = listener.accept().unwrap();
+        second.write_all(line(&hello).as_bytes()).unwrap();
+        let mut reader = BufReader::new(second.try_clone().unwrap());
+        let mut request = String::new();
+        reader.read_line(&mut request).unwrap();
+        let ClientMessage::Execute { seq, .. } = serde_json::from_str(&request).unwrap() else {
+            panic!("expected execute: {request}")
+        };
+        second
+            .write_all(
+                line(&DeviceMessage::Accepted {
+                    seq,
+                    id: 1,
+                    input_ms: 160,
+                })
+                .as_bytes(),
+            )
+            .unwrap();
+        second
+            .write_all(
+                line(&DeviceMessage::Finished {
+                    id: 1,
+                    cancelled: false,
+                })
+                .as_bytes(),
+            )
+            .unwrap();
+        // Keep it open until the client is done.
+        let _ = reader.read_line(&mut request);
+    });
+
+    let mut controller =
+        Esp32WifiController::connect(Esp32WifiConfig::new(addr.to_string())).unwrap();
+    // Let the reader see the hang-up.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while controller.is_idle().is_ok() {
+        assert!(Instant::now() < deadline, "the drop was never noticed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    controller
+        .execute(SwitchCommand::Press(SwitchButton::A))
+        .unwrap();
+    wait_idle(|| controller.is_idle().unwrap(), Duration::from_secs(2));
+    assert_eq!(controller.reconnects(), 1);
+    drop(controller);
+    server.join().unwrap();
+}
+
+/// Live: the board rebooted (a flash) without closing the socket; requests
+/// went unanswered forever. An unanswered request now counts as a lost
+/// connection, and the next one reconnects.
+#[test]
+fn an_unanswered_request_reconnects() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    use pokebot_remote::protocol::{ClientMessage, DeviceInfo, DeviceMessage, PROTOCOL_VERSION};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hello = DeviceMessage::Hello(DeviceInfo {
+        name: "fake".into(),
+        firmware: "0".into(),
+        protocol: PROTOCOL_VERSION,
+        controller: "fake".into(),
+    });
+    let line = |m: &DeviceMessage| format!("{}\n", serde_json::to_string(m).unwrap());
+    let server = std::thread::spawn(move || {
+        // First connection: hello, then silence (kept open).
+        let (mut first, _) = listener.accept().unwrap();
+        first.write_all(line(&hello).as_bytes()).unwrap();
+        // Second: a working device answering one status request.
+        let (mut second, _) = listener.accept().unwrap();
+        second.write_all(line(&hello).as_bytes()).unwrap();
+        let mut reader = BufReader::new(second.try_clone().unwrap());
+        let mut request = String::new();
+        reader.read_line(&mut request).unwrap();
+        let ClientMessage::Status { seq } = serde_json::from_str(&request).unwrap() else {
+            panic!("expected status: {request}")
+        };
+        let status = pokebot_remote::Status {
+            seq: Some(seq),
+            idle: true,
+            pending: 0,
+            usb_mounted: true,
+            usb_suspended: false,
+            keepalive_secs: None,
+            keepalives: 0,
+        };
+        second
+            .write_all(line(&DeviceMessage::Status(status)).as_bytes())
+            .unwrap();
+        let _ = reader.read_line(&mut request);
+        drop(first);
+    });
+
+    let mut controller =
+        Esp32WifiController::connect(Esp32WifiConfig::new(addr.to_string())).unwrap();
+    let silent = controller.status();
+    assert!(
+        matches!(silent, Err(pokebot_core::Error::Disconnected(_))),
+        "{silent:?}"
+    );
+    assert!(controller.status().unwrap().usb_mounted);
+    assert_eq!(controller.reconnects(), 1);
+    drop(controller);
+    server.join().unwrap();
+}

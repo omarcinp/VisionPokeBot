@@ -5,10 +5,53 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use pokebot_core::{PressProfile, SwitchCommand, SwitchState};
+use pokebot_core::{PressProfile, Stick, SwitchCommand, SwitchState, TimedSwitchInput};
 
 /// Most timed inputs that may wait in the queue.
 pub const CAPACITY: usize = 256;
+
+/// Input the device plays by itself after a stretch without any, so the
+/// Switch never dims its picture (Screen Burn-In Reduction: after 5 minutes
+/// without input) or goes to sleep (TV mode Auto-Sleep: after 1–12 hours).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keepalive {
+    /// Idle time before the routine plays (and again after each run).
+    pub after: Duration,
+    pub routine: SwitchCommand,
+}
+
+impl Keepalive {
+    /// Four minutes, under the five of the Switch's dimming.
+    pub const DEFAULT_AFTER: Duration = Duration::from_secs(240);
+
+    /// Right stick up, then down. FireRed ignores the right stick, so this
+    /// is safe on any screen (the D-pad would walk, B would answer NO), yet
+    /// it counts as input for the Switch.
+    pub fn right_stick_nudge() -> SwitchCommand {
+        let right = |stick: Stick, ms: u64| TimedSwitchInput {
+            state: SwitchState {
+                right_stick: stick,
+                ..SwitchState::NEUTRAL
+            },
+            duration: Duration::from_millis(ms),
+        };
+        SwitchCommand::Sequence(vec![
+            right(Stick::UP, 100),
+            right(Stick::CENTER, 100),
+            right(Stick::DOWN, 100),
+            right(Stick::CENTER, 100),
+        ])
+    }
+}
+
+impl Default for Keepalive {
+    fn default() -> Self {
+        Self {
+            after: Self::DEFAULT_AFTER,
+            routine: Self::right_stick_nudge(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Step {
@@ -17,6 +60,9 @@ struct Step {
     duration: Duration,
     /// Last step of its command: the command finishes when it elapses.
     last: bool,
+    /// Played by the device itself (keepalive): never reported to clients,
+    /// and dropped as soon as a client sends input.
+    internal: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,11 +105,31 @@ pub struct InputQueue {
     active: Option<Active>,
     next_id: u64,
     finished: Vec<Finished>,
+    keepalive: Option<Keepalive>,
+    /// When the queue last went idle (`None` while playing input).
+    idle_since: Option<Instant>,
+    keepalives: u32,
 }
 
 impl InputQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Plays `keepalive` whenever the queue has been idle for its `after`;
+    /// `None` turns it off.
+    pub fn set_keepalive(&mut self, keepalive: Option<Keepalive>) {
+        self.keepalive = keepalive;
+        self.idle_since = None;
+    }
+
+    pub fn keepalive(&self) -> Option<&Keepalive> {
+        self.keepalive.as_ref()
+    }
+
+    /// Keepalive routines played so far.
+    pub fn keepalives(&self) -> u32 {
+        self.keepalives
     }
 
     /// Queues `command` behind everything already queued.
@@ -74,6 +140,8 @@ impl InputQueue {
         command: &SwitchCommand,
         profile: &PressProfile,
     ) -> Result<Accepted, Rejected> {
+        // Client input takes over from a keepalive at once.
+        self.drop_internal();
         let timeline = command.timeline(profile);
         if self.steps.len() + timeline.len() > CAPACITY {
             return Err(Rejected::QueueFull);
@@ -92,17 +160,50 @@ impl InputQueue {
                 state: SwitchState::NEUTRAL,
                 duration: Duration::ZERO,
                 last: true,
+                internal: false,
             });
         }
+        self.queue_timeline(id, timeline, false);
+        Ok(Accepted { id, input })
+    }
+
+    fn queue_timeline(&mut self, id: u64, timeline: Vec<TimedSwitchInput>, internal: bool) {
+        let count = timeline.len();
         for (i, t) in timeline.into_iter().enumerate() {
             self.steps.push_back(Step {
                 command: id,
                 state: t.state,
                 duration: t.duration,
                 last: i + 1 == count,
+                internal,
             });
         }
-        Ok(Accepted { id, input })
+    }
+
+    /// Removes keepalive input, active or queued, without reporting it.
+    fn drop_internal(&mut self) {
+        if self.active.is_some_and(|a| a.step.internal) {
+            self.active = None;
+        }
+        self.steps.retain(|s| !s.internal);
+    }
+
+    /// Queues the keepalive routine once the queue has idled long enough.
+    fn keep_alive(&mut self, now: Instant) -> bool {
+        let Some(keepalive) = &self.keepalive else {
+            return false;
+        };
+        let since = *self.idle_since.get_or_insert(now);
+        if now.duration_since(since) < keepalive.after {
+            return false;
+        }
+        let timeline = keepalive.routine.timeline(&PressProfile::default());
+        let id = self.next_id;
+        self.next_id += 1;
+        self.keepalives = self.keepalives.wrapping_add(1);
+        self.idle_since = None;
+        self.queue_timeline(id, timeline, true);
+        true
     }
 
     /// Advances to `now`. Returns the controller state to present right now.
@@ -113,7 +214,7 @@ impl InputQueue {
                     return active.step.state;
                 }
                 self.active = None;
-                if active.step.last {
+                if active.step.last && !active.step.internal {
                     self.finished.push(Finished {
                         id: active.step.command,
                         cancelled: false,
@@ -128,7 +229,7 @@ impl InputQueue {
                     now
                 };
                 self.start_next(start);
-            } else if !self.start_next(now) {
+            } else if !self.start_next(now) && !self.keep_alive(now) {
                 return SwitchState::NEUTRAL;
             }
         }
@@ -137,6 +238,7 @@ impl InputQueue {
     fn start_next(&mut self, start: Instant) -> bool {
         match self.steps.pop_front() {
             Some(step) => {
+                self.idle_since = None;
                 self.active = Some(Active {
                     step,
                     ends_at: start + step.duration,
@@ -153,10 +255,16 @@ impl InputQueue {
         let mut dropped: Vec<u64> = self
             .active
             .take()
+            .filter(|a| !a.step.internal)
             .map(|a| a.step.command)
             .into_iter()
             .collect();
-        dropped.extend(self.steps.drain(..).map(|s| s.command));
+        dropped.extend(
+            self.steps
+                .drain(..)
+                .filter(|s| !s.internal)
+                .map(|s| s.command),
+        );
         dropped.dedup();
         self.finished.extend(dropped.into_iter().map(|id| Finished {
             id,
@@ -326,6 +434,113 @@ mod tests {
             }]
         );
         assert!(q.is_idle());
+    }
+
+    fn right(stick: Stick) -> SwitchState {
+        SwitchState {
+            right_stick: stick,
+            ..SwitchState::NEUTRAL
+        }
+    }
+
+    /// A queue ticked every millisecond, like the device's executor.
+    struct Ticked {
+        q: InputQueue,
+        t0: Instant,
+        now: u64,
+    }
+
+    impl Ticked {
+        fn new(keepalive: Option<Duration>) -> Self {
+            let mut q = InputQueue::new();
+            q.set_keepalive(keepalive.map(|after| Keepalive {
+                after,
+                routine: Keepalive::right_stick_nudge(),
+            }));
+            let t0 = Instant::now();
+            q.tick(t0);
+            Self { q, t0, now: 0 }
+        }
+
+        /// Ticks every millisecond up to `until`; the state at `until`.
+        fn at(&mut self, until: u64) -> SwitchState {
+            let mut state = NEUTRAL;
+            while self.now < until {
+                self.now += 1;
+                state = self.q.tick(self.t0 + ms(self.now));
+            }
+            state
+        }
+
+        fn press_a(&mut self) -> Accepted {
+            self.q
+                .push(
+                    &SwitchCommand::Press(SwitchButton::A),
+                    &PressProfile::default(),
+                )
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn keepalive_nudges_the_right_stick_after_idling() {
+        let mut t = Ticked::new(Some(ms(1000)));
+        assert_eq!(t.at(999), NEUTRAL);
+        assert_eq!(t.at(1000), right(Stick::UP));
+        assert_eq!(t.at(1100), right(Stick::CENTER));
+        assert_eq!(t.at(1200), right(Stick::DOWN));
+        assert_eq!(t.at(1400), NEUTRAL);
+        // Never reported: no client sent it.
+        assert!(t.q.take_finished().is_empty());
+        assert!(t.q.is_idle());
+        assert_eq!(t.q.keepalives(), 1);
+        // And again after another idle stretch.
+        assert_eq!(t.at(2399), NEUTRAL);
+        assert_eq!(t.at(2400), right(Stick::UP));
+        assert_eq!(t.q.keepalives(), 2);
+    }
+
+    #[test]
+    fn client_input_restarts_the_idle_clock() {
+        let mut t = Ticked::new(Some(ms(1000)));
+        t.at(900);
+        t.press_a();
+        assert_eq!(t.at(901), pressed(SwitchButton::A));
+        // Press and release end at 1061: idle from there.
+        assert_eq!(t.at(2060), NEUTRAL);
+        assert_eq!(t.at(2061), right(Stick::UP));
+    }
+
+    #[test]
+    fn client_input_takes_over_from_a_running_keepalive() {
+        let mut t = Ticked::new(Some(ms(1000)));
+        assert_eq!(t.at(1000), right(Stick::UP));
+        let a = t.press_a();
+        assert_eq!(t.at(1001), pressed(SwitchButton::A));
+        assert_eq!(t.at(1161), NEUTRAL);
+        assert_eq!(
+            t.q.take_finished(),
+            vec![Finished {
+                id: a.id,
+                cancelled: false
+            }]
+        );
+        // A client's Neutral doesn't report a keepalive as cancelled.
+        assert_eq!(t.at(2161), right(Stick::UP));
+        t.q.push(&SwitchCommand::Neutral, &PressProfile::default())
+            .unwrap();
+        assert!(t.q.take_finished().is_empty());
+        assert_eq!(t.at(2162), NEUTRAL);
+    }
+
+    #[test]
+    fn no_keepalive_unless_configured() {
+        let mut t = Ticked::new(None);
+        assert_eq!(t.at(10_000), NEUTRAL);
+        t.q.set_keepalive(Some(Keepalive::default()));
+        t.q.set_keepalive(None);
+        assert_eq!(t.at(20_000), NEUTRAL);
+        assert_eq!(t.q.keepalives(), 0);
     }
 
     #[test]

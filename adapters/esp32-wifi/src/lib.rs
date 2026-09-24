@@ -5,6 +5,11 @@
 //!
 //! The device queues and times every input itself, so WiFi latency delays
 //! when a command starts but never changes how long buttons are held.
+//!
+//! A lost connection (the board rebooted, WiFi dropped, or a request went
+//! unanswered) is reopened on the next request, at most every
+//! [`RECONNECT_INTERVAL`]; commands in flight on the old connection are
+//! forgotten.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -14,13 +19,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pokebot_core::{
-    ControllerReceipt, Error, PressProfile, Result, SwitchCommand, SwitchController,
+    ConsoleLink, ControllerReceipt, Error, PressProfile, Result, SwitchCommand, SwitchController,
 };
 use pokebot_remote::protocol::{
     ClientMessage, DeviceInfo, DeviceMessage, Status, CONTROL_PORT, PROTOCOL_VERSION,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Least time between two attempts to reopen a lost connection.
+pub const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct Esp32WifiConfig {
@@ -41,13 +48,21 @@ impl Esp32WifiConfig {
 }
 
 pub struct Esp32WifiController {
+    conn: Connection,
+    config: Esp32WifiConfig,
+    profile: PressProfile,
+    next_seq: u64,
+    last_reconnect: Option<Instant>,
+    reconnects: u32,
+}
+
+/// One TCP connection to the device and the thread reading it.
+struct Connection {
     inner: Arc<Inner>,
     writer: TcpStream,
     reader: Option<JoinHandle<()>>,
     info: DeviceInfo,
     peer: SocketAddr,
-    profile: PressProfile,
-    next_seq: u64,
 }
 
 #[derive(Default)]
@@ -66,6 +81,106 @@ struct State {
 
 impl Esp32WifiController {
     pub fn connect(config: Esp32WifiConfig) -> Result<Self> {
+        let conn = Connection::open(&config)?;
+        Ok(Self {
+            conn,
+            profile: config.press_profile,
+            config,
+            next_seq: 0,
+            last_reconnect: None,
+            reconnects: 0,
+        })
+    }
+
+    pub fn info(&self) -> &DeviceInfo {
+        &self.conn.info
+    }
+
+    pub fn peer(&self) -> SocketAddr {
+        self.conn.peer
+    }
+
+    /// Connections reopened after being lost.
+    pub fn reconnects(&self) -> u32 {
+        self.reconnects
+    }
+
+    /// Asks the device for its queue and USB state.
+    pub fn status(&mut self) -> Result<Status> {
+        let seq = self.send(|seq| ClientMessage::Status { seq })?;
+        match self.wait_reply(seq)? {
+            DeviceMessage::Status(status) => Ok(status),
+            other => Err(Error::Device(format!("unexpected reply {other:?}"))),
+        }
+    }
+
+    /// Reopens a lost connection, at most every [`RECONNECT_INTERVAL`].
+    fn ensure_connected(&mut self) -> Result<()> {
+        let Err(lost) = self.conn.inner.check() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if self
+            .last_reconnect
+            .is_some_and(|t| now.duration_since(t) < RECONNECT_INTERVAL)
+        {
+            return Err(lost);
+        }
+        self.last_reconnect = Some(now);
+        let conn = Connection::open(&self.config)
+            .map_err(|e| Error::Disconnected(format!("{lost}; reconnecting: {e}")))?;
+        self.conn = conn;
+        self.reconnects += 1;
+        Ok(())
+    }
+
+    fn send(&mut self, message: impl FnOnce(u64) -> ClientMessage) -> Result<u64> {
+        self.ensure_connected()?;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let mut line = serde_json::to_vec(&message(seq))
+            .map_err(|e| Error::Device(format!("encoding request: {e}")))?;
+        line.push(b'\n');
+        let conn = &self.conn;
+        (&conn.writer).write_all(&line).map_err(|e| {
+            conn.inner.fail(format!("write: {e}"));
+            Error::Disconnected(format!("{}: {e}", conn.peer))
+        })?;
+        Ok(seq)
+    }
+
+    fn wait_reply(&self, seq: u64) -> Result<DeviceMessage> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let inner = &self.conn.inner;
+        let mut state = inner.lock();
+        loop {
+            if let Some(reply) = state.replies.remove(&seq) {
+                return Ok(reply);
+            }
+            if let Some(failure) = &state.failure {
+                return Err(Error::Disconnected(failure.clone()));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                // A board that rebooted leaves the socket half open: writes
+                // vanish and nothing ever answers. Count it as lost, so the
+                // next request reconnects.
+                let reason = format!("{}: no reply to request {seq}", self.conn.peer);
+                drop(state);
+                inner.fail(reason.clone());
+                return Err(Error::Disconnected(reason));
+            }
+            state = inner
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Connection {
+    fn open(config: &Esp32WifiConfig) -> Result<Self> {
         let peer = resolve(&config.address)?;
         let stream = TcpStream::connect_timeout(&peer, config.connect_timeout)
             .map_err(|e| Error::Device(format!("{peer}: {e}")))?;
@@ -99,66 +214,7 @@ impl Esp32WifiController {
             reader: Some(reader),
             info,
             peer,
-            profile: config.press_profile,
-            next_seq: 0,
         })
-    }
-
-    pub fn info(&self) -> &DeviceInfo {
-        &self.info
-    }
-
-    pub fn peer(&self) -> SocketAddr {
-        self.peer
-    }
-
-    /// Asks the device for its queue and USB state.
-    pub fn status(&mut self) -> Result<Status> {
-        let seq = self.send(|seq| ClientMessage::Status { seq })?;
-        match self.wait_reply(seq)? {
-            DeviceMessage::Status(status) => Ok(status),
-            other => Err(Error::Device(format!("unexpected reply {other:?}"))),
-        }
-    }
-
-    fn send(&mut self, message: impl FnOnce(u64) -> ClientMessage) -> Result<u64> {
-        self.inner.check()?;
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        let mut line = serde_json::to_vec(&message(seq))
-            .map_err(|e| Error::Device(format!("encoding request: {e}")))?;
-        line.push(b'\n');
-        self.writer.write_all(&line).map_err(|e| {
-            self.inner.fail(format!("write: {e}"));
-            Error::Disconnected(format!("{}: {e}", self.peer))
-        })?;
-        Ok(seq)
-    }
-
-    fn wait_reply(&self, seq: u64) -> Result<DeviceMessage> {
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
-        let mut state = self.inner.lock();
-        loop {
-            if let Some(reply) = state.replies.remove(&seq) {
-                return Ok(reply);
-            }
-            if let Some(failure) = &state.failure {
-                return Err(Error::Disconnected(failure.clone()));
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Error::Device(format!(
-                    "{}: no reply to request {seq}",
-                    self.peer
-                )));
-            }
-            state = self
-                .inner
-                .changed
-                .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
     }
 }
 
@@ -182,15 +238,24 @@ impl SwitchController for Esp32WifiController {
     }
 
     fn is_idle(&self) -> Result<bool> {
-        let state = self.inner.lock();
+        let state = self.conn.inner.lock();
         match &state.failure {
             Some(failure) => Err(Error::Disconnected(failure.clone())),
             None => Ok(state.outstanding.is_empty()),
         }
     }
+
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        let status = self.status()?;
+        Ok(match (status.usb_mounted, status.usb_suspended) {
+            (true, false) => ConsoleLink::Attached,
+            (true, true) => ConsoleLink::Suspended,
+            (false, _) => ConsoleLink::Detached,
+        })
+    }
 }
 
-impl Drop for Esp32WifiController {
+impl Drop for Connection {
     fn drop(&mut self) {
         let _ = self.writer.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {

@@ -12,6 +12,10 @@
 //! * USB: TinyUSB on the native USB port (GPIO19/20). Under QEMU reports are
 //!   logged instead.
 //! * API: control protocol on TCP 7878, HTTP + control page on port 80.
+//! * Keepalive: after 4 minutes without input the device nudges the right
+//!   stick by itself, so the Switch never dims (5 minutes) or auto-sleeps
+//!   (TV mode, 1 hour at the least) when the bot is stopped. Tune or turn it
+//!   off with `POST /api/keepalive`.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -21,7 +25,7 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use log::{info, warn};
 use pokebot_remote::protocol::CONTROL_PORT;
-use pokebot_remote::{Device, DeviceConfig};
+use pokebot_remote::{Device, DeviceConfig, Keepalive};
 
 const HTTP_PORT: u16 = 80;
 
@@ -40,21 +44,30 @@ fn main() -> Result<()> {
     let mut network = net::start(peripherals, sysloop)?;
 
     let name = option_env!("DEVICE_NAME").unwrap_or("PokeBot ESP32-S3 controller");
-    let device = Device::start(
-        DeviceConfig::new(name, Ipv4Addr::UNSPECIFIED.into(), CONTROL_PORT, HTTP_PORT),
-        sink,
-    )?;
+    let mut config = DeviceConfig::new(name, Ipv4Addr::UNSPECIFIED.into(), CONTROL_PORT, HTTP_PORT);
+    config.keepalive = Some(Keepalive::default());
+    let device = Device::start(config, sink)?;
     let ip = network.ip()?;
     info!("control: {ip}:{}  (pokebot --controller esp32:{ip})", device.control_addr().port());
     info!("http:    http://{ip}:{}/", device.http_addr().port());
 
     let mut last_mounted = None;
+    let mut last_keepalives = 0;
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        let mounted = device.status().usb_mounted;
-        if last_mounted != Some(mounted) {
-            info!("usb: {}", if mounted { "mounted by host" } else { "not mounted" });
-            last_mounted = Some(mounted);
+        let status = device.status();
+        let usb = match (status.usb_mounted, status.usb_suspended) {
+            (false, _) => "not mounted",
+            (true, true) => "suspended by host (asleep)",
+            (true, false) => "mounted by host",
+        };
+        if last_mounted != Some(usb) {
+            info!("usb: {usb}");
+            last_mounted = Some(usb);
+        }
+        if status.keepalives != last_keepalives {
+            info!("keepalive: idle input played ({} so far)", status.keepalives);
+            last_keepalives = status.keepalives;
         }
         if let Err(e) = network.keep_alive() {
             warn!("network: {e}");
@@ -98,6 +111,17 @@ mod usb {
         fn mounted(&self) -> bool {
             // SAFETY: plain query of TinyUSB state.
             unsafe { switch_hid::switch_hid_mounted() }
+        }
+
+        fn suspended(&self) -> bool {
+            // SAFETY: plain query of TinyUSB state.
+            unsafe { switch_hid::switch_hid_suspended() }
+        }
+
+        fn wake(&mut self) {
+            // SAFETY: TinyUSB call without arguments; a no-op unless the
+            // host suspended the bus and allowed remote wakeup.
+            unsafe { switch_hid::switch_hid_wake() }
         }
     }
 
