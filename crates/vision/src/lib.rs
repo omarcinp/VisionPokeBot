@@ -56,7 +56,11 @@ const GLOBAL_SEARCH_INTERVAL: u32 = 120;
 /// A frame counts as a transition when this share of pixels (per mille) is
 /// near-black or near-white.
 const UNIFORM_PER_MILLE: u32 = 995;
-const DARK_LUMA: u8 = 24;
+/// Near-black: also the last steps of a fade, which are dark grey rather
+/// than black (the zoom-in out of Mt. Moon's first-entry intro ends in
+/// concentric greys of luma 0–40). Such a frame matched the black void of
+/// MtMoon_B1F at score 1000; it must never be localized.
+const DARK_LUMA: u8 = 48;
 const BRIGHT_LUMA: u8 = 232;
 
 impl PerceptionSystem for FireRedPerception {
@@ -417,6 +421,32 @@ mod tests {
         let white = perception.observe(&frame(1, RgbImage::filled(240, 160, [255, 255, 255])));
         assert_eq!(white.screen.value, ScreenState::Transition);
         assert_eq!(white.metrics.changed_pixels, 240 * 160);
+    }
+
+    /// Live: the last frame of the fade after Mt. Moon's first-entry
+    /// intro (concentric greys, luma ≤ 40) was localized in MtMoon_B1F's
+    /// black void, sending CrossMtMoon to a ladder it couldn't reach.
+    #[test]
+    fn a_dark_grey_fade_frame_is_a_transition() {
+        let mut image = RgbImage::filled(240, 160, [8, 8, 8]);
+        let greys = [
+            [0, 0, 0],
+            [16, 16, 16],
+            [24, 24, 24],
+            [33, 32, 33],
+            [40, 40, 40],
+        ];
+        for (i, grey) in greys.iter().enumerate() {
+            let inset = 12 * (i as u32 + 1);
+            for y in inset..160 - inset {
+                for x in inset..240 - inset {
+                    image.put_pixel(x, y, *grey);
+                }
+            }
+        }
+        let observation = FireRedPerception::default().observe(&frame(0, image));
+        assert_eq!(observation.screen.value, ScreenState::Transition);
+        assert!(observation.player.is_none());
     }
 
     #[test]
