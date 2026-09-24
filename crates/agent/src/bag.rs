@@ -42,6 +42,26 @@ fn is_cancel(name: &str) -> bool {
     fits("CANCEL", name)
 }
 
+/// Bag rows: (name or item key, count).
+type Rows = Vec<(String, Option<u16>)>;
+
+/// A row's identity however its name read: `CANCEL`, the item constant, or
+/// the text itself when it doesn't resolve.
+fn item_key(data: &GameData, name: &str) -> String {
+    if is_cancel(name) {
+        "CANCEL".to_owned()
+    } else {
+        data.item_named(name).unwrap_or(name).to_owned()
+    }
+}
+
+/// Rows as (item key, count): equal when they read the same items.
+fn by_item(data: &GameData, rows: &[(String, Option<u16>)]) -> Vec<(String, Option<u16>)> {
+    rows.iter()
+        .map(|(name, count)| (item_key(data, name), *count))
+        .collect()
+}
+
 /// Rows read from a pocket as (item constant, count), CANCEL left out.
 /// `None` when any other row doesn't resolve to exactly one item, or has no
 /// count (key items, which print none, count 1).
@@ -59,6 +79,9 @@ pub fn read_rows(data: &GameData, rows: &[(String, Option<u16>)]) -> Option<Item
 
 /// More retries than this in one phase fail the audit.
 const MAX_RETRIES: u32 = 12;
+/// More retries than this in the whole audit fail it (phase changes don't
+/// reset this count).
+const MAX_TOTAL_RETRIES: u32 = 40;
 /// Start menu rows are 15 px apart; the ▶ sits 4 px below its row's top.
 const START_MENU_PITCH: u32 = 15;
 /// A wait (unreadable text, no ▶) this long counts as one retry.
@@ -98,6 +121,11 @@ pub struct PocketAudit {
     /// The pocket was read and `PocketObserved` emitted (with this summary).
     observed: Option<String>,
     retries: u32,
+    /// Retries over the whole audit.
+    total_retries: u32,
+    /// The last unconfirmed reading of the list: (frame, ▶ row, rows by
+    /// item). A reading counts only once a later frame reads the same.
+    candidate: Option<(u64, u8, Rows)>,
     /// What the last input was meant to show.
     pending: Option<Expectation>,
     waiting_since: Option<u64>,
@@ -113,6 +141,8 @@ impl PocketAudit {
             last_view: None,
             observed: None,
             retries: 0,
+            total_retries: 0,
+            candidate: None,
             pending: None,
             waiting_since: None,
         }
@@ -149,21 +179,18 @@ impl PocketAudit {
             self.last_view = None;
         } else if let Some(expect) = pending {
             // New rows (a list scrolling under a ▶ that stays put) are
-            // progress too.
+            // progress too; the same rows read differently are not.
             let scrolled = o
                 .bag
                 .as_ref()
                 .zip(self.last_view.as_ref())
-                .is_some_and(|(b, last)| b.rows != *last);
+                .is_some_and(|(b, last)| by_item(data, &b.rows) != by_item(data, last));
             if !expect.met(o) && !scrolled {
-                self.retries += 1;
+                self.retry();
             }
         }
-        if self.retries > MAX_RETRIES {
-            return Decision::Fail(format!(
-                "bag audit ({:?}): no progress after {MAX_RETRIES} retries in {phase:?}",
-                self.pocket
-            ));
+        if let Some(fail) = self.exhausted(&format!("no progress in {phase:?}")) {
+            return fail;
         }
         match phase {
             Phase::Open => {
@@ -265,6 +292,26 @@ impl PocketAudit {
         if bag.rows.is_empty() || read_rows(data, &bag.rows).is_none() {
             return self.wait(o, "reading the pocket's rows");
         }
+        // Counts are facts only once two frames read them the same (one
+        // misread digit on the Switch must not become a count).
+        let view = by_item(data, &bag.rows);
+        match self.candidate.take() {
+            Some((frame, row, seen)) if row == cursor && frame < o.frame_id => {
+                if seen != view {
+                    self.candidate = Some((o.frame_id, cursor, view));
+                    self.retry();
+                    return self.wait(o, "re-reading rows that read differently");
+                }
+            }
+            Some(same) if same.0 >= o.frame_id => {
+                self.candidate = Some(same);
+                return self.wait(o, "confirming the rows on a later frame");
+            }
+            _ => {
+                self.candidate = Some((o.frame_id, cursor, view));
+                return self.wait(o, "confirming the rows on a later frame");
+            }
+        }
         self.top_seen |= cursor == 0;
         if !self.top_seen {
             self.last_view = Some(bag.rows.clone());
@@ -276,13 +323,17 @@ impl PocketAudit {
             );
         }
         // Merge in order; a row is the same item however its name read.
-        let key = |name: &str| {
-            if is_cancel(name) {
-                Some("CANCEL")
-            } else {
-                data.item_named(name)
-            }
-        };
+        let key = |name: &str| item_key(data, name);
+        // Rows seen before must read the same now (the overlap between views).
+        let conflict = bag.rows.iter().any(|(name, count)| {
+            self.rows
+                .iter()
+                .any(|(n, c)| key(n) == key(name) && c != count)
+        });
+        if conflict {
+            self.retry();
+            return self.wait(o, "re-reading rows that differ from the last view");
+        }
         for row in &bag.rows {
             if !self.rows.iter().any(|(name, _)| key(name) == key(&row.0)) {
                 self.rows.push(row.clone());
@@ -320,6 +371,7 @@ impl PocketAudit {
 
     fn act(&mut self, label: &str, button: Button, expect: Expectation, timeout: u64) -> Decision {
         self.waiting_since = None;
+        self.candidate = None;
         self.pending = Some(expect.clone());
         Decision::Act(Action::new(
             label,
@@ -333,13 +385,40 @@ impl PocketAudit {
     fn wait(&mut self, o: &Observation, reason: &str) -> Decision {
         let since = *self.waiting_since.get_or_insert(o.frame_id);
         if o.frame_id.saturating_sub(since) >= WAIT_RETRY_FRAMES {
-            self.retries += 1;
+            self.retry();
             self.waiting_since = Some(o.frame_id);
         }
-        if self.retries > MAX_RETRIES {
-            return Decision::Fail(format!("bag audit ({:?}): stuck {reason}", self.pocket));
+        if let Some(fail) = self.exhausted(reason) {
+            return fail;
         }
         Decision::Wait(reason.to_owned())
+    }
+
+    fn retry(&mut self) {
+        self.retries += 1;
+        self.total_retries += 1;
+    }
+
+    /// Fails once a phase, or the whole audit, has used up its retries.
+    fn exhausted(&self, reason: &str) -> Option<Decision> {
+        if self.retries > MAX_RETRIES {
+            return Some(Decision::Fail(format!(
+                "bag audit ({:?}): {reason} after {MAX_RETRIES} retries in {:?}",
+                self.pocket, self.phase
+            )));
+        }
+        if self.total_retries > MAX_TOTAL_RETRIES {
+            return Some(Decision::Fail(format!(
+                "bag audit ({:?}): {reason}; {MAX_TOTAL_RETRIES} retries used in all",
+                self.pocket
+            )));
+        }
+        None
+    }
+
+    /// The pocket was read and `PocketObserved` emitted.
+    pub fn observed(&self) -> bool {
+        self.observed.is_some()
     }
 }
 
@@ -456,6 +535,21 @@ mod tests {
         }
     }
 
+    /// A list reading counts only when a later frame reads the same: the
+    /// first frame waits, the second (`frame + 1`) decides.
+    fn twice(
+        audit: &mut PocketAudit,
+        o: Observation,
+        data: &GameData,
+        events: &mut Vec<GameEvent>,
+    ) -> Decision {
+        let first = audit.next(&o, data, events);
+        assert!(matches!(first, Decision::Wait(_)), "first frame acted");
+        let mut again = o;
+        again.frame_id += 1;
+        audit.next(&again, data, events)
+    }
+
     fn pressed(action: &Action) -> Button {
         match action.commands.as_slice() {
             [ControllerCommand::Press(b)] => *b,
@@ -520,7 +614,8 @@ mod tests {
         assert!(events.is_empty());
 
         // CANCEL is visible: the pocket is read, then B closes the bag.
-        let a = act(audit.next(&bag(7, "POKé BALLS", &balls, 0), &data, &mut events));
+        let o = bag(7, "POKé BALLS", &balls, 0);
+        let a = act(twice(&mut audit, o, &data, &mut events));
         assert_eq!(
             (a.label.as_str(), pressed(&a)),
             ("close the bag", Button::B)
@@ -533,14 +628,14 @@ mod tests {
             }]
         );
         // Back on the Start menu (▶ still on BAG): B closes it.
-        let a = act(audit.next(&start_menu(8, 2), &data, &mut events));
+        let a = act(audit.next(&start_menu(9, 2), &data, &mut events));
         assert_eq!(
             (a.label.as_str(), pressed(&a)),
             ("close the Start menu", Button::B)
         );
         assert_eq!(a.expect, Expectation::BagClosed);
         assert!(matches!(
-            audit.next(&overworld(9), &data, &mut events),
+            audit.next(&overworld(10), &data, &mut events),
             Decision::Done(_)
         ));
         assert_eq!(events.len(), 1, "one PocketObserved");
@@ -565,12 +660,27 @@ mod tests {
         assert_eq!(pressed(&a), Button::Left);
         assert_eq!(a.expect, Expectation::BagPocket("KEY ITEMS".into()));
         let items = [("POTION", Some(1)), ("ANTIDOTE", Some(2)), ("CANCEL", None)];
-        let a = act(audit.next(&bag(2, "ITEMS", &items, 2), &data, &mut events));
+        let a = act(twice(
+            &mut audit,
+            bag(2, "ITEMS", &items, 2),
+            &data,
+            &mut events,
+        ));
         assert_eq!(pressed(&a), Button::Up);
         assert_eq!(a.expect, Expectation::BagCursorAt(1));
-        let a = act(audit.next(&bag(3, "ITEMS", &items, 1), &data, &mut events));
+        let a = act(twice(
+            &mut audit,
+            bag(4, "ITEMS", &items, 1),
+            &data,
+            &mut events,
+        ));
         assert_eq!(pressed(&a), Button::Up);
-        let a = act(audit.next(&bag(4, "ITEMS", &items, 0), &data, &mut events));
+        let a = act(twice(
+            &mut audit,
+            bag(6, "ITEMS", &items, 0),
+            &data,
+            &mut events,
+        ));
         assert_eq!(pressed(&a), Button::B);
         assert_eq!(
             events,
@@ -594,7 +704,12 @@ mod tests {
             ("BURN HEAL", Some(5)),
             ("ICE HEAL", Some(6)),
         ];
-        let a = act(audit.next(&bag(1, "ITEMS", &top, 0), &data, &mut events));
+        let a = act(twice(
+            &mut audit,
+            bag(1, "ITEMS", &top, 0),
+            &data,
+            &mut events,
+        ));
         assert_eq!(pressed(&a), Button::Down);
         assert_eq!(a.expect, Expectation::BagCursorAt(1));
         // The list scrolls under a ▶ that stays put: new rows count as progress.
@@ -606,7 +721,12 @@ mod tests {
             ("ICE HEAL", Some(6)),
             ("CANCEL", None),
         ];
-        let a = act(audit.next(&bag(2, "ITEMS", &scrolled, 3), &data, &mut events));
+        let a = act(twice(
+            &mut audit,
+            bag(3, "ITEMS", &scrolled, 3),
+            &data,
+            &mut events,
+        ));
         assert_eq!(pressed(&a), Button::B);
         let GameEvent::PocketObserved { items, .. } = &events[0] else {
             panic!("{events:?}")
@@ -659,5 +779,165 @@ mod tests {
             audit.next(&o, &data, &mut events),
             Decision::Wait(_)
         ));
+    }
+
+    fn observed(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PocketObserved { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_misread_count_is_re_read_until_two_frames_agree() {
+        let Some(data) = data() else { return };
+        let mut audit = PocketAudit::new(Pocket::PokeBalls);
+        let mut events = Vec::new();
+        let count = |frame, n| {
+            bag(
+                frame,
+                "POKé BALLS",
+                &[("POKé BALL", Some(n)), ("CANCEL", None)],
+                0,
+            )
+        };
+        // ×8, then a misread ×3, then ×8 again: no two frames agree yet.
+        for (frame, n) in [(1, 8), (2, 3), (3, 8)] {
+            assert!(matches!(
+                audit.next(&count(frame, n), &data, &mut events),
+                Decision::Wait(_)
+            ));
+        }
+        assert_eq!(observed(&events), 0);
+        let a = act(audit.next(&count(4, 8), &data, &mut events));
+        assert_eq!(pressed(&a), Button::B);
+        assert_eq!(
+            events,
+            vec![GameEvent::PocketObserved {
+                pocket: Pocket::PokeBalls,
+                items: vec![("ITEM_POKE_BALL".into(), 8)],
+            }]
+        );
+        // Both disagreements were retries.
+        assert_eq!(audit.total_retries, 2);
+    }
+
+    #[test]
+    fn rows_that_disagree_with_the_last_view_are_never_merged() {
+        let Some(data) = data() else { return };
+        let mut audit = PocketAudit::new(Pocket::Items);
+        let mut events = Vec::new();
+        let top = [
+            ("POTION", Some(1)),
+            ("ANTIDOTE", Some(2)),
+            ("PARLYZ HEAL", Some(3)),
+            ("AWAKENING", Some(4)),
+            ("BURN HEAL", Some(5)),
+            ("ICE HEAL", Some(6)),
+        ];
+        let a = act(twice(
+            &mut audit,
+            bag(1, "ITEMS", &top, 0),
+            &data,
+            &mut events,
+        ));
+        assert_eq!(pressed(&a), Button::Down);
+        // After scrolling, ANTIDOTE reads ×7 (it was ×2) on every frame.
+        let scrolled = [
+            ("ANTIDOTE", Some(7)),
+            ("PARLYZ HEAL", Some(3)),
+            ("AWAKENING", Some(4)),
+            ("BURN HEAL", Some(5)),
+            ("ICE HEAL", Some(6)),
+            ("CANCEL", None),
+        ];
+        let mut failed = false;
+        for frame in 3..40 {
+            match audit.next(&bag(frame, "ITEMS", &scrolled, 3), &data, &mut events) {
+                Decision::Wait(_) => {}
+                Decision::Fail(_) => {
+                    failed = true;
+                    break;
+                }
+                Decision::Act(a) => panic!("acted on conflicting rows: {}", a.label),
+                Decision::Done(r) => panic!("done: {r}"),
+            }
+        }
+        assert!(failed, "a lasting conflict fails the audit");
+        assert_eq!(observed(&events), 0);
+    }
+
+    #[test]
+    fn reading_noise_is_not_progress() {
+        let Some(data) = data() else { return };
+        let mut audit = PocketAudit::new(Pocket::Items);
+        let mut events = Vec::new();
+        let top = |potion: &'static str| {
+            [
+                (potion, Some(1)),
+                ("ANTIDOTE", Some(2)),
+                ("PARLYZ HEAL", Some(3)),
+                ("AWAKENING", Some(4)),
+                ("BURN HEAL", Some(5)),
+                ("ICE HEAL", Some(6)),
+            ]
+        };
+        let a = act(twice(
+            &mut audit,
+            bag(1, "ITEMS", &top("POTION"), 0),
+            &data,
+            &mut events,
+        ));
+        assert_eq!(pressed(&a), Button::Down);
+        // Down never lands; the same rows read with and without a `?`
+        // must not count as the list scrolling.
+        let mut failed = None;
+        for frame in 3..80 {
+            let name = if frame % 2 == 0 { "POTION" } else { "POT?ON" };
+            if let Decision::Fail(r) =
+                audit.next(&bag(frame, "ITEMS", &top(name), 0), &data, &mut events)
+            {
+                failed = Some(r);
+                break;
+            }
+        }
+        let reason = failed.expect("no progress fails");
+        assert!(reason.contains("retries"), "{reason}");
+        assert_eq!(observed(&events), 0);
+    }
+
+    #[test]
+    fn total_retries_are_capped_across_phases() {
+        let Some(data) = data() else { return };
+        let mut audit = PocketAudit::new(Pocket::PokeBalls);
+        let mut events = Vec::new();
+        // Each cycle: Start fails to open the menu 11 times (under the
+        // phase limit), then a partly drawn menu resets the phase.
+        let mut frame = 0;
+        let mut failed = None;
+        'cycles: for _ in 0..5 {
+            for _ in 0..12 {
+                frame += 1;
+                match audit.next(&overworld(frame), &data, &mut events) {
+                    Decision::Act(_) => {}
+                    Decision::Fail(r) => {
+                        failed = Some(r);
+                        break 'cycles;
+                    }
+                    _ => panic!("unexpected decision"),
+                }
+            }
+            frame += 1;
+            let mut partial = start_menu(frame, 0);
+            partial.menu_lines.truncate(1);
+            assert!(matches!(
+                audit.next(&partial, &data, &mut events),
+                Decision::Wait(_)
+            ));
+        }
+        let reason = failed.expect("the total cap fails the audit");
+        assert!(reason.contains("in all"), "{reason}");
+        assert!(audit.total_retries > MAX_TOTAL_RETRIES);
+        assert!(audit.retries <= MAX_RETRIES);
     }
 }

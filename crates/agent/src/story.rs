@@ -604,7 +604,21 @@ impl Task for StoryTask {
         // would otherwise be closed as unexpected menus below); dialogue
         // without a menu still goes to the dialogue handling.
         if let StoryStep::AuditPocket(pocket) = &step {
+            // Dialogue *with* a menu goes to the audit too: the Start menu
+            // shows a help line under it, and if that ever reads as a
+            // message box the handler below would take the Start menu for
+            // an unexpected question and fail the step. The audit only
+            // acts on a menu whose rows read as the Start menu (with BAG),
+            // so a real question never gets an answer from it: the audit
+            // waits and fails instead of pressing A on YES.
             if o.dialogue.is_none() || o.menu.is_some() {
+                // Settling counts here too (the step never reaches the
+                // counter below).
+                if o.dialogue.is_some() {
+                    self.quiet_frames = 0;
+                } else {
+                    self.quiet_frames = self.quiet_frames.saturating_add(1);
+                }
                 return self.audit_pocket(*pocket, o, ctx);
             }
         }
@@ -768,6 +782,15 @@ impl StoryTask {
             return Decision::Fail("the pocket audit needs game data".into());
         };
         let audit = self.audit.get_or_insert_with(|| PocketAudit::new(pocket));
+        // Start opens the menu only once the scene has settled, as walking
+        // does: pressed during a scripted pause it lands mid-cutscene.
+        if !audit.observed()
+            && o.bag.is_none()
+            && o.menu.is_none()
+            && self.quiet_frames < SETTLE_FRAMES
+        {
+            return Decision::Wait("letting the scene settle before the bag".into());
+        }
         match audit.next(o, &data, ctx.events) {
             Decision::Done(summary) => {
                 ctx.events.push(GameEvent::GoalProgress {
@@ -1260,7 +1283,16 @@ mod tests {
         let state = GameState::default();
         let mut labels = Vec::new();
         let mut events = Vec::new();
-        for o in [overworld(1), start.clone(), bag, start, overworld(5)] {
+        let mut bag_again = bag.clone();
+        bag_again.frame_id = 4;
+        for o in [
+            overworld(1),
+            start.clone(),
+            bag,
+            bag_again,
+            start,
+            overworld(5),
+        ] {
             let decision = task.next(&mut TaskContext {
                 observation: &o,
                 state: &state,
@@ -1278,6 +1310,7 @@ mod tests {
             [
                 "open the Start menu",
                 "open the BAG",
+                "wait: confirming the rows on a later frame",
                 "close the bag",
                 "close the Start menu",
                 "wait: pocket audited",
@@ -1295,6 +1328,63 @@ mod tests {
             }]
         );
         assert_eq!(task.current(), Some(&StoryStep::Settle { frames: 1 }));
+    }
+
+    #[test]
+    fn audit_waits_for_the_scene_to_settle_before_pressing_start() {
+        use pokebot_state::{GameState, Observed, PlayerPose, PoseObservation};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(data)) = (
+            World::load(root.join("data/world")),
+            GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let mut task = StoryTask::new(
+            Arc::new(world),
+            vec![Milestone::new(
+                "Audit",
+                "read the POKé BALLS pocket",
+                vec![StoryStep::AuditPocket(Pocket::PokeBalls)],
+            )],
+        )
+        .with_data(Arc::new(data));
+        // A conversation just ended (a scripted pause may follow).
+        task.quiet_frames = 0;
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut first_start = None;
+        for frame in 0..200u64 {
+            let mut o = Observation::bare(
+                frame,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation {
+                pose: PlayerPose {
+                    map: "PewterCity".into(),
+                    x: 17,
+                    y: 26,
+                },
+                score: 980,
+            });
+            let decision = task.next(&mut TaskContext {
+                observation: &o,
+                state: &state,
+                events: &mut events,
+            });
+            if let Decision::Act(a) = decision {
+                assert_eq!(a.label, "open the Start menu");
+                first_start = Some(frame);
+                break;
+            }
+        }
+        // quiet_frames counts one per observation: the first press comes
+        // once SETTLE_FRAMES quiet observations have passed.
+        assert_eq!(first_start, Some(u64::from(SETTLE_FRAMES) - 1));
     }
 
     #[test]
