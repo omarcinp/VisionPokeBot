@@ -46,8 +46,18 @@ impl SampleGrid {
     }
 }
 
+/// Brightest channel of a "void" pixel: the black outside a map's walls
+/// (MtMoon_B1F is mostly void between its parts) and of screen fades and
+/// battle wipes.
+const VOID: u8 = 24;
+/// Minimum share (per mille) of samples that aren't black on both the frame
+/// and the render: black matching black says nothing about where we are.
+const MIN_INFORMATIVE: u32 = 100;
+
 /// Score (per mille) of the player standing at `(x, y)` on `map`, or `None`
-/// once the score can no longer reach `floor`.
+/// once the score can no longer reach `floor`. Samples black on both the
+/// frame and the render are left out: a dark fade or a battle wipe (black
+/// sweeping over the view) otherwise matched MtMoon_B1F's void at 850–1000.
 pub fn score(
     frame: &RgbImage,
     render: &RgbImage,
@@ -64,14 +74,23 @@ pub fn score(
     if total == 0 {
         return None;
     }
+    // Leaving out samples only lowers the score's ceiling: (n - m) / n is at
+    // most (total - m) / total, so this bound still ends hopeless searches.
     let allowed_misses = total - (total * floor).div_ceil(1000);
     let mut misses = 0;
+    let mut void = 0;
     let (frame_bytes, render_bytes) = (frame.as_bytes(), render.as_bytes());
+    let is_void = |b: &[u8], i: usize| b[i..i + 3].iter().all(|&c| c <= VOID);
     for &(sx, sy) in &grid.points {
         let (rx, ry) = (ox + sx, oy + sy);
-        let matched = rx >= 0 && ry >= 0 && rx < rw && ry < rh && {
-            let fi = ((sy as u32 * frame.width() + sx as u32) * 3) as usize;
+        let fi = ((sy as u32 * frame.width() + sx as u32) * 3) as usize;
+        let inside = rx >= 0 && ry >= 0 && rx < rw && ry < rh;
+        let matched = inside && {
             let ri = ((ry * rw + rx) * 3) as usize;
+            if is_void(frame_bytes, fi) && is_void(render_bytes, ri) {
+                void += 1;
+                continue;
+            }
             (0..3).all(|c| frame_bytes[fi + c].abs_diff(render_bytes[ri + c]) <= TOLERANCE)
         };
         if !matched {
@@ -81,7 +100,12 @@ pub fn score(
             }
         }
     }
-    Some((total - misses) * 1000 / total)
+    let informative = total - void;
+    if informative * 1000 < total * MIN_INFORMATIVE {
+        return None;
+    }
+    let s = (informative - misses) * 1000 / informative;
+    (s >= floor).then_some(s)
 }
 
 pub struct Localizer<'w> {

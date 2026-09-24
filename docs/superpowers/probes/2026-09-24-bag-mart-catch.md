@@ -388,6 +388,9 @@ to close the texts. No wild encounters happened on this path.
 | `mtmoon-entry-intro.png` | first-entry MT. MOON intro | `mtmoon.txt` |
 | `mtmoon-1f.png` | `MtMoon_1F` (18,35) overworld | `mtmoon.txt` |
 | `mtmoon-1f-b.png` | `MtMoon_1F` (18,33) overworld | `mtmoon.txt` |
+| `mtmoon-battle-wipe.png` | wild-battle wipe on `MtMoon_1F` (19,27), view part black (Task 12 run, frame 2593) | live recording |
+| `mtmoon-battle-wipe-b.png` | the same wipe a few frames later, mostly black (frame 2603) | live recording |
+| `mtmoon-intro-fade.png` | last zoom-in fade frame after the first-entry intro: concentric greys, luma 0–40 (frame 2118) | live recording |
 
 ---
 
