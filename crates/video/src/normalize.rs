@@ -34,6 +34,12 @@ impl Normalizer {
         Self { locator }
     }
 
+    /// A fixed viewport inside a bigger capture (a capture card), as opposed
+    /// to a source that is only the game (the emulator, images).
+    pub fn letterboxed(&self) -> bool {
+        matches!(self.locator, ViewportLocator::Fixed(_))
+    }
+
     /// Whether the letterbox around a fixed viewport is lit, i.e. the
     /// console is showing something other than the game (the Switch HOME
     /// menu, a system dialog). Always false for full-frame sources.
@@ -57,6 +63,24 @@ impl Normalizer {
         sample(0, rect.x.min(image.width()));
         sample((rect.x + rect.width).min(image.width()), image.width());
         total > 0 && lit * 2 > total
+    }
+
+    /// Whether the whole captured frame is black: no HDMI signal (the Switch
+    /// is off or asleep) or a fade. At least 99 % of the samples (every 16th
+    /// pixel) must be darker than 24 in every channel, which JPEG noise on a
+    /// black signal stays under.
+    pub fn dark(frame: &CapturedFrame) -> bool {
+        let image = &frame.image;
+        let (mut lit, mut total) = (0u32, 0u32);
+        for y in (0..image.height()).step_by(16) {
+            for x in (0..image.width()).step_by(16) {
+                total += 1;
+                if image.pixel(x, y).iter().any(|&c| c > 24) {
+                    lit += 1;
+                }
+            }
+        }
+        lit * 100 <= total
     }
 
     pub fn normalize(&self, frame: &CapturedFrame) -> Result<NormalizedFrame> {

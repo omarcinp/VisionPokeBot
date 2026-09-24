@@ -11,6 +11,7 @@ pub mod bag;
 pub mod battle;
 pub mod catch;
 pub mod checkpoint;
+pub mod console;
 mod executor;
 pub mod keyboard;
 pub mod learn;
