@@ -1,11 +1,11 @@
 //! Learning a move when four are already known, driven entirely by what is
 //! on screen: the text names the offered move, the KNOWN MOVES list shows
 //! the current moves, and the confirmation text says what was forgotten and
-//! learned. Party knowledge changes only when that text is seen.
+//! learned. Party changes are emitted as events only when that text is seen.
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::MoveListObservation;
+use pokebot_state::{GameEvent, MoveListObservation};
 
 use crate::moves::{self, LearnChoice};
 use crate::party::{display_name, names_match, Member, Party};
@@ -75,19 +75,21 @@ pub struct MoveLearning {
 }
 
 impl MoveLearning {
-    /// Interprets a fully printed page. Returns what changed, for the log.
+    /// Interprets a fully printed page. Returns the party events it implies
+    /// and what changed, for the log.
     pub fn observe_page(
         &mut self,
         lines: &[String],
         data: &GameData,
-        party: &mut Party,
+        party: &Party,
         targets: &[String],
-    ) -> Vec<String> {
+    ) -> (Vec<GameEvent>, Vec<String>) {
         let page = lines.join(" ");
         if page.is_empty() || page == self.last_page {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         self.last_page = page.clone();
+        let mut events = Vec::new();
         let mut log = Vec::new();
         for fact in parse(&page) {
             match fact {
@@ -125,14 +127,26 @@ impl MoveLearning {
                     let Some(member) = member_named(party, &pokemon) else {
                         continue;
                     };
+                    let max_pp = data.move_(&key).map_or(0, |m| m.pp);
                     match self.forgot_slot.take() {
                         Some((old, slot)) if member.moves.get(slot) == Some(&old) => {
-                            member.moves[slot] = key.clone();
                             log.push(format!("{pokemon} forgot {old} and learned {mv}"));
+                            events.push(GameEvent::MoveReplaced {
+                                slot: member.slot,
+                                move_slot: slot as u8,
+                                old,
+                                new: key,
+                                max_pp,
+                            });
                         }
                         _ if !member.moves.contains(&key) && member.moves.len() < 4 => {
-                            member.moves.push(key.clone());
                             log.push(format!("{pokemon} learned {mv}"));
+                            events.push(GameEvent::MoveLearned {
+                                slot: member.slot,
+                                move_slot: member.moves.len() as u8,
+                                mv: key,
+                                max_pp,
+                            });
                         }
                         _ => {}
                     }
@@ -152,13 +166,16 @@ impl MoveLearning {
                         .cloned();
                     if let (Some(member), Some(species)) = (member_named(party, &pokemon), species)
                     {
-                        member.species = species;
                         log.push(format!("{pokemon} evolved into {into}"));
+                        events.push(GameEvent::Evolved {
+                            slot: member.slot,
+                            species,
+                        });
                     }
                 }
             }
         }
-        log
+        (events, log)
     }
 
     /// The answer to a YES/NO question about the offered move, if the page
@@ -176,20 +193,28 @@ impl MoveLearning {
     }
 
     /// Input on the KNOWN MOVES list: confirm the moves shown, move the
-    /// frame to the chosen row and press A.
+    /// frame to the chosen row and press A. The moves shown, when they differ
+    /// from the party's, come back as a `MovesObserved` event.
     pub fn on_move_list(
         &mut self,
         list: &MoveListObservation,
         data: &GameData,
-        party: &mut Party,
+        party: &Party,
         targets: &[String],
-    ) -> Decision {
+    ) -> (Decision, Vec<GameEvent>) {
         let Some(offer) = self.offer.clone() else {
-            return Decision::Fail("move list open but no move is being offered".into());
+            return (
+                Decision::Fail("move list open but no move is being offered".into()),
+                Vec::new(),
+            );
         };
         let Some(member) = member_named(party, &offer.pokemon) else {
-            return Decision::Fail(format!("{} is not in the party", offer.pokemon));
+            return (
+                Decision::Fail(format!("{} is not in the party", offer.pokemon)),
+                Vec::new(),
+            );
         };
+        let mut events = Vec::new();
         // The list shows the real moves: adopt them if they read cleanly.
         let shown: Option<Vec<String>> = list
             .moves
@@ -198,8 +223,15 @@ impl MoveLearning {
             .map(|n| data.move_named(n).map(str::to_owned))
             .collect();
         if let Some(shown) = shown.filter(|s| s.len() == 4 && *s != member.moves) {
-            member.moves = shown;
-            let choice = moves::choose(data, member, &offer.mv, targets);
+            events.push(GameEvent::MovesObserved {
+                slot: member.slot,
+                moves: shown.clone(),
+            });
+            let seen = Member {
+                moves: shown,
+                ..member.clone()
+            };
+            let choice = moves::choose(data, &seen, &offer.mv, targets);
             self.offer = Some(Offer {
                 choice,
                 ..offer.clone()
@@ -211,10 +243,10 @@ impl MoveLearning {
             LearnChoice::Skip => NEW_MOVE_ROW,
         };
         let Some(at) = list.selected else {
-            return Decision::Wait("move list: no selection yet".into());
+            return (Decision::Wait("move list: no selection yet".into()), events);
         };
         if at == target {
-            return Decision::Act(Action::new(
+            let decision = Decision::Act(Action::new(
                 format!(
                     "pick row {} ({})",
                     target + 1,
@@ -224,25 +256,27 @@ impl MoveLearning {
                 Expectation::MoveListClosed,
                 120,
             ));
+            return (decision, events);
         }
         let (button, next) = if at < target {
             (Button::Down, at + 1)
         } else {
             (Button::Up, at - 1)
         };
-        Decision::Act(Action::new(
+        let decision = Decision::Act(Action::new(
             format!("move list: {button:?} toward row {}", target + 1),
             vec![ControllerCommand::Press(button)],
             Expectation::MoveListAt(next),
             45,
-        ))
+        ));
+        (decision, events)
     }
 }
 
-fn member_named<'a>(party: &'a mut Party, read: &str) -> Option<&'a mut Member> {
+fn member_named<'a>(party: &'a Party, read: &str) -> Option<&'a Member> {
     party
         .members
-        .iter_mut()
+        .iter()
         .find(|m| names_match(&m.display_name(), read))
 }
 
@@ -294,5 +328,51 @@ mod tests {
             }]
         );
         assert!(parse("Delete a move to make room for POISONPOWDER?").is_empty());
+    }
+    #[test]
+    fn a_swap_becomes_a_replace_event() {
+        let Some(d) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        )
+        .ok() else {
+            return;
+        };
+        let party = Party {
+            members: vec![Member {
+                slot: 0,
+                species: "SPECIES_BULBASAUR".into(),
+                level: 15,
+                moves: [
+                    "MOVE_TACKLE",
+                    "MOVE_GROWL",
+                    "MOVE_LEECH_SEED",
+                    "MOVE_VINE_WHIP",
+                ]
+                .map(String::from)
+                .to_vec(),
+                hp: None,
+                pp_used: Default::default(),
+            }],
+        };
+        let mut l = MoveLearning::default();
+        let page = |s: &str| vec![s.to_owned()];
+        l.observe_page(
+            &page("BULBASAUR is trying to learn POISONPOWDER."),
+            &d,
+            &party,
+            &[],
+        );
+        l.observe_page(&page("BULBASAUR forgot GROWL."), &d, &party, &[]);
+        let (events, _) = l.observe_page(&page("BULBASAUR learned POISONPOWDER!"), &d, &party, &[]);
+        assert_eq!(
+            events,
+            vec![GameEvent::MoveReplaced {
+                slot: 0,
+                move_slot: 1,
+                old: "MOVE_GROWL".into(),
+                new: "MOVE_POISON_POWDER".into(),
+                max_pp: 35
+            }]
+        );
     }
 }

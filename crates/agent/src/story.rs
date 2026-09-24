@@ -18,7 +18,8 @@ use crate::battle::{self, BattleMemory, BattlePolicy};
 use crate::learn::MoveLearning;
 use crate::nav::{Destination, NavStatus, Navigator};
 use crate::new_game::{advance_or_wait, select};
-use crate::party::Party;
+use crate::party::{self, Party};
+use crate::track::TextTracker;
 use crate::{Action, Decision, Expectation, Outcome, Task, TaskContext};
 
 /// Quiet frames (no dialogue) after a conversation or cutscene before the
@@ -119,6 +120,7 @@ enum TalkPhase {
 pub struct StoryTask {
     world: Arc<World>,
     data: Option<Arc<GameData>>,
+    /// The party as last read from the game state (refreshed every tick).
     party: Party,
     milestones: Vec<Milestone>,
     milestone: usize,
@@ -139,6 +141,8 @@ pub struct StoryTask {
     pacing: Option<(Tile, Tile, bool)>,
     /// New moves and evolution, read from the screen.
     learning: MoveLearning,
+    /// Money, items, heals and empty moves, read from dialogue text.
+    tracker: TextTracker,
     /// Trainers the last plan prepared for (values moves when learning).
     upcoming: Vec<String>,
 }
@@ -165,18 +169,19 @@ impl StoryTask {
             last_dialogue_frame: None,
             pacing: None,
             learning: MoveLearning::default(),
+            tracker: TextTracker::default(),
             upcoming: Vec::new(),
         }
     }
 
-    /// Game data and party knowledge enable planning, training and move
-    /// choice.
-    pub fn with_party(mut self, data: Arc<GameData>, party: Party) -> Self {
+    /// Game data enables planning, training and move choice (the party
+    /// itself is read from the game state).
+    pub fn with_data(mut self, data: Arc<GameData>) -> Self {
         self.data = Some(data);
-        self.party = party;
         self
     }
 
+    /// The party as last read from the game state.
     pub fn party(&self) -> &Party {
         &self.party
     }
@@ -397,6 +402,7 @@ impl Task for StoryTask {
     }
 
     fn next(&mut self, ctx: &mut TaskContext<'_>) -> Decision {
+        self.party = Party::from_state(ctx.state);
         let o = ctx.observation;
         let Some(milestone) = self.milestones.get(self.milestone) else {
             let names: Vec<&str> = self.milestones.iter().map(|m| m.name.as_str()).collect();
@@ -421,22 +427,31 @@ impl Task for StoryTask {
                 .as_ref()
                 .filter(|d| d.ready_for_a() || o.menu.is_some())
             {
-                for detail in
+                let (events, log) =
                     self.learning
-                        .observe_page(&d.lines, &data, &mut self.party, &self.upcoming)
-                {
+                        .observe_page(&d.lines, &data, &self.party, &self.upcoming);
+                ctx.events.extend(events);
+                for detail in log {
                     ctx.events.push(GameEvent::GoalProgress {
                         goal: "Story".into(),
                         phase: "Party".into(),
                         detail,
                     });
                 }
+                ctx.events.extend(self.tracker.observe_page(
+                    &d.lines,
+                    &data,
+                    &self.party,
+                    self.battle_memory.last_slot,
+                ));
             }
             if let Some(list) = &o.move_list {
                 self.quiet_frames = 0;
-                return self
-                    .learning
-                    .on_move_list(list, &data, &mut self.party, &self.upcoming);
+                let (decision, events) =
+                    self.learning
+                        .on_move_list(list, &data, &self.party, &self.upcoming);
+                ctx.events.extend(events);
+                return decision;
             }
             if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
                 if let Some(yes) = self.learning.answer(&d.lines) {
@@ -467,7 +482,7 @@ impl Task for StoryTask {
             }
             if let Some(data) = &self.data {
                 ctx.events
-                    .extend(crate::party::battle_events(data, &self.party, battle));
+                    .extend(party::battle_events(data, &self.party, battle));
             }
             if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) {
                 return Decision::Fail(format!(
@@ -616,16 +631,13 @@ impl Task for StoryTask {
         }
     }
 
-    fn on_outcome(&mut self, action: &Action, outcome: Outcome, _ctx: &mut TaskContext<'_>) {
+    fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut TaskContext<'_>) {
         if action.label == "choose RUN" && outcome == Outcome::Confirmed {
             self.battle_memory.run_attempts += 1;
         }
         if action.label.starts_with("choose move") && outcome == Outcome::Confirmed {
-            if let (Some(mv), Some(lead)) = (
-                self.battle_memory.last_move.clone(),
-                self.party.members.first_mut(),
-            ) {
-                *lead.pp_used.entry(mv).or_insert(0) += 1;
+            if let Some((slot, move_slot)) = self.battle_memory.last_slot {
+                ctx.events.push(GameEvent::MoveUsed { slot, move_slot });
             }
         }
         match (&action.expect, outcome) {

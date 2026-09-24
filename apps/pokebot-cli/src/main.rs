@@ -507,7 +507,7 @@ fn story(
             let mut attempt = 1;
             loop {
                 let mut task = StoryTask::new(Arc::clone(&world), vec![milestone.clone()])
-                    .with_party(Arc::clone(&data), progress.party.clone());
+                    .with_data(Arc::clone(&data));
                 match executor.run(&mut runtime, &mut task, stop) {
                     Ok(_) => {
                         progress.party = task.party().clone();

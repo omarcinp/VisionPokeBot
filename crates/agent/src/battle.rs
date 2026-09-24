@@ -40,6 +40,8 @@ pub struct BattleMemory {
     pub trainer: bool,
     /// Last move chosen (for PP accounting).
     pub last_move: Option<String>,
+    /// (party slot, move slot) of the last move chosen.
+    pub last_slot: Option<(u8, u8)>,
 }
 
 /// The opponent as a combatant, if its name and level can be read.
@@ -145,6 +147,7 @@ pub fn decide(
                 return Some(Decision::Fail("no damaging move has PP left".into()));
             };
             memory.last_move = Some(name.clone());
+            memory.last_slot = party.lead().map(|lead| (lead.slot, slot));
             let label = format!("move {} ({})", slot + 1, name.trim_start_matches("MOVE_"));
             step_toward(
                 (column, row),
