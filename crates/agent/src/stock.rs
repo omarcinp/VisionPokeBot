@@ -33,14 +33,19 @@ pub fn ball_count(state: &GameState) -> Option<u16> {
 /// Poké Balls to buy to reach [`TARGET_STOCK`], keeping the price of
 /// [`POTIONS_KEPT`] Potions. 0 when either price is missing from the data.
 pub fn buy_count(data: &GameData, stock: u16, money: u32) -> u16 {
+    let need = TARGET_STOCK.saturating_sub(stock);
+    need.min(affordable(data, "ITEM_POKE_BALL", money))
+}
+
+/// How many of `item` `money` pays for while keeping the price of
+/// [`POTIONS_KEPT`] Potions. 0 when either price is missing from the data.
+pub fn affordable(data: &GameData, item: &str, money: u32) -> u16 {
     let price = |item: &str| data.items.get(item).map(|i| i.price).filter(|p| *p > 0);
-    let (Some(potion), Some(ball)) = (price("ITEM_POTION"), price("ITEM_POKE_BALL")) else {
+    let (Some(potion), Some(price)) = (price("ITEM_POTION"), price(item)) else {
         return 0;
     };
-    let need = TARGET_STOCK.saturating_sub(stock);
     let budget = money.saturating_sub(POTIONS_KEPT * potion);
-    let affordable = budget / ball;
-    need.min(u16::try_from(affordable).unwrap_or(u16::MAX))
+    u16::try_from(budget / price).unwrap_or(u16::MAX)
 }
 
 /// The stock is known to be below the shiny reserve: buy before going on.

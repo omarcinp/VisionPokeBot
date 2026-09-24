@@ -20,7 +20,7 @@ pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BagObservation, BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction,
     FrameMetrics, KeyboardFocus, MenuObservation, MoveListObservation, NamingObservation,
-    Observation, Observed, PlayerPose, PoseObservation, Region,
+    Observation, Observed, PlayerPose, PoseObservation, Region, ShinyReading, ShopObservation,
 };
 pub use party::{MoveSlot, PartyMon, Status};
 pub use reducer::{DefaultReducer, StateReducer};

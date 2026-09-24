@@ -13,6 +13,16 @@ pub const MESSAGE_TEXT: Region = Region {
     width: 224,
     height: 36,
 };
+/// Interior of the battle text box (x 8..=231, y 119..=152). Its frame rows
+/// at y 118 and y 153 are (231,219,231): inside `MESSAGE_TEXT` they
+/// outnumber the white text, the ink cluster centres on the frame colour and
+/// the second line is lost ("RED used" without "POKé BALL!").
+pub const BATTLE_TEXT: Region = Region {
+    x: 8,
+    y: 119,
+    width: 224,
+    height: 34,
+};
 /// Body of a full-screen information page (below the header bar).
 pub const INFO_BODY: Region = Region {
     x: 0,
@@ -48,7 +58,7 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
     let (kind, region) = if is_message_box(image) {
         (DialogueKind::MessageBox, MESSAGE_TEXT)
     } else if super::battle::is_battle_text_box(image) {
-        (DialogueKind::BattleText, MESSAGE_TEXT)
+        (DialogueKind::BattleText, BATTLE_TEXT)
     } else if is_info_page(image) {
         (DialogueKind::InfoPage, INFO_BODY)
     } else {

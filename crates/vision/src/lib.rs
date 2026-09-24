@@ -7,6 +7,7 @@
 
 pub mod color;
 pub mod detect;
+pub mod shiny;
 pub mod text;
 
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub struct FireRedPerception {
     small_font: Option<Arc<text::Font>>,
     /// Last text read and the text cells it was read from.
     last_read: Option<(Vec<u8>, Vec<String>)>,
+    /// Species sprite palettes for the opponent's shiny check.
+    palettes: Option<Arc<shiny::SpritePalettes>>,
 }
 
 /// Frames between whole-world searches while the player can't be located.
@@ -53,7 +56,11 @@ const GLOBAL_SEARCH_INTERVAL: u32 = 120;
 /// A frame counts as a transition when this share of pixels (per mille) is
 /// near-black or near-white.
 const UNIFORM_PER_MILLE: u32 = 995;
-const DARK_LUMA: u8 = 24;
+/// Near-black: also the last steps of a fade, which are dark grey rather
+/// than black (the zoom-in out of Mt. Moon's first-entry intro ends in
+/// concentric greys of luma 0–40). Such a frame matched the black void of
+/// MtMoon_B1F at score 1000; it must never be localized.
+const DARK_LUMA: u8 = 48;
 const BRIGHT_LUMA: u8 = 232;
 
 impl PerceptionSystem for FireRedPerception {
@@ -96,6 +103,15 @@ impl PerceptionSystem for FireRedPerception {
             observation.menu = Some(menu);
             return observation;
         }
+        if detect::pokedex::is_page(image) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "pokedex-page"),
+                metrics,
+            );
+            observation.pokedex_page = true;
+            return observation;
+        }
         if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -115,6 +131,15 @@ impl PerceptionSystem for FireRedPerception {
                 let mut observation =
                     Observation::bare(frame.frame_id, screen(state, "bag-screen"), metrics);
                 observation.bag = Some(bag);
+                return observation;
+            }
+            if let Some(shop) = detect::shop::detect(image, font, small_font) {
+                let mut observation = Observation::bare(
+                    frame.frame_id,
+                    screen(ScreenState::Shop, "shop-screen"),
+                    metrics,
+                );
+                observation.shop = Some(shop);
                 return observation;
             }
         }
@@ -154,6 +179,9 @@ impl PerceptionSystem for FireRedPerception {
                     .collect();
             }
         }
+        if let (Some(b), Some(palettes)) = (&mut battle, &self.palettes) {
+            b.opponent_shiny = opponent_shiny(image, b, palettes);
+        }
         let battle_menu = battle.as_ref().and_then(|b| b.menu);
         // In battle, list menus appear only over battle text (YES/NO
         // questions such as "Delete a move…?").
@@ -180,6 +208,10 @@ impl PerceptionSystem for FireRedPerception {
             (None, None) => screen(ScreenState::Unknown, "none"),
         };
         let mut observation = Observation::bare(frame.frame_id, state, metrics);
+        if let (Some(m), Some(font)) = (&menu, &self.font) {
+            let cursor = detect::menu::cursor_region(image, m);
+            observation.menu_lines = font.read(image, m.window, &[cursor]);
+        }
         observation.dialogue = dialogue;
         observation.menu = menu;
         let in_battle = battle.is_some();
@@ -213,6 +245,13 @@ impl FireRedPerception {
     /// Reads small-font text (battle move names).
     pub fn with_small_font(mut self, font: Arc<text::Font>) -> Self {
         self.small_font = Some(font);
+        self
+    }
+
+    /// Checks the opponent's sprite against these palettes (keyed by the
+    /// species name the HUD prints).
+    pub fn with_palettes(mut self, palettes: Arc<shiny::SpritePalettes>) -> Self {
+        self.palettes = Some(palettes);
         self
     }
 
@@ -293,6 +332,30 @@ impl FireRedPerception {
     }
 }
 
+/// The opponent's shiny reading: only on the command menu (FIGHT/BAG/…),
+/// where the front sprite is fully drawn (text frames such as "Gotcha!"
+/// can show the HUD over an empty platform), and only when the HUD name
+/// resolves to one palette entry.
+fn opponent_shiny(
+    image: &RgbImage,
+    battle: &pokebot_state::BattleObservation,
+    palettes: &shiny::SpritePalettes,
+) -> Option<pokebot_state::ShinyReading> {
+    if !matches!(battle.menu, Some(BattleMenu::Command { .. })) {
+        return None;
+    }
+    battle.opponent_hp?;
+    let name = battle.opponent_name.as_deref()?;
+    let key = detect::hud::resolve(name, palettes.keys().map(String::as_str))?;
+    let (normal, shiny_palette) = &palettes[key];
+    Some(shiny::classify(
+        image,
+        detect::battle::OPPONENT_SPRITE,
+        normal,
+        shiny_palette,
+    ))
+}
+
 /// "a/b" → (a, b).
 fn read_fraction(text: &str) -> Option<(u8, u8)> {
     let (a, b) = text.trim().split_once('/')?;
@@ -360,6 +423,32 @@ mod tests {
         assert_eq!(white.metrics.changed_pixels, 240 * 160);
     }
 
+    /// Live: the last frame of the fade after Mt. Moon's first-entry
+    /// intro (concentric greys, luma ≤ 40) was localized in MtMoon_B1F's
+    /// black void, sending CrossMtMoon to a ladder it couldn't reach.
+    #[test]
+    fn a_dark_grey_fade_frame_is_a_transition() {
+        let mut image = RgbImage::filled(240, 160, [8, 8, 8]);
+        let greys = [
+            [0, 0, 0],
+            [16, 16, 16],
+            [24, 24, 24],
+            [33, 32, 33],
+            [40, 40, 40],
+        ];
+        for (i, grey) in greys.iter().enumerate() {
+            let inset = 12 * (i as u32 + 1);
+            for y in inset..160 - inset {
+                for x in inset..240 - inset {
+                    image.put_pixel(x, y, *grey);
+                }
+            }
+        }
+        let observation = FireRedPerception::default().observe(&frame(0, image));
+        // Transitions are never localized (observe returns before locate).
+        assert_eq!(observation.screen.value, ScreenState::Transition);
+    }
+
     #[test]
     fn synthetic_message_box_with_arrow_is_dialogue_waiting() {
         let mut image = RgbImage::filled(240, 160, [66, 138, 132]);
@@ -396,6 +485,44 @@ mod tests {
             let d = p.observe(&frame(0, image)).dialogue.unwrap();
             assert_eq!(d.help, help, "{fixture}");
         }
+    }
+
+    #[test]
+    fn start_menu_rows_are_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        // Emulator, Pewter mart: the ▶ on POKéDEX, then on BAG (15 px pitch).
+        for (fixture, cursor_y) in [("start-menu", 10), ("start-menu-bag", 40)] {
+            let Ok(image) =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{fixture}.png")))
+            else {
+                return;
+            };
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            let o = p.observe(&frame(0, image));
+            assert_eq!(o.screen.value, ScreenState::Menu, "{fixture}");
+            assert!(
+                o.dialogue.is_none(),
+                "{fixture}: the help line is not dialogue"
+            );
+            let menu = o.menu.unwrap();
+            assert_eq!((menu.window.y, menu.cursor_y), (6, cursor_y), "{fixture}");
+            assert_eq!(
+                o.menu_lines,
+                ["POKéDEX", "POKéMON", "BAG", "RED", "SAVE", "OPTION", "EXIT"],
+                "{fixture}"
+            );
+        }
+        // Without a menu there is nothing to read.
+        let Ok(image) = pokebot_video::png::load(root.join("captures/fixtures/bag-items.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default().with_font(font);
+        assert!(p.observe(&frame(0, image)).menu_lines.is_empty());
     }
 
     #[test]
@@ -494,6 +621,172 @@ mod tests {
             d.lines,
             vec!["Okay, I’ll take your POKéMON for a", "few seconds."]
         );
+    }
+
+    /// Normal/small fonts and the palettes of the fixtures' wild species
+    /// (RATTATA in the emulator's, PIDGEY in the Switch's) from the game data.
+    fn catch_perception() -> Option<FireRedPerception> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let normal = text::Font::load(root.join("data/world/font_normal.json")).ok()?;
+        let small = text::Font::load(root.join("data/world/font_small.json")).ok()?;
+        let data = pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")).ok()?;
+        let mut palettes = shiny::SpritePalettes::new();
+        for name in ["RATTATA", "PIDGEY"] {
+            let p = data
+                .species
+                .get(&format!("SPECIES_{name}"))?
+                .palettes
+                .clone()?;
+            palettes.insert(
+                name.into(),
+                (p.normal.try_into().ok()?, p.shiny.try_into().ok()?),
+            );
+        }
+        Some(
+            FireRedPerception::default()
+                .with_font(std::sync::Arc::new(normal))
+                .with_small_font(std::sync::Arc::new(small))
+                .with_palettes(std::sync::Arc::new(palettes)),
+        )
+    }
+
+    fn fixture(name: &str) -> Option<RgbImage> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        pokebot_video::png::load(root.join("captures/fixtures").join(name)).ok()
+    }
+
+    /// Wild battles on the command menu: the opponent, whether the caught
+    /// icon shows, and a normal-palette reading. `dir` is the fixture
+    /// source ("" = emulator, "switch/" = the physical Switch).
+    fn wild_battles(dir: &str, species: &str) {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        for (name, caught) in [
+            ("battle-wild-uncaught.png", false),
+            ("battle-wild-caught.png", true),
+        ] {
+            let Some(image) = fixture(&format!("{dir}{name}")) else {
+                continue;
+            };
+            let b = p.observe(&frame(0, image)).battle.expect(name);
+            assert_eq!(b.opponent_name.as_deref(), Some(species), "{dir}{name}");
+            assert_eq!(b.opponent_caught, Some(caught), "{dir}{name}");
+            assert_eq!(
+                b.opponent_shiny,
+                Some(pokebot_state::ShinyReading::Normal),
+                "{dir}{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn caught_icon_and_shiny_reading_on_wild_battles() {
+        wild_battles("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_caught_icon_and_shiny_reading_on_wild_battles() {
+        wild_battles("switch/", "PIDGEY");
+    }
+
+    /// "Gotcha!": the HUD and HP bar still show, the platform is empty.
+    fn shiny_only_on_command_menu(dir: &str, species: &str) {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        let Some(image) = fixture(&format!("{dir}battle-gotcha.png")) else {
+            return;
+        };
+        let b = p.observe(&frame(0, image)).battle.unwrap();
+        assert_eq!(b.opponent_name.as_deref(), Some(species), "{dir}");
+        assert_eq!(b.opponent_shiny, None, "{dir}");
+    }
+
+    #[test]
+    fn shiny_is_read_only_on_the_command_menu() {
+        shiny_only_on_command_menu("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_shiny_is_read_only_on_the_command_menu() {
+        shiny_only_on_command_menu("switch/", "PIDGEY");
+    }
+
+    /// The catch flow's battle texts, as the battle text box reads them.
+    fn catch_texts(dir: &str, species: &str) {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        let gotcha = format!("{species} was caught!");
+        for (name, lines) in [
+            ("battle-throw.png", ["RED used", "POKé BALL!"]),
+            (
+                "battle-broke-free.png",
+                ["Oh, no!", "The POKéMON broke free!"],
+            ),
+            (
+                "battle-broke-free-aww.png",
+                ["Aww!", "It appeared to be caught!"],
+            ),
+            (
+                "battle-broke-free-shoot.png",
+                ["Shoot!", "It was so close, too!"],
+            ),
+            ("battle-broke-free-aargh.png", ["Aargh!", "Almost had it!"]),
+            ("battle-gotcha.png", ["Gotcha!", gotcha.as_str()]),
+        ] {
+            let Some(image) = fixture(&format!("{dir}{name}")) else {
+                continue;
+            };
+            let d = p.observe(&frame(0, image)).dialogue.expect(name);
+            assert_eq!(d.lines, lines, "{dir}{name}");
+        }
+    }
+
+    #[test]
+    fn catch_texts_are_read() {
+        catch_texts("", "RATTATA");
+    }
+
+    #[test]
+    fn switch_catch_texts_are_read() {
+        catch_texts("switch/", "PIDGEY");
+    }
+
+    #[test]
+    fn no_shiny_reading_without_palettes() {
+        let Some(image) = fixture("battle-wild-uncaught.png") else {
+            return;
+        };
+        let b = FireRedPerception::default()
+            .observe(&frame(0, image))
+            .battle
+            .unwrap();
+        assert_eq!(b.opponent_shiny, None);
+    }
+
+    #[test]
+    fn pokedex_page_is_flagged() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        for dir in ["", "switch/"] {
+            for (name, page) in [
+                ("pokedex-page.png", true),
+                ("battle-gotcha.png", false),
+                ("mart-list.png", false),
+            ] {
+                let Some(image) = fixture(&format!("{dir}{name}")) else {
+                    continue;
+                };
+                assert_eq!(
+                    p.observe(&frame(0, image)).pokedex_page,
+                    page,
+                    "{dir}{name}"
+                );
+            }
+        }
     }
 
     #[test]

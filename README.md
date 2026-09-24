@@ -86,8 +86,12 @@ tools/live-run.sh /tmp/story.log story --new-game --no-save
 
 Milestones so far: new game → Mom → Oak → starter → rival → parcel → Pokédex →
 **PrepareForBrock** (the planner decides the training; the bot trains and heals) →
-**ReachPewter** (Viridian Forest) → **BeatBrock** (Boulder Badge). The bot saves after
-each milestone; if a Pokémon faints it reloads the last save and retries.
+**ReachPewter** (Viridian Forest) → **BeatBrock** (Boulder Badge) →
+**StockUpPewter** (buy Poké Balls) → **PrepareForRoute3** → **CrossRoute3** (trainer
+battles to Route 4) → **PrepareForMtMoon** → **CrossMtMoon** (wild catches, the Helix
+Fossil) → **ReachCerulean** (buy Poké Balls) → **PrepareForMisty** → **BeatMisty**
+(Cascade Badge, TM03). The bot saves after each milestone; if a Pokémon faints it
+reloads the last save and retries.
 
 ```bash
 # Readiness planning on its own

@@ -134,6 +134,20 @@ pub struct BagObservation {
     pub prompt: Option<(Vec<String>, u8)>,
 }
 
+/// The mart screen: the MONEY window, the item list, the ▶ cursor and the
+/// quantity box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShopObservation {
+    /// MONEY window amount, when shown.
+    pub money: Option<u32>,
+    /// Item list rows as read (name, price); CANCEL reads as ("CANCEL", None).
+    pub items: Vec<(String, Option<u32>)>,
+    /// ▶ row in the item list.
+    pub cursor: Option<u8>,
+    /// Quantity box: (count, total price).
+    pub quantity: Option<(u16, u32)>,
+}
+
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleMenu {
@@ -162,6 +176,25 @@ pub struct BattleObservation {
     /// The four move cells of the move menu (menu order, "" when empty).
     #[serde(default)]
     pub move_names: Vec<String>,
+    /// The caught-ball icon beside the opponent's HUD: the species is
+    /// already registered as caught. Read only when the HUD name was read.
+    #[serde(default)]
+    pub opponent_caught: Option<bool>,
+    /// The opponent's sprite matched against its normal and shiny
+    /// palettes. Only when palettes are loaded, the HUD name resolves to a
+    /// species and the sprite is fully on screen (the HP bar shows).
+    #[serde(default)]
+    pub opponent_shiny: Option<ShinyReading>,
+}
+
+/// Whether a sprite's colours match the species' normal or shiny palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShinyReading {
+    Normal,
+    Shiny,
+    /// Neither palette clearly dominates (the agent treats it as not shiny
+    /// and logs it).
+    Unclear,
 }
 
 /// Where the naming screen's cursor is.
@@ -192,6 +225,10 @@ pub struct Observation {
     pub metrics: FrameMetrics,
     pub dialogue: Option<DialogueObservation>,
     pub menu: Option<MenuObservation>,
+    /// The menu window's text lines as read (Start menu: `POKéDEX`, `BAG`,
+    /// …); empty without a menu or a font.
+    #[serde(default)]
+    pub menu_lines: Vec<String>,
     pub naming: Option<NamingObservation>,
     /// Player position, when the overworld could be matched to the map.
     pub player: Option<PoseObservation>,
@@ -200,6 +237,11 @@ pub struct Observation {
     pub move_list: Option<MoveListObservation>,
     #[serde(default)]
     pub bag: Option<BagObservation>,
+    #[serde(default)]
+    pub shop: Option<ShopObservation>,
+    /// The Pokédex entry page shown after catching a new species (A leaves).
+    #[serde(default)]
+    pub pokedex_page: bool,
 }
 
 impl DialogueObservation {
@@ -222,11 +264,14 @@ impl Observation {
             metrics,
             dialogue: None,
             menu: None,
+            menu_lines: Vec::new(),
             naming: None,
             player: None,
             battle: None,
             move_list: None,
             bag: None,
+            shop: None,
+            pokedex_page: false,
         }
     }
 }

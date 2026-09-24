@@ -155,46 +155,126 @@ mod tests {
         Some((image, font, small_font))
     }
 
-    #[test]
-    fn reads_the_poke_balls_pocket() {
-        let Some((image, font, small_font)) = fixture("bag-pokeballs.png") else {
+    /// Fixture sources: the emulator's (`captures/fixtures/`) and the
+    /// physical Switch's (`captures/fixtures/switch/`), taken of the same
+    /// screens. Each test runs its assertions on every source it finds.
+    const SOURCES: [&str; 2] = ["", "switch/"];
+
+    fn poke_balls_pocket(dir: &str) {
+        let Some((image, font, small_font)) = fixture(&format!("{dir}bag-pokeballs.png")) else {
             return;
         };
         let bag = detect(&image, &font, &small_font).expect("bag");
-        assert_eq!(bag.pocket, "POKé BALLS");
-        assert_eq!(bag.rows.first(), Some(&("POKé BALL".to_owned(), Some(8))));
-        assert_eq!(bag.rows.last().map(|r| r.0.as_str()), Some("CANCEL"));
-        assert_eq!(bag.cursor, Some(0));
+        assert_eq!(bag.pocket, "POKé BALLS", "{dir}");
+        assert_eq!(
+            bag.rows.first(),
+            Some(&("POKé BALL".to_owned(), Some(8))),
+            "{dir}"
+        );
+        assert_eq!(
+            bag.rows.last().map(|r| r.0.as_str()),
+            Some("CANCEL"),
+            "{dir}"
+        );
+        assert_eq!(bag.cursor, Some(0), "{dir}");
+    }
+
+    #[test]
+    fn reads_the_poke_balls_pocket() {
+        poke_balls_pocket("");
+    }
+
+    #[test]
+    fn switch_reads_the_poke_balls_pocket() {
+        poke_balls_pocket("switch/");
+    }
+
+    fn items_pocket(dir: &str) {
+        let Some((image, font, small_font)) = fixture(&format!("{dir}bag-items.png")) else {
+            return;
+        };
+        let bag = detect(&image, &font, &small_font).expect("bag");
+        assert_eq!(bag.pocket, "ITEMS", "{dir}");
+        assert_eq!(
+            bag.rows,
+            vec![("POTION".to_owned(), Some(1)), ("CANCEL".to_owned(), None)],
+            "{dir}"
+        );
+        assert_eq!(bag.cursor, Some(0), "{dir}");
+    }
+
+    #[test]
+    fn reads_the_items_pocket() {
+        items_pocket("");
+    }
+
+    #[test]
+    fn switch_reads_the_items_pocket() {
+        items_pocket("switch/");
+    }
+
+    fn cursor_row(dir: &str) {
+        let Some((image, font, small_font)) = fixture(&format!("{dir}bag-pokeballs-cursor1.png"))
+        else {
+            return;
+        };
+        let bag = detect(&image, &font, &small_font).expect("bag");
+        assert_eq!(bag.cursor, Some(1), "{dir}");
     }
 
     #[test]
     fn cursor_row_follows_the_arrow() {
-        let Some((image, font, small_font)) = fixture("bag-pokeballs-cursor1.png") else {
-            return;
-        };
-        let bag = detect(&image, &font, &small_font).expect("bag");
-        assert_eq!(bag.cursor, Some(1));
+        cursor_row("");
     }
 
     #[test]
-    fn use_prompt_is_read() {
-        let Some((image, font, small_font)) = fixture("bag-use-prompt.png") else {
+    fn switch_cursor_row_follows_the_arrow() {
+        cursor_row("switch/");
+    }
+
+    fn use_prompt(dir: &str) {
+        let Some((image, font, small_font)) = fixture(&format!("{dir}bag-use-prompt.png")) else {
             return;
         };
         let bag = detect(&image, &font, &small_font).expect("bag");
         let (opts, row) = bag.prompt.expect("prompt");
-        assert_eq!(opts.first().map(String::as_str), Some("USE"));
-        assert_eq!(opts.last().map(String::as_str), Some("CANCEL"));
-        assert_eq!(row, 0);
+        assert_eq!(opts.first().map(String::as_str), Some("USE"), "{dir}");
+        assert_eq!(opts.last().map(String::as_str), Some("CANCEL"), "{dir}");
+        assert_eq!(row, 0, "{dir}");
+        // The list behind the prompt is still read; its ▶ is the inactive ▷.
+        assert_eq!(bag.pocket, "POKé BALLS", "{dir}");
+        assert_eq!(bag.cursor, None, "{dir}");
+    }
+
+    #[test]
+    fn use_prompt_is_read() {
+        use_prompt("");
+    }
+
+    #[test]
+    fn switch_use_prompt_is_read() {
+        use_prompt("switch/");
     }
 
     #[test]
     fn other_screens_are_not_bags() {
-        for name in ["move-select.png", "learn-list-row0.png", "mart-list.png"] {
-            let Some((image, font, small_font)) = fixture(name) else {
-                continue;
-            };
-            assert!(detect(&image, &font, &small_font).is_none(), "{name}");
+        for dir in SOURCES {
+            for name in [
+                "move-select.png",
+                "learn-list-row0.png",
+                "mart-list.png",
+                "mart-menu.png",
+                "mart-quantity-1.png",
+                "mart-quantity-3.png",
+                "mart-confirm.png",
+                "battle-wild-uncaught.png",
+                "pokedex-page.png",
+            ] {
+                let Some((image, font, small_font)) = fixture(&format!("{dir}{name}")) else {
+                    continue;
+                };
+                assert!(detect(&image, &font, &small_font).is_none(), "{dir}{name}");
+            }
         }
     }
 

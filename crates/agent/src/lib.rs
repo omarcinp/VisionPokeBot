@@ -7,6 +7,7 @@
 //! worked; every effect is checked from video.
 
 mod action;
+pub mod bag;
 pub mod battle;
 pub mod catch;
 pub mod checkpoint;
@@ -19,6 +20,7 @@ pub mod new_game;
 pub mod party;
 pub mod progress;
 pub mod save;
+pub mod shop;
 pub mod stock;
 pub mod story;
 pub mod track;
@@ -28,4 +30,7 @@ pub use executor::{Decision, Executor, ExecutorError, Outcome, Task, TaskContext
 pub use new_game::{NewGameConfig, NewGameTask, RIVAL_PRESETS};
 pub use progress::Progress;
 pub use save::{ContinueTask, SaveGameTask};
-pub use story::{all_milestones, opening, to_brock, Milestone, Starter, StoryStep, StoryTask};
+pub use story::{
+    all_milestones, opening, to_brock, to_cerulean, to_mt_moon, Milestone, Starter, StoryStep,
+    StoryTask,
+};
