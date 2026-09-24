@@ -28,11 +28,11 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 - Processes that may still be running: `/tmp/pokebot-live emulator serve --no-save` (the virtual console) and `/tmp/pokebot-webrun …` (the last live run, holding port 8080). Kill them by exact name: `pkill -INT -x pokebot-webrun`. Never use `pkill -f` with patterns that match your own shell command.
 
 ## Current game state (checkpoint)
-- `saves/progress.json` plus `saves/state.json` (party/bag/money/PC knowledge with provenance, written after every in-game save and restored on `--continue` and on a faint retry — see "Global state" in `docs/architecture.md`) plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4).
+- `saves/progress.json` plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4). There is no `saves/state.json` yet: the next in-game save writes it next to `progress.json` (party/bag/money/PC knowledge with provenance, tied to that `progress.json` by its milestones and save position, restored on `--continue` and on a faint retry — see "Global state" in `docs/architecture.md`). Until then `--continue` migrates the party kept in `progress.json` as stale (`Tracked`) knowledge.
   - Party: IVYSAUR Lv 18 with Tackle, Sleep Powder, Leech Seed, Vine Whip.
   - Player RED (Boy), rival GREEN, Boulder Badge.
-- Backups (copy both files over the ROM's `.sav` and `saves/progress.json` to restore one):
-  - `saves/route3-ready.sav` + `progress.route3-ready.json`: after PrepareForRoute3;
+- Backups: copy `X.sav` over the ROM's `.sav`, `progress.X.json` over `saves/progress.json`, and `state.X.json` over `saves/state.json` when it exists — otherwise **delete** `saves/state.json` (a `state.json` that doesn't match the restored `progress.json` is ignored with a warning anyway, and the party in `progress.X.json` is migrated as stale knowledge). When making a new backup, copy all three files.
+  - `saves/route3-ready.sav` + `progress.route3-ready.json` + `state.route3-ready.json`: after PrepareForRoute3 (the state file comes from a run that ended on exactly this save);
   - `saves/brock.sav` + `progress.brock.json`: after BeatBrock;
   - `saves/pre-brock.sav` + `progress.pre-brock.json`: after the Pokédex;
   - `saves/trained.sav` + `progress.trained.json`: Lv 10 at the Viridian Pokémon Center.

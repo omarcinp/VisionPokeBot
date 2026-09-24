@@ -141,7 +141,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 ## New moves and evolution (`agent::learn`, `agent::moves`)
 
 - Every finished page is parsed for facts: "X is trying to learn M.", "X forgot M.", "X learned M!", "X did not learn M.", "X evolved into S!". Move names map to constants through the game's own names (`move_names.h`, with `?` wildcards).
-- Party knowledge only changes on those confirmations. Level-ups add learnset moves by inference only while a slot is free.
+- Party knowledge only changes on those confirmations: nothing is inferred from the learnset, even while a slot is free. "X learned M!" fills the next free slot (`MoveLearned`); with four moves it replaces the slot of the move the same Pokémon forgot on the page before (`MoveReplaced`). A forgotten move is tied to that Pokémon and cleared by the next offer, so a missed page never swaps the wrong move; if the "forgot" page was missed, nothing changes until the KNOWN MOVES list or the move menu shows the moves.
 - **Which move to forget** (`moves::choose`): each candidate set (the current four, or the new move in slot k) is ranked by, in order:
   1. total evaluator win probability against the trainers the last plan prepared for;
   2. damage value (power × accuracy, STAB), because the evaluator ignores PP, so a damaging move is never traded for a status move unless that wins battles;
@@ -149,7 +149,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   4. keeping the current moves, then the earliest slot.
 - "Delete a move to make room for M?" gets YES if a slot was chosen, otherwise NO. "Stop learning M?" gets the opposite. On the KNOWN MOVES list the four moves shown replace party knowledge (and the choice is recomputed if they differ). The frame is then moved row by row, each step verified, to the chosen slot (or to the new move, to skip it), and A is pressed.
 - In battle, any other YES/NO question fails the attempt instead of being answered, because A would mean YES.
-- Evolution is never assumed. The species changes on "X evolved into S!" or when the HUD shows an evolved name (any branch of the evolution chain).
+- Evolution is never assumed. The species changes on "X evolved into S!" (S matched uniquely with `GameData::species_named`) or when the HUD shows an evolved name (any branch of the evolution chain). With a single party member, a HUD name that is neither its species nor an evolution but matches exactly one species replaces the species (e.g. knowledge restored from another save).
 - PP comes from the screen. The move menu prints `PP a/b` for the move under the ▶, which sets that move's PP. Wild battles spend damaging moves' PP above a 5-PP trainer reserve, then the reserve, then RUN. Training heals when fewer than 6 attack PP are left to spend, as well as below 50% HP.
 
 ## Readiness planning (`crates/gamedata`, `crates/planner`)
@@ -177,7 +177,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Catch steps aren't executed yet.
 - **Party knowledge** (`agent::party`): species, level, moves in learning order (that order gives the menu slots), HP and PP used.
   - It's updated from the battle HUD: names, levels and HP are read from its font (the letter shapes were learned from recorded battles), and names are matched against the species dictionary with wildcards.
-  - Moves come from the learnset as levels rise. The knowledge is persisted in `saves/progress.json`.
+  - Moves come only from the screen (learn/forget text, the KNOWN MOVES list, the battle move menu). The knowledge is `GameState.party`, persisted in `state.json` at each checkpoint (see "Global state").
 - **Battle move choice:** the opponent is identified from its HUD name and level, and the evaluator's best move is chosen. In wild battles, strong moves keep 5 PP in reserve for trainers. A battle counts as a trainer battle when dialogue preceded it (so no RUN).
 - **Checkpoints and retry:** `story --continue --save-game` runs one milestone at a time and saves after each. If our Pokémon's HP reads 0, the attempt fails; the bot reloads the last save (soft reset, then CONTINUE) and retries that milestone, up to 5 times.
 - **Route 3 preparation:** from the Boulder Badge save, the planner chose Lv 18 on Route 22 (Youngster Calvin's Spearow was 0% at Lv 14). Training took 68 battles. The bot swapped Growl for Poison Powder, then Poison Powder for Sleep Powder, evolved into IVYSAUR at 16, healed twice, and saved in Pewter. No Pokémon fainted.
@@ -192,7 +192,8 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - dialogue text facts — `agent::track::TextTracker`: "X got ¥Y for winning!" → `MoneyChanged` (trainer wins only; wild battles never print this, so a training run against wild Pokémon legitimately produces zero money events), "X found/received/obtained an ITEM!" → `ItemsChanged`, "We've restored your POKéMON..." → `Healed`, "no PP left for this move!" → `MoveOutOfPp`;
   - move learning and evolution text — `agent::learn` (`MoveLearned`, `MoveReplaced`, `Evolved`).
 - **`agent::Party` is now a view**, not its own store: `Party::from_state(&GameState)` (`crates/agent/party.rs`) projects the current `GameState.party` into the flat shape the battle policy and planner use, instead of the party being tracked independently.
-- **Checkpoints:** every in-game save writes `saves/state.json` (`agent::checkpoint::store`, next to `progress.json`) with the full `SavedKnowledge` (party + bag/money/PC). On `story --continue` and on a faint-triggered retry, `checkpoint::restore` reloads it and emits `CheckpointRestored`, logged as `Checkpoint knowledge restored`. An older save that only has `progress.json` (no `state.json`) is migrated on load: its party is kept as `Tracked` (stale) knowledge (`checkpoint::legacy_knowledge`) rather than discarded.
+- **Checkpoints:** every in-game save writes `state.json` next to the progress file (`agent::checkpoint::store`) with the full `SavedKnowledge` (party + bag/money/PC; missing fields load as unknown) and the **identity** of the `progress.json` written with it (its milestones and `saved_at`). `state.json` is written first, then `progress.json`, each through a `.tmp` file renamed into place. On `story --continue` and on a faint-triggered retry, `checkpoint::restore` reloads it only if its identity matches the `progress.json` being loaded, emits `CheckpointRestored` and logs `Checkpoint knowledge restored from <source>`. A missing `state.json`, one without an identity (written before identities existed) or one for another save falls back to the legacy migration, with an `error: checkpoint: … ignored` warning for the last two: the party kept in an older `progress.json` becomes `Tracked` (stale) knowledge (`checkpoint::legacy_knowledge`); no party there means an unknown party.
+- **Healing:** the nurse's "restored your POKéMON" page emits `Healed`. If a Heal step's conversation ends without that page having been read, `Healed` is inferred (log: "heal inferred: the nurse's text was not read"), because the nurse always heals.
 - **Web UI:** the telemetry page (`crates/telemetry/web/index.html`) renders party (species, level, HP, moves/PP), money and bag from `GameState`, each value annotated with its provenance, so a stale (`Tracked`) fact reads differently from an `Observed` one.
 
 ## Devices
@@ -247,7 +248,7 @@ session/
 └── raw/*.png          optional full-resolution captures (--record-raw)
 ```
 
-- `controller.jsonl` and `events.jsonl` are flushed on every write, and `frames.jsonl` about once a second.
+- `events.jsonl` is flushed on every write and `frames.jsonl` about once a second; `controller.jsonl` is buffered and flushed only by `SessionRecorder::flush()` (at the end of a run) or when the recorder is dropped.
 - SIGINT and SIGTERM shut the bot down cleanly.
 
 ## Next
