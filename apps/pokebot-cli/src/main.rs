@@ -1,4 +1,5 @@
 mod devices;
+mod hub;
 mod plan;
 mod script;
 mod serve;
@@ -44,6 +45,10 @@ struct OutputArgs {
     /// Serve the web UI (default address 127.0.0.1:8080)
     #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:8080")]
     web: Option<SocketAddr>,
+    /// Name of this run in the web UI (`Switch`, `Emulator`); the hub's tabs
+    /// highlight the page's own instance by it
+    #[arg(long, default_value = "Local")]
+    instance_label: String,
     /// Record a replayable session to this directory
     #[arg(long)]
     record: Option<PathBuf>,
@@ -159,6 +164,8 @@ enum Command {
     /// Readiness planning: chance to beat a trainer now, and the cheapest
     /// training/catching plan to reach the confidence target.
     Plan(plan::PlanArgs),
+    /// Serve every instance's web UI under one address: /switch/, /emu/.
+    Hub(hub::HubArgs),
     /// Run the emulator as a stand-alone virtual console.
     Emulator {
         #[command(subcommand)]
@@ -289,6 +296,7 @@ fn main() -> Result<()> {
             story(&devices, &output, start, &options, &stop)
         }
         Command::Plan(args) => plan::run(args),
+        Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),
         } => serve::serve(args, stop),
@@ -324,7 +332,7 @@ fn attach_outputs(
 ) -> Result<()> {
     if let Some(addr) = output.web {
         let telemetry = Telemetry::new(video_name, controller_name);
-        let server = pokebot_telemetry::serve(telemetry.clone(), addr)?;
+        let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
         eprintln!("web UI: http://{}", server.addr);
         runtime.attach_telemetry(telemetry);
     }

@@ -47,7 +47,9 @@ pub struct WebServer {
 }
 
 /// Starts the web UI on its own thread and returns once the port is bound.
-pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
+/// `instance_label` names this run in `/api/snapshot` (`Switch`, `Emulator`,
+/// `Local`); the page uses it to highlight its tab behind the hub.
+pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Result<WebServer> {
     let listener =
         TcpListener::bind(addr).map_err(|e| Error::Device(format!("cannot bind {addr}: {e}")))?;
     listener
@@ -68,6 +70,7 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
             telemetry,
             png_cache: Arc::new(Mutex::new(None)),
             sprites: Arc::new(Mutex::new(HashMap::new())),
+            instance_label: Arc::from(instance_label),
         });
     std::thread::Builder::new()
         .name("pokebot-web".into())
@@ -96,6 +99,7 @@ struct AppState {
     telemetry: Telemetry,
     png_cache: Arc<Mutex<Option<(u64, Bytes)>>>,
     sprites: Arc<Mutex<SpriteCache>>,
+    instance_label: Arc<str>,
 }
 
 async fn frame_png(State(app): State<AppState>) -> Response {
@@ -161,7 +165,11 @@ async fn mjpeg(State(app): State<AppState>) -> Response {
 
 async fn snapshot(State(app): State<AppState>) -> Json<serde_json::Value> {
     let status = app.telemetry.inner.status.borrow().clone();
-    Json(json!({ "status": status, "log": app.telemetry.recent_log() }))
+    Json(json!({
+        "status": status,
+        "log": app.telemetry.recent_log(),
+        "instance_label": &*app.instance_label,
+    }))
 }
 
 async fn sse(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -374,6 +382,21 @@ fn encode_jpeg(image: &RgbImage, scale: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_names_the_instance() {
+        use std::io::{Read, Write};
+        let telemetry = Telemetry::new("video", "controller");
+        let server = serve(telemetry, "127.0.0.1:0".parse().unwrap(), "Emulator").unwrap();
+        let mut sock = std::net::TcpStream::connect(server.addr).unwrap();
+        sock.write_all(b"GET /api/snapshot HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut reply = String::new();
+        sock.read_to_string(&mut reply).unwrap();
+        let body = reply.split("\r\n\r\n").nth(1).unwrap();
+        let snap: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(snap["instance_label"], "Emulator");
+    }
 
     #[test]
     fn crc32_matches_png_reference() {
