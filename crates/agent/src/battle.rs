@@ -6,7 +6,7 @@ use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
 use pokebot_planner::evaluate::best_move;
 use pokebot_planner::Combatant;
-use pokebot_state::{BattleMenu, GameEvent, Observation, ScreenState};
+use pokebot_state::{BattleMenu, GameEvent, Observation, ScreenState, Status};
 
 use crate::catch::{self, CatchMemory};
 use crate::party::{display_name, Party};
@@ -65,6 +65,34 @@ pub fn disable_text(page: &str, lead: &str, data: &GameData) -> Option<Option<St
         .strip_suffix(" was disabled!")
         .or_else(|| rest.strip_suffix(" is disabled!"))?;
     data.move_named(name).map(|m| Some(m.to_owned()))
+}
+
+/// Our lead's major status from battle text: "IVYSAUR is paralyzed!",
+/// "…was poisoned!", "…fell asleep!", "…was burned!", "…was frozen
+/// solid!", and its end ("…woke up!", "…was defrosted!", "…was cured…").
+/// Pages about "Foe …"/"Wild …" never match (they start with the prefix,
+/// not our lead's name). The HUD's status badge isn't read, so this text is
+/// the only source of the lead's status.
+pub fn lead_status_text(page: &str, lead: &str) -> Option<Status> {
+    let rest = page.strip_prefix(lead)?.strip_prefix(' ')?;
+    const CHANGES: [(&str, Status); 12] = [
+        ("woke up", Status::Healthy),
+        ("was defrosted", Status::Healthy),
+        ("thawed out", Status::Healthy),
+        ("was cured", Status::Healthy),
+        ("is paralyzed", Status::Paralyzed),
+        ("was paralyzed", Status::Paralyzed),
+        ("is badly poisoned", Status::BadlyPoisoned),
+        ("was badly poisoned", Status::BadlyPoisoned),
+        ("was poisoned", Status::Poisoned),
+        ("fell asleep", Status::Asleep),
+        ("was burned", Status::Burned),
+        ("was frozen", Status::Frozen),
+    ];
+    CHANGES
+        .iter()
+        .find(|(text, _)| rest.starts_with(text))
+        .map(|(_, status)| *status)
 }
 
 /// Battle text read on two frames ([`crate::catch::observe`]): tracks
@@ -279,6 +307,30 @@ pub fn is_switch_question(page: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn our_leads_status_is_read_from_battle_text() {
+        use pokebot_state::Status;
+        let lead = "IVYSAUR";
+        let read = |p| lead_status_text(p, lead);
+        // Live: PARAS's STUN SPORE in Mt. Moon.
+        assert_eq!(
+            read("IVYSAUR is paralyzed! It may be unable to move!"),
+            Some(Status::Paralyzed)
+        );
+        assert_eq!(read("IVYSAUR was poisoned!"), Some(Status::Poisoned));
+        assert_eq!(read("IVYSAUR fell asleep!"), Some(Status::Asleep));
+        assert_eq!(read("IVYSAUR was burned!"), Some(Status::Burned));
+        assert_eq!(read("IVYSAUR was frozen solid!"), Some(Status::Frozen));
+        assert_eq!(read("IVYSAUR woke up!"), Some(Status::Healthy));
+        // The foe's status is not ours.
+        assert_eq!(
+            read("Foe PARAS is paralyzed! It may be unable to move!"),
+            None
+        );
+        assert_eq!(read("Wild ZUBAT fell asleep!"), None);
+        assert_eq!(read("IVYSAUR used TACKLE!"), None);
+    }
+
     use std::path::Path;
 
     use super::*;
