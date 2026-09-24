@@ -43,9 +43,38 @@ case "${INSTANCE}" in
 esac
 NAME="pokebot-${INSTANCE}"
 
+# Every long-lived process runs in its own systemd user unit (linger is on),
+# never as a child of the shell or agent session that launched it: a
+# `setsid nohup` child still dies with the launching service's cgroup (on
+# 2026-09-24 a restart of the agent host killed the Switch run and the hub,
+# and the idle Switch then went to sleep). Units are named after the process.
+# The user manager lacks the video/dialout groups: `sg` adds them. A unit
+# that exits with an error (the capture card or the ESP32 missing at start)
+# is restarted after 30 s.
+start_unit() {
+  local unit="$1" log="$2"; shift 2
+  systemctl --user stop "${unit}" 2>/dev/null || true
+  systemctl --user reset-failed "${unit}" 2>/dev/null || true
+  systemd-run --user --quiet --collect --unit="${unit}" \
+    --working-directory="${ROOT}" \
+    -p KillSignal=SIGINT -p TimeoutStopSec=10 \
+    -p Restart=on-failure -p RestartSec=30 \
+    -p StandardOutput="append:${log}" -p StandardError="append:${log}" \
+    sg video -c "exec $(printf '%q ' "$@")"
+}
+
+unit_pid() {
+  for _ in $(seq 50); do
+    pgrep -x "$1" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 # Ctrl-C first so the run can finish cleanly, then TERM after 5 s.
 stop_process() {
   local name="$1"
+  systemctl --user stop "${name}" 2>/dev/null || true
   pgrep -x "${name}" >/dev/null || return 0
   pkill -INT -x "${name}" 2>/dev/null || true
   for _ in $(seq 50); do pgrep -x "${name}" >/dev/null || return 0; sleep 0.1; done
@@ -64,16 +93,24 @@ if [[ "${INSTANCE}" == switch ]] && pgrep -x pokebot-webrun >/dev/null; then
 fi
 
 BIN="${ROOT}/target/release/pokebot"
+
+# Disk: recordings grow ~2 GB/hour. Prune now, and keep a watcher pruning
+# every 30 minutes (log /tmp/pokebot-disk-guard.log).
+"${ROOT}/tools/disk-guard.sh" --prune >> /tmp/pokebot-disk-guard.log 2>&1 \
+  || echo "warning: disk-guard failed; see /tmp/pokebot-disk-guard.log" >&2
+if ! systemctl --user is-active --quiet pokebot-disk-guard; then
+  start_unit pokebot-disk-guard /tmp/pokebot-disk-guard.log "${ROOT}/tools/disk-guard.sh" --watch
+  echo "started the disk guard (unit pokebot-disk-guard, log /tmp/pokebot-disk-guard.log)"
+fi
 if ! pgrep -x pokebot-hub >/dev/null; then
   if pgrep -x pokebot-webrun >/dev/null; then
     echo "note: stopping the legacy pokebot-webrun, which holds port ${HUB_PORT}; the Switch view moves to /switch/ and must be relaunched with: $0 --instance switch <log> <args...>"
     stop_process pokebot-webrun
   fi
   cp "${BIN}" /tmp/pokebot-hub
-  (cd "${ROOT}" && setsid nohup /tmp/pokebot-hub hub --listen "0.0.0.0:${HUB_PORT}" \
-    > /tmp/pokebot-hub.log 2>&1 < /dev/null &)
-  sleep 0.5
-  if pgrep -x pokebot-hub >/dev/null; then
+  : > /tmp/pokebot-hub.log
+  start_unit pokebot-hub /tmp/pokebot-hub.log /tmp/pokebot-hub hub --listen "0.0.0.0:${HUB_PORT}"
+  if unit_pid pokebot-hub >/dev/null; then
     echo "started the hub on port ${HUB_PORT} (log /tmp/pokebot-hub.log)"
   else
     echo "warning: the hub did not start; see /tmp/pokebot-hub.log" >&2
@@ -83,9 +120,14 @@ fi
 
 cp "${BIN}" "/tmp/${NAME}"
 cd "${ROOT}"
-setsid nohup "/tmp/${NAME}" "$@" --web "127.0.0.1:${PORT}" --hold --instance-label "${LABEL}" \
-  > "${LOG}" 2>&1 < /dev/null &
-PID=$!
+: > "${LOG}"
+start_unit "${NAME}" "$(realpath -m "${LOG}")" \
+  "/tmp/${NAME}" "$@" --web "127.0.0.1:${PORT}" --hold --instance-label "${LABEL}"
+PID="$(unit_pid "${NAME}" || echo 0)"
+if [[ "${PID}" == 0 ]]; then
+  echo "error: ${NAME} did not start; see ${LOG} and: systemctl --user status ${NAME}" >&2
+  exit 1
+fi
 
 mkdir -p "${INSTANCES_DIR}"
 python3 - "${INSTANCES_DIR}/${INSTANCE}.json" "${INSTANCE}" "${LABEL}" "${PORT}" "${PID}" \
@@ -104,4 +146,4 @@ EOF
 # No route (offline) must not fail the launch: fall back to localhost.
 LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' || true)"
 LAN_IP="${LAN_IP:-localhost}"
-echo "running ${INSTANCE} (pid ${PID}), log ${LOG}, UI http://${LAN_IP}:${HUB_PORT}/${INSTANCE}/"
+echo "running ${INSTANCE} (unit ${NAME}, pid ${PID}), log ${LOG}, UI http://${LAN_IP}:${HUB_PORT}/${INSTANCE}/"

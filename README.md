@@ -137,12 +137,44 @@ Each instance serves its own UI on a loopback port (Switch `127.0.0.1:18080`, em
 `tools/live-run.sh [--instance switch|emu] <log> <pokebot args…>` starts the hub if needed and replaces only the same instance, so starting one never stops the other (`--instance` defaults to `switch` when an argument starts with `capture-card:`, else `emu`):
 
 ```sh
-# Switch (main page, http://<host>:8080/switch/)
-tools/live-run.sh --instance switch /tmp/sw.log story --video capture-card:/dev/video0 --viewport 180,5,1560,1040 --card-controls switch --controller esp32:<ip> --continue --save-game --progress saves/switch/progress.json --record /tmp/sw-<n>
+# Switch (main page, http://<host>:8080/switch/): never stops (--restart)
+tools/live-run.sh --instance switch /tmp/sw.log story --video capture-card:/dev/video0 --viewport 180,5,1560,1040 --card-controls switch --controller esp32:<ip> --continue --save-game --progress saves/switch/progress.json --until CrossMtMoon --restart --record /tmp/sw-<n>
 # Emulator (http://<host>:8080/emu/): in-process emulator on copies of the saves,
 # so it never touches roms/*.sav or saves/switch/
 tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --record /tmp/emu-<n>
 ```
+
+Each process runs in its own systemd user unit (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`; `systemctl --user status <unit>`), so runs outlive the shell or agent session that started them. `sg video` gives the unit access to the capture card.
+
+### Never stopping on the Switch
+
+An idle Switch dims after 5 minutes and auto-sleeps after an hour or more; asleep, it needs a person to wake it. Three layers keep it busy:
+
+- `story --restart` never ends. After the story finishes or fails, it watches the screen for `--restart-wait` seconds (default 240), then soft resets, CONTINUEs the last save (never a new game) and plays the next milestones. `--until <milestone>` caps every cycle at that milestone; later cycles then only keep the game alive. `--restart` needs `--save-game`.
+- The ESP32 firmware nudges the right stick after 4 minutes without input (see `firmware/esp32s3-controller/README.md`).
+- If the Switch sleeps or is turned off anyway, the bot waits for it and starts the game again by itself (next section). The ESP32 client reconnects after the board reboots or WiFi drops. `tools/live-run.sh` units restart a bot that exits with an error after 30 s.
+- Set the Switch's own Auto-Sleep to Never (System Settings → Sleep Mode).
+
+### Switch off, asleep, on the HOME menu
+
+Before every CONTINUE (and a new game) `story` makes sure the game is on screen (`crates/agent/src/console.rs`). It reads two sources:
+
+- **The capture.** An all-black frame means no HDMI signal. A lit letterbox around the game's viewport is a console screen (lock screen, HOME menu, user picker). Anything else is the game.
+- **The controller.** The ESP32 reports whether the Switch has it configured over USB: `Attached`, `Suspended` (the bus is suspended: asleep) or `Detached` (off, or a dock that powers its ports down).
+
+Then:
+
+| What it sees | What it does |
+|---|---|
+| The game for 3 s | carries on (CONTINUE) |
+| Black for 10 s, or black and the link is Detached/Suspended | logs "off or asleep" and waits. While Suspended it presses HOME every 30 s, which asks for a USB remote wakeup. |
+| A console screen for 2 s | launch attempt: after a wake-up, A three times (the lock screen's "press the same button three times"); HOME (resumes a suspended game, or puts the cursor on the first software); Right to the slot; A to start; A for the user picker or "close the other software?". It waits 60 s for the game, then retries with the next slot (1, 1, 2, 3, …) and alternates the unlock. |
+
+It never presses anything while the game is on screen, and it retries forever. Every new console screen is saved to `captures/console/` (the 50 newest), to build real detectors from.
+
+### Disk
+
+Recordings grow about 2 GB per hour on the Switch. `tools/disk-guard.sh` lists free space and every recording (size, age, ACTIVE while a bot writes it). `--prune` deletes inactive recordings older than 12 h (`KEEP_HOURS`); while free space is under 100 GB (`MIN_FREE_GB`) it deletes the oldest inactive ones and then trims old frames of active ones. It also drops debug bundles older than 14 days. `tools/live-run.sh` prunes on every launch and keeps the `pokebot-disk-guard` unit pruning every 30 minutes (log `/tmp/pokebot-disk-guard.log`). Copy frames worth keeping to `captures/fixtures/` first.
 
 ## Swapping devices
 
