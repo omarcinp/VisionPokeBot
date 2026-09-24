@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# Built with the Xtensa toolchain for the ESP32-S3; has its own workspace.
+exclude = ["firmware"]
 members = [
     "crates/core",
     "crates/video",
@@ -13,10 +15,12 @@ members = [
     "crates/world",
     "crates/gamedata",
     "crates/planner",
+    "crates/remote",
     "adapters/emulator-libretro",
     "adapters/capture-card",
     "adapters/pabotbase",
     "adapters/virtual-console",
+    "adapters/esp32-wifi",
     "apps/pokebot-cli",
 ]
 
@@ -39,10 +43,12 @@ pokebot-agent = { path = "crates/agent" }
 pokebot-world = { path = "crates/world" }
 pokebot-gamedata = { path = "crates/gamedata" }
 pokebot-planner = { path = "crates/planner" }
+pokebot-remote = { path = "crates/remote" }
 pokebot-emulator-libretro = { path = "adapters/emulator-libretro" }
 pokebot-capture-card = { path = "adapters/capture-card" }
 pokebot-pabotbase = { path = "adapters/pabotbase" }
 pokebot-virtual-console = { path = "adapters/virtual-console" }
+pokebot-esp32-wifi = { path = "adapters/esp32-wifi" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

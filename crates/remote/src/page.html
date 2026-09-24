@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokéBot controller</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 1.5rem; background: #111; color: #eee; }
+  h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; color: #888; margin: 0 0 .4rem; font-weight: 600; }
+  #status { font-family: monospace; color: #9c9; margin-bottom: 1rem; }
+  .row { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+  .pad { display: grid; grid-template-columns: repeat(3, 3.6rem); gap: .3rem; }
+  .face { display: grid; grid-template-columns: repeat(3, 3.6rem); gap: .3rem; }
+  .cluster { display: flex; gap: 2.5rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+  button { font: inherit; padding: .7rem 0; min-width: 3.6rem; border-radius: .5rem;
+           border: 1px solid #555; background: #2a2a2a; color: #eee; cursor: pointer; }
+  button:active { background: #555; }
+  button.sys { border-color: #7a6; }
+  label { margin-right: 1rem; }
+  input[type=number] { width: 5rem; }
+  textarea { width: 100%; max-width: 40rem; height: 4.5rem; background: #1b1b1b; color: #eee;
+             border: 1px solid #555; border-radius: .4rem; font: 13px monospace; }
+  #reply { font: 13px monospace; color: #aaa; }
+</style>
+</head>
+<body>
+<h1>PokéBot controller</h1>
+<div id="status">…</div>
+<div class="row">
+  <label>press ms <input id="press" type="number" value="80"></label>
+  <label>hold ms <input id="hold" type="number" value="500"></label>
+  <label><input id="holdmode" type="checkbox"> hold instead of tap</label>
+</div>
+
+<div class="row">
+  <button data-b="ZL">ZL</button><button data-b="L">L</button>
+  <button data-b="Minus">−</button><button data-b="Capture" class="sys">◉</button>
+  <button data-b="Home" class="sys">⌂</button><button data-b="Plus">+</button>
+  <button data-b="R">R</button><button data-b="ZR">ZR</button>
+</div>
+
+<div class="cluster">
+  <div>
+    <h2>D-pad</h2>
+    <div class="pad">
+      <span></span><button data-b="Up">▲</button><span></span>
+      <button data-b="Left">◀</button><span></span><button data-b="Right">▶</button>
+      <span></span><button data-b="Down">▼</button><span></span>
+    </div>
+  </div>
+  <div>
+    <h2>Buttons</h2>
+    <div class="face">
+      <span></span><button data-b="X">X</button><span></span>
+      <button data-b="Y">Y</button><span></span><button data-b="A">A</button>
+      <span></span><button data-b="B">B</button><span></span>
+    </div>
+  </div>
+  <div>
+    <h2>Left stick</h2>
+    <div class="pad">
+      <span></span><button data-s="left_stick" data-x="128" data-y="0">▲</button><span></span>
+      <button data-s="left_stick" data-x="0" data-y="128">◀</button>
+      <button data-b="LStick">L3</button>
+      <button data-s="left_stick" data-x="255" data-y="128">▶</button>
+      <span></span><button data-s="left_stick" data-x="128" data-y="255">▼</button><span></span>
+    </div>
+  </div>
+  <div>
+    <h2>Right stick</h2>
+    <div class="pad">
+      <span></span><button data-s="right_stick" data-x="128" data-y="0">▲</button><span></span>
+      <button data-s="right_stick" data-x="0" data-y="128">◀</button>
+      <button data-b="RStick">R3</button>
+      <button data-s="right_stick" data-x="255" data-y="128">▶</button>
+      <span></span><button data-s="right_stick" data-x="128" data-y="255">▼</button><span></span>
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <button id="neutral">Neutral</button>
+  <button id="grip">L+R (register controller)</button>
+</div>
+
+<h2>Raw command (SwitchCommand JSON)</h2>
+<textarea id="raw">{"Hold":{"state":{"buttons":["A"],"left_stick":{"x":128,"y":0}},"duration":{"secs":1,"nanos":0}}}</textarea>
+<div class="row"><button id="send">Send</button><span id="reply"></span></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const dur = (ms) => ({ secs: Math.floor(ms / 1000), nanos: (ms % 1000) * 1e6 });
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                                body: body === undefined ? "" : JSON.stringify(body) });
+  const text = await r.text();
+  $("reply").textContent = text;
+  return text;
+}
+function profile() {
+  const ms = +$("press").value;
+  return { press: dur(ms), release: dur(ms) };
+}
+function run(state, tap) {
+  const command = $("holdmode").checked || !tap
+    ? { Hold: { state, duration: dur(+$("hold").value) } }
+    : tap;
+  post("/api/command", { command, profile: profile() });
+}
+document.querySelectorAll("button[data-b]").forEach((el) => el.addEventListener("click", () => {
+  const b = el.dataset.b;
+  run({ buttons: [b] }, { Press: b });
+}));
+document.querySelectorAll("button[data-s]").forEach((el) => el.addEventListener("click", () => {
+  run({ [el.dataset.s]: { x: +el.dataset.x, y: +el.dataset.y } }, null);
+}));
+$("neutral").addEventListener("click", () => post("/api/neutral"));
+$("grip").addEventListener("click", () =>
+  post("/api/command", { command: { Chord: ["L", "R"] }, profile: profile() }));
+$("send").addEventListener("click", () => {
+  let body;
+  try { body = JSON.parse($("raw").value); } catch (e) { $("reply").textContent = e; return; }
+  post("/api/command", body);
+});
+async function poll() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    $("status").textContent = `usb ${s.usb_mounted ? "mounted" : "not mounted"} · `
+      + `${s.idle ? "idle" : "busy"} · ${s.pending} queued`;
+  } catch (e) { $("status").textContent = "offline"; }
+  setTimeout(poll, 500);
+}
+poll();
+</script>
+</body>
+</html>

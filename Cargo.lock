@@ -1029,9 +1029,11 @@ dependencies = [
  "pokebot-controller",
  "pokebot-core",
  "pokebot-emulator-libretro",
+ "pokebot-esp32-wifi",
  "pokebot-gamedata",
  "pokebot-pabotbase",
  "pokebot-planner",
+ "pokebot-remote",
  "pokebot-replay",
  "pokebot-runtime",
  "pokebot-state",
@@ -1070,6 +1072,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pokebot-esp32-wifi"
+version = "0.1.0"
+dependencies = [
+ "pokebot-core",
+ "pokebot-remote",
+ "serde_json",
+]
+
+[[package]]
 name = "pokebot-gamedata"
 version = "0.1.0"
 dependencies = [
@@ -1092,6 +1103,15 @@ version = "0.1.0"
 dependencies = [
  "pokebot-gamedata",
  "serde",
+]
+
+[[package]]
+name = "pokebot-remote"
+version = "0.1.0"
+dependencies = [
+ "pokebot-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1158,6 +1178,7 @@ dependencies = [
  "pokebot-core",
  "pokebot-emulator-libretro",
  "pokebot-pabotbase",
+ "pokebot-remote",
  "v4l",
 ]
 

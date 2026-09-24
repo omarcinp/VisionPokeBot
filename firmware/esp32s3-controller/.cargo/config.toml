@@ -1,0 +1,24 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+# Flash over the board's UART bridge port; the native USB port is the Switch
+# controller once the firmware runs.
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.5"
+# One shared ESP-IDF checkout + tools for every build (hardware and QEMU).
+ESP_IDF_TOOLS_INSTALL_DIR = "global"
+ESP_IDF_SDKCONFIG_DEFAULTS = { value = "sdkconfig.defaults", relative = true }
+# esp-idf-sys generates bindings for the TinyUSB headers, which need the MCU
+# define TinyUSB's CMake passes only to its own sources.
+BINDGEN_EXTRA_CLANG_ARGS = "-DCFG_TUSB_MCU=OPT_MCU_ESP32S3"
+# embuild needs this when CARGO_TARGET_DIR is overridden (tools/qemu.sh does).
+CARGO_WORKSPACE_DIR = { value = "", relative = true }

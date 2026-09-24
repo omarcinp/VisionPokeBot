@@ -30,6 +30,9 @@ For fast, deterministic work the emulator can also run in-process (`--video emul
 - `Controller::execute(ControllerCommand) -> ControllerReceipt`: queues input and returns immediately. `is_idle()` reports when the queue has drained. A receipt only confirms that the device accepted the command; only video can confirm what the game did with it.
 - Every adapter expands `ControllerCommand`s the same way, via `ControllerCommand::timeline(PressProfile)`.
 - Buttons are logical GBA buttons. Adapters map them to the physical controller: Start → Switch `+`, Select → `−`, and so on.
+- `SwitchController::execute(SwitchCommand)` has the same contract for devices that emulate a whole Switch controller: all 18 buttons (including Home, Capture, ZL/ZR and the stick clicks) and both analog sticks.
+  - `GbaOnSwitch<C: SwitchController>` is the adapter that makes such a device the bot's `Controller`, using the Switch Online GBA layout (`switch::gba_to_switch`).
+  - One device therefore serves the bot and full-layout uses, such as navigating the Switch menus.
 
 ## Bot loop (`crates/runtime`, `state`, `vision`)
 
@@ -221,9 +224,22 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 - `device::VirtualDevice` is the device-side peer used by the virtual console.
 - **Not yet verified against real firmware.** Both ends are implemented here from the upstream source.
 
+**ESP32-S3 WiFi controller (`crates/remote`, `adapters/esp32-wifi`, `firmware/esp32s3-controller`)**
+- Our own firmware: the ESP32-S3 shows up on its native USB port as a wired HORI Pokkén pad (VID 0x0F0D, PID 0x0092), and the bot drives it over WiFi. The Switch needs no pairing.
+- Protocol v2: newline-delimited JSON over TCP port 7878. The client sends `SwitchCommand`s. The device replies `accepted` (with the input duration), then `finished` once the last timed input has elapsed. HTTP on port 80 serves `/api/{info,status,command,neutral}` and a manual control page with the full Switch layout.
+- The firmware only knows the Switch layout. `Esp32WifiController` implements `SwitchController`, and the CLI hands the bot `GbaOnSwitch(Esp32WifiController)`.
+- The device expands commands with `SwitchCommand::timeline` and times every input itself (1 ms tick). WiFi latency therefore delays when a command starts, but never changes how long buttons are held. `Neutral` cancels the queue.
+- `pokebot-remote` holds all of the device logic: queue, HID report and descriptor, TCP and HTTP servers. It uses plain `std`, so the same code runs in three places:
+  - the firmware (ESP-IDF std, TinyUSB via a small C component);
+  - `pokebot-remote-sim` (prints HID reports);
+  - `pokebot emulator serve` (presses the emulator's joypad, `--controller esp32:127.0.0.1`).
+- The firmware also runs in Espressif QEMU (`--features qemu`), using emulated OpenCores Ethernet and logging HID reports instead of sending them over USB.
+- **Not yet verified on real hardware.** Tested against the simulator and against the firmware under QEMU.
+
 **Virtual console (`adapters/virtual-console`)**
 - Writes emulator frames to a V4L2 output device (RGB24, integer-upscaled, default 3× = 720×480).
 - Serves PABotBase2 on a pseudo-terminal, symlinked to `/tmp/pokebot-esp32`.
+- Serves the ESP32-S3 WiFi controller protocol on 127.0.0.1:7878 (HTTP on 8078).
 - Reported command completion follows the emulator's actual frame consumption.
 
 ## Telemetry and web UI (`crates/telemetry`)
