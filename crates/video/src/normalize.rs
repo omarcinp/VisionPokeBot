@@ -21,9 +21,12 @@ pub enum ViewportLocator {
 
 /// Reduces any captured frame to the canonical 240×160 viewport.
 ///
-/// Scaling samples the source pixel under the centre of each canonical
-/// pixel, which reproduces integer-scaled output exactly and is fully
-/// deterministic (integer arithmetic only).
+/// Each canonical pixel is the mean of the source pixels well inside its
+/// cell: the pixels wholly inside it minus a one-pixel border, where scaling
+/// blurs neighbours together and compression rings. On a 6.5× Switch capture
+/// that is a 4×4 block, which averages out most JPEG noise; where the border
+/// leaves nothing (up to 2×) it is the pixel under the cell's centre. Integer
+/// scaling is reproduced exactly, and the arithmetic is integer only.
 #[derive(Debug, Clone)]
 pub struct Normalizer {
     locator: ViewportLocator,
@@ -124,15 +127,48 @@ fn resample(image: &RgbImage, rect: Rect) -> Result<RgbImage> {
     {
         return Ok(image.clone());
     }
+    let columns = cell_interiors(rect.width, CANONICAL_WIDTH);
+    let rows = cell_interiors(rect.height, CANONICAL_HEIGHT);
+    let (bytes, stride) = (image.as_bytes(), image.width() as usize * 3);
     let mut data = Vec::with_capacity((CANONICAL_WIDTH * CANONICAL_HEIGHT * 3) as usize);
-    for y in 0..CANONICAL_HEIGHT {
-        let sy = rect.y + centre_sample(y, rect.height, CANONICAL_HEIGHT);
-        for x in 0..CANONICAL_WIDTH {
-            let sx = rect.x + centre_sample(x, rect.width, CANONICAL_WIDTH);
-            data.extend_from_slice(&image.pixel(sx, sy));
+    for &(y0, h) in &rows {
+        for &(x0, w) in &columns {
+            let mut sum = [0u32; 3];
+            for sy in rect.y + y0..rect.y + y0 + h {
+                let line = sy as usize * stride;
+                let start = line + (rect.x + x0) as usize * 3;
+                for p in bytes[start..start + w as usize * 3].chunks_exact(3) {
+                    for c in 0..3 {
+                        sum[c] += u32::from(p[c]);
+                    }
+                }
+            }
+            let n = w * h;
+            data.extend(sum.map(|s| ((s + n / 2) / n) as u8));
         }
     }
     RgbImage::from_raw(CANONICAL_WIDTH, CANONICAL_HEIGHT, data)
+}
+
+/// Per destination cell along one axis, the source pixels averaged for it:
+/// `(first, count)`. A cell covers `[i·src/dst, (i+1)·src/dst)`; the pixels
+/// wholly inside it, minus one at each end, or else the centre pixel.
+fn cell_interiors(src: u32, dst: u32) -> Vec<(u32, u32)> {
+    (0..dst)
+        .map(|i| {
+            let (src64, dst64, i) = (u64::from(src), u64::from(dst), u64::from(i));
+            let first_inside = (i * src64).div_ceil(dst64);
+            let end_inside = ((i + 1) * src64) / dst64; // exclusive
+            if end_inside >= first_inside + 3 {
+                (
+                    first_inside as u32 + 1,
+                    (end_inside - first_inside - 2) as u32,
+                )
+            } else {
+                (centre_sample(i as u32, src, dst), 1)
+            }
+        })
+        .collect()
 }
 
 /// Source offset under the centre of destination cell `i` of `dst` cells.
@@ -253,6 +289,49 @@ mod tests {
             .normalize(&captured(big))
             .unwrap();
         assert_eq!(out.image(), &src);
+    }
+
+    #[test]
+    fn integer_scales_round_trip_exactly() {
+        let src = pattern();
+        for scale in 1..=7 {
+            let (w, h) = (CANONICAL_WIDTH * scale, CANONICAL_HEIGHT * scale);
+            let big = letterbox(&src, scale, (w + 20, h + 10), 10, 5);
+            let rect = Rect {
+                x: 10,
+                y: 5,
+                width: w,
+                height: h,
+            };
+            let out = Normalizer::new(ViewportLocator::Fixed(rect))
+                .normalize(&captured(big))
+                .unwrap();
+            assert_eq!(out.image(), &src, "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn cells_average_their_interior() {
+        // 6.5× (the Switch viewport): cells alternate 6 and 7 source pixels
+        // with a straddling pixel between them; 4 interior pixels each.
+        assert_eq!(&cell_interiors(1560, 240)[..3], &[(1, 4), (8, 4), (14, 4)]);
+        // Noise on one interior pixel moves the mean by a sixteenth of it,
+        // and noise on the border doesn't count at all.
+        let (w, h) = (1560, 1040);
+        let mut big = RgbImage::filled(w, h, [100, 100, 100]);
+        big.put_pixel(2, 2, [180, 100, 100]);
+        big.put_pixel(0, 0, [255, 255, 255]);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        };
+        let out = Normalizer::new(ViewportLocator::Fixed(rect))
+            .normalize(&captured(big))
+            .unwrap();
+        assert_eq!(out.image().pixel(0, 0), [105, 100, 100]);
+        assert_eq!(out.image().pixel(1, 0), [100, 100, 100]);
     }
 
     #[test]

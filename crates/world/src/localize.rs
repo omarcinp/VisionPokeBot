@@ -108,6 +108,21 @@ pub fn score(
     (s >= floor).then_some(s)
 }
 
+/// Whether the sampled frame is one flat colour (a white flash, a fade):
+/// it would match any equally flat stretch of some map (a white frame scored
+/// 1000 on NavelRock_Fork).
+fn featureless(frame: &RgbImage, grid: &SampleGrid) -> bool {
+    let mut points = grid.points.iter();
+    let Some(&(x0, y0)) = points.next() else {
+        return true;
+    };
+    let first = frame.pixel(x0 as u32, y0 as u32);
+    points.all(|&(x, y)| {
+        let p = frame.pixel(x as u32, y as u32);
+        (0..3).all(|c| p[c].abs_diff(first[c]) <= TOLERANCE)
+    })
+}
+
 pub struct Localizer<'w> {
     world: &'w World,
 }
@@ -138,6 +153,9 @@ impl<'w> Localizer<'w> {
         let render = map.render().ok()?;
         let fine = SampleGrid::new(exclude, SAMPLE_STEP);
         let coarse = SampleGrid::new(exclude, COARSE_STEP);
+        if featureless(frame, &coarse) {
+            return None;
+        }
         let (x_range, y_range) = match near {
             Some((nx, ny)) => (
                 (nx - radius).max(0)..=(nx + radius).min(map.width - 1),
@@ -226,13 +244,31 @@ impl<'w> Localizer<'w> {
         warps.chain(edges).min().unwrap_or(i32::MAX)
     }
 
-    /// Searches every map (slow; for recovering when lost).
+    /// Searches every map, split over the machine's cores (for recovering
+    /// when lost: ~150 ms on one core, ~10 ms on 32). The result doesn't
+    /// depend on the split: ties go to the last map by name, as sequentially.
     pub fn locate_anywhere(&self, frame: &RgbImage, exclude: &[Region]) -> Option<PoseObservation> {
         let mut maps: Vec<&MapData> = self.world.maps().collect();
         maps.sort_by(|a, b| a.name.cmp(&b.name));
-        maps.into_iter()
-            .filter_map(|m| self.locate_in(frame, m, None, 0, exclude))
-            .max_by_key(|o| o.score)
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let chunk = maps.len().div_ceil(threads).max(1);
+        let found: Vec<Option<PoseObservation>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = maps
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|m| self.locate_in(frame, m, None, 0, exclude))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().expect("localizer worker panicked"))
+                .collect()
+        });
+        found.into_iter().flatten().max_by_key(|o| o.score)
     }
 
     fn neighbours<'a>(&'a self, map: &'a MapData) -> impl Iterator<Item = &'w MapData> + 'a {
