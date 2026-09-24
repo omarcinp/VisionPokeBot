@@ -311,6 +311,7 @@ pub fn gba_to_switch(button: Button) -> SwitchButton {
         Button::R => SwitchButton::R,
         Button::Start => SwitchButton::Plus,
         Button::Select => SwitchButton::Minus,
+        Button::Home => SwitchButton::Home,
         Button::Up => SwitchButton::Up,
         Button::Down => SwitchButton::Down,
         Button::Left => SwitchButton::Left,

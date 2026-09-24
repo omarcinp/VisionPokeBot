@@ -74,6 +74,31 @@ def species_data(src):
     return species
 
 
+def gba_rgb(r8, g8, b8):
+    """Colour as mGBA outputs it (RGB565 via libretro); same as
+    tools/world/extract_world.py."""
+    r5, g5, b5 = r8 >> 3, g8 >> 3, b8 >> 3
+    expand5 = lambda v: (v << 3) | (v >> 2)
+    g6 = g5 << 1
+    return [expand5(r5), (g6 << 2) | (g6 >> 4), expand5(b5)]
+
+
+def read_pal(path):
+    values = list(map(int, path.read_text().split()[3:3 + 48]))
+    return [gba_rgb(*values[i * 3:i * 3 + 3]) for i in range(16)]
+
+
+def species_palettes(pret, species):
+    """graphics/pokemon/<name>/{normal,shiny}.pal per species (directory
+    names are the lower-case species constant; NIDORAN_F → nidoran_f)."""
+    root = pret / "graphics/pokemon"
+    for name, sp in species.items():
+        d = root / name.removeprefix("SPECIES_").lower()
+        normal, shiny = d / "normal.pal", d / "shiny.pal"
+        if normal.exists() and shiny.exists():
+            sp["palettes"] = {"normal": read_pal(normal), "shiny": read_pal(shiny)}
+
+
 def move_data(src):
     text = (src / "data/battle_moves.h").read_text()
     raw = parse_designated(text, "MOVE_")
@@ -215,6 +240,9 @@ def main():
         "marts": marts,
         "items": items,
     }
+    species_palettes(pret, data["species"])
+    n = sum(1 for sp in data["species"].values() if "palettes" in sp)
+    print(f"palettes: {n}")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(data, separators=(",", ":")))
     counts = {k: len(v) for k, v in data.items()}

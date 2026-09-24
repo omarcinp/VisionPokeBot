@@ -4,7 +4,7 @@ use pokebot_core::RgbImage;
 use pokebot_state::{BattleMenu, BattleObservation, Region};
 
 use super::{px, share};
-use crate::color::{near, Rgb};
+use crate::color::{near, Rgb, TOLERANCE};
 
 pub const BOX_EDGE: Rgb = [41, 48, 49];
 pub const BOX_GOLD: Rgb = [206, 170, 74];
@@ -106,7 +106,7 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
 
 /// Top-left of the first battle ▶ whose top row is in `rows`.
 pub fn find_cursor(image: &RgbImage, rows: std::ops::Range<u32>) -> Option<(u32, u32)> {
-    let dark = |x: u32, y: u32| near(px(image, x, y), CURSOR, 12);
+    let dark = |x: u32, y: u32| near(px(image, x, y), CURSOR, TOLERANCE);
     let last = rows.end.min(image.height() - CURSOR_WIDTHS.len() as u32);
     for y in rows.start..last {
         for x in 1..image.width() - 8 {

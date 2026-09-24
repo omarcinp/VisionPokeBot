@@ -8,6 +8,7 @@
 
 mod action;
 pub mod battle;
+pub mod catch;
 pub mod checkpoint;
 mod executor;
 pub mod keyboard;
@@ -18,6 +19,7 @@ pub mod new_game;
 pub mod party;
 pub mod progress;
 pub mod save;
+pub mod stock;
 pub mod story;
 pub mod track;
 

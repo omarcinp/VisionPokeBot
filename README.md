@@ -118,6 +118,28 @@ each milestone; if a Pokémon faints it reloads the last save and retries.
 
 Endpoints: `/frame.png`, `/stream.mjpg`, `/api/snapshot`, `/api/stream` (server-sent events).
 
+`--instance-label <text>` names the run in `/api/snapshot` (default `Local`). The page only uses relative URLs, so it works standalone at `/` and behind the hub.
+
+### The hub on port 8080: Switch and emulator side by side
+
+`pokebot hub [--listen 0.0.0.0:8080] [--instances-dir /tmp/pokebot-instances]` is the one address for every run (the user's reverse proxy fronts port 8080):
+
+- `/` redirects to `/switch/`, the main page, which always shows the physical Switch;
+- `/emu/` shows the emulator run;
+- `/api/instances` lists both, with `alive`, from the files `tools/live-run.sh` writes (`$POKEBOT_INSTANCES_DIR` overrides the directory).
+
+Each instance serves its own UI on a loopback port (Switch `127.0.0.1:18080`, emulator `127.0.0.1:18081`) and the hub forwards `/<name>/…` to it with the prefix stripped, piping the bytes so MJPEG and server-sent events stream through. The forwarded request always says `Connection: close`, so each request gets its own connection and its own path rewrite. A stopped instance gives a 503 page with links to the others. The page shows one tab per instance, and the Switch page adds a small live thumbnail of the emulator.
+
+`tools/live-run.sh [--instance switch|emu] <log> <pokebot args…>` starts the hub if needed and replaces only the same instance, so starting one never stops the other (`--instance` defaults to `switch` when an argument starts with `capture-card:`, else `emu`):
+
+```sh
+# Switch (main page, http://<host>:8080/switch/)
+tools/live-run.sh --instance switch /tmp/sw.log story --video capture-card:/dev/video0 --viewport 180,5,1560,1040 --card-controls switch --controller esp32:<ip> --continue --save-game --progress saves/switch/progress.json --record /tmp/sw-<n>
+# Emulator (http://<host>:8080/emu/): in-process emulator on copies of the saves,
+# so it never touches roms/*.sav or saves/switch/
+tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --record /tmp/emu-<n>
+```
+
 ## Swapping devices
 
 Every command takes the same device flags, and nothing downstream knows which devices are active:

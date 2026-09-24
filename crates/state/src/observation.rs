@@ -91,6 +91,10 @@ pub struct DialogueObservation {
     /// glyphs read as `?`).
     #[serde(default)]
     pub lines: Vec<String>,
+    /// An information page of the HELP System (header "HELP"), which opens
+    /// on L/R or by itself in some versions; B closes it.
+    #[serde(default)]
+    pub help: bool,
 }
 
 /// A list menu with the ▶ cursor (YES/NO, gender, name presets, Start menu).
@@ -112,6 +116,22 @@ pub struct MoveListObservation {
     pub moves: Vec<String>,
     /// Row of the red selection frame.
     pub selected: Option<u8>,
+}
+
+/// The bag screen (field or battle): pocket title, rows, cursor and the
+/// USE/CANCEL prompt over a battle bag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BagObservation {
+    /// Pocket title as read ("POKé BALLS"), `?` for unknown glyphs.
+    pub pocket: String,
+    /// Visible rows, top to bottom: (name as read, count). CANCEL reads as
+    /// ("CANCEL", None).
+    pub rows: Vec<(String, Option<u16>)>,
+    /// Index into `rows` of the ▶.
+    pub cursor: Option<u8>,
+    /// The USE/…/CANCEL action window is open; its options as read and the
+    /// ▶ row.
+    pub prompt: Option<(Vec<String>, u8)>,
 }
 
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
@@ -178,6 +198,8 @@ pub struct Observation {
     pub battle: Option<BattleObservation>,
     #[serde(default)]
     pub move_list: Option<MoveListObservation>,
+    #[serde(default)]
+    pub bag: Option<BagObservation>,
 }
 
 impl DialogueObservation {
@@ -204,6 +226,7 @@ impl Observation {
             player: None,
             battle: None,
             move_list: None,
+            bag: None,
         }
     }
 }

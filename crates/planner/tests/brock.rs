@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use pokebot_gamedata::GameData;
+use pokebot_planner::evaluate::faint_probability;
 use pokebot_planner::{
     battle_vs_trainer, plan_preparation, Area, Combatant, PartyMember, PlanStep, Request,
 };
@@ -128,4 +129,30 @@ fn plans_are_deterministic() {
         format!("{:?}", a.iter().map(|p| &p.steps).collect::<Vec<_>>()),
         format!("{:?}", b.iter().map(|p| &p.steps).collect::<Vec<_>>())
     );
+}
+
+#[test]
+fn faint_probability_grows_with_turns() {
+    let Some(data) = data() else { return };
+    let foe = Combatant::new(
+        &data,
+        "SPECIES_GEODUDE",
+        9,
+        data.default_moves("SPECIES_GEODUDE", 9),
+        31,
+    )
+    .unwrap();
+    let mut us = Combatant::new(
+        &data,
+        "SPECIES_IVYSAUR",
+        18,
+        vec!["MOVE_VINE_WHIP".into()],
+        0,
+    )
+    .unwrap();
+    let one = faint_probability(&data, &foe, &us, 1);
+    let ten = faint_probability(&data, &foe, &us, 10);
+    assert!(one <= ten && ten <= 1.0);
+    us.hp = 1;
+    assert!(faint_probability(&data, &foe, &us, 1) > 0.5);
 }

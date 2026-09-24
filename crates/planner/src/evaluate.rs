@@ -86,6 +86,24 @@ pub fn best_move(
     best.map(|(_, n, r)| (n, r))
 }
 
+/// Probability that `defender` faints within `turns` attacks of `attacker`'s
+/// most damaging move (every attack is that move), from `defender.hp`.
+pub fn faint_probability(
+    data: &GameData,
+    attacker: &Combatant,
+    defender: &Combatant,
+    turns: usize,
+) -> f64 {
+    let Some((_, rolls)) = best_move(data, attacker, defender) else {
+        return 0.0;
+    };
+    ko_distribution(&rolls, defender.hp)
+        .iter()
+        .take(turns.min(MAX_TURNS))
+        .sum::<f64>()
+        .min(1.0)
+}
+
 /// `result[t]` = probability the defender faints exactly on attack `t+1`.
 fn ko_distribution(rolls: &DamageRolls, hp: u32) -> Vec<f64> {
     let hp = hp as usize;

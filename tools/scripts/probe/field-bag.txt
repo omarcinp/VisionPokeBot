@@ -1,0 +1,129 @@
+# Probe: field bag, ITEMS and POKé BALLS pockets
+# Replays ONLY against the route3-ready checkpoint (saves/route3-ready.sav, via a copy):
+#   cp saves/route3-ready.sav /tmp/probe/game.sav
+#   ./target/release/pokebot run --save /tmp/probe/game.sav --script tools/scripts/probe/field-bag.txt
+# Generated from walk-annotated sources by tools/probe/expand_walk.py; see README.md.
+# ---- 00-continue
+wait 1
+hold A+B+Start+Select 250ms
+wait 17
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 12
+press Start
+wait 169
+press A
+wait 102
+press A
+wait 33
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 71
+neutral
+# ---- 10-to-mart
+# Pewter PC (7,4) -> Pewter City (17,26) -> mart door (28,18) -> PewterCity_Mart (4,7)
+hold Down 1338ms
+wait 104
+wait 150
+hold Right 1338ms
+wait 104
+hold Up 1872ms
+wait 136
+hold Right 1605ms
+wait 120
+hold Up 268ms
+wait 40
+wait 150
+# ---- 20-mart
+# PewterCity_Mart: up to (4,3), face the clerk (object 3 at (2,3)) across the counter
+hold Up 1070ms
+wait 88
+press Left
+wait 30
+press A
+wait 180
+# BUY
+press A
+wait 120
+# POKé BALL (row 0) -> quantity box
+press A
+wait 240
+press Up
+wait 30
+press Up
+wait 30
+press A
+wait 240
+# YES -> "Here you are! Thank you!" -> back to the list
+press A
+wait 240
+press A
+wait 90
+# also buy one POTION so the ITEMS pocket is not empty
+press Down
+wait 30
+press A
+wait 240
+press A
+wait 240
+press A
+wait 240
+press A
+wait 90
+# leave: B closes the list ("Is there anything else I can do?"), B = SEE YA!, A dismisses "Please come again!"
+press B
+wait 240
+press B
+wait 150
+press A
+wait 90
+# ---- 30-bag
+# Field bag: Start -> BAG (row 2) -> ITEMS pocket -> Right x2 -> POKé BALLS -> Down
+press Start
+wait 60
+press Down
+wait 20
+press Down
+wait 20
+press A
+wait 120
+screenshot captures/fixtures/bag-items.png
+press Right
+wait 60
+press Right
+wait 60
+screenshot captures/fixtures/bag-pokeballs.png
+press Down
+wait 30
+screenshot captures/fixtures/bag-pokeballs-cursor1.png
+# B closes the bag back to the start menu, B closes the start menu
+press B
+wait 90
+press B
+wait 60

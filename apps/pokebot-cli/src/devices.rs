@@ -92,6 +92,41 @@ impl FromStr for ViewportArg {
     }
 }
 
+/// Capture card picture controls: `switch`, or `name=value,...`.
+#[derive(Debug, Clone, Default)]
+pub struct CardControlsArg(pub Vec<(String, i64)>);
+
+impl FromStr for CardControlsArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "switch" {
+            // Nintendo Switch into an MS2109 card: the Switch sends limited
+            // range; these expand it and undo the card's default saturation
+            // boost (180), matching mGBA's colours within ~4 levels.
+            return Ok(Self(vec![
+                ("brightness".into(), -18),
+                ("contrast".into(), 150),
+                ("saturation".into(), 155),
+                ("hue".into(), 0),
+            ]));
+        }
+        s.split(',')
+            .map(|kv| {
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| format!("bad control {kv:?}, expected name=value"))?;
+                let v = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("bad value in {kv:?}"))?;
+                Ok((k.trim().to_owned(), v))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+}
+
 /// Which game the emulator runs.
 #[derive(Debug, Clone, clap::Args)]
 pub struct EmulatorArgs {
@@ -120,6 +155,14 @@ pub struct DeviceArgs {
     /// Game viewport inside captured frames as x,y,w,h (default: whole frame)
     #[arg(long)]
     pub viewport: Option<ViewportArg>,
+    /// Capture card picture controls: `switch` (calibrated for a Switch into
+    /// an MS2109 card) or `name=value,...` (see `v4l2-ctl --list-ctrls`)
+    #[arg(long)]
+    pub card_controls: Option<CardControlsArg>,
+    /// Extra frames actions may take to show on screen (default: 0 for the
+    /// emulator, 30 for real hardware)
+    #[arg(long)]
+    pub latency_frames: Option<u64>,
     /// Serial baud rate for pabotbase (default: try 921600, then 115200)
     #[arg(long)]
     pub baud: Option<u32>,
@@ -128,6 +171,16 @@ pub struct DeviceArgs {
     /// Run the in-process emulator at console speed instead of one frame per read
     #[arg(long)]
     pub realtime: bool,
+}
+
+impl DeviceArgs {
+    /// Input-to-screen latency allowance for the executor.
+    pub fn latency_frames(&self) -> u64 {
+        self.latency_frames.unwrap_or(match self.controller {
+            ControllerSpec::Emulator | ControllerSpec::Null => 0,
+            _ => 30,
+        })
+    }
 }
 
 pub fn open(args: &DeviceArgs) -> Result<Devices> {
@@ -157,6 +210,7 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
             let source = CaptureCardVideoSource::open(CaptureCardConfig {
                 device: device.clone(),
                 size: None,
+                controls: args.card_controls.clone().unwrap_or_default().0,
             })?;
             let name = format!("capture-card:{}", source.description());
             eprintln!("{name}");

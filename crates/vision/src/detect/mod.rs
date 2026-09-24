@@ -1,5 +1,6 @@
 //! Individual UI detectors. Coordinates are canonical 240×160.
 
+pub mod bag;
 pub mod battle;
 pub mod dialogue;
 pub mod hud;

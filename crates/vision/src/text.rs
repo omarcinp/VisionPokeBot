@@ -14,7 +14,7 @@ use pokebot_core::{Error, Result, RgbImage};
 use pokebot_state::Region;
 use serde::Deserialize;
 
-use crate::color::{near, Rgb, TOLERANCE};
+use crate::color::{near, Rgb};
 
 /// Rows in a glyph cell.
 const CELL: u32 = 16;
@@ -23,6 +23,8 @@ const CELL: u32 = 16;
 const SPACE_GAP: u32 = 4;
 /// Colour candidates tried as ink, most common first.
 const MAX_INKS: usize = 4;
+/// Colours closer than this (per channel) are one palette colour.
+const CLUSTER_SPREAD: u8 = 40;
 /// Pixels a colour needs to be considered as ink.
 const MIN_INK_PIXELS: u32 = 4;
 
@@ -130,8 +132,9 @@ impl Font {
     /// ignoring pixels in `exclude` (the ▼ arrow, cursors).
     pub fn read(&self, image: &RgbImage, region: Region, exclude: &[Region]) -> Vec<String> {
         let mut best: Option<(i64, Vec<String>)> = None;
-        for ink in ink_candidates(image, region, exclude) {
-            let mask = Mask::new(image, region, exclude, ink);
+        let palette = colour_clusters(image, region, exclude);
+        for &ink in palette.iter().skip(1).take(MAX_INKS) {
+            let mask = Mask::new(image, region, exclude, ink, &palette);
             let (score, lines) = self.read_mask(&mask);
             if best.as_ref().is_none_or(|(s, _)| score > *s) {
                 best = Some((score, lines));
@@ -265,7 +268,10 @@ impl Font {
 
 /// Non-background colours in `region`, most common first (clustered within
 /// the capture tolerance).
-fn ink_candidates(image: &RgbImage, region: Region, exclude: &[Region]) -> Vec<Rgb> {
+/// The region's colour clusters, most common first (the first is the
+/// background): the candidates for ink, and the palette pixels are assigned
+/// to.
+fn colour_clusters(image: &RgbImage, region: Region, exclude: &[Region]) -> Vec<Rgb> {
     let mut counts: HashMap<Rgb, u32> = HashMap::new();
     for y in region.y..region.y + region.height {
         for x in region.x..region.x + region.width {
@@ -276,21 +282,40 @@ fn ink_candidates(image: &RgbImage, region: Region, exclude: &[Region]) -> Vec<R
     }
     let mut colours: Vec<(Rgb, u32)> = counts.into_iter().collect();
     colours.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    // Text, shadow and background colours are far apart (48+ per channel);
+    // compression spreads each over a few dozen levels.
     let mut clusters: Vec<(Rgb, u32)> = Vec::new();
     for (c, n) in colours {
-        match clusters.iter_mut().find(|(k, _)| near(*k, c, TOLERANCE)) {
+        match clusters
+            .iter_mut()
+            .find(|(k, _)| near(*k, c, CLUSTER_SPREAD))
+        {
             Some(cluster) => cluster.1 += n,
             None => clusters.push((c, n)),
         }
     }
-    // The most common cluster is the background.
+    clusters.sort_by_key(|a| std::cmp::Reverse(a.1));
     clusters
         .into_iter()
-        .skip(1)
-        .filter(|(_, n)| *n >= MIN_INK_PIXELS)
-        .take(MAX_INKS)
-        .map(|(c, _)| c)
+        .enumerate()
+        .filter(|(i, (_, n))| *i == 0 || *n >= MIN_INK_PIXELS)
+        .map(|(_, (c, _))| c)
         .collect()
+}
+
+fn distance(a: Rgb, b: Rgb) -> u32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| u32::from(x.abs_diff(y)).pow(2))
+        .sum()
+}
+
+/// Whether `pixel` belongs to `ink`: that is the nearest palette colour
+/// (compressed captures smear colours past a fixed tolerance, but stay
+/// nearest to their own) and not implausibly far from it.
+fn is_ink(pixel: Rgb, ink: Rgb, palette: &[Rgb]) -> bool {
+    let d = distance(pixel, ink);
+    d <= 3 * 64 * 64 && palette.iter().all(|&c| c == ink || distance(pixel, c) > d)
 }
 
 /// Ink pixels of one colour inside a region.
@@ -301,14 +326,20 @@ struct Mask {
 }
 
 impl Mask {
-    fn new(image: &RgbImage, region: Region, exclude: &[Region], ink: Rgb) -> Mask {
+    fn new(
+        image: &RgbImage,
+        region: Region,
+        exclude: &[Region],
+        ink: Rgb,
+        palette: &[Rgb],
+    ) -> Mask {
         let (width, height) = (region.width as usize, region.height as usize);
         let mut bits = vec![false; width * height];
         for dy in 0..region.height {
             for dx in 0..region.width {
                 let (x, y) = (region.x + dx, region.y + dy);
                 bits[dy as usize * width + dx as usize] = !exclude.iter().any(|r| r.contains(x, y))
-                    && near(image.pixel(x, y), ink, TOLERANCE);
+                    && is_ink(image.pixel(x, y), ink, palette);
             }
         }
         Mask {

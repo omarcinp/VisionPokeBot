@@ -25,6 +25,15 @@ pub struct Species {
     pub learnset: Vec<(u8, String)>,
     /// (method, parameter, target species).
     pub evolutions: Vec<(String, serde_json::Value, String)>,
+    #[serde(default)]
+    pub palettes: Option<Palettes>,
+}
+
+/// A species' sprite palettes (16 colours, mGBA output; index 0 is transparent).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Palettes {
+    pub normal: Vec<[u8; 3]>,
+    pub shiny: Vec<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -265,5 +274,21 @@ mod lookup_tests {
         assert_eq!(d.move_named("POISONPOWDER"), Some("MOVE_POISON_POWDER"));
         // Too many wildcards: several moves fit, so nothing is resolved.
         assert_eq!(d.move_named("?????"), None);
+    }
+
+    #[test]
+    fn species_have_normal_and_shiny_palettes() {
+        let Some(d) = data() else { return };
+        let p = d.species["SPECIES_ZUBAT"]
+            .palettes
+            .as_ref()
+            .expect("palettes");
+        assert_eq!(p.normal.len(), 16);
+        assert_eq!(p.shiny.len(), 16);
+        assert_ne!(p.normal, p.shiny);
+        // mGBA colours: every channel has its low bits copied from the high ones.
+        for c in p.normal.iter().chain(&p.shiny) {
+            assert_eq!(c[0] & 7, c[0] >> 5);
+        }
     }
 }

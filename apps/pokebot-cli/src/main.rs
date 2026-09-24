@@ -1,4 +1,5 @@
 mod devices;
+mod hub;
 mod plan;
 mod script;
 mod serve;
@@ -44,6 +45,10 @@ struct OutputArgs {
     /// Serve the web UI (default address 127.0.0.1:8080)
     #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:8080")]
     web: Option<SocketAddr>,
+    /// Name of this run in the web UI (`Switch`, `Emulator`); the hub's tabs
+    /// highlight the page's own instance by it
+    #[arg(long, default_value = "Local")]
+    instance_label: String,
     /// Record a replayable session to this directory
     #[arg(long)]
     record: Option<PathBuf>,
@@ -126,7 +131,8 @@ enum Command {
         /// The bot's memory of the save file (milestones done, save position)
         #[arg(long, default_value = "saves/progress.json")]
         progress: PathBuf,
-        /// Tries per milestone; a fainted Pokémon reloads the last save
+        /// Tries per milestone; a failed attempt (stuck, fainted, ...)
+        /// reloads the last save and tries again
         #[arg(long, default_value_t = 5)]
         attempts: u32,
         /// Stop after this many milestones
@@ -135,6 +141,14 @@ enum Command {
         /// Keep observing after finishing until Ctrl-C
         #[arg(long)]
         hold: bool,
+        /// Shell command run on failures, retries and the end of the story,
+        /// with $POKEBOT_EVENT (retry | failed | finished), $POKEBOT_MESSAGE
+        /// and $POKEBOT_BUNDLE (debug bundle directory, if any)
+        #[arg(long)]
+        notify: Option<String>,
+        /// Where debug bundles of failed attempts go
+        #[arg(long, default_value = "captures/stuck")]
+        bundles: PathBuf,
     },
     /// Open a window showing the video feed, with the keyboard as controller.
     #[cfg(feature = "viewer")]
@@ -150,6 +164,8 @@ enum Command {
     /// Readiness planning: chance to beat a trainer now, and the cheapest
     /// training/catching plan to reach the confidence target.
     Plan(plan::PlanArgs),
+    /// Serve every instance's web UI under one address: /switch/, /emu/.
+    Hub(hub::HubArgs),
     /// Run the emulator as a stand-alone virtual console.
     Emulator {
         #[command(subcommand)]
@@ -251,6 +267,8 @@ fn main() -> Result<()> {
             attempts,
             milestones,
             hold,
+            notify,
+            bundles,
         } => {
             let start = if r#continue {
                 StoryStart::Continue
@@ -272,10 +290,13 @@ fn main() -> Result<()> {
                 hold,
                 attempts,
                 milestones,
+                notify,
+                bundles,
             };
             story(&devices, &output, start, &options, &stop)
         }
         Command::Plan(args) => plan::run(args),
+        Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),
         } => serve::serve(args, stop),
@@ -311,7 +332,7 @@ fn attach_outputs(
 ) -> Result<()> {
     if let Some(addr) = output.web {
         let telemetry = Telemetry::new(video_name, controller_name);
-        let server = pokebot_telemetry::serve(telemetry.clone(), addr)?;
+        let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
         eprintln!("web UI: http://{}", server.addr);
         runtime.attach_telemetry(telemetry);
     }
@@ -347,7 +368,11 @@ fn new_game(
     let mut runtime = start_runtime(args, output)?;
     runtime.echo_events(true);
     let started = std::time::Instant::now();
-    let result = Executor::default().run(&mut runtime, &mut task, stop);
+    let executor = Executor {
+        latency_frames: args.latency_frames(),
+        ..Executor::default()
+    };
+    let result = executor.run(&mut runtime, &mut task, stop);
     match &result {
         Ok(summary) => runtime.info(format!(
             "NewGame finished in {:.1} s ({} frames): {summary}",
@@ -387,6 +412,64 @@ struct StoryOptions {
     attempts: u32,
     /// Stop after this many milestones.
     milestones: Option<usize>,
+    notify: Option<String>,
+    bundles: PathBuf,
+}
+
+/// Tells the operator: a `NOTIFY` log line (watchable) and the `--notify`
+/// command, if any.
+fn notify(
+    runtime: &Runtime,
+    options: &StoryOptions,
+    event: &str,
+    message: &str,
+    bundle: Option<&Path>,
+) {
+    runtime.error(format!("NOTIFY {event}: {message}"));
+    let Some(command) = &options.notify else {
+        return;
+    };
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .env("POKEBOT_EVENT", event)
+        .env("POKEBOT_MESSAGE", message);
+    if let Some(bundle) = bundle {
+        cmd.env("POKEBOT_BUNDLE", bundle);
+    }
+    // Don't wait: a slow notifier must not stall the bot.
+    if let Err(e) = cmd.spawn() {
+        runtime.error(format!("--notify: {e}"));
+    }
+}
+
+/// Saves what the bot saw when an attempt failed: the captured frame (full
+/// resolution), the normalized frame, the observation and the reason.
+fn write_bundle(runtime: &Runtime, dir: &Path, milestone: &str, reason: &str) -> Result<PathBuf> {
+    let frame = runtime.last_frame().map_or(0, |f| f.frame_id);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let dir = dir.join(format!("{stamp}-{milestone}-f{frame}"));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("reason.txt"), format!("{milestone}: {reason}\n"))?;
+    if let Some(captured) = runtime.last_captured() {
+        pokebot_video::png::save(&captured.image, dir.join("captured.png"))?;
+    }
+    if let Some(normalized) = runtime.last_frame() {
+        pokebot_video::png::save(normalized.image(), dir.join("normalized.png"))?;
+    }
+    if let Some(observation) = runtime.observation() {
+        std::fs::write(
+            dir.join("observation.json"),
+            serde_json::to_string_pretty(observation)?,
+        )?;
+    }
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string_pretty(runtime.state())?,
+    )?;
+    Ok(dir)
 }
 
 /// Restores the knowledge that goes with the save just loaded.
@@ -457,6 +540,7 @@ fn story(
     // attempt that stops making progress.
     let executor = Executor {
         max_frames: 60 * 60 * 60 * 3,
+        latency_frames: args.latency_frames(),
         ..Executor::default()
     };
     let data = Arc::new(
@@ -544,14 +628,46 @@ fn story(
                         progress.milestones.push(milestone.name.clone());
                         break;
                     }
-                    Err(e) if e.to_string().contains("fainted") && attempt < options.attempts => {
+                    Err(pokebot_agent::ExecutorError::Stopped) => {
+                        return Err(pokebot_agent::ExecutorError::Stopped.into())
+                    }
+                    Err(e) => {
+                        let bundle = write_bundle(
+                            &runtime,
+                            &options.bundles,
+                            &milestone.name,
+                            &e.to_string(),
+                        )
+                        .map_err(|b| runtime.error(format!("debug bundle: {b:#}")))
+                        .ok();
+                        let saved = Progress::load(&options.progress).ok();
+                        if attempt >= options.attempts || saved.is_none() {
+                            let why = if saved.is_none() {
+                                "no save to reload (use --save-game)"
+                            } else {
+                                "out of attempts"
+                            };
+                            notify(
+                                &runtime,
+                                options,
+                                "failed",
+                                &format!("{}: {e} ({why})", milestone.name),
+                                bundle.as_deref(),
+                            );
+                            return Err(e.into());
+                        }
+                        let saved = saved.expect("checked");
                         attempt += 1;
-                        runtime.error(format!(
-                            "{}: {e} — reloading the last save (attempt {attempt}/{})",
-                            milestone.name, options.attempts
-                        ));
-                        let saved = Progress::load(&options.progress)
-                            .context("no save to reload (use --save-game)")?;
+                        notify(
+                            &runtime,
+                            options,
+                            "retry",
+                            &format!(
+                                "{}: {e} — reloading the last save (attempt {attempt}/{})",
+                                milestone.name, options.attempts
+                            ),
+                            bundle.as_deref(),
+                        );
                         if let Some(pose) = &saved.saved_at {
                             runtime.set_pose_hint(pose.clone());
                         }
@@ -559,7 +675,6 @@ fn story(
                         restore_checkpoint(&mut runtime, &state_path, &saved, &data)?;
                         progress = saved;
                     }
-                    Err(e) => return Err(e.into()),
                 }
             }
             if options.save_game {
@@ -597,12 +712,25 @@ fn story(
         Ok(format!("completed {}", progress.milestones.join(", ")))
     })();
     match &result {
-        Ok(summary) => runtime.info(format!(
-            "Story finished in {:.1} s ({} frames): {summary}",
-            started.elapsed().as_secs_f64(),
-            runtime.frames_seen()
-        )),
-        Err(e) => runtime.error(format!("Story: {e:#}")),
+        Ok(summary) => {
+            let message = format!(
+                "Story finished in {:.1} s ({} frames): {summary}",
+                started.elapsed().as_secs_f64(),
+                runtime.frames_seen()
+            );
+            runtime.info(&message);
+            notify(&runtime, options, "finished", &message, None);
+        }
+        Err(e) => {
+            runtime.error(format!("Story: {e:#}"));
+            let stopped = matches!(
+                e.downcast_ref::<pokebot_agent::ExecutorError>(),
+                Some(pokebot_agent::ExecutorError::Stopped)
+            );
+            if !stopped {
+                notify(&runtime, options, "failed", &format!("{e:#}"), None);
+            }
+        }
     }
     if options.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
@@ -854,6 +982,13 @@ fn describe_observation(o: &Observation) -> String {
     }
     if let Some(l) = &o.move_list {
         parts.push(format!("moves {:?}, selected {:?}", l.moves, l.selected));
+    }
+    if let Some(b) = &o.bag {
+        let mut s = format!("bag: {} {:?} ▶{:?}", b.pocket, b.rows, b.cursor);
+        if let Some((opts, row)) = &b.prompt {
+            s.push_str(&format!(" prompt {opts:?} ▶{row}"));
+        }
+        parts.push(s);
     }
     if let Some(n) = &o.naming {
         parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));

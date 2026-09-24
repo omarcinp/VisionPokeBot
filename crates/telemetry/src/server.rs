@@ -27,7 +27,10 @@ use crate::Telemetry;
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const STATUS_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Default `/stream.mjpg` upscale and frame interval; `?scale=1..3` and
+/// `?fps=1..30` lower them (the hub's thumbnails use `scale=1&fps=10`).
 const MJPEG_SCALE: u32 = 3;
+const MJPEG_MAX_FPS: u32 = 30;
 /// The page reconnects when it hears nothing for a few of these.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 /// Species folders (`front.png`, `shiny.pal`) from the decompilation.
@@ -47,7 +50,9 @@ pub struct WebServer {
 }
 
 /// Starts the web UI on its own thread and returns once the port is bound.
-pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
+/// `instance_label` names this run in `/api/snapshot` (`Switch`, `Emulator`,
+/// `Local`); the page uses it to highlight its tab behind the hub.
+pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Result<WebServer> {
     let listener =
         TcpListener::bind(addr).map_err(|e| Error::Device(format!("cannot bind {addr}: {e}")))?;
     listener
@@ -68,6 +73,7 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr) -> Result<WebServer> {
             telemetry,
             png_cache: Arc::new(Mutex::new(None)),
             sprites: Arc::new(Mutex::new(HashMap::new())),
+            instance_label: Arc::from(instance_label),
         });
     std::thread::Builder::new()
         .name("pokebot-web".into())
@@ -96,6 +102,7 @@ struct AppState {
     telemetry: Telemetry,
     png_cache: Arc<Mutex<Option<(u64, Bytes)>>>,
     sprites: Arc<Mutex<SpriteCache>>,
+    instance_label: Arc<str>,
 }
 
 async fn frame_png(State(app): State<AppState>) -> Response {
@@ -131,12 +138,35 @@ async fn frame_png(State(app): State<AppState>) -> Response {
         .into_response()
 }
 
-async fn mjpeg(State(app): State<AppState>) -> Response {
+#[derive(serde::Deserialize)]
+struct MjpegQuery {
+    scale: Option<String>,
+    fps: Option<String>,
+}
+
+/// (upscale, frame interval) for `/stream.mjpg`: values clamp to 1–3 and
+/// 1–30 fps; missing or unparsable ones keep the full-quality defaults.
+fn mjpeg_params(scale: Option<&str>, fps: Option<&str>) -> (u32, Duration) {
+    let scale = scale
+        .and_then(|s| s.parse::<u32>().ok())
+        .map_or(MJPEG_SCALE, |s| s.clamp(1, MJPEG_SCALE));
+    let interval = fps
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|fps| fps.clamp(1, MJPEG_MAX_FPS))
+        .filter(|&fps| fps < MJPEG_MAX_FPS)
+        .map_or(FRAME_INTERVAL, |fps| {
+            Duration::from_millis(1000 / u64::from(fps))
+        });
+    (scale, interval)
+}
+
+async fn mjpeg(State(app): State<AppState>, Query(query): Query<MjpegQuery>) -> Response {
+    let (scale, interval) = mjpeg_params(query.scale.as_deref(), query.fps.as_deref());
     let frames = WatchStream::new(app.telemetry.inner.frame.subscribe())
-        .throttle(FRAME_INTERVAL)
+        .throttle(interval)
         .filter_map(|frame: Option<FrameSnapshot>| frame)
-        .map(|frame| {
-            let jpeg = encode_jpeg(&frame.image, MJPEG_SCALE);
+        .map(move |frame| {
+            let jpeg = encode_jpeg(&frame.image, scale);
             let mut part = format!(
                 "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
                 jpeg.len()
@@ -161,7 +191,11 @@ async fn mjpeg(State(app): State<AppState>) -> Response {
 
 async fn snapshot(State(app): State<AppState>) -> Json<serde_json::Value> {
     let status = app.telemetry.inner.status.borrow().clone();
-    Json(json!({ "status": status, "log": app.telemetry.recent_log() }))
+    Json(json!({
+        "status": status,
+        "log": app.telemetry.recent_log(),
+        "instance_label": &*app.instance_label,
+    }))
 }
 
 async fn sse(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -374,6 +408,37 @@ fn encode_jpeg(image: &RgbImage, scale: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_names_the_instance() {
+        use std::io::{Read, Write};
+        let telemetry = Telemetry::new("video", "controller");
+        let server = serve(telemetry, "127.0.0.1:0".parse().unwrap(), "Emulator").unwrap();
+        let mut sock = std::net::TcpStream::connect(server.addr).unwrap();
+        sock.write_all(b"GET /api/snapshot HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut reply = String::new();
+        sock.read_to_string(&mut reply).unwrap();
+        let body = reply.split("\r\n\r\n").nth(1).unwrap();
+        let snap: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(snap["instance_label"], "Emulator");
+    }
+
+    #[test]
+    fn mjpeg_params_default_and_clamp() {
+        let full = (MJPEG_SCALE, FRAME_INTERVAL);
+        assert_eq!(mjpeg_params(None, None), full);
+        assert_eq!(
+            mjpeg_params(Some("1"), Some("10")),
+            (1, Duration::from_millis(100))
+        );
+        // Out of range values clamp; garbage falls back to the default.
+        assert_eq!(mjpeg_params(Some("0"), Some("0")).0, 1);
+        assert_eq!(mjpeg_params(Some("0"), Some("0")).1, Duration::from_secs(1));
+        assert_eq!(mjpeg_params(Some("9"), Some("500")), full);
+        assert_eq!(mjpeg_params(Some("x"), Some("")), full);
+        assert_eq!(mjpeg_params(Some("2"), None), (2, FRAME_INTERVAL));
+    }
 
     #[test]
     fn crc32_matches_png_reference() {

@@ -1,0 +1,225 @@
+# Probe: wild battle, throw, broke free, catch, Pokédex page, nickname, caught icon
+# Replays ONLY against the route3-ready checkpoint (saves/route3-ready.sav, via a copy):
+#   cp saves/route3-ready.sav /tmp/probe/game.sav
+#   ./target/release/pokebot run --save /tmp/probe/game.sav --script tools/scripts/probe/battle-catch.txt
+# Generated from walk-annotated sources by tools/probe/expand_walk.py; see README.md.
+# ---- 00-continue
+wait 1
+hold A+B+Start+Select 250ms
+wait 17
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 162
+press Start
+wait 12
+press Start
+wait 169
+press A
+wait 102
+press A
+wait 33
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 12
+press B
+wait 71
+neutral
+# ---- 10-to-mart
+# Pewter PC (7,4) -> Pewter City (17,26) -> mart door (28,18) -> PewterCity_Mart (4,7)
+hold Down 1338ms
+wait 104
+wait 150
+hold Right 1338ms
+wait 104
+hold Up 1872ms
+wait 136
+hold Right 1605ms
+wait 120
+hold Up 268ms
+wait 40
+wait 150
+# ---- 20-mart
+# PewterCity_Mart: up to (4,3), face the clerk (object 3 at (2,3)) across the counter
+hold Up 1070ms
+wait 88
+press Left
+wait 30
+press A
+wait 180
+# BUY
+press A
+wait 120
+# POKé BALL (row 0) -> quantity box
+press A
+wait 240
+press Up
+wait 30
+press Up
+wait 30
+press A
+wait 240
+# YES -> "Here you are! Thank you!" -> back to the list
+press A
+wait 240
+press A
+wait 90
+# also buy one POTION so the ITEMS pocket is not empty
+press Down
+wait 30
+press A
+wait 240
+press A
+wait 240
+press A
+wait 240
+press A
+wait 90
+# leave: B closes the list ("Is there anything else I can do?"), B = SEE YA!, A dismisses "Please come again!"
+press B
+wait 240
+press B
+wait 150
+press A
+wait 90
+# ---- 30-bag
+# Field bag: Start -> BAG (row 2) -> ITEMS pocket -> Right x2 -> POKé BALLS -> Down
+press Start
+wait 60
+press Down
+wait 20
+press Down
+wait 20
+press A
+wait 120
+press Right
+wait 60
+press Right
+wait 60
+press Down
+wait 30
+# B closes the bag back to the start menu, B closes the start menu
+press B
+wait 90
+press B
+wait 60
+# ---- 40-to-route2
+# Mart (4,3) -> Pewter (28,19) -> (22,39) -> Route2 (10,3) -> grass (8,3); pace until a wild RATTATA Lv3
+hold Down 1338ms
+wait 104
+wait 150
+hold Left 1605ms
+wait 120
+hold Down 5350ms
+wait 344
+wait 60
+hold Down 1070ms
+wait 88
+wait 120
+hold Left 535ms
+wait 56
+hold Left 535ms
+wait 56
+hold Right 535ms
+wait 56
+# ---- 50-battle-catch
+# Wild RATTATA (female) Lv3, not yet caught
+wait 300
+press A
+wait 200
+screenshot captures/fixtures/battle-wild-uncaught.png
+# BAG (command cursor Right); the battle bag reopens on the field bag's pocket and row (POKé BALLS, CANCEL)
+press Right
+wait 30
+press A
+wait 120
+press Up
+wait 30
+press A
+wait 60
+screenshot captures/fixtures/bag-use-prompt.png
+# USE; the throw's outcome depends on the frame (RNG), these waits are tuned for this save
+wait 7
+press A
+wait 150
+screenshot captures/fixtures/battle-throw.png
+wait 420
+screenshot captures/fixtures/battle-broke-free.png
+# RATTATA uses TACKLE, back to the command menu (cursor stays on BAG)
+press A
+wait 400
+press A
+wait 120
+press A
+wait 60
+wait 9
+press A
+wait 900
+screenshot captures/fixtures/battle-gotcha.png
+press A
+wait 240
+press A
+wait 200
+screenshot captures/fixtures/pokedex-page.png
+wait 280
+press A
+wait 400
+screenshot captures/fixtures/nickname-prompt.png
+# B = No
+press B
+wait 300
+# ---- 60-pace
+hold Left 535ms
+wait 56
+hold Right 535ms
+wait 56
+hold Left 535ms
+wait 56
+hold Right 535ms
+wait 56
+hold Left 535ms
+wait 56
+hold Right 535ms
+wait 56
+hold Left 535ms
+wait 56
+hold Right 535ms
+wait 56
+hold Left 535ms
+wait 56
+# ---- 70-battle-caught
+# Wild RATTATA (male) Lv3: species already caught -> ball icon in the HUD
+wait 420
+press A
+wait 200
+screenshot captures/fixtures/battle-wild-caught.png
+# RUN: command cursor Down+Right
+press Down
+wait 20
+press Right
+wait 20
+press A
+wait 420
+press A
+wait 200

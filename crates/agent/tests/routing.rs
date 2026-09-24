@@ -40,3 +40,20 @@ fn pallet_to_viridian_uses_route_1() {
         Some(Hop::Edge(pokebot_state::Direction::Up))
     ));
 }
+
+#[test]
+fn lab_exit_uses_the_mat_not_the_plain_warp_beside_it() {
+    let Some(world) = world() else { return };
+    // After the rival battle: (7, 12) is a warp event on plain floor that
+    // never fires; the arrow mat is (6, 12).
+    let pose = PlayerPose {
+        map: "PalletTown_ProfessorOaksLab".into(),
+        x: 7,
+        y: 8,
+    };
+    let Some(Hop::Warp(i)) = route_from(&world, &pose, "PalletTown") else {
+        panic!("expected a warp");
+    };
+    let warp = &world.map("PalletTown_ProfessorOaksLab").unwrap().warps[i];
+    assert_eq!((warp.x, warp.y), (6, 12));
+}
