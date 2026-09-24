@@ -1,9 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_runtime::Runtime;
-use pokebot_state::{GameEvent, GameState, Observation, ScreenState};
+use pokebot_state::{GameEvent, GameState, Observation, PlayerPose, ScreenState};
 
+use crate::motion::{HoldTracker, InputKind, SyncerHandle, Track, FRAME_MS};
 use crate::{Action, Expectation};
 
 /// Consecutive frames an expectation must hold to count as confirmed.
@@ -44,6 +46,10 @@ pub enum Outcome {
     TimedOut,
     /// An interruptible action was cancelled because something came up.
     Interrupted,
+    /// An interruptible walk was cancelled because the player fell behind
+    /// the tile the timing model predicted (blocked, or slower than
+    /// modelled).
+    Stalled,
 }
 
 pub trait Task {
@@ -52,12 +58,115 @@ pub trait Task {
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut TaskContext<'_>);
 }
 
+/// A moment on the frame clock and the wall clock.
+#[derive(Debug, Clone, Copy)]
+struct Moment {
+    frame: u64,
+    at: Instant,
+}
+
+/// The action in flight and what has been seen of it.
 struct Pending {
     action: Action,
-    issued_frame: u64,
+    issued: Moment,
+    /// Where the player stood when the inputs were issued.
+    issued_pose: Option<PlayerPose>,
     /// First frame at which the controller had applied all inputs.
     idle_since: Option<u64>,
     confirmations: u32,
+    /// First frame at which the action showed an effect: its expectation
+    /// held, or the player left the tile it was on.
+    first_effect: Option<Moment>,
+    /// First frame of the run of frames on which the expectation held.
+    met_since: Option<Moment>,
+    /// Predicts the player's tile during a walking hold.
+    tracker: Option<HoldTracker>,
+}
+
+impl Pending {
+    fn new(action: Action, issued: Moment, observation: &Observation) -> Self {
+        Self {
+            action,
+            issued,
+            issued_pose: observation.player.as_ref().map(|p| p.pose.clone()),
+            idle_since: None,
+            confirmations: 0,
+            first_effect: None,
+            met_since: None,
+            tracker: None,
+        }
+    }
+
+    fn issued_frame(&self) -> u64 {
+        self.issued.frame
+    }
+
+    /// Notes what this frame shows: the first effect, the run of confirming
+    /// frames, and whether a walking hold is stalling.
+    fn note_frame(
+        &mut self,
+        now: Moment,
+        observation: &Observation,
+        idle: bool,
+        frame_clock: bool,
+    ) -> Track {
+        let met = self.action.expect.met(observation);
+        if self.first_effect.is_none() {
+            let moved = match (&self.issued_pose, &observation.player) {
+                (Some(from), Some(seen)) => seen.pose != *from,
+                _ => false,
+            };
+            if met || moved {
+                self.first_effect = Some(now);
+            }
+        }
+        if idle && self.idle_since.is_none() {
+            self.idle_since = Some(now.frame);
+        }
+        if idle && met {
+            self.confirmations += 1;
+            self.met_since.get_or_insert(now);
+        } else {
+            self.confirmations = 0;
+            self.met_since = None;
+        }
+        match &mut self.tracker {
+            // Once the buttons are released the timeout takes over.
+            Some(tracker) if !idle => {
+                let elapsed = elapsed_ms(self.issued, now, frame_clock);
+                tracker.track(elapsed, observation.player.as_ref().map(|p| &p.pose))
+            }
+            _ => Track::OnTrack {
+                predicted: 0,
+                observed: None,
+            },
+        }
+    }
+
+    /// The confirmed action's intervals for the timing model, in ms:
+    /// (issue → first effect, first effect → expectation met).
+    fn timing_sample(&self, frame_clock: bool) -> Option<(InputKind, usize, f64, f64)> {
+        let (kind, units) = self.action.timing?;
+        let done = self.met_since?;
+        let first_effect = self.first_effect.unwrap_or(done);
+        Some((
+            kind,
+            units,
+            elapsed_ms(self.issued, first_effect, frame_clock),
+            elapsed_ms(first_effect, done, frame_clock),
+        ))
+    }
+}
+
+/// Milliseconds from `from` to `to`: on the frame clock when the video is
+/// stepped by the bot (wall time means nothing then), else on the frames'
+/// capture times.
+fn elapsed_ms(from: Moment, to: Moment, frame_clock: bool) -> f64 {
+    if frame_clock {
+        to.frame.saturating_sub(from.frame) as f64 * FRAME_MS
+    } else {
+        to.at.saturating_duration_since(from.at).as_secs_f64() * 1000.0
+    }
 }
 
 /// Runs a task to completion against the runtime's devices.
@@ -68,8 +177,15 @@ pub struct Executor {
     pub max_frames: u64,
     /// Extra frames every action may take to show its effect: 0 for an
     /// emulator stepped by the bot, more for real hardware (controller, game
-    /// and capture latency).
+    /// and capture latency). Superseded by the syncer's estimate when one
+    /// is attached.
     pub latency_frames: u64,
+    /// The timing model: fed by every confirmed action with a `timing`,
+    /// consulted for the allowance and to predict walking holds.
+    pub syncer: Option<SyncerHandle>,
+    /// Measure time in frames (at the GBA's rate) instead of wall time:
+    /// for an in-process emulator stepped by the bot.
+    pub frame_clock: bool,
 }
 
 impl Default for Executor {
@@ -78,6 +194,8 @@ impl Default for Executor {
             max_wait_frames: 45 * 60,
             max_frames: 60 * 60 * 20,
             latency_frames: 0,
+            syncer: None,
+            frame_clock: false,
         }
     }
 }
@@ -112,6 +230,12 @@ impl Executor {
                 .cloned()
                 .expect("observe() sets the observation");
             let frame = observation.frame_id;
+            let now = Moment {
+                frame,
+                at: runtime
+                    .last_captured()
+                    .map_or_else(Instant::now, |c| c.captured_at),
+            };
             let first = *first_frame.get_or_insert(frame);
             if frame - first > self.max_frames {
                 let reason = format!("gave up after {} frames", self.max_frames);
@@ -155,24 +279,22 @@ impl Executor {
                         || observation.battle.is_some()
                         || observation.menu.is_some()
                         || observation.screen.value == ScreenState::Transition);
-                if interrupted {
+                let track = p.note_frame(now, &observation, idle, self.frame_clock);
+                // A walking hold whose player fell behind the prediction:
+                // it is blocked; release now instead of finishing the hold.
+                let stalled = !interrupted && matches!(track, Track::Stalled { .. });
+                if interrupted || stalled {
                     runtime.execute(ControllerCommand::Neutral)?;
                 }
-                if idle && p.idle_since.is_none() {
-                    p.idle_since = Some(frame);
-                }
-                if idle && p.action.expect.met(&observation) {
-                    p.confirmations += 1;
-                } else {
-                    p.confirmations = 0;
-                }
+                let allowance = self.allowance(p.action.timing.map(|(kind, _)| kind));
                 let outcome = if interrupted {
                     Some(Outcome::Interrupted)
+                } else if stalled {
+                    Some(Outcome::Stalled)
                 } else if p.confirmations >= CONFIRM_FRAMES {
                     Some(Outcome::Confirmed)
                 } else if p.idle_since.is_some_and(|since| {
-                    frame - since
-                        > p.action.timeout_frames.max(CONFIRM_FRAMES.into()) + self.latency_frames
+                    frame - since > p.action.timeout_frames.max(CONFIRM_FRAMES.into()) + allowance
                 }) {
                     Some(Outcome::TimedOut)
                 } else {
@@ -188,9 +310,10 @@ impl Executor {
                             "label": p.action.label,
                             "confirmed": outcome == Outcome::Confirmed,
                             "outcome": format!("{outcome:?}"),
-                            "frames": frame - p.issued_frame,
+                            "frames": frame - p.issued_frame(),
                             "after_idle": p.idle_since.map(|i| frame - i),
                             "timeout": p.action.timeout_frames,
+                            "track": format!("{track:?}"),
                         }),
                     )?;
                     if outcome == Outcome::TimedOut {
@@ -198,10 +321,13 @@ impl Executor {
                             format!(
                                 "{name}: \"{}\" not confirmed after {} frames",
                                 p.action.label,
-                                frame - p.issued_frame
+                                frame - p.issued_frame()
                             ),
                             &p.action,
                         );
+                    }
+                    if outcome == Outcome::Confirmed {
+                        self.learn_timing(runtime, &p)?;
                     }
                     let state = runtime.state().clone();
                     task.on_outcome(
@@ -237,12 +363,13 @@ impl Executor {
                     for command in &action.commands {
                         runtime.execute(command.clone())?;
                     }
-                    pending = Some(Pending {
-                        action,
-                        issued_frame: frame,
-                        idle_since: None,
-                        confirmations: 0,
-                    });
+                    let issued = Moment {
+                        frame,
+                        at: Instant::now(),
+                    };
+                    let mut p = Pending::new(action, issued, &observation);
+                    p.tracker = self.hold_tracker(&p);
+                    pending = Some(p);
                 }
                 Decision::Wait(reason) => {
                     let (since, _) = waiting_since.get_or_insert((frame, reason.clone()));
@@ -280,6 +407,59 @@ impl Executor {
         }
     }
 
+    /// Extra frames an action of `kind` may take to show its effect.
+    fn allowance(&self, kind: Option<InputKind>) -> u64 {
+        match &self.syncer {
+            Some(syncer) => lock(syncer).expect_frames(kind),
+            None => self.latency_frames,
+        }
+    }
+
+    /// A predictor for a walking hold that may be cut short: an
+    /// interruptible action of two or more tiles, issued from a located
+    /// tile, with a timing model to predict from.
+    fn hold_tracker(&self, p: &Pending) -> Option<HoldTracker> {
+        let (InputKind::WalkTile, tiles) = p.action.timing? else {
+            return None;
+        };
+        if tiles < 2 || !p.action.interruptible {
+            return None;
+        }
+        let from = p.issued_pose.clone()?;
+        let syncer = self.syncer.as_ref()?;
+        Some(HoldTracker::new(from, tiles, &lock(syncer)))
+    }
+
+    /// Feeds the confirmed action's timing to the model.
+    fn learn_timing(&self, runtime: &mut Runtime, p: &Pending) -> Result<(), ExecutorError> {
+        let Some(syncer) = &self.syncer else {
+            return Ok(());
+        };
+        let Some((kind, units, to_effect, effect_to_done)) = p.timing_sample(self.frame_clock)
+        else {
+            return Ok(());
+        };
+        let estimate = {
+            let mut syncer = lock(syncer);
+            syncer.observe_ms(kind, to_effect, effect_to_done, units);
+            syncer.estimate(kind)
+        };
+        runtime.record(
+            "TimingSample",
+            serde_json::json!({
+                "kind": format!("{kind:?}"),
+                "units": units,
+                "to_effect_ms": to_effect,
+                "effect_to_done_ms": effect_to_done,
+                "latency_ms": estimate.latency_ms,
+                "unit_ms": estimate.unit_ms,
+                "spread_ms": estimate.spread_ms,
+                "samples": estimate.samples,
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Releases the controller and records the goal result.
     fn finish(
         &self,
@@ -295,5 +475,160 @@ impl Executor {
             detail: detail.to_owned(),
         })?;
         Ok(())
+    }
+}
+
+fn lock(syncer: &SyncerHandle) -> std::sync::MutexGuard<'_, crate::motion::Syncer> {
+    syncer.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use pokebot_state::{Observed, PoseObservation};
+
+    use super::*;
+    use crate::motion::Syncer;
+
+    fn pose(x: i32) -> PlayerPose {
+        PlayerPose {
+            map: "Route1".into(),
+            x,
+            y: 5,
+        }
+    }
+
+    fn observation(frame: u64, x: Option<i32>) -> Observation {
+        let mut o = Observation::bare(
+            frame,
+            Observed {
+                value: ScreenState::Overworld,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = x.map(|x| PoseObservation {
+            pose: pose(x),
+            score: 1000,
+        });
+        o
+    }
+
+    fn moment(t0: Instant, frame: u64) -> Moment {
+        Moment {
+            frame,
+            at: t0 + Duration::from_millis(frame * 20),
+        }
+    }
+
+    /// A hold of 4 tiles: the player leaves the start tile on frame 20 and
+    /// stands on the target from frame 60 on; confirmed on frame 61.
+    #[test]
+    fn a_confirmed_hold_feeds_the_syncer() {
+        let t0 = Instant::now();
+        let action = Action::new("walk", vec![], Expectation::PlayerAt(pose(4)), 30)
+            .interruptible()
+            .timed(InputKind::WalkTile, 4);
+        let mut p = Pending::new(action, moment(t0, 0), &observation(0, Some(0)));
+        let executor = Executor {
+            syncer: Some(SyncerHandle::new(Syncer::new("emulator").into())),
+            ..Executor::default()
+        };
+        p.tracker = executor.hold_tracker(&p);
+        assert!(p.tracker.is_some());
+        let mut confirmed_at = None;
+        for frame in 1..=61 {
+            let x = match frame {
+                0..=19 => Some(0),
+                20..=39 => Some(1),
+                40..=49 => Some(2),
+                50..=59 => Some(3),
+                _ => Some(4),
+            };
+            let idle = frame >= 55;
+            let track = p.note_frame(moment(t0, frame), &observation(frame, x), idle, false);
+            assert!(
+                matches!(track, Track::OnTrack { .. }),
+                "frame {frame}: {track:?}"
+            );
+            if p.confirmations >= CONFIRM_FRAMES {
+                confirmed_at = Some(frame);
+                break;
+            }
+        }
+        assert_eq!(confirmed_at, Some(61));
+        assert_eq!(p.first_effect.map(|m| m.frame), Some(20));
+        assert_eq!(p.met_since.map(|m| m.frame), Some(60));
+        // Wall clock: 20 ms per frame here.
+        let (kind, units, to_effect, effect_to_done) = p.timing_sample(false).unwrap();
+        assert_eq!((kind, units), (InputKind::WalkTile, 4));
+        assert!((to_effect - 400.0).abs() < 1.0, "{to_effect}");
+        assert!((effect_to_done - 800.0).abs() < 1.0, "{effect_to_done}");
+        // Frame clock: the GBA's frame period instead.
+        let (_, _, to_effect, _) = p.timing_sample(true).unwrap();
+        assert!((to_effect - 20.0 * FRAME_MS).abs() < 0.01, "{to_effect}");
+        let syncer = executor.syncer.clone().unwrap();
+        let (kind, units, a, b) = p.timing_sample(false).unwrap();
+        lock(&syncer).observe_ms(kind, a, b, units);
+        // One sample, pulled toward 800 / 3 ≈ 267 ms per tile.
+        let e = lock(&syncer).estimate(InputKind::WalkTile);
+        assert_eq!(e.samples, 1);
+        assert!(
+            (e.unit_ms - (268.0 + 0.2 * (800.0 / 3.0 - 268.0))).abs() < 0.01,
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_hold_whose_player_stays_put_stalls() {
+        let t0 = Instant::now();
+        let action = Action::new("walk", vec![], Expectation::PlayerAt(pose(6)), 30)
+            .interruptible()
+            .timed(InputKind::WalkTile, 6);
+        let mut p = Pending::new(action, moment(t0, 0), &observation(0, Some(0)));
+        let executor = Executor {
+            syncer: Some(SyncerHandle::new(Syncer::new("emulator").into())),
+            ..Executor::default()
+        };
+        p.tracker = executor.hold_tracker(&p);
+        let mut stalled_at = None;
+        for frame in 1..=60 {
+            // The player never moves (an NPC in the way); 20 ms per frame.
+            let track = p.note_frame(
+                moment(t0, frame),
+                &observation(frame, Some(0)),
+                false,
+                false,
+            );
+            if matches!(track, Track::Stalled { .. }) {
+                stalled_at = Some(frame);
+                break;
+            }
+        }
+        // Two tiles predicted at 536 ms (frame 27), lagging by 2 from then;
+        // 100 ms later (frame 32) the hold is called stalled.
+        assert_eq!(stalled_at, Some(32));
+        assert!(p.timing_sample(false).is_none());
+    }
+
+    #[test]
+    fn actions_without_timing_or_tracking_are_untouched() {
+        let t0 = Instant::now();
+        let executor = Executor::default();
+        let action = Action::new("press A", vec![], Expectation::MenuOpen, 30);
+        let mut p = Pending::new(action, moment(t0, 0), &observation(0, None));
+        assert!(executor.hold_tracker(&p).is_none());
+        assert_eq!(executor.allowance(Some(InputKind::MenuPress)), 0);
+        let hw = Executor {
+            latency_frames: 30,
+            ..Executor::default()
+        };
+        assert_eq!(hw.allowance(None), 30);
+        for frame in 1..=3 {
+            p.note_frame(moment(t0, frame), &observation(frame, None), true, false);
+        }
+        assert!(p.timing_sample(false).is_none());
+        assert_eq!(p.confirmations, 0);
     }
 }

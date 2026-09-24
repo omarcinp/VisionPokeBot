@@ -224,6 +224,8 @@ pub struct StoryTask {
     milestone: usize,
     step: usize,
     nav: Option<Navigator>,
+    /// The device's timing model, handed to every navigator.
+    syncer: Option<crate::motion::SyncerHandle>,
     talk: TalkPhase,
     saw_dialogue: bool,
     answers_used: usize,
@@ -352,6 +354,7 @@ impl StoryTask {
             milestone: 0,
             step: 0,
             nav: None,
+            syncer: None,
             talk: TalkPhase::Approach,
             saw_dialogue: false,
             answers_used: 0,
@@ -391,6 +394,21 @@ impl StoryTask {
     pub fn with_data(mut self, data: Arc<GameData>) -> Self {
         self.data = Some(data);
         self
+    }
+
+    /// Walk with this timing model's hold lengths and timeouts.
+    pub fn with_syncer(mut self, syncer: crate::motion::SyncerHandle) -> Self {
+        self.syncer = Some(syncer);
+        self
+    }
+
+    fn navigator(&self, dest: &Destination) -> Navigator {
+        let nav =
+            Navigator::new(Arc::clone(&self.world), dest.clone()).with_gone(self.taken.clone());
+        match &self.syncer {
+            Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
+            None => nav,
+        }
     }
 
     /// The party as last read from the game state.
@@ -477,14 +495,10 @@ impl StoryTask {
                 "letting the scene settle".into(),
             ));
         }
-        let world = Arc::clone(&self.world);
-        let nav = self.nav.get_or_insert_with(|| {
-            Navigator::new(world, dest.clone()).with_gone(self.taken.clone())
-        });
-        if nav.destination != *dest {
-            *nav =
-                Navigator::new(Arc::clone(&self.world), dest.clone()).with_gone(self.taken.clone());
+        if self.nav.as_ref().is_none_or(|nav| nav.destination != *dest) {
+            self.nav = Some(self.navigator(dest));
         }
+        let nav = self.nav.as_mut().expect("navigator set above");
         if nav.stalled() >= 6 {
             return NavStatusOrDecision::Decision(Decision::Fail(format!(
                 "cannot move toward {dest:?}"

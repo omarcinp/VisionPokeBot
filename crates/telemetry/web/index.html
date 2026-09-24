@@ -197,6 +197,11 @@
   /* Details */
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; font-family: var(--mono); font-size: 12px; }
   .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  table.timing { border-collapse: collapse; font-family: var(--mono); font-size: 12px; margin-top: 6px; }
+  table.timing th, table.timing td { text-align: right; padding: 1px 8px 1px 0; }
+  table.timing th:first-child, table.timing td:first-child { text-align: left; }
+  table.timing th { color: var(--muted); font-weight: normal; }
+  table.timing tr.learned td { color: var(--fg, inherit); font-weight: 600; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); font: 11px/1.4 var(--mono); }
   details { margin-top: 10px; } summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 
@@ -379,6 +384,9 @@
         <dt>changed px</dt><dd id="obs-changed">–</dd>
         <dt>dialogue</dt><dd id="obs-text">–</dd>
       </dl>
+      <details id="timing-details"><summary>Timing model <span id="timing-profile"></span></summary>
+        <table class="timing"><thead><tr><th>input</th><th>latency</th><th>unit</th><th>spread</th><th>n</th></tr></thead><tbody id="timing-rows"></tbody></table>
+      </details>
       <details id="state-details"><summary>GameState (raw)</summary><pre id="state-json"></pre></details>
       <details id="obs-details"><summary>Observation (raw)</summary><pre id="obs-json"></pre></details>
     </section>
@@ -861,9 +869,19 @@ function setStatus(status) {
     chip('chip-ui', ui.join(' · ') || '–');
     setText('obs-text', ob.dialogue && ob.dialogue.lines && ob.dialogue.lines.length ? ob.dialogue.lines.join(' / ') : '–');
   }
+  renderTiming(status.timing);
   // Serializing the whole state is costly on phones: only when looked at.
   if ($('state-details').open) setText('state-json', JSON.stringify(st, null, 2));
   if ($('obs-details').open) setText('obs-json', JSON.stringify(ob, null, 2));
+}
+
+/// The timing model: one row per input kind, learned values in bold.
+function renderTiming(timing) {
+  if (!timing || !timing.estimates) { setText('timing-profile', ''); return; }
+  setText('timing-profile', `(${timing.profile})`);
+  const ms = (v) => `${Number(v).toFixed(0)} ms`;
+  $('timing-rows').innerHTML = timing.estimates.map(([kind, e]) => `
+    <tr class="${e.samples ? 'learned' : ''}"><td>${esc(kind)}</td><td>${ms(e.latency_ms)}</td><td>${ms(e.unit_ms)}</td><td>${ms(e.spread_ms)}</td><td>${e.samples}</td></tr>`).join('');
 }
 
 // ---------------------------------------------------------------- frames

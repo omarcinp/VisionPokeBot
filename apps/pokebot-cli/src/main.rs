@@ -19,7 +19,7 @@ use pokebot_agent::console::bring_up_game;
 use pokebot_agent::party::{self, Party};
 use pokebot_agent::{
     all_milestones, ContinueTask, Executor, NewGameConfig, NewGameTask, Progress, SaveGameTask,
-    Starter, StoryTask,
+    Starter, StoryTask, SyncerHandle,
 };
 use pokebot_core::{CapturedFrame, Error, VideoSource};
 use pokebot_replay::Session;
@@ -245,7 +245,7 @@ fn main() -> Result<()> {
             scale,
         } => {
             devices.realtime = true;
-            let runtime = start_runtime(&devices, &output)?;
+            let (runtime, _) = start_runtime(&devices, &output)?;
             viewer::play(runtime, scale, &stop)
         }
         Command::NewGame {
@@ -333,31 +333,106 @@ fn main() -> Result<()> {
     }
 }
 
-fn start_runtime(devices: &DeviceArgs, output: &OutputArgs) -> Result<Runtime> {
+fn start_runtime(
+    devices: &DeviceArgs,
+    output: &OutputArgs,
+) -> Result<(Runtime, Option<Telemetry>)> {
     let devices = devices::open(devices)?;
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::new(devices);
-    attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
-    Ok(runtime)
+    let telemetry = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    Ok((runtime, telemetry))
 }
 
+/// Attaches the web UI and the recorder; the telemetry hub, if any, so
+/// other publishers (the timing model) can reach the UI too.
 fn attach_outputs(
     runtime: &mut Runtime,
     output: &OutputArgs,
     video_name: &str,
     controller_name: &str,
-) -> Result<()> {
+) -> Result<Option<Telemetry>> {
+    let mut hub = None;
     if let Some(addr) = output.web {
         let telemetry = Telemetry::new(video_name, controller_name);
         let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
         eprintln!("web UI: http://{}", server.addr);
-        runtime.attach_telemetry(telemetry);
+        runtime.attach_telemetry(telemetry.clone());
+        hub = Some(telemetry);
     }
     if let Some(dir) = &output.record {
         runtime.record_to(&fresh_record_dir(dir), output.record_raw)?;
     }
-    Ok(())
+    Ok(hub)
+}
+
+/// How often the timing model is written to its file while a run lasts.
+const TIMING_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keeps the timing model on the web UI and on disk: publishes it whenever
+/// it changes, saves it every [`TIMING_SAVE_INTERVAL`] and when dropped
+/// (the end of the run).
+struct TimingKeeper {
+    syncer: SyncerHandle,
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TimingKeeper {
+    fn start(syncer: SyncerHandle, path: PathBuf, telemetry: Option<Telemetry>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (syncer, path, stop) = (Arc::clone(&syncer), path.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut published = None;
+                let mut saved = None;
+                let mut last_save = std::time::Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let (revision, report) = {
+                        let syncer = syncer.lock().unwrap_or_else(|e| e.into_inner());
+                        (syncer.revision(), syncer.report())
+                    };
+                    if published != Some(revision) {
+                        if let Some(telemetry) = &telemetry {
+                            telemetry.publish_timing(&report);
+                        }
+                        published = Some(revision);
+                    }
+                    if saved != Some(revision) && last_save.elapsed() >= TIMING_SAVE_INTERVAL {
+                        Self::save(&syncer, &path);
+                        saved = Some(revision);
+                        last_save = std::time::Instant::now();
+                    }
+                }
+            })
+        };
+        Self {
+            syncer,
+            path,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn save(syncer: &SyncerHandle, path: &Path) {
+        let syncer = syncer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = syncer.save(path) {
+            eprintln!("timing model: could not save {}: {e}", path.display());
+        }
+    }
+}
+
+impl Drop for TimingKeeper {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        Self::save(&self.syncer, &self.path);
+    }
 }
 
 /// `dir`, or `dir.2`, `dir.3`, … if it already holds a session: a bot that
@@ -402,11 +477,15 @@ fn new_game(
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut task = NewGameTask::new(config).map_err(anyhow::Error::msg)?;
-    let mut runtime = start_runtime(args, output)?;
+    let (mut runtime, telemetry) = start_runtime(args, output)?;
     runtime.echo_events(true);
     let started = std::time::Instant::now();
+    let syncer = args.syncer()?;
+    let _timing = TimingKeeper::start(Arc::clone(&syncer), args.timing.clone(), telemetry);
     let executor = Executor {
         latency_frames: args.latency_frames(),
+        syncer: Some(syncer),
+        frame_clock: args.frame_clock(),
         ..Executor::default()
     };
     let result = executor.run(&mut runtime, &mut task, stop);
@@ -596,13 +675,17 @@ fn story(
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::with_perception(devices, perception);
-    attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
+    let telemetry = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
+    let syncer = args.syncer()?;
+    let _timing = TimingKeeper::start(Arc::clone(&syncer), args.timing.clone(), telemetry);
     // Milestones include long training plans; stuck detection still ends an
     // attempt that stops making progress.
     let executor = Executor {
         max_frames: 60 * 60 * 60 * 3,
         latency_frames: args.latency_frames(),
+        syncer: Some(Arc::clone(&syncer)),
+        frame_clock: args.frame_clock(),
         ..Executor::default()
     };
     let state_path = checkpoint::path_for(&options.progress);
@@ -692,7 +775,8 @@ fn story(
                 let mut attempt = 1;
                 loop {
                     let mut task = StoryTask::new(Arc::clone(&world), vec![milestone.clone()])
-                        .with_data(Arc::clone(&data));
+                        .with_data(Arc::clone(&data))
+                        .with_syncer(Arc::clone(&syncer));
                     match executor.run(&mut runtime, &mut task, stop) {
                         Ok(_) => {
                             progress.milestones.push(milestone.name.clone());
@@ -905,7 +989,7 @@ fn run(
     if steps.is_empty() && frames == 0 && !hold {
         bail!("nothing to do: pass --script, --frames and/or --hold");
     }
-    let mut runtime = start_runtime(args, output)?;
+    let (mut runtime, _) = start_runtime(args, output)?;
     let result = run_steps(&mut runtime, steps, frames, hold, stop);
     if let Err(e) = &result {
         runtime.error(format!("{e:#}"));

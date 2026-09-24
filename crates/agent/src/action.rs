@@ -5,6 +5,8 @@ use pokebot_state::{
 use pokebot_vision::detect::dialogue::changed_cells;
 use serde::Serialize;
 
+use crate::motion::InputKind;
+
 /// Text cells that must change for text to count as advanced.
 const TEXT_CHANGE_CELLS: usize = 3;
 
@@ -20,6 +22,9 @@ pub struct Action {
     /// Cancel the inputs early if something interrupts (dialogue, battle,
     /// menu): for long holds such as walking a straight run.
     pub interruptible: bool,
+    /// What the timing model learns from this action once confirmed: the
+    /// kind of input and how many units of it (tiles, presses) it holds.
+    pub timing: Option<(InputKind, usize)>,
 }
 
 impl Action {
@@ -35,11 +40,18 @@ impl Action {
             expect,
             timeout_frames,
             interruptible: false,
+            timing: None,
         }
     }
 
     pub fn interruptible(mut self) -> Self {
         self.interruptible = true;
+        self
+    }
+
+    /// Feeds the timing model when confirmed: `units` units of `kind`.
+    pub fn timed(mut self, kind: InputKind, units: usize) -> Self {
+        self.timing = Some((kind, units));
         self
     }
 }

@@ -15,6 +15,7 @@ pub mod console;
 mod executor;
 pub mod keyboard;
 pub mod learn;
+pub mod motion;
 pub mod moves;
 pub mod nav;
 pub mod new_game;
@@ -28,6 +29,7 @@ pub mod track;
 
 pub use action::{Action, Expectation};
 pub use executor::{Decision, Executor, ExecutorError, Outcome, Task, TaskContext};
+pub use motion::{InputKind, Syncer, SyncerHandle};
 pub use new_game::{NewGameConfig, NewGameTask, RIVAL_PRESETS};
 pub use progress::Progress;
 pub use save::{ContinueTask, SaveGameTask};

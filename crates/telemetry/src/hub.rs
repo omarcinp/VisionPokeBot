@@ -51,6 +51,8 @@ pub struct Status {
     pub stats: Stats,
     pub state: Value,
     pub observation: Value,
+    /// The device's timing model (latency and duration per input kind).
+    pub timing: Value,
 }
 
 #[derive(Clone)]
@@ -142,6 +144,14 @@ impl Telemetry {
             status.state = state;
             status.observation = observation;
         });
+    }
+
+    /// Publishes the timing model as the bot learns it.
+    pub fn publish_timing(&self, timing: &impl Serialize) {
+        let timing = serde_json::to_value(timing).unwrap_or(Value::Null);
+        self.inner
+            .status
+            .send_modify(|status| status.timing = timing);
     }
 
     pub fn log(
