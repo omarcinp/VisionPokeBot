@@ -12,8 +12,8 @@
 use std::path::Path;
 
 use pokebot_core::{
-    CapturedFrame, Controller, ControllerCommand, ControllerReceipt, NormalizedFrame, Result,
-    VideoSource,
+    CapturedFrame, ConsoleLink, Controller, ControllerCommand, ControllerReceipt, NormalizedFrame,
+    Result, VideoSource,
 };
 use pokebot_replay::SessionRecorder;
 use pokebot_state::{
@@ -47,6 +47,8 @@ pub struct Runtime {
     /// The console shows something other than the game (see
     /// `Normalizer::outside_viewport_lit`).
     outside_game: bool,
+    /// The whole captured frame is black (see `Normalizer::dark`).
+    dark: bool,
     frames_seen: u64,
     recorder: Option<SessionRecorder>,
     telemetry: Option<Telemetry>,
@@ -69,6 +71,7 @@ impl Runtime {
             last_frame: None,
             last_captured: None,
             outside_game: false,
+            dark: false,
             frames_seen: 0,
             recorder: None,
             telemetry: None,
@@ -106,6 +109,7 @@ impl Runtime {
         let captured = self.devices.video.next_frame()?;
         let frame = self.devices.normalizer.normalize(&captured)?;
         self.outside_game = self.devices.normalizer.outside_viewport_lit(&captured);
+        self.dark = Normalizer::dark(&captured);
         let observation = self.perception.observe(&frame);
         let events = self.extractor.observe(&observation);
         self.apply(&events)?;
@@ -216,6 +220,22 @@ impl Runtime {
     /// The console is showing something other than the game.
     pub fn outside_game(&self) -> bool {
         self.outside_game
+    }
+
+    /// The last captured frame was entirely black.
+    pub fn dark(&self) -> bool {
+        self.dark
+    }
+
+    /// The video is a console seen through a capture card (a fixed viewport
+    /// in a bigger frame), not the game alone.
+    pub fn watches_console(&self) -> bool {
+        self.devices.normalizer.letterboxed()
+    }
+
+    /// What the controller knows about the console's USB connection.
+    pub fn console_link(&mut self) -> Result<ConsoleLink> {
+        self.devices.controller.console_link()
     }
 
     pub fn frames_seen(&self) -> u64 {

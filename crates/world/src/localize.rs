@@ -7,7 +7,7 @@
 //! tiles just cost a few percent).
 
 use pokebot_core::RgbImage;
-use pokebot_state::{PlayerPose, PoseObservation, Region};
+use pokebot_state::{Direction, PlayerPose, PoseObservation, Region};
 
 use crate::{MapData, World, BLOCK};
 
@@ -192,9 +192,38 @@ impl<'w> Localizer<'w> {
         if let Some(found) = self.locate_in(frame, map, None, 0, exclude) {
             return Some(found);
         }
+        // Maps that look the same (the two Viridian Forest gates, every
+        // Pokémon Center) score the same: the one whose way in is nearest
+        // the player wins.
         self.neighbours(map)
-            .filter_map(|other| self.locate_in(frame, other, None, 0, exclude))
-            .max_by_key(|o| o.score)
+            .filter_map(|other| {
+                let found = self.locate_in(frame, other, None, 0, exclude)?;
+                Some((found, self.distance_to(map, hint, &other.name)))
+            })
+            .max_by_key(|(o, distance)| (o.score, std::cmp::Reverse(*distance)))
+            .map(|(o, _)| o)
+    }
+
+    /// Tiles from the hint to the nearest warp or map edge leading to `other`.
+    fn distance_to(&self, map: &MapData, hint: &PlayerPose, other: &str) -> i32 {
+        let warps = map
+            .warps
+            .iter()
+            .filter(|w| self.world.name_of(&w.dest_map) == Some(other))
+            .map(|w| (w.x - hint.x).abs() + (w.y - hint.y).abs());
+        let edges = map
+            .connections
+            .iter()
+            .filter(|c| self.world.name_of(&c.map) == Some(other))
+            .filter_map(|c| {
+                Some(match c.direction()? {
+                    Direction::Up => hint.y,
+                    Direction::Down => map.height - 1 - hint.y,
+                    Direction::Left => hint.x,
+                    Direction::Right => map.width - 1 - hint.x,
+                })
+            });
+        warps.chain(edges).min().unwrap_or(i32::MAX)
     }
 
     /// Searches every map (slow; for recovering when lost).

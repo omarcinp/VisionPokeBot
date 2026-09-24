@@ -13,7 +13,8 @@ pub mod image;
 pub mod switch;
 
 pub use controller::{
-    Button, ButtonSet, Controller, ControllerCommand, ControllerReceipt, PressProfile, TimedInput,
+    Button, ButtonSet, ConsoleLink, Controller, ControllerCommand, ControllerReceipt, PressProfile,
+    TimedInput,
 };
 pub use error::{Error, Result};
 pub use frame::{CapturedFrame, NormalizedFrame, VideoSource, CANONICAL_HEIGHT, CANONICAL_WIDTH};

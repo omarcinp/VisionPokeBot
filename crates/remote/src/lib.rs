@@ -14,4 +14,5 @@ pub mod server;
 
 pub use hid::SwitchReport;
 pub use protocol::{ClientMessage, DeviceInfo, DeviceMessage, Status, CONTROL_PORT};
+pub use queue::Keepalive;
 pub use server::{Device, DeviceConfig, HidSink};

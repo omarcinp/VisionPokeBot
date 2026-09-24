@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use pokebot_agent::checkpoint;
+use pokebot_agent::console::bring_up_game;
 use pokebot_agent::party::{self, Party};
 use pokebot_agent::{
     all_milestones, ContinueTask, Executor, NewGameConfig, NewGameTask, Progress, SaveGameTask,
@@ -135,9 +136,21 @@ enum Command {
         /// reloads the last save and tries again
         #[arg(long, default_value_t = 5)]
         attempts: u32,
-        /// Stop after this many milestones
+        /// Stop after this many milestones (per cycle with --restart)
         #[arg(long)]
         milestones: Option<usize>,
+        /// Last milestone to play (e.g. CrossMtMoon); later ones are left
+        #[arg(long)]
+        until: Option<String>,
+        /// Never stop: after the story finishes or fails, wait
+        /// --restart-wait seconds (still observing), then soft reset,
+        /// CONTINUE the last save and play on. Keeps the Switch in use, so it
+        /// never dims or sleeps. Later cycles never start a new game.
+        #[arg(long, requires = "save_game")]
+        restart: bool,
+        /// Seconds between one cycle's end and the next soft reset
+        #[arg(long, default_value_t = 240)]
+        restart_wait: u64,
         /// Keep observing after finishing until Ctrl-C
         #[arg(long)]
         hold: bool,
@@ -266,6 +279,9 @@ fn main() -> Result<()> {
             progress,
             attempts,
             milestones,
+            until,
+            restart,
+            restart_wait,
             hold,
             notify,
             bundles,
@@ -290,6 +306,8 @@ fn main() -> Result<()> {
                 hold,
                 attempts,
                 milestones,
+                until,
+                restart: restart.then(|| Duration::from_secs(restart_wait)),
                 notify,
                 bundles,
             };
@@ -337,9 +355,28 @@ fn attach_outputs(
         runtime.attach_telemetry(telemetry);
     }
     if let Some(dir) = &output.record {
-        runtime.record_to(dir, output.record_raw)?;
+        runtime.record_to(&fresh_record_dir(dir), output.record_raw)?;
     }
     Ok(())
+}
+
+/// `dir`, or `dir.2`, `dir.3`, … if it already holds a session: a bot that
+/// systemd restarts after a crash reuses its command line.
+fn fresh_record_dir(dir: &Path) -> PathBuf {
+    let taken = |d: &Path| d.join("metadata.json").exists();
+    if !taken(dir) {
+        return dir.to_path_buf();
+    }
+    let mut n = 2;
+    loop {
+        let mut name = dir.as_os_str().to_owned();
+        name.push(format!(".{n}"));
+        let candidate = PathBuf::from(name);
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -395,6 +432,10 @@ fn new_game(
     result.map(|_| ()).map_err(Into::into)
 }
 
+/// Captures of the Switch's own screens (lock screen, HOME menu), kept to
+/// build detectors from.
+const CONSOLE_SNAPSHOTS: &str = "captures/console";
+
 enum StoryStart {
     NewGame(NewGameConfig),
     Continue,
@@ -412,6 +453,10 @@ struct StoryOptions {
     attempts: u32,
     /// Stop after this many milestones.
     milestones: Option<usize>,
+    /// Last milestone to play.
+    until: Option<String>,
+    /// Never stop: the pause before each restart (soft reset, CONTINUE).
+    restart: Option<Duration>,
     notify: Option<String>,
     bundles: PathBuf,
 }
@@ -500,6 +545,19 @@ fn story(
     options: &StoryOptions,
     stop: &AtomicBool,
 ) -> Result<()> {
+    if let Some(until) = &options.until {
+        let known = all_milestones(options.starter);
+        if !known.iter().any(|m| &m.name == until) {
+            bail!(
+                "--until {until}: no such milestone (known: {})",
+                known
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     let world = Arc::new(pokebot_world::World::load(&options.world).with_context(|| {
         format!(
             "loading {} (run tools/world/build.sh)",
@@ -540,7 +598,6 @@ fn story(
     let mut runtime = Runtime::with_perception(devices, perception);
     attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
-    let started = std::time::Instant::now();
     // Milestones include long training plans; stuck detection still ends an
     // attempt that stops making progress.
     let executor = Executor {
@@ -549,190 +606,231 @@ fn story(
         ..Executor::default()
     };
     let state_path = checkpoint::path_for(&options.progress);
-    let result = (|| -> Result<String> {
-        let mut progress = match (&start, previous) {
-            (StoryStart::NewGame(config), _) => {
-                executor.run(
-                    &mut runtime,
-                    &mut NewGameTask::new(config.clone()).map_err(anyhow::Error::msg)?,
-                    stop,
-                )?;
-                // A new game always starts in the bedroom, next to the bed.
-                runtime.set_pose_hint(PlayerPose {
-                    map: "PalletTown_PlayersHouse_2F".into(),
-                    x: 6,
-                    y: 6,
-                });
-                // Known from the story: the starter was received at level 5.
-                runtime.emit(GameEvent::PartyMonDerived {
-                    slot: 0,
-                    mon: Box::new(party::starter_mon(&data, options.starter.species(), 5)),
-                })?;
-                Progress {
-                    player_name: config.player_name.clone(),
-                    rival_name: config.rival_name.clone(),
-                    gender: config.gender,
-                    starter: options.starter,
-                    milestones: Vec::new(),
-                    saved_at: None,
-                    party: Party::default(),
-                }
-            }
-            (StoryStart::Continue, Some(previous)) => {
-                if let Some(pose) = &previous.saved_at {
-                    runtime.set_pose_hint(pose.clone());
-                }
-                executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
-                runtime.info(format!(
-                    "continuing after: {}",
-                    previous.milestones.join(", ")
-                ));
-                restore_checkpoint(&mut runtime, &state_path, &previous, &data)?;
-                previous
-            }
-            _ => {
-                let progress = Progress {
-                    player_name: "?".into(),
-                    rival_name: "?".into(),
-                    gender: Gender::Boy,
-                    starter: options.starter,
-                    milestones: Vec::new(),
-                    saved_at: None,
-                    party: Party::default(),
-                };
-                if runtime.state().party.value.is_none() {
+    let (mut start, mut previous) = (start, previous);
+    let mut cycle = 1u64;
+    let result = loop {
+        let started = std::time::Instant::now();
+        let result = (|| -> Result<String> {
+            let mut progress = match (&start, previous.take()) {
+                (StoryStart::NewGame(config), _) => {
+                    bring_up_game(&mut runtime, stop, Some(Path::new(CONSOLE_SNAPSHOTS)))?;
+                    executor.run(
+                        &mut runtime,
+                        &mut NewGameTask::new(config.clone()).map_err(anyhow::Error::msg)?,
+                        stop,
+                    )?;
+                    // A new game always starts in the bedroom, next to the bed.
+                    runtime.set_pose_hint(PlayerPose {
+                        map: "PalletTown_PlayersHouse_2F".into(),
+                        x: 6,
+                        y: 6,
+                    });
+                    // Known from the story: the starter was received at level 5.
                     runtime.emit(GameEvent::PartyMonDerived {
                         slot: 0,
-                        mon: Box::new(party::starter_mon(&data, progress.starter.species(), 5)),
+                        mon: Box::new(party::starter_mon(&data, options.starter.species(), 5)),
                     })?;
+                    Progress {
+                        player_name: config.player_name.clone(),
+                        rival_name: config.rival_name.clone(),
+                        gender: config.gender,
+                        starter: options.starter,
+                        milestones: Vec::new(),
+                        saved_at: None,
+                        party: Party::default(),
+                    }
                 }
-                progress
+                (StoryStart::Continue, Some(previous)) => {
+                    if let Some(pose) = &previous.saved_at {
+                        runtime.set_pose_hint(pose.clone());
+                    }
+                    bring_up_game(&mut runtime, stop, Some(Path::new(CONSOLE_SNAPSHOTS)))?;
+                    executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
+                    runtime.info(format!(
+                        "continuing after: {}",
+                        previous.milestones.join(", ")
+                    ));
+                    restore_checkpoint(&mut runtime, &state_path, &previous, &data)?;
+                    previous
+                }
+                _ => {
+                    let progress = Progress {
+                        player_name: "?".into(),
+                        rival_name: "?".into(),
+                        gender: Gender::Boy,
+                        starter: options.starter,
+                        milestones: Vec::new(),
+                        saved_at: None,
+                        party: Party::default(),
+                    };
+                    if runtime.state().party.value.is_none() {
+                        runtime.emit(GameEvent::PartyMonDerived {
+                            slot: 0,
+                            mon: Box::new(party::starter_mon(&data, progress.starter.species(), 5)),
+                        })?;
+                    }
+                    progress
+                }
+            };
+            let mut all = all_milestones(progress.starter);
+            if let Some(until) = &options.until {
+                if let Some(last) = all.iter().position(|m| &m.name == until) {
+                    all.truncate(last + 1);
+                }
             }
-        };
-        let remaining: Vec<_> = all_milestones(progress.starter)
-            .into_iter()
-            .filter(|m| !progress.milestones.contains(&m.name))
-            .take(options.milestones.unwrap_or(usize::MAX))
-            .collect();
-        if remaining.is_empty() {
-            return Ok("no milestones left".into());
-        }
-        // One milestone at a time: save after each; if a Pokémon faints,
-        // reload the last save and retry that milestone.
-        for milestone in remaining {
-            let mut attempt = 1;
-            loop {
-                let mut task = StoryTask::new(Arc::clone(&world), vec![milestone.clone()])
-                    .with_data(Arc::clone(&data));
-                match executor.run(&mut runtime, &mut task, stop) {
-                    Ok(_) => {
-                        progress.milestones.push(milestone.name.clone());
-                        break;
-                    }
-                    Err(pokebot_agent::ExecutorError::Stopped) => {
-                        return Err(pokebot_agent::ExecutorError::Stopped.into())
-                    }
-                    Err(e) => {
-                        let bundle = write_bundle(
-                            &runtime,
-                            &options.bundles,
-                            &milestone.name,
-                            &e.to_string(),
-                        )
-                        .map_err(|b| runtime.error(format!("debug bundle: {b:#}")))
-                        .ok();
-                        let saved = Progress::load(&options.progress).ok();
-                        if attempt >= options.attempts || saved.is_none() {
-                            let why = if saved.is_none() {
-                                "no save to reload (use --save-game)"
-                            } else {
-                                "out of attempts"
-                            };
+            let remaining: Vec<_> = all
+                .into_iter()
+                .filter(|m| !progress.milestones.contains(&m.name))
+                .take(options.milestones.unwrap_or(usize::MAX))
+                .collect();
+            if remaining.is_empty() {
+                return Ok("no milestones left".into());
+            }
+            // One milestone at a time: save after each; if a Pokémon faints,
+            // reload the last save and retry that milestone.
+            for milestone in remaining {
+                let mut attempt = 1;
+                loop {
+                    let mut task = StoryTask::new(Arc::clone(&world), vec![milestone.clone()])
+                        .with_data(Arc::clone(&data));
+                    match executor.run(&mut runtime, &mut task, stop) {
+                        Ok(_) => {
+                            progress.milestones.push(milestone.name.clone());
+                            break;
+                        }
+                        Err(pokebot_agent::ExecutorError::Stopped) => {
+                            return Err(pokebot_agent::ExecutorError::Stopped.into())
+                        }
+                        Err(e) => {
+                            let bundle = write_bundle(
+                                &runtime,
+                                &options.bundles,
+                                &milestone.name,
+                                &e.to_string(),
+                            )
+                            .map_err(|b| runtime.error(format!("debug bundle: {b:#}")))
+                            .ok();
+                            let saved = Progress::load(&options.progress).ok();
+                            if attempt >= options.attempts || saved.is_none() {
+                                let why = if saved.is_none() {
+                                    "no save to reload (use --save-game)"
+                                } else {
+                                    "out of attempts"
+                                };
+                                notify(
+                                    &runtime,
+                                    options,
+                                    "failed",
+                                    &format!("{}: {e} ({why})", milestone.name),
+                                    bundle.as_deref(),
+                                );
+                                return Err(e.into());
+                            }
+                            let saved = saved.expect("checked");
+                            attempt += 1;
                             notify(
                                 &runtime,
                                 options,
-                                "failed",
-                                &format!("{}: {e} ({why})", milestone.name),
+                                "retry",
+                                &format!(
+                                    "{}: {e} — reloading the last save (attempt {attempt}/{})",
+                                    milestone.name, options.attempts
+                                ),
                                 bundle.as_deref(),
                             );
-                            return Err(e.into());
+                            if let Some(pose) = &saved.saved_at {
+                                runtime.set_pose_hint(pose.clone());
+                            }
+                            bring_up_game(&mut runtime, stop, Some(Path::new(CONSOLE_SNAPSHOTS)))?;
+                            executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
+                            restore_checkpoint(&mut runtime, &state_path, &saved, &data)?;
+                            progress = saved;
                         }
-                        let saved = saved.expect("checked");
-                        attempt += 1;
-                        notify(
-                            &runtime,
-                            options,
-                            "retry",
-                            &format!(
-                                "{}: {e} — reloading the last save (attempt {attempt}/{})",
-                                milestone.name, options.attempts
-                            ),
-                            bundle.as_deref(),
-                        );
-                        if let Some(pose) = &saved.saved_at {
-                            runtime.set_pose_hint(pose.clone());
-                        }
-                        executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
-                        restore_checkpoint(&mut runtime, &state_path, &saved, &data)?;
-                        progress = saved;
                     }
                 }
-            }
-            if options.save_game {
-                executor.run(&mut runtime, &mut SaveGameTask::default(), stop)?;
-                runtime.persist_save()?;
-                progress.saved_at = runtime.state().player.pose.value.clone();
-                if let Some(dir) = options.progress.parent() {
-                    std::fs::create_dir_all(dir)?;
+                if options.save_game {
+                    executor.run(&mut runtime, &mut SaveGameTask::default(), stop)?;
+                    runtime.persist_save()?;
+                    progress.saved_at = runtime.state().player.pose.value.clone();
+                    if let Some(dir) = options.progress.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    // state.json first: if progress.json is not written after
+                    // it, their identities differ and state.json is ignored.
+                    checkpoint::store(
+                        &state_path,
+                        &checkpoint::Identity::of(&progress),
+                        &runtime.state().saved_knowledge(),
+                    )?;
+                    progress.store(&options.progress)?;
+                    let party = Party::from_state(runtime.state());
+                    runtime.info(format!(
+                        "checkpoint after {}: saved in-game at {}; party {}",
+                        milestone.name,
+                        progress
+                            .saved_at
+                            .as_ref()
+                            .map_or("?".into(), |p| p.to_string()),
+                        party
+                            .members
+                            .iter()
+                            .map(|m| format!("{} Lv{}", m.display_name(), m.level))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
-                // state.json first: if progress.json is not written after
-                // it, their identities differ and state.json is ignored.
-                checkpoint::store(
-                    &state_path,
-                    &checkpoint::Identity::of(&progress),
-                    &runtime.state().saved_knowledge(),
-                )?;
-                progress.store(&options.progress)?;
-                let party = Party::from_state(runtime.state());
-                runtime.info(format!(
-                    "checkpoint after {}: saved in-game at {}; party {}",
-                    milestone.name,
-                    progress
-                        .saved_at
-                        .as_ref()
-                        .map_or("?".into(), |p| p.to_string()),
-                    party
-                        .members
-                        .iter()
-                        .map(|m| format!("{} Lv{}", m.display_name(), m.level))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+            }
+            Ok(format!("completed {}", progress.milestones.join(", ")))
+        })();
+        let stopped = matches!(
+            result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<pokebot_agent::ExecutorError>()),
+            Some(pokebot_agent::ExecutorError::Stopped)
+        );
+        report_story(&runtime, options, &result, started);
+        let Some(wait) = options.restart else {
+            break result;
+        };
+        if stopped || stop.load(Ordering::Relaxed) {
+            break result;
+        }
+        // Never stop: pause (watching, so the web UI stays live), then load the
+        // last save and play on.
+        match Progress::load(&options.progress) {
+            Ok(saved) => {
+                cycle += 1;
+                notify(
+                    &runtime,
+                    options,
+                    "restart",
+                    &format!(
+                        "restarting in {} s (cycle {cycle}): soft reset and CONTINUE after {}",
+                        wait.as_secs(),
+                        saved.milestones.last().map_or("the start", String::as_str)
+                    ),
+                    None,
+                );
+                pause(&mut runtime, wait, stop);
+                if stop.load(Ordering::Relaxed) {
+                    break result;
+                }
+                start = StoryStart::Continue;
+                previous = Some(saved);
+            }
+            Err(e) => {
+                // Nothing to continue from: wait and look again.
+                runtime.error(format!(
+                    "restart: no progress file to continue from ({e:#}); waiting"
                 ));
+                pause(&mut runtime, wait, stop);
+                if stop.load(Ordering::Relaxed) {
+                    break result;
+                }
             }
         }
-        Ok(format!("completed {}", progress.milestones.join(", ")))
-    })();
-    match &result {
-        Ok(summary) => {
-            let message = format!(
-                "Story finished in {:.1} s ({} frames): {summary}",
-                started.elapsed().as_secs_f64(),
-                runtime.frames_seen()
-            );
-            runtime.info(&message);
-            notify(&runtime, options, "finished", &message, None);
-        }
-        Err(e) => {
-            runtime.error(format!("Story: {e:#}"));
-            let stopped = matches!(
-                e.downcast_ref::<pokebot_agent::ExecutorError>(),
-                Some(pokebot_agent::ExecutorError::Stopped)
-            );
-            if !stopped {
-                notify(&runtime, options, "failed", &format!("{e:#}"), None);
-            }
-        }
-    }
+    };
     if options.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
         while !stop.load(Ordering::Relaxed) {
@@ -745,6 +843,47 @@ fn story(
     }
     runtime.finish()?;
     result.map(|_| ())
+}
+
+/// Logs how a story cycle ended and tells the operator.
+fn report_story(
+    runtime: &Runtime,
+    options: &StoryOptions,
+    result: &Result<String>,
+    started: std::time::Instant,
+) {
+    match result {
+        Ok(summary) => {
+            let message = format!(
+                "Story finished in {:.1} s ({} frames): {summary}",
+                started.elapsed().as_secs_f64(),
+                runtime.frames_seen()
+            );
+            runtime.info(&message);
+            notify(runtime, options, "finished", &message, None);
+        }
+        Err(e) => {
+            runtime.error(format!("Story: {e:#}"));
+            let stopped = matches!(
+                e.downcast_ref::<pokebot_agent::ExecutorError>(),
+                Some(pokebot_agent::ExecutorError::Stopped)
+            );
+            if !stopped {
+                notify(runtime, options, "failed", &format!("{e:#}"), None);
+            }
+        }
+    }
+}
+
+/// Watches the screen for `duration` (the web UI stays live). A video error
+/// (the Switch off, the capture unplugged) is waited out, not fatal.
+fn pause(runtime: &mut Runtime, duration: Duration, stop: &AtomicBool) {
+    let until = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        if runtime.observe().is_err() {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
 }
 
 fn run(

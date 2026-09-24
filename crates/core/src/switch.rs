@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::controller::{
-    Button, ButtonSet, Controller, ControllerCommand, ControllerReceipt, PressProfile,
+    Button, ButtonSet, ConsoleLink, Controller, ControllerCommand, ControllerReceipt, PressProfile,
 };
 use crate::{Error, Result};
 
@@ -288,6 +288,11 @@ pub trait SwitchController {
 
     /// True when every queued input has been fully applied.
     fn is_idle(&self) -> Result<bool>;
+
+    /// See [`Controller::console_link`].
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        Ok(ConsoleLink::Unknown)
+    }
 }
 
 impl<C: SwitchController + ?Sized> SwitchController for Box<C> {
@@ -297,6 +302,10 @@ impl<C: SwitchController + ?Sized> SwitchController for Box<C> {
 
     fn is_idle(&self) -> Result<bool> {
         (**self).is_idle()
+    }
+
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        (**self).console_link()
     }
 }
 
@@ -385,6 +394,10 @@ impl<C: SwitchController> Controller for GbaOnSwitch<C> {
 
     fn is_idle(&self) -> Result<bool> {
         self.0.is_idle()
+    }
+
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        self.0.console_link()
     }
 }
 

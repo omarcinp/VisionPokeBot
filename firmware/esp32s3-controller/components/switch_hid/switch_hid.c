@@ -42,7 +42,8 @@ esp_err_t switch_hid_init(const switch_hid_config_t *config)
     };
 
     const uint8_t configuration[] = {
-        TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, 0x80, 500),
+        // Bus powered, remote wakeup: a button can wake a sleeping Switch.
+        TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
         TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, config->report_descriptor_len,
                                  EP_OUT, EP_IN, EP_SIZE, config->poll_interval_ms),
     };
@@ -76,13 +77,23 @@ bool switch_hid_mounted(void)
     return tud_mounted();
 }
 
-bool switch_hid_send(const uint8_t *report, size_t len)
+bool switch_hid_suspended(void)
 {
-    if (!tud_mounted()) {
-        return false;
-    }
+    return tud_suspended();
+}
+
+void switch_hid_wake(void)
+{
     if (tud_suspended()) {
         tud_remote_wakeup();
+    }
+}
+
+bool switch_hid_send(const uint8_t *report, size_t len)
+{
+    // Asleep: reports go nowhere. Waking is the caller's choice
+    // (switch_hid_wake), made on a button press, never on every tick.
+    if (!tud_mounted() || tud_suspended()) {
         return false;
     }
     if (!tud_hid_ready()) {

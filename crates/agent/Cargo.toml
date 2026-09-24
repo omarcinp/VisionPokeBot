@@ -14,6 +14,7 @@ pokebot-core.workspace = true
 pokebot-gamedata.workspace = true
 pokebot-planner.workspace = true
 pokebot-runtime.workspace = true
+pokebot-video = { path = "../video" }
 pokebot-state.workspace = true
 pokebot-vision.workspace = true
 pokebot-world.workspace = true
@@ -23,4 +24,3 @@ thiserror = "2.0.20"
 
 [dev-dependencies]
 pokebot-emulator-libretro = { path = "../../adapters/emulator-libretro" }
-pokebot-video = { path = "../video" }

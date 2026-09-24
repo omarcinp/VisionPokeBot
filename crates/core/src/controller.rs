@@ -231,6 +231,12 @@ pub trait Controller {
 
     /// True when every queued input has been fully applied.
     fn is_idle(&self) -> Result<bool>;
+
+    /// What the controller knows about the console at the other end of its
+    /// cable. Devices that can't tell answer [`ConsoleLink::Unknown`].
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        Ok(ConsoleLink::Unknown)
+    }
 }
 
 impl<C: Controller + ?Sized> Controller for Box<C> {
@@ -241,6 +247,24 @@ impl<C: Controller + ?Sized> Controller for Box<C> {
     fn is_idle(&self) -> Result<bool> {
         (**self).is_idle()
     }
+
+    fn console_link(&mut self) -> Result<ConsoleLink> {
+        (**self).console_link()
+    }
+}
+
+/// The controller's view of the console, from its USB connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConsoleLink {
+    /// The console has the controller configured and is awake.
+    Attached,
+    /// Configured, but the console suspended the bus: it is asleep.
+    Suspended,
+    /// Not configured: the console is off or asleep with its USB ports
+    /// unpowered, or the cable is out.
+    Detached,
+    /// The device can't tell (emulator, serial bridge, older firmware).
+    Unknown,
 }
 
 #[cfg(test)]

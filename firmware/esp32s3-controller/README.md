@@ -27,6 +27,46 @@ curl -d '"Neutral"' http://<ip>/api/command
 Sticks use x 0 = left … 255 = right and y 0 = up … 255 = down, with 128 as
 centre. Omitted fields mean released or centred.
 
+### Keepalive: the Switch never dims or sleeps
+
+When the bot is stopped the Switch gets no input. After 5 minutes Screen
+Burn-In Reduction dims the picture (which also changes the captured colours);
+in TV mode Auto-Sleep then puts the console to sleep after 1, 2, 3, 6 or 12
+hours (System Settings → Sleep Mode; "Never" is also an option). A sleeping
+Switch stops the capture and cuts the controller's USB (`usb_mounted: false`),
+and nobody may be there to wake it.
+
+So after **4 minutes without input** the firmware nudges the **right stick**
+up and down by itself (400 ms, no buttons). FireRed ignores the right stick,
+so this is safe on every screen: the D-pad would walk the player (through a
+door, into grass) and B would answer NO. Any command from a client cancels a
+running nudge at once and restarts the idle clock; nudges are never reported
+to clients as finished commands.
+
+```sh
+curl http://<ip>/api/keepalive                                   # settings and count
+curl -d '{"after_secs": 120}' http://<ip>/api/keepalive          # idle time
+curl -d '{"after_secs": null}' http://<ip>/api/keepalive         # off
+curl -d '{"routine": {"Press": "B"}}' http://<ip>/api/keepalive  # other input
+```
+
+`GET /api/status` reports `keepalive_secs` and `keepalives` (routines played),
+plus `usb_suspended`: the Switch suspended the bus (asleep).
+
+### Waking a sleeping Switch
+
+The configuration descriptor advertises **USB remote wakeup**. While the bus
+is suspended, a report with a **button** pressed (not a stick, so never the
+keepalive) makes the firmware request a wakeup, at most every 100 ms, like
+HOME on a wired pad. The bot presses HOME every 30 s while the link is
+`Suspended`. This works only if the Switch keeps the controller configured
+while asleep and enables remote wakeup for it. If the dock powers its USB
+ports down (`usb_mounted: false` while asleep), someone has to wake the
+console.
+Runtime changes last until the board restarts. Also set the Switch itself to
+System Settings → Sleep Mode → Auto-Sleep (Playing on TV Screen) → Never, and
+turn off Screen Burn-In Reduction if you want.
+
 All protocol and timing logic is in [`crates/remote`](../../crates/remote),
 which is shared with the host simulator and the emulator's virtual console.
 This crate only brings up WiFi and TinyUSB. See

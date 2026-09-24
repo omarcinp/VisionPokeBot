@@ -81,6 +81,16 @@ pub struct Status {
     pub pending: usize,
     /// A host (the Switch) has configured the USB device.
     pub usb_mounted: bool,
+    /// The host suspended the bus: the Switch is asleep. A button press
+    /// then asks it to wake up (USB remote wakeup).
+    #[serde(default)]
+    pub usb_suspended: bool,
+    /// Idle seconds before the keepalive routine plays; `None` = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u64>,
+    /// Keepalive routines played since the device started.
+    #[serde(default)]
+    pub keepalives: u32,
 }
 
 /// Body of `POST /api/command`: either a bare command or one with a profile.
@@ -136,10 +146,25 @@ mod tests {
             idle: true,
             pending: 0,
             usb_mounted: false,
+            usb_suspended: false,
+            keepalive_secs: Some(240),
+            keepalives: 3,
         });
         assert_eq!(
             serde_json::to_string(&status).unwrap(),
-            r#"{"type":"status","seq":2,"idle":true,"pending":0,"usb_mounted":false}"#
+            r#"{"type":"status","seq":2,"idle":true,"pending":0,"usb_mounted":false,"usb_suspended":false,"keepalive_secs":240,"keepalives":3}"#
+        );
+        // Firmware without the keepalive still parses.
+        let old: DeviceMessage = serde_json::from_str(
+            r#"{"type":"status","seq":2,"idle":true,"pending":0,"usb_mounted":false}"#,
+        )
+        .unwrap();
+        let DeviceMessage::Status(old) = old else {
+            panic!("not a status")
+        };
+        assert_eq!(
+            (old.usb_suspended, old.keepalive_secs, old.keepalives),
+            (false, None, 0)
         );
     }
 
