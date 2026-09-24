@@ -149,7 +149,8 @@ fn badge_received(page: &str) -> Option<&'static str> {
     })
 }
 
-/// "RED found a POTION!" / "received the TOWN MAP." / "obtained a X!", and
+/// "RED found a POTION!" / "received the TOWN MAP." / "received TM03 from
+/// MISTY." / "obtained a X!", and
 /// the Mt. Moon fossil's "Obtained the HELIX FOSSIL!" (no name before it).
 fn item_gained(page: &str) -> Option<(String, String)> {
     for (verb, reason) in [
@@ -169,7 +170,9 @@ fn item_gained(page: &str) -> Option<(String, String)> {
                 .find_map(|p| rest.strip_prefix(p))
                 .unwrap_or(rest);
             let end = rest.find(['!', '.'])?;
-            return Some((rest[..end].trim().to_owned(), reason.to_owned()));
+            // "RED received TM03 from MISTY.": the giver follows the item.
+            let name = rest[..end].split(" from ").next().unwrap_or_default();
+            return Some((name.trim().to_owned(), reason.to_owned()));
         }
     }
     None
@@ -368,6 +371,23 @@ mod tests {
             None
         )
         .is_empty());
+    }
+
+    /// Live (Task 13): "RED received TM03\nfrom MISTY." names the giver
+    /// after the item.
+    #[test]
+    fn an_item_received_from_someone_is_tracked() {
+        let Some(d) = data() else { return };
+        let mut t = TextTracker::default();
+        assert_eq!(
+            read(&mut t, "RED received TM03\nfrom MISTY.", &d, None),
+            vec![GameEvent::ItemsChanged {
+                pocket: Pocket::TmCase,
+                item: "ITEM_TM03".into(),
+                delta: 1,
+                reason: "received".into()
+            }]
+        );
     }
 
     fn thrown() -> GameEvent {
