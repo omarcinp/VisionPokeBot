@@ -45,6 +45,35 @@ pub struct BattleMemory {
     pub last_slot: Option<(u8, u8)>,
     /// Identifying the wild opponent and catching it.
     pub catch: CatchMemory,
+    /// Our lead's move under the foe's DISABLE, read from battle text; never
+    /// chosen until "… is disabled no more!".
+    pub disabled: Option<String>,
+}
+
+/// DISABLE in battle text about our lead (`lead`, its printed name):
+/// `Some(Some(move))` for "IVYSAUR's VINE WHIP was disabled!" (the foe used
+/// DISABLE) and "… is disabled!" (the move was chosen anyway),
+/// `Some(None)` for "IVYSAUR is disabled no more!". Pages about the foe
+/// ("Foe …", "Wild …") never match. The font's apostrophe reads as `’`.
+pub fn disable_text(page: &str, lead: &str, data: &GameData) -> Option<Option<String>> {
+    let page = page.replace('’', "'");
+    if page == format!("{lead} is disabled no more!") {
+        return Some(None);
+    }
+    let rest = page.strip_prefix(&format!("{lead}'s "))?;
+    let name = rest
+        .strip_suffix(" was disabled!")
+        .or_else(|| rest.strip_suffix(" is disabled!"))?;
+    data.move_named(name).map(|m| Some(m.to_owned()))
+}
+
+/// Battle text read on two frames ([`crate::catch::observe`]): tracks
+/// DISABLE on our lead.
+pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: &GameData) {
+    let Some(lead) = party.lead() else { return };
+    if let Some(disabled) = disable_text(page, &lead.display_name(), data) {
+        memory.disabled = disabled;
+    }
 }
 
 /// The opponent as a combatant, if its name and level can be read.
@@ -67,7 +96,8 @@ pub fn identify_opponent(data: &GameData, observation: &Observation) -> Option<C
 
 /// The move slot to use: the evaluator's best damaging move among those
 /// with PP to spare; in wild battles, the trainer reserve is spent only when
-/// nothing else is left. `None` when no damaging move has PP.
+/// nothing else is left. A disabled move is never chosen (the game refuses
+/// it and returns to the move menu). `None` when no damaging move has PP.
 pub fn choose_move(
     data: &GameData,
     party: &Party,
@@ -76,7 +106,9 @@ pub fn choose_move(
     policy: &BattlePolicy,
 ) -> Option<(u8, String)> {
     let lead = party.lead()?;
-    let damaging = |m: &String| data.move_(m).is_some_and(|mv| mv.power > 0);
+    let damaging = |m: &String| {
+        data.move_(m).is_some_and(|mv| mv.power > 0) && memory.disabled.as_ref() != Some(m)
+    };
     let spare = |m: &String| {
         let left = lead.pp_left(data, m);
         let max = data.move_(m).map_or(0, |mv| mv.pp);
@@ -265,5 +297,59 @@ mod tests {
         // No damaging PP at all: nothing to choose (the battle policy runs).
         let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
         assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
+    }
+
+    /// Live (Route 3, Lass Robin's JIGGLYPUFF): DISABLE on VINE WHIP, and the
+    /// bot chose VINE WHIP again every turn: "IVYSAUR's VINE WHIP is
+    /// disabled!" sent it back to the move menu forever.
+    #[test]
+    fn a_disabled_move_is_not_chosen_until_disable_ends() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        let party = ivysaur(&data, &[("MOVE_VINE_WHIP", 3)]);
+        let mut memory = BattleMemory {
+            trainer: true,
+            ..BattleMemory::default()
+        };
+        assert_eq!(
+            choose_move(&data, &party, None, &memory, &policy),
+            Some((3, "MOVE_VINE_WHIP".into()))
+        );
+        // The foe's own moves and unrelated pages change nothing.
+        for page in [
+            "Foe JIGGLYPUFF's POUND was disabled!",
+            "Foe JIGGLYPUFF used DISABLE!",
+        ] {
+            observe_page(&mut memory, page, &party, &data);
+            assert_eq!(memory.disabled, None, "{page}");
+        }
+        observe_page(
+            &mut memory,
+            "IVYSAUR's VINE WHIP was disabled!",
+            &party,
+            &data,
+        );
+        assert_eq!(memory.disabled.as_deref(), Some("MOVE_VINE_WHIP"));
+        assert_eq!(
+            choose_move(&data, &party, None, &memory, &policy),
+            Some((0, "MOVE_TACKLE".into()))
+        );
+        // Chosen anyway (e.g. the first page was missed): the refusal page
+        // also marks it.
+        memory.disabled = None;
+        observe_page(
+            &mut memory,
+            // As read live: the font's apostrophe is `’`.
+            "IVYSAUR’s VINE WHIP is disabled!",
+            &party,
+            &data,
+        );
+        assert_eq!(memory.disabled.as_deref(), Some("MOVE_VINE_WHIP"));
+        observe_page(&mut memory, "IVYSAUR is disabled no more!", &party, &data);
+        assert_eq!(memory.disabled, None);
+        assert_eq!(
+            choose_move(&data, &party, None, &memory, &policy),
+            Some((3, "MOVE_VINE_WHIP".into()))
+        );
     }
 }

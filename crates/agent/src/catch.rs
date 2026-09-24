@@ -403,8 +403,9 @@ pub struct CatchMemory {
 impl CatchMemory {
     /// Reads battle text on every battle frame: the throw's result, the
     /// foe's status, the nickname question (a catch) and the PC box. A page
-    /// counts once two frames read the same text, and only once.
-    pub fn observe(&mut self, o: &Observation) {
+    /// counts once two frames read the same text, and only once; that page
+    /// is returned for the other battle-text readers.
+    pub fn observe(&mut self, o: &Observation) -> Option<String> {
         // The battle is back after USE: that throw is over.
         if o.battle.is_some() && self.thrower.as_ref().is_some_and(Thrower::used) {
             self.thrower = None;
@@ -415,21 +416,23 @@ impl CatchMemory {
         if o.battle.as_ref().is_some_and(|b| b.menu.is_none()) {
             self.hud = None;
         }
-        let Some(d) = &o.dialogue else { return };
+        let Some(d) = &o.dialogue else {
+            return None;
+        };
         let page = d.lines.join(" ");
         if page.trim().is_empty() {
-            return;
+            return None;
         }
         match &self.page {
             Some((frame, seen)) if *seen == page && *frame < o.frame_id => {}
-            Some((_, seen)) if *seen == page => return,
+            Some((_, seen)) if *seen == page => return None,
             _ => {
                 self.page = Some((o.frame_id, page));
-                return;
+                return None;
             }
         }
         if page == self.applied {
-            return;
+            return None;
         }
         self.applied = page.clone();
         let species = self.foe.as_ref().map(|(s, _)| s.clone());
@@ -460,6 +463,7 @@ impl CatchMemory {
             self.attempt = None;
             self.thrower = None;
         }
+        Some(page)
     }
 
     /// A move choice was confirmed: the opener, if it was one, is used.
@@ -483,12 +487,14 @@ impl CatchMemory {
 }
 
 /// Reads battle text into the battle's memory ([`CatchMemory::observe`]);
-/// a blocked ball marks the battle as a trainer's.
-pub fn observe(memory: &mut BattleMemory, o: &Observation) {
-    memory.catch.observe(o);
+/// a blocked ball marks the battle as a trainer's. Returns the page newly
+/// read on two frames, if any.
+pub fn observe(memory: &mut BattleMemory, o: &Observation) -> Option<String> {
+    let page = memory.catch.observe(o);
     if memory.catch.blocked {
         memory.trainer = true;
     }
+    page
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -812,12 +818,16 @@ pub(crate) fn attempt_decision(
         )));
         return None;
     }
+    // The game refuses a disabled move: never choose it.
+    let usable = |(_, m): &(u8, String)| memory.disabled.as_ref() != Some(m);
     let status = (!attempt.opened && plan.status_move.is_some())
         .then(|| status_move(data, member, attempt.foe_status))
-        .flatten();
+        .flatten()
+        .filter(usable);
     let attack = (foe_hp >= WEAKENED_PER_MILLE)
         .then(|| weakening_move(data, &lead, &foe))
-        .flatten();
+        .flatten()
+        .filter(usable);
     let throws_left = plan.expected_throws.saturating_sub(attempt.throws).max(1);
     let turns = u32::from(status.is_some())
         + attack
@@ -1934,6 +1944,12 @@ mod tests {
         let label = decide_on(&data, &party, &mut memory, &wild(9, moves, 1000));
         assert_eq!(label, "cursor to move 4 (VINE_WHIP): Down");
         assert_eq!(memory.last_slot, Some((0, 3)));
+        // VINE WHIP under DISABLE (live: Route 3, the bot chose a disabled
+        // move forever): no safe attack is left, so throw instead.
+        memory.disabled = Some("MOVE_VINE_WHIP".into());
+        let label = decide_on(&data, &party, &mut memory, &wild(10, moves, 1000));
+        assert_eq!(label, "back to the command menu to throw");
+        memory.disabled = None;
         // Weakened (200‰): BAG.
         let label = decide_on(&data, &party, &mut memory, &wild(11, command, 200));
         assert_eq!(label, "cursor to BAG: Right");
