@@ -83,7 +83,7 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<ShopOb
     }
     let money = {
         let label = font.read(image, MONEY_LABEL, &[]).join(" ");
-        if label == "MONEY" {
+        if is_money_label(&label) {
             parse_amount(&small_font.read(image, MONEY_AMOUNT, &[]).join(" "))
         } else {
             None
@@ -109,6 +109,18 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<ShopOb
         cursor,
         quantity,
     })
+}
+
+/// The MONEY window's label, read with `?` for glyphs the font can't
+/// place (one misread glyph, as on the Switch, still counts).
+fn is_money_label(label: &str) -> bool {
+    const LABEL: &str = "MONEY";
+    label.chars().count() == LABEL.chars().count()
+        && label.chars().any(|c| c != '?')
+        && LABEL
+            .chars()
+            .zip(label.chars())
+            .all(|(want, read)| read == '?' || want == read)
 }
 
 /// The MONEY window's distinctive frame colour, at the top border strip.
@@ -223,6 +235,71 @@ mod tests {
     #[test]
     fn switch_reads_the_quantity_box() {
         quantity_box("switch/");
+    }
+
+    #[test]
+    fn money_label_allows_a_misread_glyph() {
+        assert!(is_money_label("MONEY"));
+        assert!(is_money_label("M?NEY"));
+        assert!(is_money_label("MONE?"));
+        assert!(!is_money_label("?????"));
+        assert!(!is_money_label("MONE"));
+        assert!(!is_money_label("MENU?"));
+        assert!(!is_money_label("POKé BALL"));
+    }
+
+    /// Review: a single glyph the font can't place (a Switch scaling
+    /// artefact) dropped the whole money reading.
+    #[test]
+    fn a_misread_label_glyph_still_reads_the_money() {
+        for dir in SOURCES {
+            let Some((mut image, font, small_font)) = fixture(&format!("{dir}mart-list.png"))
+            else {
+                continue;
+            };
+            // Stray ink inside the label's second glyph (the O).
+            let label = font.read(&image, MONEY_LABEL, &[]).join(" ");
+            assert_eq!(label, "MONEY", "{dir}");
+            let ink = ink_columns(&image);
+            let (x0, x1) = (ink[1].0, ink[1].1);
+            let mid = (x0 + x1) / 2;
+            let ink_colour = image.pixel(ink[0].0, ink[0].2);
+            let dark = |image: &RgbImage, x: u32, y: u32| {
+                image.pixel(x, y).iter().map(|c| u32::from(*c)).sum::<u32>() < 300
+            };
+            let rows: Vec<u32> = (MONEY_LABEL.y..MONEY_LABEL.y + MONEY_LABEL.height)
+                .filter(|y| (x0..=x1).any(|x| dark(&image, x, *y)))
+                .collect();
+            let middle = rows[rows.len() / 2];
+            for dy in 0..2 {
+                image.put_pixel(mid, middle + dy, ink_colour);
+            }
+            let label = font.read(&image, MONEY_LABEL, &[]).join(" ");
+            assert!(label.len() == 5 && label != "MONEY", "{dir}: {label}");
+            let shop = detect(&image, &font, &small_font).expect("shop");
+            assert_eq!(shop.money, Some(4880), "{dir}: label {label}");
+        }
+    }
+
+    /// Runs of columns with dark ink in the MONEY label: (first x, last x,
+    /// a y with ink in the first column).
+    fn ink_columns(image: &RgbImage) -> Vec<(u32, u32, u32)> {
+        let dark =
+            |x: u32, y: u32| image.pixel(x, y).iter().map(|c| u32::from(*c)).sum::<u32>() < 300;
+        let mut runs: Vec<(u32, u32, u32)> = Vec::new();
+        let mut open: Option<(u32, u32)> = None;
+        for x in MONEY_LABEL.x..MONEY_LABEL.x + MONEY_LABEL.width {
+            let y = (MONEY_LABEL.y..MONEY_LABEL.y + MONEY_LABEL.height).find(|y| dark(x, *y));
+            match (y, open) {
+                (Some(y), None) => open = Some((x, y)),
+                (None, Some((start, y0))) => {
+                    runs.push((start, x - 1, y0));
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        runs
     }
 
     #[test]
