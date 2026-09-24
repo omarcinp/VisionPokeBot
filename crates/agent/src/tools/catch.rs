@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use pokebot_core::ControllerCommand;
+use pokebot_state::Status;
 
 use super::battle::BattleStep;
 use super::go::{GoStep, NavParts};
@@ -16,6 +17,7 @@ use super::{
     progress, BattlePlan, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
 };
+use crate::catch::CATCH_MIN_HP;
 use crate::nav::{nearest_reachable, Destination};
 use crate::party::Party;
 use crate::story::spin_sequence;
@@ -27,8 +29,11 @@ const SPIN_TURNS: usize = 24;
 const MAX_CATCH_ENCOUNTERS: u32 = 40;
 /// Battles before a training hunt is given up.
 const MAX_TRAIN_ENCOUNTERS: u32 = 150;
-/// The lead heals below this share of its HP (per mille).
-const HEAL_BELOW: u32 = 500;
+/// A training lead heals below this share of its HP (per mille); a
+/// catching lead below the catch policy's own bar ([`CATCH_MIN_HP`]),
+/// since under it every encounter of the target is refused (flash-1: a
+/// SPEAROW passed up at 39/60 HP while the hunt went on).
+const TRAIN_HEAL_BELOW: u32 = 500;
 /// Heals per hunt before it counts as not working.
 const MAX_HEALS: u32 = 3;
 /// How the step reports a lead that must heal before going on.
@@ -54,6 +59,16 @@ pub struct HuntStep {
     spin_at: Option<(i32, i32)>,
     encounters: u32,
     nav: NavParts,
+}
+
+impl Hunt {
+    /// Share of max HP (per mille) under which the lead heals first.
+    fn heal_below(&self) -> u32 {
+        match self {
+            Hunt::Species(_) => CATCH_MIN_HP,
+            Hunt::Level(_) => TRAIN_HEAL_BELOW,
+        }
+    }
 }
 
 impl HuntStep {
@@ -158,15 +173,31 @@ impl ToolStep for HuntStep {
             return Decision::Wait("a battle starts".into());
         }
         if let Some(lead) = party.lead() {
+            let heal_below = self.hunt.heal_below();
             if lead
                 .hp
-                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
+                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * heal_below)
             {
                 return Decision::Fail(format!(
-                    "{HEAL_FIRST}: the lead is at {}/{} HP",
+                    "{HEAL_FIRST}: the lead is at {}/{} HP, below {:.0} %",
                     lead.hp.map_or(0, |h| h.0),
-                    lead.hp.map_or(0, |h| h.1)
+                    lead.hp.map_or(0, |h| h.1),
+                    f64::from(heal_below) / 10.0
                 ));
+            }
+            // The catch policy refuses a lead with a status condition too.
+            if matches!(self.hunt, Hunt::Species(_)) {
+                if let Some(status) = ctx
+                    .state
+                    .party
+                    .value
+                    .as_ref()
+                    .and_then(|p| p.first())
+                    .and_then(|m| m.status.value)
+                    .filter(|s| !matches!(s, Status::Healthy))
+                {
+                    return Decision::Fail(format!("{HEAL_FIRST}: the lead is {status:?}"));
+                }
             }
         }
         if ctx.quiet_frames < SETTLE_FRAMES {
@@ -336,6 +367,15 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    #[test]
+    fn a_catching_lead_heals_at_the_catch_policys_bar() {
+        assert_eq!(
+            Hunt::Species("SPECIES_SPEAROW".into()).heal_below(),
+            CATCH_MIN_HP
+        );
+        assert_eq!(Hunt::Level(22).heal_below(), TRAIN_HEAL_BELOW);
+    }
 
     #[test]
     fn route_4_grass_is_out_of_reach_from_its_west_part() {
