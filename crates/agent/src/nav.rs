@@ -457,6 +457,12 @@ impl Navigator {
                     timeout,
                 ))
             }
+            // Learned blocks may be stale (a wandering NPC moved on, or a
+            // step in a featureless corridor that did happen but couldn't
+            // be seen).
+            _ if self.learned.remove(&map.name).is_some() => {
+                NavStatus::Wait(format!("no path {label}; forgetting learned obstacles"))
+            }
             _ => NavStatus::Fail(format!("no path {label} on {}", map.name)),
         }
     }
@@ -794,6 +800,58 @@ mod tests {
             },
         ];
         assert_eq!(straight_run((0, 0), &jump_first), 1);
+    }
+
+    /// Live: in MtMoon_B2F's featureless bottom corridor two Right taps
+    /// that did move the player weren't seen (the view is the same at
+    /// every x), the tile ahead was learned as blocked, and the walk to
+    /// the ladder failed with "no path to warp (25, 21)".
+    #[test]
+    fn a_warp_walk_forgets_learned_obstacles_before_giving_up() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "MtMoon_B2F".into(),
+            x: 27,
+            y: 38,
+        };
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation {
+            pose: pose.clone(),
+            score: 1000,
+        });
+        let mut nav = Navigator::new(
+            Arc::new(world),
+            Destination::Warp {
+                map: "MtMoon_B2F".into(),
+                warp: 0,
+            },
+        );
+        // Both corridor rows ahead learned as blocked.
+        nav.learned.insert(
+            "MtMoon_B2F".into(),
+            Obstacles::from([(28, 38), (28, 37), (27, 37)]),
+        );
+        match nav.next(&o) {
+            NavStatus::Wait(r) => assert!(r.contains("forgetting"), "{r}"),
+            _ => panic!("expected a wait"),
+        }
+        match nav.next(&o) {
+            NavStatus::Act(a) => {
+                assert!(a.label.starts_with("walk to warp (25, 21)"), "{}", a.label)
+            }
+            _ => panic!("expected a step"),
+        }
     }
 
     #[test]
