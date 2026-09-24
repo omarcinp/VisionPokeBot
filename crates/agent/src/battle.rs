@@ -271,6 +271,12 @@ pub(crate) fn step_toward(
     ))
 }
 
+/// "Will RED change POKéMON?": asked before a trainer sends the next
+/// Pokémon, when the party has more than one.
+pub fn is_switch_question(page: &str) -> bool {
+    page.starts_with("Will ") && page.contains(" change") && page.contains("POK")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

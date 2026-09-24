@@ -770,6 +770,17 @@ impl Task for StoryTask {
                         90,
                     ));
                 }
+                // A trainer about to send the next Pokémon (Shift style,
+                // with 2+ in the party): "Will RED change POKéMON?" → No
+                // (the lead fights; switching is out of scope).
+                if battle::is_switch_question(&d.lines.join(" ")) {
+                    return Decision::Act(Action::new(
+                        "change Pokémon: NO",
+                        vec![ControllerCommand::Press(Button::B)],
+                        Expectation::MenuClosed,
+                        90,
+                    ));
+                }
                 // A is YES: never answer a question we don't understand.
                 return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
             }
@@ -2547,6 +2558,24 @@ mod tests {
         let label = tick(&mut task, &located(f, "MtMoon_B2F", 14, 8), &state);
         assert!(label.contains("Up"), "{label}");
         assert!(label.contains("(5, 10)"), "{label}");
+    }
+
+    /// Live: with a second party member (a catch), a trainer's next
+    /// Pokémon brings "Will RED change POKéMON?" Yes/No, and the story
+    /// failed on it as an unexpected question.
+    #[test]
+    fn the_change_pokemon_question_is_answered_no() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut ask = wild_frame(1, None, &["Will RED change", "POKéMON?"]);
+        ask.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        assert_eq!(tick_events(&mut task, &ask, &state).0, "change Pokémon: NO");
     }
 
     #[test]
