@@ -4,7 +4,7 @@ use pokebot_core::RgbImage;
 use pokebot_state::{DialogueKind, DialogueObservation, Region};
 
 use super::{px, share};
-use crate::color::{luma, near, ARROW_RED, INFO_HEADER, MESSAGE_BORDER, TOLERANCE, WHITE};
+use crate::color::{is_arrow_red, luma, INFO_HEADER, MESSAGE_BORDER, SIGN_BORDER, WHITE};
 
 /// Interior of the standard bottom message box.
 pub const MESSAGE_TEXT: Region = Region {
@@ -20,6 +20,29 @@ pub const INFO_BODY: Region = Region {
     width: 240,
     height: 144,
 };
+
+/// Title in the header bar of an information page ("HELP", "CONTROLS").
+pub const INFO_TITLE: Region = Region {
+    x: 0,
+    y: 0,
+    width: 120,
+    height: 16,
+};
+
+/// Whether an information page title reads "HELP", allowing one unreadable
+/// letter (captured frames lose the odd glyph).
+pub fn is_help_title(lines: &[String]) -> bool {
+    lines.first().is_some_and(|line| {
+        let title: Vec<char> = line.trim().chars().collect();
+        title.len() == 4
+            && title
+                .iter()
+                .zip("HELP".chars())
+                .filter(|(a, b)| *a == b)
+                .count()
+                >= 3
+    })
+}
 
 pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
     let (kind, region) = if is_message_box(image) {
@@ -40,16 +63,19 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
         stable_frames: 0,
         text_cells: text_cells(image, region, arrow),
         lines: Vec::new(),
+        help: false,
     })
 }
 
+/// The bottom message box: blue frame (people, events) or grey (signs).
 fn is_message_box(image: &RgbImage) -> bool {
-    let top = share(image, Region::new(12, 115, 216, 1), MESSAGE_BORDER, 2);
-    let bottom = share(image, Region::new(12, 156, 216, 1), MESSAGE_BORDER, 2);
-    let left = share(image, Region::new(5, 126, 1, 20), MESSAGE_BORDER, 2);
-    let right = share(image, Region::new(234, 126, 1, 20), MESSAGE_BORDER, 2);
-    let interior = share(image, MESSAGE_TEXT, WHITE, 2);
-    top >= 800 && bottom >= 800 && left >= 800 && right >= 800 && interior >= 500
+    let framed = |border| {
+        share(image, Region::new(12, 115, 216, 1), border, 2) >= 800
+            && share(image, Region::new(12, 156, 216, 1), border, 2) >= 800
+            && share(image, Region::new(5, 126, 1, 20), border, 2) >= 800
+            && share(image, Region::new(234, 126, 1, 20), border, 2) >= 800
+    };
+    (framed(MESSAGE_BORDER) || framed(SIGN_BORDER)) && share(image, MESSAGE_TEXT, WHITE, 2) >= 500
 }
 
 fn is_info_page(image: &RgbImage) -> bool {
@@ -59,7 +85,7 @@ fn is_info_page(image: &RgbImage) -> bool {
 /// The downward red triangle: rows of red pixels shrinking by two each row
 /// (9, 7, 5, 3, 1 at native size). Red text never forms this shape.
 pub fn find_arrow(image: &RgbImage, region: Region) -> Option<Region> {
-    let red = |x: u32, y: u32| region.contains(x, y) && near(px(image, x, y), ARROW_RED, TOLERANCE);
+    let red = |x: u32, y: u32| region.contains(x, y) && is_arrow_red(px(image, x, y));
     for y in region.y..region.y + region.height {
         for x in region.x..region.x + region.width {
             // Candidate top-left of the arrow: a red run starting here.
@@ -144,6 +170,7 @@ pub fn changed_cells(a: &[u8], b: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::ARROW_RED;
     use crate::detect::testing::*;
 
     fn scene() -> RgbImage {

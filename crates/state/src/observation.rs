@@ -91,6 +91,10 @@ pub struct DialogueObservation {
     /// glyphs read as `?`).
     #[serde(default)]
     pub lines: Vec<String>,
+    /// An information page of the HELP System (header "HELP"), which opens
+    /// on L/R or by itself in some versions; B closes it.
+    #[serde(default)]
+    pub help: bool,
 }
 
 /// A list menu with the ▶ cursor (YES/NO, gender, name presets, Start menu).

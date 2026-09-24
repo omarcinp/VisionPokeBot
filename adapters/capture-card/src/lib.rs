@@ -21,6 +21,25 @@ use v4l::{Device, FourCC};
 
 pub use decode::PixelFormat;
 
+/// Sets integer controls by name (case-insensitive, as `v4l2-ctl` lists them).
+fn set_controls(device: &Device, controls: &[(String, i64)]) -> std::io::Result<()> {
+    let known = device.query_controls()?;
+    for (name, value) in controls {
+        let wanted = name.to_lowercase().replace(' ', "_");
+        let description = known
+            .iter()
+            .find(|d| d.name.to_lowercase().replace(' ', "_") == wanted)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, format!("no control {name:?}"))
+            })?;
+        device.set_control(v4l::control::Control {
+            id: description.id,
+            value: v4l::control::Value::Integer(*value),
+        })?;
+    }
+    Ok(())
+}
+
 const BUFFERS: u32 = 4;
 
 #[derive(Debug, Clone)]
@@ -30,6 +49,9 @@ pub struct CaptureCardConfig {
     /// Requested size; `None` keeps whatever the device is set to (a
     /// loopback device always uses its writer's size).
     pub size: Option<(u32, u32)>,
+    /// Picture controls to set on open, by V4L2 name (e.g. `("saturation",
+    /// 155)`). Cards forget them when unplugged, so the bot sets them.
+    pub controls: Vec<(String, i64)>,
 }
 
 pub struct CaptureCardVideoSource {
@@ -72,6 +94,9 @@ impl CaptureCardVideoSource {
             format.height = height;
             format =
                 Capture::set_format(&device, &format).map_err(|e| device_err("set format", e))?;
+        }
+        if !config.controls.is_empty() {
+            set_controls(&device, &config.controls).map_err(|e| device_err("set controls", e))?;
         }
         let pixel_format = PixelFormat::from_fourcc(format.fourcc.repr).ok_or_else(|| {
             Error::Unsupported(format!(

@@ -75,8 +75,9 @@ pub enum StoryStep {
     /// Follow dialogue/cutscenes until nothing has happened for `frames`.
     Settle { frames: u32 },
     /// Walk toward `trigger` until a battle starts, fight it, and finish once
-    /// back in the overworld.
-    Battle { trigger: Destination },
+    /// back in the overworld. With `loss_ok` (the first rival battle), losing
+    /// is part of the story and not a failure.
+    Battle { trigger: Destination, loss_ok: bool },
     /// Heal at a Pokémon Center (the given one, or the nearest).
     Heal { center: Option<String> },
     /// Walk the tall grass of `map`, fighting wild Pokémon, until the lead is
@@ -110,6 +111,59 @@ impl Milestone {
 
 type Tile = (i32, i32);
 
+/// Frames a page's text must stay unchanged to count as fully printed.
+const PAGE_PRINTED_FRAMES: u32 = 8;
+
+/// Time each direction of a spin is held: under the 8-frame turn (134 ms),
+/// so the direction read when a turn ends is always a new one (holding the
+/// facing direction then would walk instead of turning).
+const SPIN_STEP_MS: u64 = 100;
+/// Direction changes per spin action (~2.4 s; a battle cancels it early).
+const SPIN_TURNS: usize = 24;
+
+/// Where to spin for encounters: a grass tile, preferring ones surrounded by
+/// grass (a turn that becomes a step still lands in grass), then closeness.
+pub(crate) fn spin_tile(
+    grass: &impl Fn(i32, i32) -> bool,
+    width: i32,
+    height: i32,
+    near: Tile,
+) -> Option<Tile> {
+    let mut best: Option<(i32, Tile)> = None;
+    for y in 0..height {
+        for x in 0..width {
+            if !grass(x, y) {
+                continue;
+            }
+            let around = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+                .iter()
+                .filter(|(dx, dy)| grass(x + dx, y + dy))
+                .count() as i32;
+            let score = 8 * around - ((x - near.0).abs() + (y - near.1).abs());
+            if best.is_none_or(|(s, _)| score > s) {
+                best = Some((score, (x, y)));
+            }
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+/// Turning in place rolls for a wild encounter like a step does (the turn's
+/// end counts as arriving on the tile; pokefirered field_player_avatar.c
+/// UpdatePlayerAvatarTransitionState) in half the time, without moving.
+/// Up, Right, Down, Left, ...: every direction differs from the last.
+pub(crate) fn spin_sequence(turns: usize) -> Vec<pokebot_core::TimedInput> {
+    [Button::Up, Button::Right, Button::Down, Button::Left]
+        .into_iter()
+        .cycle()
+        .take(turns)
+        .map(|b| pokebot_core::TimedInput {
+            buttons: [b].into_iter().collect(),
+            duration: std::time::Duration::from_millis(SPIN_STEP_MS),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TalkPhase {
     Approach,
@@ -138,7 +192,8 @@ pub struct StoryTask {
     in_battle: bool,
     last_dialogue_frame: Option<u64>,
     /// Training: the two grass tiles we pace between, and which is next.
-    pacing: Option<(Tile, Tile, bool)>,
+    /// The grass tile training spins on.
+    spin_at: Option<Tile>,
     /// New moves and evolution, read from the screen.
     learning: MoveLearning,
     /// Money, items, heals and empty moves, read from dialogue text.
@@ -202,7 +257,7 @@ impl StoryTask {
             battle_memory: BattleMemory::default(),
             in_battle: false,
             last_dialogue_frame: None,
-            pacing: None,
+            spin_at: None,
             learning: MoveLearning::default(),
             tracker: TextTracker::default(),
             upcoming: Vec::new(),
@@ -241,7 +296,7 @@ impl StoryTask {
         self.saw_dialogue = false;
         self.answers_used = 0;
         self.battle_seen = false;
-        self.pacing = None;
+        self.spin_at = None;
         self.heal.reset();
         if self.step >= self.milestones[self.milestone].steps.len() {
             ctx.events.push(GameEvent::GoalProgress {
@@ -271,7 +326,7 @@ impl StoryTask {
         self.talk = TalkPhase::Approach;
         self.saw_dialogue = false;
         self.answers_used = 0;
-        self.pacing = None;
+        self.spin_at = None;
         self.heal.reset();
     }
 
@@ -343,29 +398,14 @@ impl StoryTask {
 
     /// Two neighbouring tall-grass tiles on `map` to pace between, closest to
     /// `near` (deterministic: row-major order breaks ties).
-    fn grass_pair(&self, map: &str, near: (i32, i32)) -> Option<((i32, i32), (i32, i32))> {
+    /// Where to spin on `map` for encounters, near `near`.
+    fn grass_spot(&self, map: &str, near: Tile) -> Option<Tile> {
         let m = self.world.map(map)?;
         let grass = |x: i32, y: i32| {
             m.tile(x, y)
                 .is_some_and(|t| t.behavior == TALL_GRASS && t.collision == 0)
         };
-        let mut best: Option<(i32, Tile, Tile)> = None;
-        for y in 0..m.height {
-            for x in 0..m.width {
-                if !grass(x, y) {
-                    continue;
-                }
-                for (dx, dy) in [(1, 0), (0, 1)] {
-                    if grass(x + dx, y + dy) {
-                        let d = (x - near.0).abs() + (y - near.1).abs();
-                        if best.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
-                            best = Some((d, (x, y), (x + dx, y + dy)));
-                        }
-                    }
-                }
-            }
-        }
-        best.map(|(_, a, b)| (a, b))
+        spin_tile(&grass, m.width, m.height, near)
     }
 
     fn plan(
@@ -460,11 +500,13 @@ impl Task for StoryTask {
         // finished page is read, and the KNOWN MOVES list and questions
         // about moves are answered from the plan's value of each move.
         if let Some(data) = self.data.clone() {
-            if let Some(d) = o
-                .dialogue
-                .as_ref()
-                .filter(|d| d.ready_for_a() || o.menu.is_some())
-            {
+            // Pages that advance by themselves (the nurse's "We've restored
+            // your POKéMON…") show no arrow and are gone before they count as
+            // settled: read any page once its text stops changing. Both
+            // readers ignore a page they have already seen.
+            if let Some(d) = o.dialogue.as_ref().filter(|d| {
+                d.ready_for_a() || o.menu.is_some() || d.stable_frames >= PAGE_PRINTED_FRAMES
+            }) {
                 let (events, log) =
                     self.learning
                         .observe_page(&d.lines, &data, &self.party, &self.upcoming);
@@ -521,7 +563,8 @@ impl Task for StoryTask {
                 ctx.events
                     .extend(party::battle_events(data, &self.party, battle));
             }
-            if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) {
+            let loss_ok = matches!(step, StoryStep::Battle { loss_ok: true, .. });
+            if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !loss_ok {
                 return Decision::Fail(format!(
                     "our Pokémon fainted ({})",
                     battle.player_name.clone().unwrap_or_default()
@@ -644,7 +687,7 @@ impl Task for StoryTask {
                 }
                 Err(e) => Decision::Fail(format!("planning failed: {e}")),
             },
-            StoryStep::Battle { trigger } => {
+            StoryStep::Battle { trigger, .. } => {
                 if self.battle_seen {
                     if !self.in_battle && self.quiet_frames >= SETTLE_FRAMES {
                         self.advance_step(ctx);
@@ -811,9 +854,9 @@ impl StoryTask {
         if pose.map != map {
             let dest = self.world.map(map).and_then(|m| {
                 let entry = (m.width / 2, m.height / 2);
-                self.grass_pair(map, entry)
+                self.grass_spot(map, entry)
             });
-            let Some((a, _)) = dest else {
+            let Some(a) = dest else {
                 return Decision::Fail(format!("no tall grass on {map}"));
             };
             return match self.navigate(
@@ -831,18 +874,27 @@ impl StoryTask {
                 NavStatusOrDecision::Nav(status) => nav_decision(status),
             };
         }
-        if self.pacing.is_none() {
-            let Some((a, b)) = self.grass_pair(map, (pose.x, pose.y)) else {
-                return Decision::Fail(format!("no tall grass on {map}"));
-            };
-            self.pacing = Some((a, b, false));
-        }
-        let (a, b, toward_b) = self.pacing.expect("set above");
-        let target = if toward_b { b } else { a };
+        let target = match self.spin_at {
+            Some(t) => t,
+            None => {
+                let Some(t) = self.grass_spot(map, (pose.x, pose.y)) else {
+                    return Decision::Fail(format!("no tall grass on {map}"));
+                };
+                self.spin_at = Some(t);
+                t
+            }
+        };
         if (pose.x, pose.y) == target {
-            self.pacing = Some((a, b, !toward_b));
             self.nav = None;
-            return Decision::Wait("turning around in the grass".into());
+            return Decision::Act(
+                Action::new(
+                    "spin in the grass for encounters",
+                    vec![ControllerCommand::Sequence(spin_sequence(SPIN_TURNS))],
+                    Expectation::InputsDone,
+                    10,
+                )
+                .interruptible(),
+            );
         }
         match self.navigate(
             &Destination::Tile {
@@ -853,7 +905,9 @@ impl StoryTask {
             o,
         ) {
             NavStatusOrDecision::Decision(d) => d,
-            NavStatusOrDecision::Nav(NavStatus::Arrived) => Decision::Wait("pacing".into()),
+            NavStatusOrDecision::Nav(NavStatus::Arrived) => {
+                Decision::Wait("at the spin tile".into())
+            }
             NavStatusOrDecision::Nav(status) => nav_decision(status),
         }
     }
@@ -939,7 +993,10 @@ pub fn opening(starter: Starter) -> Vec<Milestone> {
             "RivalBattle",
             "head for the exit; the rival challenges us",
             vec![
-                StoryStep::Battle { trigger: Destination::Tile { map: LAB.into(), x: 6, y: 8 } },
+                StoryStep::Battle {
+                    trigger: Destination::Tile { map: LAB.into(), x: 6, y: 8 },
+                    loss_ok: true,
+                },
                 StoryStep::Settle { frames: 180 },
             ],
         ),
@@ -1063,6 +1120,36 @@ pub fn all_milestones(starter: Starter) -> Vec<Milestone> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `#` grass, `.` other.
+    fn grid<'a>(rows: &'a [&'a str]) -> impl Fn(i32, i32) -> bool + 'a {
+        move |x, y| {
+            usize::try_from(y)
+                .ok()
+                .and_then(|y| rows.get(y))
+                .zip(usize::try_from(x).ok())
+                .is_some_and(|(row, x)| row.as_bytes().get(x) == Some(&b'#'))
+        }
+    }
+
+    #[test]
+    fn spin_tile_prefers_grass_surrounded_by_grass() {
+        let g = grid(&["#.......", "........", "....###.", "....###.", "....###."]);
+        // The centre of the 3×3 patch beats the lone tile next to us.
+        assert_eq!(spin_tile(&g, 8, 5, (0, 0)), Some((5, 3)));
+        assert_eq!(spin_tile(&grid(&["...."]), 4, 1, (0, 0)), None);
+    }
+
+    #[test]
+    fn spin_sequence_never_repeats_a_direction() {
+        let seq = spin_sequence(9);
+        assert_eq!(seq.len(), 9);
+        for pair in seq.windows(2) {
+            assert_ne!(pair[0].buttons, pair[1].buttons);
+            // Shorter than a turn (8 frames at 59.7 Hz = 134 ms).
+            assert!(pair[0].duration.as_millis() < 134);
+        }
+    }
 
     #[test]
     fn heal_is_inferred_when_the_nurse_text_was_missed() {

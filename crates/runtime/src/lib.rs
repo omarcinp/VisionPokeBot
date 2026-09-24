@@ -12,7 +12,8 @@
 use std::path::Path;
 
 use pokebot_core::{
-    Controller, ControllerCommand, ControllerReceipt, NormalizedFrame, Result, VideoSource,
+    CapturedFrame, Controller, ControllerCommand, ControllerReceipt, NormalizedFrame, Result,
+    VideoSource,
 };
 use pokebot_replay::SessionRecorder;
 use pokebot_state::{
@@ -41,6 +42,11 @@ pub struct Runtime {
     state: GameState,
     observation: Option<Observation>,
     last_frame: Option<NormalizedFrame>,
+    /// The last frame as captured (full resolution), for debug bundles.
+    last_captured: Option<CapturedFrame>,
+    /// The console shows something other than the game (see
+    /// `Normalizer::outside_viewport_lit`).
+    outside_game: bool,
     frames_seen: u64,
     recorder: Option<SessionRecorder>,
     telemetry: Option<Telemetry>,
@@ -61,6 +67,8 @@ impl Runtime {
             state: GameState::default(),
             observation: None,
             last_frame: None,
+            last_captured: None,
+            outside_game: false,
             frames_seen: 0,
             recorder: None,
             telemetry: None,
@@ -97,6 +105,7 @@ impl Runtime {
     pub fn observe(&mut self) -> Result<&NormalizedFrame> {
         let captured = self.devices.video.next_frame()?;
         let frame = self.devices.normalizer.normalize(&captured)?;
+        self.outside_game = self.devices.normalizer.outside_viewport_lit(&captured);
         let observation = self.perception.observe(&frame);
         let events = self.extractor.observe(&observation);
         self.apply(&events)?;
@@ -108,6 +117,7 @@ impl Runtime {
         }
         self.frames_seen += 1;
         self.observation = Some(observation);
+        self.last_captured = Some(captured);
         Ok(self.last_frame.insert(frame))
     }
 
@@ -155,6 +165,19 @@ impl Runtime {
         }
     }
 
+    /// Appends a diagnostic record (not a game event) to the recording, e.g.
+    /// how long an action took to confirm.
+    pub fn record(&mut self, kind: &str, detail: impl serde::Serialize) -> Result<()> {
+        let frame_id = self.last_frame.as_ref().map_or(0, |f| f.frame_id);
+        if let Some(recorder) = &mut self.recorder {
+            recorder.record_event(&serde_json::json!({
+                "frame_id": frame_id,
+                "event": { kind: detail },
+            }))?;
+        }
+        Ok(())
+    }
+
     /// Makes an in-game save durable now (no-op on real hardware).
     pub fn persist_save(&self) -> Result<()> {
         self.devices
@@ -183,6 +206,16 @@ impl Runtime {
 
     pub fn last_frame(&self) -> Option<&NormalizedFrame> {
         self.last_frame.as_ref()
+    }
+
+    /// The last frame as captured, before normalization.
+    pub fn last_captured(&self) -> Option<&CapturedFrame> {
+        self.last_captured.as_ref()
+    }
+
+    /// The console is showing something other than the game.
+    pub fn outside_game(&self) -> bool {
+        self.outside_game
     }
 
     pub fn frames_seen(&self) -> u64 {

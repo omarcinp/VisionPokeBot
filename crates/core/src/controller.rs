@@ -20,9 +20,13 @@ pub enum Button {
     Down,
     Left,
     Right,
+    /// The console's HOME button: not a GBA input, used only to get back
+    /// into the game from a console menu. Emulators ignore it.
+    Home,
 }
 
 impl Button {
+    /// The GBA's buttons (without [`Button::Home`]).
     pub const ALL: [Button; 10] = [
         Button::A,
         Button::B,
@@ -53,6 +57,7 @@ impl FromStr for Button {
     fn from_str(s: &str) -> Result<Self> {
         Button::ALL
             .into_iter()
+            .chain([Button::Home])
             .find(|b| b.to_string().eq_ignore_ascii_case(s))
             .ok_or_else(|| Error::InvalidData(format!("unknown button {s:?}")))
     }

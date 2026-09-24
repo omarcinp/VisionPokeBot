@@ -38,7 +38,8 @@ pub struct FireRedPerception {
     hint: Option<PlayerPose>,
     frames_since_global_search: u32,
     /// Previous frame's text cells and how long they have been unchanged.
-    previous_text: Option<(Vec<u8>, u32)>,
+    /// Text cells of the last dialogue and the frame they first appeared.
+    previous_text: Option<(Vec<u8>, u64)>,
     font: Option<Arc<text::Font>>,
     /// Reads small-font text (battle move names).
     small_font: Option<Arc<text::Font>>,
@@ -107,17 +108,22 @@ impl PerceptionSystem for FireRedPerception {
         let mut dialogue = detect::dialogue::detect(image);
         match &mut dialogue {
             Some(d) => {
-                let stable = match &self.previous_text {
-                    Some((cells, n))
+                // Frames (not observations) since the text last changed.
+                let since = match &self.previous_text {
+                    Some((cells, since))
                         if detect::dialogue::changed_cells(cells, &d.text_cells) == 0 =>
                     {
-                        n + 1
+                        *since
                     }
-                    _ => 0,
+                    _ => frame.frame_id,
                 };
-                d.stable_frames = stable;
-                self.previous_text = Some((d.text_cells.clone(), stable));
+                d.stable_frames = u32::try_from(frame.frame_id - since).unwrap_or(u32::MAX);
+                self.previous_text = Some((d.text_cells.clone(), since));
                 d.lines = self.read_text(image, d);
+                if let (DialogueKind::InfoPage, Some(font)) = (d.kind, &self.font) {
+                    let title = font.read(image, detect::dialogue::INFO_TITLE, &[]);
+                    d.help = detect::dialogue::is_help_title(&title);
+                }
             }
             None => self.previous_text = None,
         }
@@ -304,6 +310,33 @@ mod tests {
     }
 
     #[test]
+    fn stable_text_is_counted_in_frames_not_observations() {
+        // A capture card delivers every other frame to a busy bot: the
+        // count must follow frame ids so settle thresholds mean the same.
+        let mut image = RgbImage::filled(240, 160, [255, 255, 255]);
+        detect::testing::draw_message_box(&mut image);
+        let mut p = FireRedPerception::default();
+        assert_eq!(
+            p.observe(&frame(10, image.clone()))
+                .dialogue
+                .unwrap()
+                .stable_frames,
+            0
+        );
+        assert_eq!(
+            p.observe(&frame(12, image.clone()))
+                .dialogue
+                .unwrap()
+                .stable_frames,
+            2
+        );
+        assert_eq!(
+            p.observe(&frame(20, image)).dialogue.unwrap().stable_frames,
+            10
+        );
+    }
+
+    #[test]
     fn black_and_white_frames_are_transitions() {
         let mut perception = FireRedPerception::default();
         let black = perception.observe(&frame(0, RgbImage::filled(240, 160, [0, 0, 0])));
@@ -324,6 +357,130 @@ mod tests {
         let dialogue = observation.dialogue.unwrap();
         assert!(dialogue.waiting_for_input);
         assert_eq!(dialogue.arrow.unwrap().x, 120);
+    }
+
+    #[test]
+    fn help_system_pages_are_flagged() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        // Switch captures (colour-corrected); the HELP System pops up in
+        // Oak's introduction there.
+        for (fixture, help) in [
+            ("switch-help-greeting", true),
+            ("switch-help-menu", true),
+            ("switch-help-page", true),
+            ("switch-controls", false),
+        ] {
+            let Ok(image) =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{fixture}.png")))
+            else {
+                return;
+            };
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            let d = p.observe(&frame(0, image)).dialogue.unwrap();
+            assert_eq!(d.help, help, "{fixture}");
+        }
+    }
+
+    #[test]
+    fn jpeg_softened_arrow_is_found() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Switch capture: the arrow's edge pixels blend towards the shadow.
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-oak-arrow.png"))
+        else {
+            return;
+        };
+        let d = FireRedPerception::default()
+            .observe(&frame(0, image))
+            .dialogue
+            .unwrap();
+        assert!(d.waiting_for_input);
+    }
+
+    #[test]
+    fn switch_move_menu_cursor_is_found() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Two known moves; one cursor pixel is off by JPEG noise.
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-move-select.png"))
+        else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(0, image));
+        assert_eq!(o.screen.value, ScreenState::BattleMoveSelection);
+        assert_eq!(
+            o.battle.unwrap().menu,
+            Some(BattleMenu::Moves { column: 0, row: 0 })
+        );
+    }
+
+    #[test]
+    fn sign_box_is_a_message_box() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Walking into a sign: grey-framed box ("OAK POKéMON RESEARCH LAB").
+        let Ok(image) = pokebot_video::png::load(root.join("captures/fixtures/switch-sign.png"))
+        else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(0, image));
+        assert_eq!(o.screen.value, ScreenState::Dialogue);
+        assert_eq!(o.dialogue.unwrap().kind, DialogueKind::MessageBox);
+    }
+
+    #[test]
+    fn switch_battle_hud_is_read_despite_jpeg_noise() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(small), Ok(normal)) = (
+            text::Font::load(root.join("data/world/font_small.json")),
+            text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-battle-hud.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default()
+            .with_font(std::sync::Arc::new(normal))
+            .with_small_font(std::sync::Arc::new(small));
+        let b = p.observe(&frame(0, image)).battle.unwrap();
+        assert_eq!(b.player_name.as_deref(), Some("BULBASAUR"));
+        assert_eq!(b.player_level, Some(7));
+        assert_eq!(b.player_hp_numbers, Some((8, 23)));
+        assert_eq!(b.opponent_name.as_deref(), Some("MANKEY"));
+        assert_eq!(b.opponent_level, Some(4));
+        // O (read as the digit 0) and W.
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-battle-spearow.png"))
+        else {
+            return;
+        };
+        let b = p.observe(&frame(1, image)).battle.unwrap();
+        assert_eq!(b.opponent_name.as_deref(), Some("SPEAROW"));
+    }
+
+    #[test]
+    fn switch_message_text_is_read_despite_jpeg_noise() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-nurse-text.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default().with_font(std::sync::Arc::new(font));
+        let d = p.observe(&frame(0, image)).dialogue.unwrap();
+        assert_eq!(
+            d.lines,
+            vec!["Okay, I’ll take your POKéMON for a", "few seconds."]
+        );
     }
 
     #[test]

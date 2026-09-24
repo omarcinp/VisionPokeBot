@@ -17,6 +17,9 @@ pub struct Action {
     pub expect: Expectation,
     /// Frames to wait for the expectation after the inputs finish.
     pub timeout_frames: u64,
+    /// Cancel the inputs early if something interrupts (dialogue, battle,
+    /// menu): for long holds such as walking a straight run.
+    pub interruptible: bool,
 }
 
 impl Action {
@@ -31,7 +34,13 @@ impl Action {
             commands,
             expect,
             timeout_frames,
+            interruptible: false,
         }
+    }
+
+    pub fn interruptible(mut self) -> Self {
+        self.interruptible = true;
+        self
     }
 }
 
@@ -63,6 +72,8 @@ pub enum Expectation {
     NamingClosed,
     /// The player was located somewhere other than `from`.
     PlayerMovedFrom(PlayerPose),
+    /// The player stands on this tile.
+    PlayerAt(PlayerPose),
     /// The player was located on a map other than this one.
     LeftMap(String),
     DialogueOpen,
@@ -113,6 +124,7 @@ impl Expectation {
             Expectation::PlayerMovedFrom(from) => {
                 observation.player.as_ref().is_some_and(|p| p.pose != *from)
             }
+            Expectation::PlayerAt(at) => observation.player.as_ref().is_some_and(|p| p.pose == *at),
             Expectation::LeftMap(map) => observation
                 .player
                 .as_ref()
