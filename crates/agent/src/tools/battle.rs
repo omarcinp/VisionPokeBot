@@ -235,6 +235,11 @@ impl ToolStep for BattleStep {
                         90,
                     ));
                 }
+                // The PC transfer text after NO to the nickname, with the
+                // YES/NO box still drawn: plain text to advance.
+                if catch::is_pc_transfer_text(&page) {
+                    return advance_or_wait(o.dialogue.as_ref(), "PC transfer text");
+                }
                 // A is YES: never answer a question we don't understand.
                 return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
             }

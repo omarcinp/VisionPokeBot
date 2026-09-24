@@ -924,6 +924,11 @@ impl Task for StoryTask {
                         90,
                     ));
                 }
+                // The PC transfer text after NO to the nickname, with the
+                // YES/NO box still drawn: plain text to advance.
+                if catch::is_pc_transfer_text(&d.lines.join(" ")) {
+                    return advance_or_wait(o.dialogue.as_ref(), "PC transfer text");
+                }
                 // A is YES: never answer a question we don't understand.
                 return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
             }
@@ -3514,6 +3519,29 @@ mod tests {
         assert_eq!(
             state.party.value.as_ref().unwrap()[0].status.value,
             Some(Status::Paralyzed)
+        );
+    }
+
+    /// flash-4, Viridian Forest with a full party: after NO to the nickname
+    /// the game prints "WEEDLE was transferred to Someone's PC." with the
+    /// YES/NO box still on screen (fixture
+    /// `captures/fixtures/emu-catch-transferred-to-pc.png`).
+    #[test]
+    fn the_pc_transfer_text_under_a_lingering_yes_no_box_is_advanced() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut page = wild_frame(1, None, &["WEEDLE was transferred to", "Someone’s PC."]);
+        page.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        let (label, _) = tick_events(&mut task, &page, &state);
+        assert!(
+            !label.starts_with("fail:"),
+            "the transfer text is not a question: {label}"
         );
     }
 

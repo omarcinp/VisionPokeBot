@@ -578,6 +578,15 @@ pub fn is_nickname_question(page: &str) -> bool {
     page.contains("Give a nickname to the")
 }
 
+/// The pages after the nickname question when the party is full: "X was
+/// transferred to Someone's PC." / "… to BOX “BOX2.”" / "BOX “BOX1” was
+/// full." / "It was placed in …". The game prints them while the YES/NO
+/// box of the nickname question is still drawn (flash-4: the battle step
+/// took the lingering box for a question it did not know and failed).
+pub fn is_pc_transfer_text(page: &str) -> bool {
+    page.contains("transferred to") || page.contains("placed in") || page.contains("was full")
+}
+
 /// "It was placed in BOX “BOX2.”" / "X was transferred to BOX “BOX2.”" →
 /// 1. The "BOX … was full." page names the full box, not the new one.
 pub fn box_from_text(page: &str) -> Option<u8> {
