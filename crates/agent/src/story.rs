@@ -128,6 +128,9 @@ type Tile = (i32, i32);
 
 /// Frames a page's text must stay unchanged to count as fully printed.
 const PAGE_PRINTED_FRAMES: u32 = 8;
+/// Longest wait for a page waiting for A to read the same on a second
+/// frame (a flickering misread must not stall the story).
+const PAGE_READ_WAIT_FRAMES: u64 = 10;
 
 /// Time each direction of a spin is held: under the 8-frame turn (134 ms),
 /// so the direction read when a turn ends is always a new one (holding the
@@ -228,6 +231,8 @@ pub struct StoryTask {
     /// A mandatory ball buy was tried in this milestone (never retried:
     /// with no money it would loop).
     mandatory_buy_tried: bool,
+    /// First frame a page waiting for A was not yet read on two frames.
+    unread_since: Option<u64>,
 }
 
 /// Whether the nurse's "restored your POKéMON" was read during the current
@@ -293,6 +298,7 @@ impl StoryTask {
             buy_at: None,
             buy_mart: None,
             mandatory_buy_tried: false,
+            unread_since: None,
         }
     }
 
@@ -615,6 +621,19 @@ impl Task for StoryTask {
                         .observe_page(&d.lines, &data, self.battle_memory.last_slot);
                 self.heal.observe(&tracked);
                 ctx.events.extend(tracked);
+                // The executor doesn't show the task the frames while its A
+                // press is pending: a page advanced on its first ready frame
+                // is read once and its facts (money won, items) are lost.
+                // Wait for a second reading first (questions, with a menu,
+                // are answered instead).
+                if d.ready_for_a() && o.menu.is_none() && !self.tracker.applied(&d.lines) {
+                    let since = *self.unread_since.get_or_insert(o.frame_id);
+                    if o.frame_id.saturating_sub(since) < PAGE_READ_WAIT_FRAMES {
+                        return Decision::Wait("reading the page on a second frame".into());
+                    }
+                } else {
+                    self.unread_since = None;
+                }
             }
             if let Some(list) = &o.move_list {
                 self.quiet_frames = 0;
@@ -2268,6 +2287,62 @@ mod tests {
             e,
             GameEvent::PartyMonDerived { slot: 1, mon } if mon.species.value.as_deref() == Some("SPECIES_PIDGEY")
         )), "{events:?}");
+    }
+
+    /// Live (Route 3, every trainer won): "RED got ¥120 for winning!" was
+    /// advanced on its first ready frame, so the tracker read it once and
+    /// never emitted `MoneyChanged`.
+    #[test]
+    fn a_page_is_read_on_two_frames_before_it_is_advanced() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let money = |f| {
+            let mut o = wild_frame(f, None, &["RED got ¥120", "for winning!"]);
+            o.battle.as_mut().unwrap().opponent_name = None;
+            let d = o.dialogue.as_mut().unwrap();
+            d.waiting_for_input = true;
+            d.arrow = Some(pokebot_state::Region::new(220, 150, 8, 8));
+            o
+        };
+        let (label, events) = tick_events(&mut task, &money(1), &state);
+        assert_eq!(label, "wait: reading the page on a second frame");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::MoneyChanged { .. })),
+            "{events:?}"
+        );
+        let (label, events) = tick_events(&mut task, &money(2), &state);
+        assert!(events.contains(&GameEvent::MoneyChanged {
+            delta: 120,
+            reason: "won a battle".into()
+        }));
+        assert_eq!(label, "advance text");
+        // A page that keeps misreading is advanced after a bounded wait.
+        let flicker = |f: u64| {
+            let mut o = money(f);
+            let d = o.dialogue.as_mut().unwrap();
+            d.lines[1] = if f % 2 == 0 {
+                "for winning!"
+            } else {
+                "for winnin"
+            }
+            .into();
+            d.lines[0] = "RED got ¥80".into();
+            o
+        };
+        for f in 3..3 + PAGE_READ_WAIT_FRAMES {
+            assert_eq!(
+                tick_events(&mut task, &flicker(f), &state).0,
+                "wait: reading the page on a second frame"
+            );
+        }
+        let f = 3 + PAGE_READ_WAIT_FRAMES;
+        assert_eq!(
+            tick_events(&mut task, &flicker(f), &state).0,
+            "advance text"
+        );
     }
 
     #[test]

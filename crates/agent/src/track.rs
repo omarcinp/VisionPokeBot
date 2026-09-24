@@ -19,6 +19,13 @@ impl TextTracker {
     /// it equals the last page applied: a one-frame misread inside a stable
     /// page (A, B, A) neither applies B nor re-applies A. `last_move` is the
     /// (party slot, move slot) chosen last in battle.
+    /// Whether `lines` is the page applied last (or empty): it was read on
+    /// two observations and may be advanced.
+    pub fn applied(&self, lines: &[String]) -> bool {
+        let page = lines.join(" ");
+        page.is_empty() || page == self.last_page
+    }
+
     pub fn observe_page(
         &mut self,
         lines: &[String],
