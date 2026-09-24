@@ -82,11 +82,18 @@ pub fn list_instances(dir: &Path) -> Vec<Value> {
     list_instances_for(&default_routes(), dir)
 }
 
-/// One entry per route, in route order: the fields of `<dir>/<name>.json`
-/// plus `alive` (its `pid` is running) and `path`. A route without a
-/// readable file is `{ name, label, path, alive: false }`. Files that match
-/// no route are ignored: the hub could not reach them anyway.
+/// [`list_instances_in`] against the real `/proc`.
 pub fn list_instances_for(routes: &[Route], dir: &Path) -> Vec<Value> {
+    list_instances_in(routes, dir, Path::new("/proc"))
+}
+
+/// One entry per route, in route order: the fields of `<dir>/<name>.json`
+/// plus `alive` and `path`. `alive` means `<proc_root>/<pid>/comm` is
+/// `pokebot-<name>`, the process name `tools/live-run.sh` gives each
+/// instance, so a pid reused by another program doesn't count. A route
+/// without a readable file is `{ name, label, path, alive: false }`. Files
+/// that match no route are ignored: the hub could not reach them anyway.
+pub fn list_instances_in(routes: &[Route], dir: &Path, proc_root: &Path) -> Vec<Value> {
     routes
         .iter()
         .map(|route| {
@@ -102,9 +109,11 @@ pub fn list_instances_for(routes: &[Route], dir: &Path) -> Vec<Value> {
                     "alive": false,
                 });
             };
-            let alive = entry["pid"]
-                .as_u64()
-                .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists());
+            let expected = format!("pokebot-{}", route.name);
+            let alive = entry["pid"].as_u64().is_some_and(|pid| {
+                std::fs::read_to_string(proc_root.join(pid.to_string()).join("comm"))
+                    .is_ok_and(|comm| comm.trim_end() == expected)
+            });
             let obj = entry.as_object_mut().expect("checked above");
             obj.entry("name").or_insert_with(|| json!(route.name));
             obj.entry("label").or_insert_with(|| json!(route.label));
@@ -384,26 +393,32 @@ mod tests {
     #[test]
     fn instances_list_every_route_in_order_with_liveness() {
         let dir = temp_dir("list");
+        // Fake /proc: pid 101 runs pokebot-switch, pid 102 was reused by
+        // another program, pid 103 is gone.
+        let proc_root = dir.join("proc");
+        for (pid, comm) in [(101, "pokebot-switch\n"), (102, "bash\n")] {
+            std::fs::create_dir_all(proc_root.join(pid.to_string())).unwrap();
+            std::fs::write(proc_root.join(format!("{pid}/comm")), comm).unwrap();
+        }
         let entry = |name: &str, label: &str, port: u16, pid: u32| {
             serde_json::json!({
                 "name": name, "label": label, "port": port, "pid": pid,
                 "command": "pokebot run", "log": "/tmp/x.log", "started_at": "2026-09-24T10:00:00Z",
             })
         };
+        let write = |name: &str, label: &str, port: u16, pid: u32| {
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                entry(name, label, port, pid).to_string(),
+            )
+            .unwrap();
+        };
         // Written emu first: the listing must still put switch first.
-        std::fs::write(
-            dir.join("emu.json"),
-            entry("emu", "Emulator", 18081, u32::MAX - 1).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("switch.json"),
-            entry("switch", "Switch", 18080, std::process::id()).to_string(),
-        )
-        .unwrap();
+        write("emu", "Emulator", 18081, 103);
+        write("switch", "Switch", 18080, 101);
         std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
 
-        let list = list_instances(&dir);
+        let list = list_instances_in(&default_routes(), &dir, &proc_root);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0]["name"], "switch");
         assert_eq!(list[0]["alive"], true);
@@ -415,14 +430,38 @@ mod tests {
         assert_eq!(list[1]["alive"], false);
         assert_eq!(list[1]["path"], "/emu/");
 
+        // A reused pid (another program's comm) is not alive.
+        write("emu", "Emulator", 18081, 102);
+        let list = list_instances_in(&default_routes(), &dir, &proc_root);
+        assert_eq!(list[1]["alive"], false);
+        // Nor is a live pid that runs a different instance.
+        write("emu", "Emulator", 18081, 101);
+        let list = list_instances_in(&default_routes(), &dir, &proc_root);
+        assert_eq!(list[1]["alive"], false);
+
         // A route without a file is still listed, as stopped.
         std::fs::remove_file(dir.join("emu.json")).unwrap();
-        let list = list_instances(&dir);
+        let list = list_instances_in(&default_routes(), &dir, &proc_root);
         assert_eq!(list.len(), 2);
         assert_eq!(
             list[1],
             serde_json::json!({ "name": "emu", "label": "Emulator", "path": "/emu/", "alive": false })
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn this_test_process_is_not_an_instance() {
+        let dir = temp_dir("self");
+        let pid = std::process::id();
+        std::fs::write(
+            dir.join("switch.json"),
+            serde_json::json!({ "name": "switch", "pid": pid }).to_string(),
+        )
+        .unwrap();
+        // /proc/<pid> exists, but its comm is the test binary's.
+        assert!(Path::new(&format!("/proc/{pid}")).exists());
+        assert_eq!(list_instances(&dir)[0]["alive"], false);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

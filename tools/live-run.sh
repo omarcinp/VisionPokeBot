@@ -101,5 +101,7 @@ with open(path + ".tmp", "w") as f:
 os.replace(path + ".tmp", path)
 EOF
 
-LAN_IP="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+# No route (offline) must not fail the launch: fall back to localhost.
+LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' || true)"
+LAN_IP="${LAN_IP:-localhost}"
 echo "running ${INSTANCE} (pid ${PID}), log ${LOG}, UI http://${LAN_IP}:${HUB_PORT}/${INSTANCE}/"

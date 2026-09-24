@@ -981,15 +981,44 @@ const instances = {
       }
     }
   },
+  /// Small and slow: the thumbnail goes through the user's reverse proxy.
   connect(a) {
-    a.querySelector('img').src = `..${a.dataset.path}stream.mjpg?t=${Date.now()}`;
+    a._stale = 0;
+    a._sig = null;
+    a.querySelector('img').src = `..${a.dataset.path}stream.mjpg?scale=1&fps=10&t=${Date.now()}`;
+  },
+  /// A stream that ends cleanly leaves a frozen picture and no `error` (some
+  /// browsers fire `load` then, others once per part, so neither says
+  /// "ended"). Instead sample the picture on every refresh and reconnect when
+  /// it hasn't changed for 3 refreshes (15 s). A static game screen costs one
+  /// cheap reconnect per 15 s; the old picture stays up until the new one
+  /// arrives.
+  checkStale() {
+    const c = this._canvas || (this._canvas = Object.assign(document.createElement('canvas'), { width: 24, height: 16 }));
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    for (const a of $('thumbs').children) {
+      const img = a.querySelector('img');
+      let sig = null;
+      if (img.complete && img.naturalWidth) {
+        try {
+          ctx.drawImage(img, 0, 0, 24, 16);
+          const d = ctx.getImageData(0, 0, 24, 16).data;
+          let h = 0;
+          for (let i = 0; i < d.length; i += 3) h = (h * 31 + d[i]) | 0;
+          sig = h;
+        } catch (e) { /* not decodable right now */ }
+      }
+      a._stale = sig === null || sig === a._sig ? a._stale + 1 : 0;
+      a._sig = sig;
+      if (a._stale >= 3 && !document.hidden) this.connect(a);
+    }
   },
   reconnectAll() {
     for (const a of $('thumbs').children) this.connect(a);
   },
 };
 instances.refresh();
-setInterval(() => instances.refresh(), 5000);
+setInterval(() => instances.refresh().then(() => instances.checkStale()), 5000);
 
 // ---------------------------------------------------------------- connection
 
