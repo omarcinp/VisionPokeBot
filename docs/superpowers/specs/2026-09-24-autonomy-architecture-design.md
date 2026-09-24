@@ -530,6 +530,42 @@ goal planner:
 Each goal still runs through the §8 loop; the campaign only chooses which
 goal is next and which resources it may spend.
 
+### 4.6 Deferred sub-goals, passive progress and opportunistic audits
+
+Three rules keep plans from doing work up front that the journey would do
+for free. They came out of the first Flash run (2026-09-25), whose plan
+caught seven species around Pewter before starting the story steps that
+walk through seven new areas.
+
+1. **Least commitment.** The steps that establish a predicate are placed
+   as late as possible: just before the first step that consumes it,
+   unless placing them earlier is cheaper by locality (the plan is already
+   at the area). For Flash: the Pokédex count is consumed by the aide, so
+   its establishing steps go after Cut is in hand, not before Mt. Moon.
+2. **Passive progress.** Walking legs through encounter areas produce
+   expected facts without any explicit step. For each leg the planner
+   sums, over the species of the area's wild table that are not yet
+   caught, the probability of meeting one during the leg (encounter rate
+   × tiles of grass/cave on the leg × slot share) times the catch
+   policy's probability of a catch (it catches every new species it can
+   afford and survive). The expected number of new species along the
+   whole plan is subtracted from the shortfall; explicit `Catch` steps are
+   planned only for the remainder, and only at the last areas before the
+   consumer. The count is tracked at execution (§3.5), so a plan that was
+   optimistic about the walk simply replans with a smaller shortfall when
+   it arrives. The same mechanism prices experience gained on the way for
+   `Train` steps.
+3. **Opportunistic audits.** A probe or audit whose screen is where the
+   plan already goes is priced at its screen cost alone: the PC at the
+   Pokémon Center the plan heals at (box audit, party summary pages), the
+   mart window when buying (money), the Trainer Card at any quiet
+   overworld moment (badges, count). At bootstrap (§3.3) the cheap
+   screens are opened first (card, party), and if the player starts in or
+   next to a Pokémon Center with unknown boxes, the PC is audited before
+   planning, because a boxed Pokémon can change what the party should be
+   (an HM carrier, a better lead) and a count derived from observed
+   catches alone undercounts (the starter, gifts, an older save).
+
 ## 5. Route planner (`crates/world::route`)
 
 ### 5.1 Place graph
