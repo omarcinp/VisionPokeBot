@@ -31,15 +31,17 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 - Processes that may still be running: `/tmp/pokebot-live emulator serve --no-save` (the virtual console) plus `/tmp/pokebot-hub` (the hub on 8080), `/tmp/pokebot-switch` and `/tmp/pokebot-emu` (the live runs; each is described in `/tmp/pokebot-instances/<instance>.json`). Kill them by exact name, e.g. `pkill -INT -x pokebot-emu`. Never use `pkill -f` with patterns that match your own shell command.
 
 ## Current game state (checkpoint)
-- `saves/progress.json` plus the ROM's `.sav`: all milestones through **PrepareForRoute3** are done. The game is saved in the Pewter Pokémon Center at (7,4). There is no `saves/state.json` yet: the next in-game save writes it next to `progress.json` (party/bag/money/PC knowledge with provenance, tied to that `progress.json` by its milestones and save position, restored on `--continue` and on a faint retry — see "Global state" in `docs/architecture.md`). Until then `--continue` migrates the party kept in `progress.json` as stale (`Tracked`) knowledge.
-  - Party: IVYSAUR Lv 18 with Tackle, Sleep Powder, Leech Seed, Vine Whip.
-  - Player RED (Boy), rival GREEN, Boulder Badge.
-- Backups: copy `X.sav` over the ROM's `.sav`, `progress.X.json` over `saves/progress.json`, and `state.X.json` over `saves/state.json` when it exists — otherwise **delete** `saves/state.json` (a `state.json` that doesn't match the restored `progress.json` is ignored with a warning anyway, and the party in `progress.X.json` is migrated as stale knowledge). When making a new backup, copy all three files.
+- **Emulator (fast loop):** `saves/cascade.*` (`saves/cascade.sav` + `saves/progress.cascade.json` + `saves/state.cascade.json`) is the newest checkpoint: milestones through **BeatMisty**, saved in `CeruleanCity_Gym` (9, 6). Party IVYSAUR Lv26 (64/75, Healthy), GEODUDE Lv8, ZUBAT Lv8, PARAS Lv8, CLEFAIRY Lv8; 15 Poké Balls (Tracked); ¥6284 (Tracked). The Cascade Badge and TM03 (Water Pulse) were received; badges aren't yet persisted in `state.json` (only in `progress.json`'s milestones).
+- **Switch (the target):** `saves/switch/` is at **BeatBrock** (`PewterCity_Gym` (6,6)), unchanged since the last handoff. Switch acceptance of everything through BeatMisty is pending — it needs `PrepareForRoute3` first, and the last attempt failed because the console's video was black (the controller is mounted but there's no HDMI image; the console may be asleep/undocked). The Switch fixtures (bag, mart, catch, Pokédex page, and every other new reader) pass unchanged against captures taken on the physical hardware.
+- Backups: copy `X.sav` over the ROM's `.sav` (or the relevant `saves/<instance>/`), `progress.X.json` over `progress.json`, and `state.X.json` over `state.json` when it exists — otherwise **delete** `state.json` (a `state.json` that doesn't match the restored `progress.json` is ignored with a warning anyway, and the party in `progress.X.json` is migrated as stale knowledge). When making a new backup, copy all three files.
   - `saves/route3-ready.sav` + `progress.route3-ready.json` + `state.route3-ready.json`: after PrepareForRoute3 (the state file comes from a run that ended on exactly this save);
+  - `saves/route4.*`: after StockUpPewter + CrossRoute3;
+  - `saves/mtmoon-done.*`: after PrepareForMtMoon + CrossMtMoon (four catches, the Helix Fossil);
+  - `saves/cascade.*`: after ReachCerulean + PrepareForMisty + BeatMisty (the newest; see above);
   - `saves/brock.sav` + `progress.brock.json`: after BeatBrock;
   - `saves/pre-brock.sav` + `progress.pre-brock.json`: after the Pokédex;
   - `saves/trained.sav` + `progress.trained.json`: Lv 10 at the Viridian Pokémon Center.
-- Resume with: `tools/live-run.sh /tmp/x.log story --continue --save-game --record /tmp/run-N`.
+- Resume with: `tools/live-run.sh --instance emu /tmp/x.log story --continue --save-game --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --record /tmp/run-N` (emulator, on copies — never touches `roms/*.sav` or `saves/switch/`), or `tools/live-run.sh --instance switch …` for the Switch once its video is back.
 
 ## Code map (about 14k lines of Rust)
 - `crates/core` holds the `VideoSource`/`Controller` traits and `ControllerCommand`. `crates/video` normalizes to 240×160. `crates/controller` has `InputSchedule`. `crates/replay` handles sessions. `crates/telemetry` is the web UI (`web/index.html`).
@@ -84,7 +86,7 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
    - PC (deposit/withdraw);
    - move-learning prompt (choose which move to forget, via planner value);
    - evolution (allow).
-3. **Catching:** BAG → Poké Ball in battle, weakening first (a status move or a false-swipe equivalent), tracking the party after a catch, and buying balls. The planner already produces `PlanStep::Catch`, but `StoryTask::plan` rejects it today.
+3. **Catching:** done and live on the emulator (BAG → Poké Ball, weakening first, tracking the party after a catch, buying balls). See "Catching" and "Buying" in `docs/architecture.md` for the policy. Still open: a Paralyze Heal / Potion policy to cut the round trips a paralyzed lead makes to heal mid-dungeon, and a HUD status badge reader (status currently comes only from battle text).
 4. **HMs and field moves:**
    - Cut (from the S.S. Anne), Flash (Rock Tunnel is dark, so localization needs Flash or a dark-mode matcher), Surf, Strength, optionally Fly;
    - an "HM user" in the party (a catch plus teaching);
@@ -92,7 +94,8 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 5. **Dynamic world state:** remove cut trees and boulders once cleared, doors unlocked by flags, and NPCs appearing or disappearing by story flags (`objects[].flag` in the map JSON). Add an event-sourced overlay on the static world, used by the navigator and the localizer.
 6. **Puzzles:** Rocket Hideout spin tiles, Silph Co teleport pads, Seafoam boulders and currents, Victory Road boulders, Cinnabar Mansion switches, Vermilion Gym trash cans (random second can), Saffron Gym pads, Fuchsia Gym invisible walls. Each needs a small planner plus closed-loop verification.
 7. **Story milestone data:**
-   - Mt. Moon (fossil), Cerulean (Nugget Bridge, Bill, the rival), the S.S. Anne (Cut);
+   - Mt. Moon (fossil) and Cerulean through Misty are done (live on the emulator; see `docs/architecture.md`'s "Cascade Badge segment"). Still open in Cerulean: **Nugget Bridge and Bill**.
+   - the S.S. Anne (Cut);
    - Vermilion, Rock Tunnel, Lavender (Pokémon Tower needs the Silph Scope from the Celadon Rocket Hideout), the Poké Flute, Snorlax;
    - Fuchsia (Safari Zone for Surf and Strength), Saffron (Silph Co, Tea for the gate guards), Cinnabar (Secret Key);
    - the FireRed One Island trip with Bill (verify against the decompilation's scripts whether it gates anything);
@@ -105,9 +108,13 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
 9. **Localization edge cases:** caves without Flash, fog/rain overlays, surfing/biking sprites, ice. Also a proper test that retry-on-faint actually works (it has never triggered in a successful run).
 
 ## Suggested next milestones (smallest useful vertical slices)
-1. Dialogue-font OCR plus the move-learning prompt (BULBASAUR learns Poison Powder/Sleep Powder at 15, so this is needed soon).
-2. Catching in the executor plus Poké Ball shopping, so `Prepare` can run catch plans. Then build a team for Misty (the planner will likely pick Vine Whip/levels or a catch).
-3. Milestones: Route 3 → Mt. Moon (trainers, Zubat caves: check localization in `MtMoon_*`) → Cerulean → Misty. Make derived reachability part of this.
+1. ~~Dialogue-font OCR plus the move-learning prompt~~ — done.
+2. ~~Catching in the executor plus Poké Ball shopping~~ — done; live through BeatMisty on the emulator.
+3. ~~Milestones: Route 3 → Mt. Moon → Cerulean → Misty~~ — done on the emulator (checkpoint `saves/cascade.*`). Next:
+   - **Switch acceptance** of PrepareForRoute3 through BeatMisty (the Switch save is at BeatBrock; the console's video needs to come back first).
+   - **Nugget Bridge and Bill** in Cerulean.
+   - A Paralyze Heal / Potion policy and a HUD status badge, to cut down the heal round trips a status'd lead makes mid-dungeon.
+   - `SentToPc`, not yet seen live (the party is at 5 members).
 4. Dynamic world overlay, then Cut (S.S. Anne) → Lt. Surge (trash-can puzzle).
 5. Global-state Phase 1 own audits (their own plans, not covered by the just-finished global-state task): the bag menu (use items, teach TM/HM) and its `ItemsChanged`/`PocketObserved` events; the party menu and Pokémon summary screen (switch, use a field move) feeding `PartyObserved`; money read from the overworld/mart HUD (`MoneyObserved`) rather than only from battle-win text; and the PC box UI (`BoxObserved`, `PcItemsObserved`, deposit/withdraw). Also the caught-icon and shiny detectors that emit `SpeciesCaught`/`ShinySeen` (the reducer already supports them).
 

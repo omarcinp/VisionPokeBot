@@ -55,6 +55,10 @@ Controller ◀── commands (also emitted as InputIssued events)
   | Naming keyboard | panel colour; the focused key is the cell whose border isn't panel-coloured; typed count = filled 8 px name slots |
   | YES/NO over a battle | the battle ▶ above the battle panel, inside a white window (same window walk as field menus) |
   | KNOWN MOVES list | tan/blue header bar; the selected row's red frame (rows 28 px apart); five move names read with the font |
+  | Bag / mart list | cream interior (bag and mart use different creams); pocket title plate; the ▶ cursor, or the inactive ▷ (swapped fill/edge colours) while a sub-window has focus; rows read with the font (name normal, price/count small, `O`→`0`) |
+  | Caught-ball icon | a 7×7 Poké Ball (outline, highlight, orange/red top, grey/cream bottom) left of the opponent HP bar, present once that species is caught |
+  | Shiny matcher | opponent sprite pixels inside the 64×64 sprite box classified against the species' normal/shiny palettes (`vision::shiny`); a species needs enough normal-only and shiny-only pixels to decide |
+  | Pokédex page | tan background, upper/lower page split; number (small, `O`→`0`), name, category, height, weight read with the font |
 
   Anything else is `Unknown`, including the overworld for now.
 - **Text reading (`vision::text`):** the game's normal font is extracted from the decompilation (`tools/gamedata/extract_font.py` → `data/world/font_normal.json`: bitmap and advance width per character, built locally).
@@ -141,6 +145,20 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - the HP bars (48 px each, framed, green/yellow/red), read as per mille.
 - **Policy (placeholder):** FIGHT with move slot 1. RUN when HP is under 35 %, trying at most 3 times per battle so trainer battles fall back to fighting.
 
+## Catching (`agent::catch`) and buying (`agent::stock`, `agent::shop`)
+
+- **Catch policy** (`agent::catch::plan_catch`): a non-shiny catch is only attempted when the lead is at ≥ 75 % HP with no major status (a shiny ignores this gate, and also the risk gate and the ball reserve, and never RUNs). The plan:
+  - picks an opener (a status move — sleep before paralysis before poison/Leech Seed) and, once the foe is asleep/paralyzed or already weak, a **crit-safe weakening move**: the least-damaging move with PP whose critical-hit maximum roll (our iv 31 vs. the foe's iv 0) cannot faint the foe at the target HP;
+  - estimates throws at the HP weakening can actually reach — `max(max_hp × 250‰, the crit-safe floor)` — not a fixed 25 %;
+  - stops attempting when the estimated risk of a faint over the remaining turns exceeds **`RISK_LIMIT` = 2 %**;
+  - picks the **best ball** by the catch formula, but the **Master Ball is never auto-used**;
+  - declines when the known ball stock is at or below the shiny reserve (5), unless the target is a shiny.
+- **Ball stock** (`agent::stock`): a reserve of **5** balls is kept for shinies only; a mart visit restocks toward a target of **15**; buying never spends the money needed for **2 Potions** (`SHINY_RESERVE`, `TARGET_STOCK`, `POTIONS_KEPT`). `must_buy` (stock below the reserve) and `should_buy` (stock unknown or below the target) gate a `StockUp` story step.
+- **Heal-before-battle policy**: before a planned `Battle`/`Challenge` step, the lead heals when `P(win)` at full HP with every move (`p_full`) is ≥ 0.9 and higher than `P(win)` now with only PP-having moves (`p_now`), or when the lead has a major status. When `p_full < 0.9` healing can't help, so the step is fought anyway (a `GoalProgress{phase: "Warning"}` is logged) rather than looping. Walking steps (Go, Train, Battle, Challenge, a Talk's approach) also heal a known major status first.
+- **Bag and mart perception** (`vision::detect::bag`, `vision::detect::shop`): the field bag and the battle bag share the same layout, colours and regions (the battle bag differs only in its bottom panel: USE/CANCEL instead of the description). The bag remembers the last pocket and row across field and battle. Prices, counts, money and the Pokédex number use the small font, where `0` and `O` share a bitmap (`O` → `0`).
+- **Events**: `PocketObserved` (an audit), `ItemsChanged` (`"bought"`, `"thrown"`, `"obtained"`, `"received"`), `MoneyObserved`/`MoneyChanged`, `SpeciesSeen`, `SpeciesCaught`, `ShinySeen`.
+- **Live results (emulator, Task 11–13):** `StockUpPewter` audited 5 Poké Balls and bought 10 (to the target of 15). Four species were caught in Mt. Moon (GEODUDE, ZUBAT, CLEFAIRY, PARAS), each with the full sequence (throw, `ItemsChanged(-1, "thrown")`, "Gotcha!", the Pokédex page, "nickname: NO", `SpeciesCaught`); the Helix Fossil was obtained. Misty was beaten with no faint; the lead's lowest HP was 61/72.
+
 ## New moves and evolution (`agent::learn`, `agent::moves`)
 
 - Every finished page is parsed for facts: "X is trying to learn M.", "X forgot M.", "X learned M!", "X did not learn M.", "X evolved into S!". Move names map to constants through the game's own names (`move_names.h`, with `?` wildcards).
@@ -177,7 +195,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Training paces between two neighbouring tall-grass tiles and fights whatever appears.
   - It heals at the nearest Pokémon Center when HP drops below 50% (talking to the nurse across the counter, answering YES).
   - It stops once the level read from the battle HUD reaches the target.
-  - Catch steps aren't executed yet.
+  - A `PlanStep::Catch` becomes a wild-battle catch attempt (see "Catching" below), with a `StockUp` step at the nearest mart when the ball stock needs it.
 - **Party knowledge** (`agent::party`): species, level, moves in learning order (that order gives the menu slots), HP and PP used.
   - It's updated from the battle HUD: names, levels and HP are read from its font (the letter shapes were learned from recorded battles), and names are matched against the species dictionary with wildcards.
   - Moves come only from the screen (learn/forget text, the KNOWN MOVES list, the battle move menu). The knowledge is `GameState.party`, persisted in `state.json` at each checkpoint (see "Global state").
@@ -185,6 +203,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 - **Checkpoints and retry:** `story --continue --save-game` runs one milestone at a time and saves after each. If our Pokémon's HP reads 0, the attempt fails; the bot reloads the last save (soft reset, then CONTINUE) and retries that milestone, up to 5 times.
 - **Route 3 preparation:** from the Boulder Badge save, the planner chose Lv 18 on Route 22 (Youngster Calvin's Spearow was 0% at Lv 14). Training took 68 battles. The bot swapped Growl for Poison Powder, then Poison Powder for Sleep Powder, evolved into IVYSAUR at 16, healed twice, and saved in Pewter. No Pokémon fainted.
 - **Result:** from the Pokédex save, the planner chose "Lv 10 on Route 22". Training took 12 battles. The bot then crossed Viridian Forest (7 battles), healed and saved in Pewter, beat Camper Liam and Brock (lowest HP 27/38) and received the Boulder Badge. No Pokémon fainted.
+- **Cascade Badge segment (live, emulator):** `StockUpPewter` (audited 5 Poké Balls, bought 10 → 15) and `CrossRoute3` (four trainer battles, no faint) reached Route 4. `PrepareForMtMoon` said "already ready" (no training). `CrossMtMoon` took several fixes (cross-map routing, localization, the DISABLE and status/heal policies) before an attempt with no faint: four wild catches (GEODUDE, ZUBAT, CLEFAIRY, PARAS) and the Helix Fossil. `ReachCerulean` bought 4 more balls (11 → 15). `PrepareForMisty` said "already ready". `BeatMisty` succeeded on the first attempt with no faint, lowest HP 61/72; IVYSAUR alone beat Swimmer Luis and Misty (STARYU, STARMIE), earning the Cascade Badge and TM03 (Water Pulse). Checkpoints: `saves/route4.*`, `saves/mtmoon-done.*`, `saves/cascade.*`.
 
 ## Global state (`crates/state`, `agent::party`, `agent::checkpoint`)
 
@@ -269,8 +288,11 @@ session/
 
 ## Next
 
-- Menu text: read YES/NO and list menus with the font (shops, bag, party).
-- Catching (BAG → Poké Ball) and buying at marts, so plans with catches can run.
-- Route 3 / Mt. Moon toward Misty, with story gating (which areas are reachable) derived rather than listed.
+- **Switch acceptance of the Route 3 → Cascade Badge milestones.** All live runs so far are on the emulator; the physical Switch is the target. Acceptance needs `PrepareForRoute3` first (the Switch save is at `BeatBrock`), and it is pending because the console's video was black (the controller is mounted but there's no HDMI image).
+- Nugget Bridge and Bill.
+- A Paralyze Heal / Potion policy, to cut the round trips a paralyzed lead currently makes to a Pokémon Center mid-dungeon.
+- A HUD status badge reader (PAR/PSN/SLP/BRN/FRZ), so status doesn't come from battle text alone.
+- `SentToPc`, not yet seen live (the party reached 5 members in Mt. Moon; a sixth catch fills the last slot, and the one after that goes to the PC).
+- Other deferred items from the SDD ledger (`.superpowers/sdd/2026-09-24-cascade-badge-and-catching/progress.md`): badges and TM Case not persisted in `state.json`, dead-reckoning or ambiguity-reporting for featureless corridors, `badge_received` covering gyms after Misty, and the rest of the minors listed per task.
 - The Town Map from Daisy (optional side goal).
 - `pokebot run --hold --record` and `pokebot play --record` capture fixtures for new detectors.
