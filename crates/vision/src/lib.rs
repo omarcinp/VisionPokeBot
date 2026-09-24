@@ -50,8 +50,9 @@ pub struct FireRedPerception {
     palettes: Option<Arc<shiny::SpritePalettes>>,
 }
 
-/// Frames between whole-world searches while the player can't be located.
-const GLOBAL_SEARCH_INTERVAL: u32 = 120;
+/// Frames between whole-world searches while the player can't be located
+/// (each takes ~10 ms of all cores; see `Localizer::locate_anywhere`).
+const GLOBAL_SEARCH_INTERVAL: u32 = 30;
 
 /// A frame counts as a transition when this share of pixels (per mille) is
 /// near-black or near-white.
@@ -602,6 +603,23 @@ mod tests {
         };
         let b = p.observe(&frame(1, image)).battle.unwrap();
         assert_eq!(b.opponent_name.as_deref(), Some("SPEAROW"));
+        // V and F (captures/stuck on Mt. Moon read I?YSAUR and CLE?AIRY).
+        for (i, (fixture, player, opponent)) in [
+            ("switch-battle-ivysaur", "IVYSAUR", "GRIMER"),
+            ("switch-battle-clefairy", "IVYSAUR", "CLEFAIRY"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Ok(image) =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{fixture}.png")))
+            else {
+                return;
+            };
+            let b = p.observe(&frame(2 + i as u64, image)).battle.unwrap();
+            assert_eq!(b.player_name.as_deref(), Some(player));
+            assert_eq!(b.opponent_name.as_deref(), Some(opponent));
+        }
     }
 
     #[test]

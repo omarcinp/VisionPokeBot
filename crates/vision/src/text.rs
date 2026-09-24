@@ -4,8 +4,10 @@
 //! (`tools/gamedata/extract_font.py` → `data/world/font_normal.json`, built
 //! locally). Text colour varies by speaker and window, so the reader tries
 //! each prominent non-background colour as ink and keeps the reading that
-//! explains the most ink. Matching is exact on the ink mask; columns no glyph
-//! explains read as `?`, which dictionary resolution treats as a wildcard.
+//! explains the most ink. Matching is exact on the ink mask, except that a
+//! glyph one pixel off (compression noise on a capture) is accepted when no
+//! glyph matches exactly and no other is as close; columns no glyph explains
+//! read as `?`, which dictionary resolution treats as a wildcard.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +29,9 @@ const MAX_INKS: usize = 4;
 const CLUSTER_SPREAD: u8 = 40;
 /// Pixels a colour needs to be considered as ink.
 const MIN_INK_PIXELS: u32 = 4;
+/// Ink a glyph needs before a one-pixel-off match is accepted: one pixel is
+/// then at most an eighth of it (not a comma turning into a full stop).
+const NEAR_MATCH_MIN_INK: u32 = 8;
 
 #[derive(Debug, Clone)]
 pub struct Glyph {
@@ -181,14 +186,19 @@ impl Font {
         let mut unknown = false;
         let mut x = 0usize;
         while x < columns.len() {
-            let found = self.match_at(&columns[x..]);
+            let found = self
+                .match_at(&columns[x..])
+                .map(|g| (g, 0))
+                .or_else(|| self.near_match_at(&columns[x..]).map(|g| (g, 1)));
             match found {
-                Some(g) => {
+                Some((g, off)) => {
                     if !text.is_empty() && gap >= SPACE_GAP {
                         text.push(' ');
                     }
                     text.push_str(&g.text);
-                    score += i64::from(g.ink);
+                    // The off pixel is ink left unexplained (or explained
+                    // wrongly): it costs what unexplained ink costs.
+                    score += i64::from(g.ink) - 2 * off;
                     x += g.width as usize;
                     gap = 0;
                     unknown = false;
@@ -243,6 +253,36 @@ impl Font {
             }
         }
         best
+    }
+
+    /// The glyph exactly one pixel off at the start of `columns` (a flipped
+    /// pixel from compression), if it is the only one that close and big
+    /// enough for one pixel not to change what it is. Only tried where no
+    /// glyph matches exactly, and never on a blank column.
+    fn near_match_at(&self, columns: &[u16]) -> Option<&Glyph> {
+        if columns[0] == 0 {
+            return None;
+        }
+        let mut found: Option<&Glyph> = None;
+        for g in &self.glyphs {
+            let w = g.width as usize;
+            if w > columns.len() {
+                continue;
+            }
+            let off: u32 = columns[..w]
+                .iter()
+                .zip(&g.columns)
+                .map(|(a, b)| (a ^ b).count_ones())
+                .sum();
+            if off != 1 {
+                continue;
+            }
+            if g.ink < NEAR_MATCH_MIN_INK || found.is_some() {
+                return None;
+            }
+            found = Some(g);
+        }
+        found
     }
 
     /// Draws `text` with its glyph cell's top-left at (x, y) (test images).
@@ -447,6 +487,30 @@ mod tests {
         font.render(&mut image, 40, 121, "o", INK, SHADOW);
         let lines = font.read(&image, Region::new(8, 118, 224, 36), &[]);
         assert_eq!(lines, vec!["I ? o"]);
+    }
+
+    #[test]
+    fn a_glyph_one_pixel_off_is_still_read() {
+        let font = font();
+        let mut image = RgbImage::filled(240, 160, [255, 251, 255]);
+        font.render(&mut image, 16, 121, "Io", INK, SHADOW);
+        // Compression flips a pixel inside the I (ink 16) and one of the o
+        // (ink 8): both are still the only glyph that close.
+        image.put_pixel(17, 127, SHADOW);
+        image.put_pixel(19, 128, INK);
+        let lines = font.read(&image, Region::new(8, 118, 224, 36), &[]);
+        assert_eq!(lines, vec!["Io"]);
+    }
+
+    #[test]
+    fn a_small_glyph_one_pixel_off_is_unknown() {
+        let font = font();
+        let mut image = RgbImage::filled(240, 160, [255, 251, 255]);
+        font.render(&mut image, 16, 121, "I!", INK, SHADOW);
+        // The ! (ink 7) with its dot missing could be anything.
+        image.put_pixel(19, 131, [255, 251, 255]);
+        let lines = font.read(&image, Region::new(8, 118, 224, 36), &[]);
+        assert_eq!(lines, vec!["I?"]);
     }
 
     #[test]
