@@ -96,6 +96,7 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::MonWithdrawn { .. }
                 | GameEvent::SpeciesSeen { .. }
                 | GameEvent::SpeciesCaught { .. }
+                | GameEvent::PokedexCountObserved { .. }
                 | GameEvent::ShinySeen { .. }
                 | GameEvent::CheckpointRestored { .. }
                 | GameEvent::FlagObserved { .. }

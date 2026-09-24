@@ -1,7 +1,8 @@
-//! Goal planning over the real world data from a Pewter checkpoint
-//! (skipped without `data/world`).
+//! Goal planning over the real world data from the Pewter and Route 4
+//! checkpoints (skipped without `data/world`).
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
@@ -9,7 +10,7 @@ use pokebot_planner::{
     Planner, ProbeFact,
 };
 use pokebot_state::inference::InferenceRules;
-use pokebot_state::{Pocket, Priors, SavedKnowledge};
+use pokebot_state::{PlayerPose, Pocket, Priors, SavedKnowledge};
 use pokebot_world::route::{PlaceGraph, RouteParams};
 use pokebot_world::World;
 
@@ -45,13 +46,68 @@ fn fixture() -> Option<Fixture> {
     })
 }
 
-fn pewter() -> (SavedKnowledge, Option<pokebot_state::PlayerPose>) {
+fn checkpoint(name: &str) -> (SavedKnowledge, Option<PlayerPose>) {
     let (mut knowledge, pose) =
-        load_checkpoint(root().join("crates/planner/tests/fixtures/pewter_state.json")).unwrap();
+        load_checkpoint(root().join("crates/planner/tests/fixtures").join(name)).unwrap();
     if let Ok(rules) = InferenceRules::load(root().join("data/rules/inference.json")) {
         rules.apply(&mut knowledge.world);
     }
     (knowledge, pose)
+}
+
+fn pewter() -> (SavedKnowledge, Option<PlayerPose>) {
+    checkpoint("pewter_state.json")
+}
+
+/// The checkpoint at the Route 4 Pokémon Center's door: four party
+/// members, three species caught, seven Poké Balls, Mt. Moon unvisited.
+fn route4() -> (SavedKnowledge, Option<PlayerPose>) {
+    checkpoint("route4_state.json")
+}
+
+impl Fixture {
+    fn planner(&self, options: PlanOptions) -> Planner<'_> {
+        Planner::new(
+            &self.world,
+            &self.graph,
+            &self.data,
+            Some(&self.obtain),
+            Some(&self.priors),
+            &self.methods,
+            options,
+        )
+    }
+}
+
+/// The plan's step at which `pred` first holds, or the plan's length.
+fn position(plan: &Plan, pred: impl Fn(&Intent) -> bool) -> usize {
+    plan.intents
+        .iter()
+        .position(|s| pred(&s.intent))
+        .unwrap_or(plan.intents.len())
+}
+
+/// The maps of a route's legs (from and to of each), in order.
+fn leg_maps(step: &pokebot_planner::PlannedIntent) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for leg in &step.route {
+        // "Map (x, y) -> Map (x, y) [kind] cost"
+        let mut ends = leg.split(" -> ");
+        let from = ends.next().unwrap_or("").split(" (").next().unwrap_or("");
+        let to = ends.next().unwrap_or("").split(" (").next().unwrap_or("");
+        for m in [from, to] {
+            if out.last().map(String::as_str) != Some(m) {
+                out.push(m.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Whether `wanted` appears in `seq` in order (not necessarily adjacent).
+fn subsequence(seq: &[String], wanted: &[&str]) -> bool {
+    let mut it = seq.iter();
+    wanted.iter().all(|w| it.any(|s| s == w))
 }
 
 fn print(plan: &Plan, limit: usize) {
@@ -240,4 +296,287 @@ fn a_goal_that_already_holds_is_an_empty_plan() {
         .unwrap();
     assert!(plan.intents.is_empty());
     assert_eq!(plan.cost_s, 0.0);
+}
+
+#[test]
+fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
+    let Some(f) = fixture() else { return };
+    let options = PlanOptions {
+        budget_s: 180.0,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = route4();
+    assert_eq!(pose.as_ref().map(|p| p.map.as_str()), Some("Route4"));
+    let goal = parse_goal("item ITEM_HM05 1").unwrap();
+    let started = Instant::now();
+    let plan = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
+    let elapsed = started.elapsed().as_secs_f64();
+    print(&plan, 60);
+    assert!(elapsed < 180.0, "planned in {elapsed:.1} s");
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    assert!(plan.intents.iter().all(|s| s.cost_s.is_finite()));
+    let intents: Vec<&Intent> = plan.intents.iter().map(|s| &s.intent).collect();
+
+    // The aide is last, reached by the gatehouse's own route. Both ways
+    // to the gatehouse cut trees (from Diglett's Cave one, from Pewter
+    // two), so once Cut is taught the short way from Pewter is taken.
+    let n = intents.len();
+    assert!(
+        matches!(intents[n - 1], Intent::RunScript { script, answers, .. }
+            if script == "Route2_EastBuilding_EventScript_Aide" && answers == &["yes".to_string()]),
+        "last step {}",
+        intents[n - 1]
+    );
+    assert_eq!(
+        intents[n - 2],
+        &Intent::Go {
+            dest: "Route2_EastBuilding".into()
+        }
+    );
+    let legs = leg_maps(&plan.intents[n - 2]);
+    println!("gatehouse route: {}", legs.join(" > "));
+    assert!(
+        subsequence(
+            &legs,
+            &[
+                "Route4",
+                "Route3",
+                "PewterCity",
+                "Route2",
+                "Route2_EastBuilding"
+            ]
+        ),
+        "{legs:?}"
+    );
+    // The long way round (Cerulean, the Underground Path, Vermilion,
+    // Diglett's Cave) is what the Cut subgoals themselves walk.
+    let captain = plan
+        .intents
+        .iter()
+        .find(|s| matches!(&s.intent, Intent::Go { dest } if dest == "SSAnne_CaptainsOffice"))
+        .expect("a Go to the captain");
+    assert!(
+        subsequence(
+            &leg_maps(captain),
+            &[
+                "Route4",
+                "MtMoon_1F",
+                "MtMoon_B2F",
+                "Route4",
+                "CeruleanCity",
+                "Route5",
+                "UndergroundPath_NorthSouthTunnel",
+                "Route6",
+                "VermilionCity",
+                "SSAnne_CaptainsOffice",
+            ]
+        ),
+        "{:?}",
+        leg_maps(captain)
+    );
+    assert!(
+        plan.intents[n - 2]
+            .route
+            .iter()
+            .any(|l| l.contains("gate:cut_tree")),
+        "the Route 2 tree is cut on the way"
+    );
+
+    // Mt. Moon: the Super Nerd is beaten, then one fossil (the Dome, by
+    // name) is taken so the way to Route 4's east side opens.
+    let miguel = position(
+        &plan,
+        |i| matches!(i, Intent::Beat { trainer, map } if trainer == "TRAINER_SUPER_NERD_MIGUEL" && map == "MtMoon_B2F"),
+    );
+    let fossil = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "MtMoon_B2F_EventScript_DomeFossil"),
+    );
+    assert!(
+        miguel < fossil && fossil < n,
+        "Beat at {miguel}, fossil at {fossil}"
+    );
+    assert!(!intents
+        .iter()
+        .any(|i| matches!(i, Intent::RunScript { script, .. } if script.contains("HelixFossil"))));
+
+    // Cut: Bill's ticket, the captain's HM01, Misty's badge, then Teach.
+    let bill = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "Route25_SeaCottage_EventScript_Bill"),
+    );
+    let captain = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "SSAnne_CaptainsOffice_EventScript_Captain"),
+    );
+    let misty = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "CeruleanCity_Gym_EventScript_Misty"),
+    );
+    let teach = position(
+        &plan,
+        |i| matches!(i, Intent::Teach { hm, .. } if hm == "ITEM_HM01"),
+    );
+    assert!(bill < captain && captain < teach && misty < teach && teach < n - 2);
+
+    // The Pokédex count is unknown (three species observed caught): the
+    // Trainer Card is read first and, unless it shows ten, seven new
+    // species are caught, each after a Go to its grass.
+    let probe = position(&plan, |i| {
+        matches!(
+            i,
+            Intent::Probe {
+                fact: ProbeFact::TrainerCard
+            }
+        )
+    });
+    let catches: Vec<&pokebot_planner::PlannedIntent> = plan
+        .intents
+        .iter()
+        .filter(|s| {
+            matches!(s.intent, Intent::Catch { .. })
+                && s.unless.contains(&GoalPredicate::pokedex_caught(10))
+        })
+        .collect();
+    assert_eq!(catches.len(), 10 - 3, "{:?}", catches);
+    assert!(probe < position(&plan, |i| matches!(i, Intent::Catch { .. })));
+    let mut species: Vec<&str> = catches
+        .iter()
+        .filter_map(|s| match &s.intent {
+            Intent::Catch { species, .. } => Some(species.as_str()),
+            _ => None,
+        })
+        .collect();
+    species.sort();
+    species.dedup();
+    assert_eq!(species.len(), 7, "seven different species");
+    assert!(!species
+        .iter()
+        .any(|s| ["SPECIES_RATTATA", "SPECIES_PIDGEY", "SPECIES_CATERPIE"].contains(s)));
+    for (i, s) in plan.intents.iter().enumerate() {
+        if let Intent::Catch { map, .. } = &s.intent {
+            let go = plan.intents[..i]
+                .iter()
+                .rev()
+                .find(|s| matches!(s.intent, Intent::Go { .. }));
+            assert!(
+                matches!(go.map(|s| &s.intent), Some(Intent::Go { dest }) if dest == map),
+                "catch on {map} without a Go to it"
+            );
+        }
+    }
+    // Route 4's grass lies past Mt. Moon: its Go is priced to the tile.
+    if let Some(go) = plan.intents.iter().find(|s| {
+        matches!(&s.intent, Intent::Go { dest } if dest == "Route4")
+            && s.note.as_deref().is_some_and(|n| n.contains("grass"))
+    }) {
+        assert!(go.cost_s > 60.0, "{:.1}s", go.cost_s);
+        assert!(leg_maps(go).contains(&"MtMoon_B2F".to_string()));
+    }
+
+    // Planning is a pure function of the knowledge.
+    let again = planner.plan(&goal, &knowledge, pose).unwrap();
+    assert_eq!(plan, again);
+}
+
+#[test]
+fn cerulean_from_route2_returns_within_the_budget_with_the_fossil() {
+    let Some(f) = fixture() else { return };
+    let options = PlanOptions {
+        budget_s: 60.0,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, _) = pewter();
+    let pose = Some(PlayerPose {
+        map: "Route2".into(),
+        x: 8,
+        y: 10,
+    });
+    let goal = parse_goal("at CeruleanCity").unwrap();
+    let started = Instant::now();
+    let plan = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
+    let elapsed = started.elapsed().as_secs_f64();
+    print(&plan, 20);
+    assert!(elapsed < 60.0, "planned in {elapsed:.1} s");
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    let n = plan.intents.len();
+    assert_eq!(
+        plan.intents[n - 1].intent,
+        Intent::Go {
+            dest: "CeruleanCity".into()
+        }
+    );
+    let fossil = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "MtMoon_B2F_EventScript_DomeFossil"),
+    );
+    let miguel = position(
+        &plan,
+        |i| matches!(i, Intent::Beat { trainer, .. } if trainer == "TRAINER_SUPER_NERD_MIGUEL"),
+    );
+    assert!(miguel < fossil && fossil < n - 1);
+    // Both are skipped when the fossil turns out taken.
+    assert!(plan.intents[fossil]
+        .unless
+        .contains(&GoalPredicate::flag("FLAG_HIDE_DOME_FOSSIL", true)));
+    let legs = leg_maps(&plan.intents[n - 1]);
+    assert!(
+        subsequence(
+            &legs,
+            &[
+                "Route2",
+                "PewterCity",
+                "Route3",
+                "Route4",
+                "MtMoon_1F",
+                "MtMoon_B2F",
+                "Route4",
+                "CeruleanCity"
+            ]
+        ),
+        "{legs:?}"
+    );
+    let again = planner.plan(&goal, &knowledge, pose).unwrap();
+    assert_eq!(plan, again);
+}
+
+#[test]
+fn a_budget_of_nothing_returns_the_partial_plan() {
+    let Some(f) = fixture() else { return };
+    let options = PlanOptions {
+        budget_s: 0.0,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = route4();
+    let goal = parse_goal("item ITEM_HM05 1").unwrap();
+    match planner.plan(&goal, &knowledge, pose) {
+        Err(pokebot_planner::PlanError::Budget {
+            best_partial,
+            nodes,
+            ..
+        }) => {
+            assert!(nodes <= 1);
+            let partial = best_partial.expect("a partial plan");
+            assert!(partial
+                .intents
+                .iter()
+                .any(|s| matches!(&s.intent, Intent::Unsupported { establishes, .. } if *establishes == goal)));
+        }
+        other => panic!("expected a budget error, got {other:?}"),
+    }
+    // A stop request ends planning the same way.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let options = PlanOptions {
+        stop: Some(stop),
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = route4();
+    assert!(matches!(
+        planner.plan(&goal, &knowledge, pose),
+        Err(pokebot_planner::PlanError::Budget { .. })
+    ));
 }

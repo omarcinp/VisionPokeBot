@@ -83,10 +83,21 @@ impl Default for PcStorage {
     }
 }
 
+/// The totals the Trainer Card and the Pokédex's own header show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PokedexCounts {
+    pub seen: u16,
+    pub caught: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Pokedex {
     pub caught: BTreeMap<String, Knowledge<bool>>,
     pub seen: BTreeMap<String, Knowledge<bool>>,
+    /// The totals as last read; the per-species maps are a lower bound
+    /// when this is unknown. Missing in files written before it existed.
+    #[serde(default)]
+    pub counts: Knowledge<PokedexCounts>,
 }
 
 /// The knowledge that belongs to a save file: stored beside it after every

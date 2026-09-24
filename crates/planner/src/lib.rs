@@ -20,7 +20,6 @@ pub use intents::{
 };
 pub use methods::{Method, Methods};
 
-pub(crate) use pokebot_world::behavior::WARP_DOOR;
 pub use prepare::{
     plan_preparation, plan_training, Area, PartyMember, PlanStep, PreparationPlan, Request, OUR_IV,
 };

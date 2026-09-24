@@ -3,7 +3,8 @@
 
 use crate::belief::track;
 use crate::{
-    GameEvent, GameState, HealSpot, Knowledge, KnowledgeSource, MoveSlot, PartyMon, Status,
+    GameEvent, GameState, HealSpot, Knowledge, KnowledgeSource, MoveSlot, PartyMon, PokedexCounts,
+    Status,
 };
 
 /// Applies `event` if it is a knowledge event; returns whether it was one.
@@ -232,6 +233,15 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 .pokedex
                 .caught
                 .insert(species.clone(), Knowledge::observed(true, frame));
+        }
+        GameEvent::PokedexCountObserved { seen, caught } => {
+            state.pokedex.counts = Knowledge::observed(
+                PokedexCounts {
+                    seen: *seen,
+                    caught: *caught,
+                },
+                frame,
+            );
         }
         GameEvent::CheckpointRestored { knowledge } => {
             let k = (**knowledge).clone();
@@ -571,6 +581,39 @@ mod tests {
         assert_eq!(s.pc.boxes[0].value.as_ref().unwrap().len(), 1);
         assert_eq!(s.pokedex.caught["SPECIES_RATTATA"].value, Some(true));
         assert_eq!(s.pokedex.seen["SPECIES_RATTATA"].value, Some(true));
+    }
+
+    #[test]
+    fn pokedex_counts_are_observed_from_the_trainer_card() {
+        let s = run(vec![starter()]);
+        assert_eq!(s.pokedex.counts, Knowledge::unknown());
+        let s = run(vec![
+            starter(),
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_RATTATA".into(),
+            },
+            GameEvent::PokedexCountObserved {
+                seen: 12,
+                caught: 7,
+            },
+        ]);
+        assert_eq!(
+            s.pokedex.counts.value,
+            Some(PokedexCounts {
+                seen: 12,
+                caught: 7
+            })
+        );
+        assert_eq!(s.pokedex.counts.source, KnowledgeSource::Observed);
+        // The per-species map is untouched: it is a lower bound, not the total.
+        assert_eq!(s.pokedex.caught.len(), 1);
+        // Round trip through the saved knowledge; older files load as unknown.
+        let saved = s.saved_knowledge();
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: crate::SavedKnowledge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pokedex.counts, saved.pokedex.counts);
+        let old: crate::Pokedex = serde_json::from_str(r#"{"caught":{},"seen":{}}"#).unwrap();
+        assert_eq!(old.counts, Knowledge::unknown());
     }
 
     #[test]

@@ -13,23 +13,31 @@ use pokebot_core::{Error, Result};
 use pokebot_gamedata::mechanics::{ball_multiplier, catch_probability};
 use pokebot_gamedata::GameData;
 use pokebot_state::{PlayerPose, Pocket};
-use pokebot_world::events::{Condition, Effect as ScriptEffect, ScriptPath, Val};
+use pokebot_world::events::{Condition, DexCount, Effect as ScriptEffect, ScriptPath, Val};
 use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
-use pokebot_world::route::{route, Place, PlaceGraph, RouteResult, UnknownPolicy};
-use pokebot_world::{MapData, World};
+use pokebot_world::route::{route, route_to_map, Place, PlaceGraph, RouteResult, UnknownPolicy};
+use pokebot_world::World;
 use serde::{Deserialize, Serialize};
 
-use crate::WARP_DOOR;
-
 /// A test on the belief the planner can be asked to make true: the world's
-/// predicates plus the planner-level ones (a species caught, a trainer
-/// beatable, money, a healed party).
+/// predicates plus the planner-level ones (a species caught, a Pokédex
+/// count, a trainer beatable, money, a healed party).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum GoalPredicate {
     World(Predicate),
     Caught {
         caught: String,
+    },
+    /// At least `ge` species caught in the Kanto Pokédex.
+    PokedexCaught {
+        #[serde(rename = "pokedex_caught")]
+        ge: u16,
+    },
+    /// At least `ge` species seen in the Kanto Pokédex.
+    PokedexSeen {
+        #[serde(rename = "pokedex_seen")]
+        ge: u16,
     },
     /// The party wins against the trainer with P ≥ the planner's confidence.
     CanBeat {
@@ -81,6 +89,14 @@ impl GoalPredicate {
         }
     }
 
+    pub fn pokedex_caught(ge: u16) -> GoalPredicate {
+        GoalPredicate::PokedexCaught { ge }
+    }
+
+    pub fn pokedex_seen(ge: u16) -> GoalPredicate {
+        GoalPredicate::PokedexSeen { ge }
+    }
+
     /// The predicate that rules this one out, when one exists: a flag with
     /// the other value (badges are flags too).
     pub fn negation(&self) -> Option<GoalPredicate> {
@@ -113,6 +129,24 @@ impl GoalPredicate {
             }
             Condition::Move { r#move, known } if *known => {
                 Some(GoalPredicate::party_has_move(r#move))
+            }
+            Condition::Pokedex {
+                which,
+                national: false,
+                cmp,
+            } => {
+                // Only a lower bound is a goal; "fewer than n" is the
+                // other branch of the same script.
+                let ge = match (&cmp.ge, &cmp.gt) {
+                    (Some(v), _) => v.as_int()?,
+                    (None, Some(v)) => v.as_int()? + 1,
+                    (None, None) => return None,
+                };
+                let ge = u16::try_from(ge).ok()?;
+                Some(match which {
+                    DexCount::Caught => GoalPredicate::pokedex_caught(ge),
+                    DexCount::Seen => GoalPredicate::pokedex_seen(ge),
+                })
             }
             Condition::Var { var, cmp } => {
                 let (op, v) = [
@@ -184,6 +218,8 @@ impl fmt::Display for GoalPredicate {
         match self {
             GoalPredicate::World(p) => write!(f, "{p}"),
             GoalPredicate::Caught { caught } => write!(f, "Caught({caught})"),
+            GoalPredicate::PokedexCaught { ge } => write!(f, "PokedexCaught(≥{ge})"),
+            GoalPredicate::PokedexSeen { ge } => write!(f, "PokedexSeen(≥{ge})"),
             GoalPredicate::CanBeat { can_beat } => write!(f, "CanBeat({can_beat})"),
             GoalPredicate::Money { money } => write!(f, "Money(≥{money})"),
             GoalPredicate::Healed { healed: true } => write!(f, "Healed"),
@@ -240,6 +276,10 @@ impl ProbeFact {
             GoalPredicate::World(Predicate::Visited { .. }) => Some(ProbeFact::FlyMap),
             GoalPredicate::World(Predicate::PartyHasMove { .. }) => Some(ProbeFact::Party),
             GoalPredicate::Caught { .. } => Some(ProbeFact::Pokedex),
+            // The card shows both totals; the Pokédex list is dearer.
+            GoalPredicate::PokedexCaught { .. } | GoalPredicate::PokedexSeen { .. } => {
+                Some(ProbeFact::TrainerCard)
+            }
             GoalPredicate::CanBeat { .. } | GoalPredicate::Healed { .. } => Some(ProbeFact::Party),
             GoalPredicate::Money { .. } => Some(ProbeFact::TrainerCard),
             GoalPredicate::World(_) => None,
@@ -409,204 +449,41 @@ pub struct PlanContext<'a> {
     pub params: CostParams,
     /// How the route planner treats unknown edge requirements.
     pub policy: UnknownPolicy,
-    pub entries: &'a Entries,
 }
 
 impl PlanContext<'_> {
-    /// The cheapest route to any tile of `map` from the current pose.
+    /// The cheapest route to any landing of `map` from the current pose
+    /// (`None` when the position is unknown). Blocked alternatives list
+    /// what a cheaper or the only way in needs.
     pub fn route_to(&self, map: &str) -> Option<RouteResult> {
         let pose = self.pose.as_ref()?;
-        self.entries
-            .route(self.world, self.graph, self.belief, pose, map, self.policy)
+        Some(route_to_map(
+            self.world,
+            self.graph,
+            self.belief,
+            pose,
+            map,
+            self.policy,
+        ))
+    }
+
+    /// The cheapest route to the tile `(x, y)` of `map` from the current
+    /// pose; a map's grass may lie in a part of it the landings don't reach.
+    pub fn route_to_tile(&self, map: &str, x: i32, y: i32) -> Option<RouteResult> {
+        let pose = self.pose.as_ref()?;
+        Some(route(
+            self.world,
+            self.graph,
+            self.belief,
+            pose,
+            &Place::tile(map, x, y),
+            self.policy,
+        ))
     }
 
     /// The script path an intent runs, when it is a `RunScript`.
     pub fn script_path(&self, script: &str, path: usize) -> Option<&ScriptPath> {
         self.world.events()?.script(script)?.paths.get(path)
-    }
-}
-
-/// Where `At{map}` is routed to, and how buildings are entered.
-///
-/// The destination is the tile an edge into the map lands on (a warp's
-/// landing, a connection crossing), so it is a tile the route can reach —
-/// a map's own warp tiles are left alone by the walk flood.
-///
-/// Outdoor door tiles are collision tiles the flood never steps on (the
-/// walker stands below one and pushes Up), so the route planner can't enter
-/// a building on its own: [`Entries::route`] goes to the tile in front of
-/// the building's door, charges the warp, and routes on from the landing.
-pub struct Entries {
-    /// Map → the tiles edges into it land on, sorted.
-    landing: BTreeMap<String, Vec<Place>>,
-    /// Interior map → (outdoor tile in front of its building's door, the
-    /// landing inside the building's ground floor).
-    building: BTreeMap<String, (Place, PlayerPose)>,
-}
-
-impl Entries {
-    pub fn build(world: &World, graph: &PlaceGraph) -> Entries {
-        let mut landing: BTreeMap<String, Vec<Place>> = BTreeMap::new();
-        for from in graph.places() {
-            for edge in graph.edges_from(&from.map, from.x, from.y) {
-                let to = &edge.to;
-                landing.entry(to.map.clone()).or_default().push(to.clone());
-            }
-        }
-        for places in landing.values_mut() {
-            places.sort();
-            places.dedup();
-        }
-        // Outdoor doors first, then every interior reached from those
-        // buildings through interior warps (stairs, doors inside).
-        let mut maps: Vec<&MapData> = world.maps().collect();
-        maps.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut building: BTreeMap<String, (Place, PlayerPose)> = BTreeMap::new();
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        for map in &maps {
-            if !map.is_outdoor() {
-                continue;
-            }
-            for w in &map.warps {
-                let Some((dest, dx, dy)) = world.warp_destination(w) else {
-                    continue;
-                };
-                if dest.is_outdoor() || building.contains_key(&dest.name) {
-                    continue;
-                }
-                let is_door = map
-                    .tile(w.x, w.y)
-                    .is_some_and(|t| t.collision != 0 || t.behavior == WARP_DOOR);
-                if !is_door {
-                    continue;
-                }
-                let front = Place::tile(&map.name, w.x, w.y + 1);
-                let inside = PlayerPose {
-                    map: dest.name.clone(),
-                    x: dx,
-                    y: dy,
-                };
-                building.insert(dest.name.clone(), (front, inside));
-                queue.push_back(dest.name.clone());
-            }
-        }
-        while let Some(name) = queue.pop_front() {
-            let Some(map) = world.map(&name) else {
-                continue;
-            };
-            let entry = building[&name].clone();
-            for w in &map.warps {
-                let Some((dest, _, _)) = world.warp_destination(w) else {
-                    continue;
-                };
-                if dest.is_outdoor() || building.contains_key(&dest.name) {
-                    continue;
-                }
-                building.insert(dest.name.clone(), entry.clone());
-                queue.push_back(dest.name.clone());
-            }
-        }
-        Entries { landing, building }
-    }
-
-    /// The tiles `At{map}` may be routed to: the map's entry landings (some
-    /// may lie in a part of the map only reachable from another side), else
-    /// its first place, else its middle tile.
-    pub fn destinations(&self, world: &World, graph: &PlaceGraph, map: &str) -> Vec<Place> {
-        if let Some(p) = self.landing.get(map) {
-            return p.clone();
-        }
-        if let Some(p) = graph.places_on(map).first() {
-            return vec![p.clone()];
-        }
-        world
-            .map(map)
-            .map(|m| vec![Place::tile(map, m.width / 2, m.height / 2)])
-            .unwrap_or_default()
-    }
-
-    /// The cheapest of the routes to `dests` (ties: the first).
-    fn best_route(
-        world: &World,
-        graph: &PlaceGraph,
-        belief: &dyn BeliefView,
-        pose: &PlayerPose,
-        dests: &[Place],
-        policy: UnknownPolicy,
-    ) -> Option<RouteResult> {
-        let mut best: Option<RouteResult> = None;
-        for dest in dests {
-            let r = route(world, graph, belief, pose, dest, policy);
-            let better = match &best {
-                None => true,
-                Some(b) => {
-                    r.cost_s < b.cost_s
-                        || (!b.found()
-                            && r.blocked.first().map(|x| x.1) < b.blocked.first().map(|x| x.1))
-                }
-            };
-            if better {
-                best = Some(r);
-            }
-        }
-        best
-    }
-
-    /// The cheapest route from `pose` to any tile of `map`: direct when the
-    /// route planner finds one, else through the building's front door.
-    pub fn route(
-        &self,
-        world: &World,
-        graph: &PlaceGraph,
-        belief: &dyn BeliefView,
-        pose: &PlayerPose,
-        map: &str,
-        policy: UnknownPolicy,
-    ) -> Option<RouteResult> {
-        let dests = self.destinations(world, graph, map);
-        if pose.map == map {
-            return Some(RouteResult {
-                legs: Vec::new(),
-                cost_s: 0.0,
-                assumes: Vec::new(),
-                blocked: Vec::new(),
-            });
-        }
-        let direct = Self::best_route(world, graph, belief, pose, &dests, policy)?;
-        if direct.found() {
-            return Some(direct);
-        }
-        let Some((front, inside)) = self.building.get(map) else {
-            return Some(direct);
-        };
-        let warp_s = graph.params().warp_s;
-        let outside = route(world, graph, belief, pose, front, policy);
-        let onward = if inside.map == map {
-            RouteResult {
-                legs: Vec::new(),
-                cost_s: 0.0,
-                assumes: Vec::new(),
-                blocked: Vec::new(),
-            }
-        } else {
-            Self::best_route(world, graph, belief, inside, &dests, policy)?
-        };
-        let mut legs = outside.legs;
-        legs.extend(onward.legs);
-        let mut assumes = outside.assumes;
-        assumes.extend(onward.assumes);
-        assumes.sort();
-        assumes.dedup();
-        let mut blocked = outside.blocked;
-        for b in &mut blocked {
-            b.1 += warp_s + onward.cost_s;
-        }
-        Some(RouteResult {
-            legs,
-            cost_s: outside.cost_s + warp_s + onward.cost_s,
-            assumes,
-            blocked,
-        })
     }
 }
 
@@ -699,9 +576,11 @@ impl Intent {
             Intent::Talk { .. } | Intent::Battle { .. } | Intent::Save | Intent::Unstick => {
                 Vec::new()
             }
-            Intent::RunScript { script, path, .. } => ctx
+            Intent::RunScript {
+                script, path, map, ..
+            } => ctx
                 .script_path(script, *path)
-                .map(path_effects)
+                .map(|p| path_effects_in(p, map, ctx.world))
                 .unwrap_or_default()
                 .into_iter()
                 .map(Effect::Establishes)
@@ -870,6 +749,48 @@ pub fn path_effects(path: &ScriptPath) -> Vec<GoalPredicate> {
     let mut out: Vec<GoalPredicate> = Vec::new();
     for e in &path.does {
         for p in GoalPredicate::from_effect(e) {
+            if let Some(neg) = p.negation() {
+                out.retain(|q| *q != neg);
+            }
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// [`path_effects`] plus what the path does to `map`'s objects: removing
+/// an object sets the flag that hides it (the game's `removeobject`), so a
+/// route past it opens; adding one clears it.
+pub fn path_effects_in(path: &ScriptPath, map: &str, world: &World) -> Vec<GoalPredicate> {
+    let mut out = path_effects(path);
+    let hide_flag = |id: &Val, on: &Option<String>| -> Option<String> {
+        let id = u32::try_from(id.as_int()?).ok()?;
+        let name = match on {
+            Some(m) => world.name_of(m).unwrap_or(m.as_str()),
+            None => map,
+        };
+        let flag = world
+            .map(name)?
+            .objects
+            .iter()
+            .find(|o| o.local_id == id)?
+            .flag
+            .clone()?;
+        (flag != "0" && !flag.starts_with("FLAG_TEMP_")).then_some(flag)
+    };
+    for e in &path.does {
+        let p = match e {
+            ScriptEffect::RemoveObject { remove_object, map } => {
+                hide_flag(remove_object, map).map(|f| GoalPredicate::flag(&f, true))
+            }
+            ScriptEffect::AddObject { add_object, map } => {
+                hide_flag(add_object, map).map(|f| GoalPredicate::flag(&f, false))
+            }
+            _ => None,
+        };
+        if let Some(p) = p {
             if let Some(neg) = p.negation() {
                 out.retain(|q| *q != neg);
             }
@@ -1071,6 +992,34 @@ mod tests {
             GoalPredicate::badge(2).negation(),
             Some(GoalPredicate::flag("FLAG_BADGE02_GET", false))
         );
+        let d = GoalPredicate::pokedex_caught(10);
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#"{"pokedex_caught":10}"#);
+        assert_eq!(serde_json::from_str::<GoalPredicate>(&json).unwrap(), d);
+        assert_eq!(d.to_string(), "PokedexCaught(≥10)");
+        assert_eq!(
+            serde_json::from_str::<GoalPredicate>(r#"{"pokedex_seen":3}"#).unwrap(),
+            GoalPredicate::pokedex_seen(3)
+        );
+    }
+
+    #[test]
+    fn pokedex_count_conditions_become_lower_bounds() {
+        let cond: Condition = serde_json::from_str(r#"{"pokedex": "caught", "ge": 10}"#).unwrap();
+        assert_eq!(
+            GoalPredicate::from_condition(&cond),
+            Some(GoalPredicate::pokedex_caught(10))
+        );
+        let gt: Condition = serde_json::from_str(r#"{"pokedex": "seen", "gt": 59}"#).unwrap();
+        assert_eq!(
+            GoalPredicate::from_condition(&gt),
+            Some(GoalPredicate::pokedex_seen(60))
+        );
+        let lt: Condition = serde_json::from_str(r#"{"pokedex": "caught", "lt": 10}"#).unwrap();
+        assert_eq!(GoalPredicate::from_condition(&lt), None);
+        let national: Condition =
+            serde_json::from_str(r#"{"pokedex": "caught", "national": true, "ge": 60}"#).unwrap();
+        assert_eq!(GoalPredicate::from_condition(&national), None);
     }
 
     #[test]

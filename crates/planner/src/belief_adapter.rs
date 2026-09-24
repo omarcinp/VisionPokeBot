@@ -6,12 +6,13 @@
 //! Anything the knowledge lacks is `Unknown`: an absent flag, an unread bag
 //! pocket, a party never looked at.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use pokebot_core::{Error, Result};
 use pokebot_gamedata::GameData;
-use pokebot_state::{PartyMon, PlayerPose, Pocket, SavedKnowledge};
+use pokebot_state::{Knowledge, PartyMon, PlayerPose, Pocket, SavedKnowledge};
+use pokebot_world::events::DexCount;
 use pokebot_world::predicate::{BeliefView, Predicate, Truth};
 use serde::Deserialize;
 
@@ -215,7 +216,72 @@ impl<'a> StateBelief<'a> {
                 return Some(Truth::True);
             }
         }
+        let bound = match p {
+            GoalPredicate::PokedexCaught { ge } => Some((DexCount::Caught, *ge)),
+            GoalPredicate::PokedexSeen { ge } => Some((DexCount::Seen, *ge)),
+            _ => None,
+        };
+        if let Some((which, ge)) = bound {
+            let held = self
+                .established
+                .iter()
+                .filter_map(|q| match (which, q) {
+                    (DexCount::Caught, GoalPredicate::PokedexCaught { ge })
+                    | (DexCount::Seen, GoalPredicate::PokedexSeen { ge }) => Some(*ge),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            if held >= ge {
+                return Some(Truth::True);
+            }
+        }
         None
+    }
+
+    /// Species seen or caught: the total the Trainer Card showed when it
+    /// was read (`Pokedex.counts`), else the species observed one by one,
+    /// plus the catches the plan so far establishes. The flag says whether
+    /// the count is exact (a read total) or a lower bound.
+    pub fn pokedex_count(&self, which: DexCount) -> (u32, bool) {
+        let dex = &self.knowledge.pokedex;
+        let known = |map: &BTreeMap<String, Knowledge<bool>>| {
+            map.iter()
+                .filter(|(_, k)| k.value == Some(true))
+                .map(|(s, _)| s.clone())
+                .collect::<BTreeSet<String>>()
+        };
+        let mut observed = known(&dex.caught);
+        if which == DexCount::Seen {
+            observed.extend(known(&dex.seen));
+        }
+        let new = self
+            .established
+            .iter()
+            .filter(|p| matches!(p, GoalPredicate::Caught { caught } if !observed.contains(caught)))
+            .count() as u32;
+        let observed = observed.len() as u32;
+        match dex.counts.value {
+            Some(c) => {
+                let total = match which {
+                    DexCount::Seen => c.seen,
+                    DexCount::Caught => c.caught,
+                };
+                (u32::from(total).max(observed) + new, true)
+            }
+            None => (observed + new, false),
+        }
+    }
+
+    fn pokedex_truth(&self, which: DexCount, ge: u16) -> Truth {
+        let (count, exact) = self.pokedex_count(which);
+        if count >= u32::from(ge) {
+            Truth::True
+        } else if exact {
+            Truth::False
+        } else {
+            Truth::Unknown
+        }
     }
 
     fn eval_world(&self, p: &Predicate) -> Truth {
@@ -283,6 +349,8 @@ impl GoalBelief for StateBelief<'_> {
                     .get(caught)
                     .and_then(|k| k.value),
             ),
+            GoalPredicate::PokedexCaught { ge } => self.pokedex_truth(DexCount::Caught, *ge),
+            GoalPredicate::PokedexSeen { ge } => self.pokedex_truth(DexCount::Seen, *ge),
             GoalPredicate::CanBeat { can_beat } => {
                 if !self.data.trainers.contains_key(can_beat) {
                     return Truth::Unknown;
@@ -360,6 +428,48 @@ mod tests {
             }),
             Truth::False
         );
+    }
+
+    #[test]
+    fn pokedex_counts_are_a_lower_bound_until_the_card_is_read() {
+        let Some(data) = data() else { return };
+        let mut k = SavedKnowledge::default();
+        for s in ["SPECIES_RATTATA", "SPECIES_PIDGEY", "SPECIES_CATERPIE"] {
+            k.pokedex
+                .caught
+                .insert(s.into(), Knowledge::observed(true, 1));
+        }
+        let mut b = StateBelief::new(&k, &data, None);
+        assert_eq!(b.pokedex_count(DexCount::Caught), (3, false));
+        assert_eq!(b.eval_goal(&GoalPredicate::pokedex_caught(3)), Truth::True);
+        assert_eq!(
+            b.eval_goal(&GoalPredicate::pokedex_caught(10)),
+            Truth::Unknown
+        );
+        // Planned catches raise the bound; one already counted doesn't.
+        b.established.insert(GoalPredicate::caught("SPECIES_ZUBAT"));
+        b.established
+            .insert(GoalPredicate::caught("SPECIES_RATTATA"));
+        assert_eq!(b.pokedex_count(DexCount::Caught), (4, false));
+        b.established.insert(GoalPredicate::pokedex_caught(10));
+        assert_eq!(b.eval_goal(&GoalPredicate::pokedex_caught(10)), Truth::True);
+        // The card's total is exact: below it the goal is False.
+        let mut k2 = k.clone();
+        k2.pokedex.counts = Knowledge::observed(
+            pokebot_state::PokedexCounts {
+                seen: 12,
+                caught: 7,
+            },
+            2,
+        );
+        let b2 = StateBelief::new(&k2, &data, None);
+        assert_eq!(b2.pokedex_count(DexCount::Caught), (7, true));
+        assert_eq!(b2.pokedex_count(DexCount::Seen), (12, true));
+        assert_eq!(
+            b2.eval_goal(&GoalPredicate::pokedex_caught(10)),
+            Truth::False
+        );
+        assert_eq!(b2.eval_goal(&GoalPredicate::pokedex_seen(10)), Truth::True);
     }
 
     #[test]

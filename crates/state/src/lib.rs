@@ -25,7 +25,9 @@ mod state;
 pub use belief::{Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
 pub use events::{EventExtractor, EventRecord, GameEvent};
 pub use inference::{Condition, InferenceRule, InferenceRules};
-pub use inventory::{Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, SavedKnowledge, BOXES};
+pub use inventory::{
+    Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, PokedexCounts, SavedKnowledge, BOXES,
+};
 pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BagObservation, BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction,

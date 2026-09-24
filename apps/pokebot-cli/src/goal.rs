@@ -14,7 +14,8 @@ use pokebot_agent::{ContinueTask, Executor, Progress};
 use pokebot_core::Error;
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
-    load_checkpoint, parse_goal, GoalPredicate, Methods, Obtain, Plan, PlanOptions, Planner,
+    load_checkpoint, parse_goal, GoalPredicate, Methods, Obtain, Plan, PlanError, PlanOptions,
+    Planner,
 };
 use pokebot_runtime::Runtime;
 use pokebot_state::inference::InferenceRules;
@@ -49,6 +50,10 @@ pub struct GoalArgs {
     /// A wrong assumption dearer than this many seconds makes a probe mandatory
     #[arg(long, default_value_t = 600.0)]
     pub expensive_secs: f64,
+    /// Wall-clock seconds a plan may take before the planner gives up
+    /// (Ctrl-C ends it too)
+    #[arg(long, default_value_t = 60.0)]
+    pub plan_budget_secs: f64,
     /// World model directory (tools/world/build.sh)
     #[arg(long, default_value = "data/world")]
     pub world: PathBuf,
@@ -151,6 +156,7 @@ impl PlannerData {
         let graph = PlaceGraph::build(&world, RouteParams::default());
         let options = PlanOptions {
             expensive_secs: args.expensive_secs,
+            budget_s: args.plan_budget_secs,
             ..PlanOptions::default()
         };
         Ok(PlannerData {
@@ -179,11 +185,29 @@ impl PlannerData {
 
 pub fn run(args: GoalArgs, stop: &AtomicBool) -> Result<()> {
     let goal = parse_goal(&args.goal).map_err(|e| anyhow::anyhow!(e))?;
-    let pd = PlannerData::load(&args)?;
-    if args.dry_run {
-        return dry_run(&args, &goal, &pd);
-    }
-    execute(&args, &goal, &pd, stop)
+    let mut pd = PlannerData::load(&args)?;
+    // The planner checks a flag it owns; a watcher mirrors the process's
+    // stop flag into it while planning runs.
+    let planner_stop = Arc::new(AtomicBool::new(false));
+    pd.options.stop = Some(Arc::clone(&planner_stop));
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) {
+                    planner_stop.store(true, Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        let result = if args.dry_run {
+            dry_run(&args, &goal, &pd)
+        } else {
+            execute(&args, &goal, &pd, stop)
+        };
+        done.store(true, Ordering::Relaxed);
+        result
+    })
 }
 
 fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()> {
@@ -194,11 +218,28 @@ fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()
         Some(p) => println!("from: {p}"),
         None => println!("from: unknown position"),
     }
-    let plan = planner
-        .plan(goal, &knowledge, pose)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    print_plan(&plan);
-    Ok(())
+    let started = std::time::Instant::now();
+    match planner.plan(goal, &knowledge, pose) {
+        Ok(plan) => {
+            print_plan(&plan);
+            println!("planned in {:.1} s", started.elapsed().as_secs_f64());
+            Ok(())
+        }
+        Err(PlanError::Budget {
+            goal,
+            nodes,
+            elapsed_s,
+            best_partial,
+        }) => {
+            println!("planning {goal} stopped after {nodes} nodes and {elapsed_s:.1} s");
+            if let Some(plan) = best_partial {
+                println!("best partial plan:");
+                print_plan(&plan);
+            }
+            bail!("no plan within the budget")
+        }
+        Err(e) => bail!("{e}"),
+    }
 }
 
 /// `Save` that also records the save position in `progress.json`, so the
@@ -466,6 +507,9 @@ pub fn print_plan(plan: &Plan) {
             step.cost_s,
             notes.join(" & ")
         );
+        for leg in &step.route {
+            println!("{:>4}    {leg}", "");
+        }
     }
     let minutes = plan.cost_s / 60.0;
     println!(

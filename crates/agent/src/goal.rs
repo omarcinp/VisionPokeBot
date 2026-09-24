@@ -662,5 +662,8 @@ pub fn provenance(knowledge: &SavedKnowledge, p: &GoalPredicate) -> KnowledgeSou
             .get(caught)
             .map_or(KnowledgeSource::Unknown, |k| k.source),
         GoalPredicate::Money { .. } => knowledge.money.source,
+        GoalPredicate::PokedexCaught { .. } | GoalPredicate::PokedexSeen { .. } => {
+            knowledge.pokedex.counts.source
+        }
     }
 }
