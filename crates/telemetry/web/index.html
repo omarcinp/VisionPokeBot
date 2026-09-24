@@ -83,6 +83,12 @@
       <dt>rival</dt><dd><span id="rival-name">–</span> <span class="src" id="rival-name-src">–</span></dd>
       <dt>in control</dt><dd><span id="control">–</span> <span class="src" id="control-src">–</span></dd>
     </dl>
+    <h2>party &amp; items</h2>
+    <dl class="kv">
+      <dt>money</dt><dd><span id="money">–</span> <span class="src" id="money-src">–</span></dd>
+      <dt>party</dt><dd id="party">–</dd>
+      <dt>bag</dt><dd id="bag">–</dd>
+    </dl>
     <h2>Inferred state</h2>
     <dl class="kv">
       <dt>screen</dt><dd><span class="big" id="screen-state">–</span> <span class="src" id="screen-src">–</span></dd>
@@ -219,6 +225,23 @@ function setStatus(status) {
   knowledge('gender', pr.gender);
   knowledge('rival-name', pr.rival_name);
   knowledge('control', pr.in_control);
+  knowledge('money', st.money);
+  const kv = (k) => (k && k.value != null ? k.value : '?');
+  const src = (k) => `<span class="src ${k ? k.source : 'Unknown'}">${k ? k.source : 'Unknown'}</span>`;
+  const party = (st.party && st.party.value) || [];
+  $('party').innerHTML = party.length ? party.map((m) => {
+    const sp = String(kv(m.species)).replace('SPECIES_', '');
+    const hp = m.hp && m.hp.value ? `${m.hp.value[0]}/${m.hp.value[1]}` : '?';
+    const moves = m.moves.filter(Boolean).map((s) => {
+      const pp = s.pp && s.pp.value ? `${s.pp.value[0]}/${s.pp.value[1]}` : '?';
+      return `${String(kv(s.mv)).replace('MOVE_', '')} ${pp} ${src(s.pp)}`;
+    }).join(' · ');
+    return `<div><b>${sp}</b> Lv${kv(m.level)} HP ${hp} ${src(m.hp)}<br><small>${moves}</small></div>`;
+  }).join('') : '–';
+  const pockets = (st.bag && st.bag.pockets) || {};
+  $('bag').innerHTML = Object.entries(pockets).map(([p, k]) =>
+    `${p}: ${k.value ? k.value.map(([i, n]) => `${i.replace('ITEM_', '')}×${n}`).join(', ') || 'empty' : '?'} ${src(k)}`
+  ).join('<br>') || '–';
   const ob = status.observation || {};
   if (ob.screen) {
     $('obs-screen').textContent = ob.screen.value;
