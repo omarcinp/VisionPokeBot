@@ -2,7 +2,7 @@ use pokebot_core::ControllerCommand;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BoxMon, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
+    BoxMon, Direction, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
     ScreenState, Status,
 };
 
@@ -177,6 +177,61 @@ pub enum GameEvent {
     /// The knowledge stored with the save that was just loaded.
     CheckpointRestored {
         knowledge: Box<SavedKnowledge>,
+    },
+    /// A flag's value read from the screen (trainer card, a dialogue branch
+    /// that implies it, an NPC at its tile).
+    FlagObserved {
+        flag: String,
+        value: bool,
+    },
+    /// A flag a script path is known to have set or cleared.
+    FlagTracked {
+        flag: String,
+        value: bool,
+    },
+    VarObserved {
+        var: String,
+        value: u16,
+    },
+    VarTracked {
+        var: String,
+        value: u16,
+    },
+    /// The player was on `map` (a transition seen, or the Fly map lit).
+    MapVisited {
+        map: String,
+    },
+    /// Where a blackout now lands (the last Pokémon Center used).
+    RespawnSet {
+        map: String,
+        x: i32,
+        y: i32,
+    },
+    /// An NPC was seen at a tile of `map`.
+    NpcSeen {
+        map: String,
+        local_id: u32,
+        x: i32,
+        y: i32,
+        facing: Direction,
+    },
+    /// An NPC's scripted tile was looked at and it was not there.
+    NpcAbsent {
+        map: String,
+        local_id: u32,
+    },
+    /// The agent ran path `path` of the compiled script `script` to
+    /// completion. The reducer only records it: the agent emits the
+    /// `FlagTracked`/`VarTracked`/`ItemsChanged` the path's effects imply,
+    /// so the reducer needs no world data.
+    ScriptPathRun {
+        script: String,
+        path: usize,
+    },
+    /// An intent failed in a way that replanning it would repeat; forgotten
+    /// on `CheckpointRestored`.
+    IntentInfeasible {
+        intent: String,
     },
 }
 

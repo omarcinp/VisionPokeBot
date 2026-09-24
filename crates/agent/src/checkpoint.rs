@@ -301,6 +301,28 @@ mod tests {
     }
 
     #[test]
+    fn world_belief_round_trips_through_state_json() {
+        let dir = temp_dir("belief");
+        let path = dir.join("state.json");
+        let mut k = SavedKnowledge::default();
+        k.world
+            .flags
+            .insert("FLAG_BADGE01_GET".into(), Knowledge::observed(true, 7));
+        k.world
+            .visited
+            .insert("PewterCity".into(), Knowledge::observed(true, 7));
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        let back = load(&path).unwrap().unwrap();
+        assert_eq!(back.knowledge.world, k.world);
+        assert_eq!(
+            back.knowledge.world.flag("FLAG_BADGE01_GET"),
+            Knowledge::observed(true, 7)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn store_leaves_no_temp_file() {
         let dir = temp_dir("atomic");
         let path = dir.join("state.json");

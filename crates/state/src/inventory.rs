@@ -100,6 +100,7 @@ pub struct SavedKnowledge {
     pub money: Knowledge<u32>,
     pub pc: PcStorage,
     pub pokedex: Pokedex,
+    pub world: crate::WorldBelief,
 }
 
 #[cfg(test)]

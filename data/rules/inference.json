@@ -1,0 +1,90 @@
+[
+  {
+    "if": {
+      "flag": "FLAG_BADGE01_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_BROCK",
+      "is": true
+    },
+    "note": "the badge is only given after beating Brock"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE02_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_MISTY",
+      "is": true
+    },
+    "note": "the badge is only given after beating Misty"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE03_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_LT_SURGE",
+      "is": true
+    },
+    "note": "the badge is only given after beating Lt Surge"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE04_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_ERIKA",
+      "is": true
+    },
+    "note": "the badge is only given after beating Erika"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE05_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_KOGA",
+      "is": true
+    },
+    "note": "the badge is only given after beating Koga"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE06_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_SABRINA",
+      "is": true
+    },
+    "note": "the badge is only given after beating Sabrina"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE07_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_BLAINE",
+      "is": true
+    },
+    "note": "the badge is only given after beating Blaine"
+  },
+  {
+    "if": {
+      "flag": "FLAG_BADGE08_GET",
+      "is": true
+    },
+    "then": {
+      "flag": "FLAG_DEFEATED_LEADER_GIOVANNI",
+      "is": true
+    },
+    "note": "the badge is only given after beating Giovanni"
+  }
+]

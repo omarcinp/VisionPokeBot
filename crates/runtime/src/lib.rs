@@ -412,6 +412,22 @@ fn summarize(event: &GameEvent) -> String {
         GameEvent::ShinySeen { species } => format!("SHINY {species}!"),
         GameEvent::BadgeEarned { badge } => format!("Badge earned: {badge}"),
         GameEvent::CheckpointRestored { .. } => "Checkpoint knowledge restored".into(),
+        GameEvent::FlagObserved { flag, value } => format!("Flag {flag} = {value} (seen)"),
+        GameEvent::FlagTracked { flag, value } => format!("Flag {flag} = {value} (tracked)"),
+        GameEvent::VarObserved { var, value } => format!("Var {var} = {value} (seen)"),
+        GameEvent::VarTracked { var, value } => format!("Var {var} = {value} (tracked)"),
+        GameEvent::MapVisited { map } => format!("Visited {map}"),
+        GameEvent::RespawnSet { map, x, y } => format!("Respawn at {map} ({x}, {y})"),
+        GameEvent::NpcSeen {
+            map,
+            local_id,
+            x,
+            y,
+            facing,
+        } => format!("NPC {map}#{local_id} at ({x}, {y}) facing {facing:?}"),
+        GameEvent::NpcAbsent { map, local_id } => format!("NPC {map}#{local_id} absent"),
+        GameEvent::ScriptPathRun { script, path } => format!("Ran {script} path {path}"),
+        GameEvent::IntentInfeasible { intent } => format!("Intent {intent} infeasible"),
     }
 }
 

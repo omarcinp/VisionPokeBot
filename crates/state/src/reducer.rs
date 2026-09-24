@@ -97,7 +97,17 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::SpeciesSeen { .. }
                 | GameEvent::SpeciesCaught { .. }
                 | GameEvent::ShinySeen { .. }
-                | GameEvent::CheckpointRestored { .. } => {
+                | GameEvent::CheckpointRestored { .. }
+                | GameEvent::FlagObserved { .. }
+                | GameEvent::FlagTracked { .. }
+                | GameEvent::VarObserved { .. }
+                | GameEvent::VarTracked { .. }
+                | GameEvent::MapVisited { .. }
+                | GameEvent::RespawnSet { .. }
+                | GameEvent::NpcSeen { .. }
+                | GameEvent::NpcAbsent { .. }
+                | GameEvent::ScriptPathRun { .. }
+                | GameEvent::IntentInfeasible { .. } => {
                     unreachable!("handled by reduce_knowledge")
                 }
             }

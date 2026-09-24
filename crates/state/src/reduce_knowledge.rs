@@ -1,7 +1,10 @@
-//! Applying knowledge events (party, bag, money, PC, Pokédex) to the state.
-//! Pure: the same events always give the same state.
+//! Applying knowledge events (party, bag, money, PC, Pokédex, world belief)
+//! to the state. Pure: the same events always give the same state.
 
-use crate::{GameEvent, GameState, Knowledge, KnowledgeSource, MoveSlot, PartyMon, Status};
+use crate::belief::track;
+use crate::{
+    GameEvent, GameState, HealSpot, Knowledge, KnowledgeSource, MoveSlot, PartyMon, Status,
+};
 
 /// Applies `event` if it is a knowledge event; returns whether it was one.
 pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> bool {
@@ -237,6 +240,67 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             state.money = k.money;
             state.pc = k.pc;
             state.pokedex = k.pokedex;
+            state.world = k.world;
+            // Session-scoped: what was infeasible before the restore may
+            // not be any more.
+            state.world.infeasible.clear();
+        }
+        GameEvent::FlagObserved { flag, value } => {
+            state
+                .world
+                .flags
+                .insert(flag.clone(), Knowledge::observed(*value, frame));
+        }
+        GameEvent::FlagTracked { flag, value } => {
+            if let Some(k) = track(state.world.flags.get(flag), *value) {
+                state.world.flags.insert(flag.clone(), k);
+            }
+        }
+        GameEvent::VarObserved { var, value } => {
+            state
+                .world
+                .vars
+                .insert(var.clone(), Knowledge::observed(*value, frame));
+        }
+        GameEvent::VarTracked { var, value } => {
+            if let Some(k) = track(state.world.vars.get(var), *value) {
+                state.world.vars.insert(var.clone(), k);
+            }
+        }
+        GameEvent::MapVisited { map } => {
+            state
+                .world
+                .visited
+                .insert(map.clone(), Knowledge::observed(true, frame));
+        }
+        GameEvent::RespawnSet { map, x, y } => {
+            state.world.respawn = Knowledge::observed(
+                HealSpot {
+                    map: map.clone(),
+                    x: *x,
+                    y: *y,
+                },
+                frame,
+            );
+        }
+        GameEvent::NpcSeen {
+            map,
+            local_id,
+            x,
+            y,
+            facing,
+        } => {
+            let npc = state.world.npc_mut(map, *local_id);
+            npc.pos = Knowledge::observed((*x, *y), frame);
+            npc.facing = Knowledge::observed(*facing, frame);
+            npc.present = Knowledge::observed(true, frame);
+        }
+        GameEvent::NpcAbsent { map, local_id } => {
+            state.world.npc_mut(map, *local_id).present = Knowledge::observed(false, frame);
+        }
+        GameEvent::ScriptPathRun { script, path } => state.world.record_path(script, *path),
+        GameEvent::IntentInfeasible { intent } => {
+            state.world.infeasible.insert(intent.clone());
         }
         _ => return false,
     }
