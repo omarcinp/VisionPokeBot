@@ -1,0 +1,17 @@
+[package]
+name = "pokebot-emulator-libretro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libloading = "0.8.9"
+pokebot-controller.workspace = true
+pokebot-core.workspace = true
+
+[dev-dependencies]
+pokebot-video = { path = "../../crates/video" }

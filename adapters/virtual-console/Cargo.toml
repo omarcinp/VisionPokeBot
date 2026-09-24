@@ -1,0 +1,17 @@
+[package]
+name = "pokebot-virtual-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2.189"
+pokebot-core.workspace = true
+pokebot-emulator-libretro.workspace = true
+pokebot-pabotbase.workspace = true
+pokebot-remote.workspace = true
+v4l = "0.14.0"
