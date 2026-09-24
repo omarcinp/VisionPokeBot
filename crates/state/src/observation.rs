@@ -139,6 +139,9 @@ pub struct BattleObservation {
     /// PP left / maximum of the move under the ▶ in the move menu.
     #[serde(default)]
     pub move_pp: Option<(u8, u8)>,
+    /// The four move cells of the move menu (menu order, "" when empty).
+    #[serde(default)]
+    pub move_names: Vec<String>,
 }
 
 /// Where the naming screen's cursor is.

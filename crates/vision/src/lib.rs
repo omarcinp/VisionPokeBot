@@ -40,6 +40,8 @@ pub struct FireRedPerception {
     /// Previous frame's text cells and how long they have been unchanged.
     previous_text: Option<(Vec<u8>, u32)>,
     font: Option<Arc<text::Font>>,
+    /// Reads small-font text (battle move names).
+    small_font: Option<Arc<text::Font>>,
     /// Last text read and the text cells it was read from.
     last_read: Option<(Vec<u8>, Vec<String>)>,
 }
@@ -125,6 +127,14 @@ impl PerceptionSystem for FireRedPerception {
                 b.move_pp = read_fraction(&font.read(image, detect::battle::MOVE_PP, &[]).join(""));
             }
         }
+        if let (Some(b), Some(small)) = (&mut battle, &self.small_font) {
+            if matches!(b.menu, Some(BattleMenu::Moves { .. })) {
+                b.move_names = detect::battle::MOVE_NAME_CELLS
+                    .iter()
+                    .map(|r| small.read(image, *r, &[]).join(" "))
+                    .collect();
+            }
+        }
         let battle_menu = battle.as_ref().and_then(|b| b.menu);
         // In battle, list menus appear only over battle text (YES/NO
         // questions such as "Delete a move…?").
@@ -178,6 +188,12 @@ impl FireRedPerception {
     /// Reads dialogue text with the game font.
     pub fn with_font(mut self, font: Arc<text::Font>) -> Self {
         self.font = Some(font);
+        self
+    }
+
+    /// Reads small-font text (battle move names).
+    pub fn with_small_font(mut self, font: Arc<text::Font>) -> Self {
+        self.small_font = Some(font);
         self
     }
 
@@ -308,5 +324,29 @@ mod tests {
         let dialogue = observation.dialogue.unwrap();
         assert!(dialogue.waiting_for_input);
         assert_eq!(dialogue.arrow.unwrap().x, 120);
+    }
+
+    #[test]
+    fn move_menu_names_are_read_with_the_small_font() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(small), Ok(normal)) = (
+            text::Font::load(root.join("data/world/font_small.json")),
+            text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let Ok(image) = pokebot_video::png::load(root.join("captures/fixtures/move-select.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default()
+            .with_font(std::sync::Arc::new(normal))
+            .with_small_font(std::sync::Arc::new(small));
+        let b = p.observe(&frame(0, image)).battle.unwrap();
+        assert_eq!(
+            b.move_names,
+            vec!["TACKLE", "GROWL", "LEECH SEED", "VINE WHIP"]
+        );
+        assert_eq!(b.move_pp, Some((35, 35)));
     }
 }

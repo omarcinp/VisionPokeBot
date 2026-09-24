@@ -262,6 +262,7 @@ mod tests {
             player_hp: Some(562),
             opponent_hp: None,
             move_pp: Some((12, 35)),
+            move_names: Vec::new(),
         };
         party.observe_battle(&data, &battle);
         let lead = party.lead().unwrap();

@@ -56,6 +56,12 @@ struct GlyphFile {
     rows: Vec<String>,
 }
 
+/// Whether `text` is a single ASCII digit (used to break bitmap ties in
+/// favour of letters; see `Font::from_json`).
+fn is_digit(text: &str) -> bool {
+    matches!(text.as_bytes(), [b] if b.is_ascii_digit())
+}
+
 impl Font {
     pub fn load(path: impl AsRef<Path>) -> Result<Font> {
         let path = path.as_ref();
@@ -82,12 +88,21 @@ impl Font {
             let columns: Vec<u16> = (0..g.width as usize).map(|x| column('#', x)).collect();
             let shadow = (0..g.width as usize).map(|x| column('s', x)).collect();
             let ink = columns.iter().map(|c| c.count_ones()).sum();
-            // The first glyph with a given bitmap wins (lowest character code).
-            if ink > 0
-                && !glyphs
-                    .iter()
-                    .any(|o| o.columns == columns && o.width == g.width)
+            if ink == 0 {
+                continue;
+            }
+            // Duplicate bitmap (the game reuses one glyph for two codes,
+            // e.g. `0`/`O` in the small font): the lowest character code
+            // wins, unless it's a digit standing in for a letter — digits
+            // are rare in menu text, so keep the letter reading.
+            if let Some(existing) = glyphs
+                .iter_mut()
+                .find(|o| o.columns == columns && o.width == g.width)
             {
+                if is_digit(&existing.text) && !is_digit(&g.text) {
+                    existing.text = g.text;
+                }
+            } else {
                 glyphs.push(Glyph {
                     text: g.text,
                     width: g.width,

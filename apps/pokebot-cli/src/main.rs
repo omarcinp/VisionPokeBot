@@ -413,8 +413,16 @@ fn story(
     let font_path = options.world.join("font_normal.json");
     let font = pokebot_vision::text::Font::load(&font_path)
         .with_context(|| format!("loading {} (run tools/world/build.sh)", font_path.display()))?;
+    let small_font_path = options.world.join("font_small.json");
+    let small_font = pokebot_vision::text::Font::load(&small_font_path).with_context(|| {
+        format!(
+            "loading {} (run tools/world/build.sh)",
+            small_font_path.display()
+        )
+    })?;
     let perception = FireRedPerception::with_world(Arc::clone(&world))
         .with_font(Arc::new(font))
+        .with_small_font(Arc::new(small_font))
         .with_global_search(matches!(start, StoryStart::AsIs));
     let devices = devices::open(args)?;
     let (video_name, controller_name) =
@@ -688,9 +696,14 @@ fn inspect(
         bail!("--out needs a single image");
     }
     let world = world.map(pokebot_world::World::load).transpose()?;
+    let small_font_path = font.with_file_name("font_small.json");
     let font = font
         .exists()
         .then(|| pokebot_vision::text::Font::load(&font).map(Arc::new))
+        .transpose()?;
+    let small_font = small_font_path
+        .exists()
+        .then(|| pokebot_vision::text::Font::load(&small_font_path).map(Arc::new))
         .transpose()?;
     for path in paths {
         let image = pokebot_video::png::load(&path)?;
@@ -723,6 +736,9 @@ fn inspect(
         let mut perception = FireRedPerception::default();
         if let Some(font) = &font {
             perception = perception.with_font(Arc::clone(font));
+        }
+        if let Some(small_font) = &small_font {
+            perception = perception.with_small_font(Arc::clone(small_font));
         }
         let observation = perception.observe(&normalized);
         println!(
@@ -785,9 +801,10 @@ fn describe_observation(o: &Observation) -> String {
     }
     if let Some(b) = &o.battle {
         parts.push(format!(
-            "battle {:?} PP {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",
+            "battle {:?} PP {:?} moves {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",
             b.menu,
             b.move_pp,
+            b.move_names,
             b.player_name,
             b.player_level,
             b.player_hp_numbers,

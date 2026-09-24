@@ -24,6 +24,35 @@ pub const MOVE_PP: Region = Region {
     height: 16,
 };
 
+/// Move-menu name cells (latin_small), menu order: top-left, top-right,
+/// bottom-left, bottom-right.
+pub const MOVE_NAME_CELLS: [Region; 4] = [
+    Region {
+        x: 16,
+        y: 120,
+        width: 64,
+        height: 14,
+    },
+    Region {
+        x: 88,
+        y: 120,
+        width: 64,
+        height: 14,
+    },
+    Region {
+        x: 16,
+        y: 136,
+        width: 64,
+        height: 14,
+    },
+    Region {
+        x: 88,
+        y: 136,
+        width: 64,
+        height: 14,
+    },
+];
+
 /// HP bars: left edge, row, 48 px wide.
 const OPPONENT_BAR: (u32, u32) = (52, 34);
 const PLAYER_BAR: (u32, u32) = (174, 92);
@@ -71,6 +100,7 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
         player_hp,
         opponent_hp,
         move_pp: None,
+        move_names: Vec::new(),
     })
 }
 

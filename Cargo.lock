@@ -1167,6 +1167,7 @@ version = "0.1.0"
 dependencies = [
  "pokebot-core",
  "pokebot-state",
+ "pokebot-video",
  "pokebot-world",
  "serde",
  "serde_json",
