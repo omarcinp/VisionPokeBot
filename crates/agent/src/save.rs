@@ -210,6 +210,15 @@ impl Task for ContinueTask {
                     self.phase = ContinuePhase::MainMenu;
                     self.next(ctx)
                 }
+                // The intro and title never show an info page: the soft
+                // reset didn't land (on the Switch, the first input after
+                // the pad connects only wakes it) and a New Game tutorial is
+                // up, where Start does nothing. Reset again.
+                ScreenState::InfoPage => {
+                    self.attempts += 1;
+                    self.phase = ContinuePhase::SoftReset;
+                    self.next(ctx)
+                }
                 _ => Decision::Act(Action::new(
                     "press Start to skip the intro",
                     vec![ControllerCommand::Press(Button::Start)],
@@ -244,6 +253,11 @@ impl Task for ContinueTask {
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, _ctx: &mut TaskContext<'_>) {
         if outcome == Outcome::TimedOut {
             self.attempts += 1;
+            // Start keeps failing to reach the title: wherever we are, the
+            // soft reset may not have landed. Every fourth miss resets again.
+            if self.phase == ContinuePhase::AwaitTitle && self.attempts % 4 == 0 {
+                self.phase = ContinuePhase::SoftReset;
+            }
             return;
         }
         match (self.phase, action.label.as_str()) {
@@ -254,5 +268,71 @@ impl Task for ContinueTask {
             (ContinuePhase::MainMenu, "choose CONTINUE") => self.phase = ContinuePhase::Resume,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pokebot_state::{GameState, Observation, Observed};
+
+    use super::*;
+
+    fn observe(screen: ScreenState) -> Observation {
+        let screen = Observed {
+            value: screen,
+            detector: "test".into(),
+        };
+        Observation::bare(0, screen, Default::default())
+    }
+
+    fn next(task: &mut ContinueTask, screen: ScreenState) -> Action {
+        let decision = task.next(&mut TaskContext {
+            observation: &observe(screen),
+            state: &GameState::default(),
+            events: &mut Vec::new(),
+        });
+        match decision {
+            Decision::Act(action) => action,
+            _ => panic!("expected an action"),
+        }
+    }
+
+    fn time_out(task: &mut ContinueTask, action: &Action) {
+        task.on_outcome(
+            action,
+            Outcome::TimedOut,
+            &mut TaskContext {
+                observation: &observe(ScreenState::Unknown),
+                state: &GameState::default(),
+                events: &mut Vec::new(),
+            },
+        );
+    }
+
+    fn awaiting_title() -> ContinueTask {
+        ContinueTask {
+            phase: ContinuePhase::AwaitTitle,
+            ..ContinueTask::default()
+        }
+    }
+
+    #[test]
+    fn a_new_game_tutorial_after_the_reset_resets_again() {
+        let action = next(&mut awaiting_title(), ScreenState::InfoPage);
+        assert_eq!(action.label, "soft reset (A+B+Start+Select)");
+    }
+
+    #[test]
+    fn every_fourth_intro_miss_resets_again() {
+        let mut task = awaiting_title();
+        for _ in 0..3 {
+            let action = next(&mut task, ScreenState::Unknown);
+            assert_eq!(action.label, "press Start to skip the intro");
+            time_out(&mut task, &action);
+        }
+        assert_eq!(task.phase, ContinuePhase::AwaitTitle);
+        let action = next(&mut task, ScreenState::Unknown);
+        time_out(&mut task, &action);
+        assert_eq!(task.phase, ContinuePhase::SoftReset);
     }
 }

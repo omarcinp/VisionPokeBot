@@ -623,6 +623,25 @@ mod tests {
         );
     }
 
+    /// Live (Switch): the clerk's blue "Please come again!" read as nothing:
+    /// the window's top-left corner, smeared into the text's blue, joined
+    /// the line and pushed its glyph cells out of the searched range.
+    #[test]
+    fn switch_blue_text_under_a_smeared_corner_is_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-mart-come-again.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::default().with_font(std::sync::Arc::new(font));
+        let d = p.observe(&frame(0, image)).dialogue.unwrap();
+        assert_eq!(d.lines, vec!["Please come again!"]);
+    }
+
     /// Normal/small fonts and the palettes of the fixtures' wild species
     /// (RATTATA in the emulator's, PIDGEY in the Switch's) from the game data.
     fn catch_perception() -> Option<FireRedPerception> {

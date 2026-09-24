@@ -148,10 +148,14 @@ impl Font {
         let mut lines = Vec::new();
         for (top, bottom) in mask.bands() {
             // Glyph ink starts between cell rows 0 and 8 (accents … lower case),
-            // so try every cell top that keeps the band inside the cell.
+            // so try every cell top that keeps the band inside the cell. Specks
+            // above the text (a window corner smeared into the ink colour on
+            // a capture) can make the band start early: tops below the band's
+            // top row are tried too, down to where the band bottom is a
+            // glyph's baseline.
             let lowest = bottom.saturating_sub(CELL - 1);
             let mut line_best: Option<(i64, String)> = None;
-            for y in lowest.max(top.saturating_sub(8))..=top {
+            for y in lowest.max(top.saturating_sub(8))..=bottom.saturating_sub(8).max(top) {
                 let (s, text) = self.read_line(mask, i64::from(y));
                 if line_best.as_ref().is_none_or(|(b, _)| s > *b) {
                     line_best = Some((s, text));

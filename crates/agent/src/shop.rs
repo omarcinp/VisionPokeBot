@@ -592,10 +592,14 @@ impl Purchase {
         if QUESTION_PAGES.iter().any(|q| page.contains(q)) {
             return self.wait(o, "a question: waiting for its box");
         }
-        if !(d.waiting_for_input || (d.ready_for_a() && !d.lines.is_empty())) {
+        // After SEE YA! only the farewell is left: a settled box is it even
+        // when its text wasn't read (it has no ▼ arrow).
+        let farewell = self.finished && self.leaves > 0;
+        let read = !d.lines.is_empty() || farewell;
+        if !(d.waiting_for_input || (d.ready_for_a() && read)) {
             return self.wait(o, "mart text is printing");
         }
-        let expect = if self.finished && self.leaves > 0 {
+        let expect = if farewell {
             Expectation::ShopClosed
         } else {
             Expectation::TextAdvanced {
@@ -1031,6 +1035,24 @@ mod tests {
         );
         leave(&mut p, &data, &mut events, 20);
         assert_eq!(events.len(), 3);
+    }
+
+    /// Live (Switch): the settled farewell's text wasn't read; without a
+    /// ▼ arrow the mart waited on it until it failed.
+    #[test]
+    fn an_unread_settled_farewell_is_advanced() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POKE_BALL", 0).with_stock(Some(3));
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        act(twice(&mut p, list(2, 700, 0), &data, &mut events));
+        let a = act(p.next(&mart_menu(10, 0), &data, &mut events));
+        assert_eq!(pressed(&a), Button::B);
+        let mut farewell = text(11, &[]);
+        farewell.dialogue.as_mut().unwrap().waiting_for_input = false;
+        let a = act(p.next(&farewell, &data, &mut events));
+        assert_eq!(pressed(&a), Button::A);
+        assert_eq!(a.expect, Expectation::ShopClosed);
     }
 
     #[test]
