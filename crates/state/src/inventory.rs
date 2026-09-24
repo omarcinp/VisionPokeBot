@@ -91,7 +91,9 @@ pub struct Pokedex {
 
 /// The knowledge that belongs to a save file: stored beside it after every
 /// in-game save and restored when that save is loaded.
+/// Missing fields load as unknown, so older files keep loading.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SavedKnowledge {
     pub party: Knowledge<Vec<PartyMon>>,
     pub bag: Bag,
@@ -140,5 +142,16 @@ mod tests {
             serde_json::from_str::<SavedKnowledge>(&json).unwrap(),
             saved
         );
+    }
+
+    #[test]
+    fn saved_knowledge_with_missing_fields_loads() {
+        let saved: SavedKnowledge = serde_json::from_str(
+            r#"{"money":{"value":5,"source":"Observed","last_verified_frame":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.money.value, Some(5));
+        assert_eq!(saved.party, Knowledge::unknown());
+        assert_eq!(saved.pc, PcStorage::default());
     }
 }

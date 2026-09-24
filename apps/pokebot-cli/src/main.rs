@@ -389,6 +389,27 @@ struct StoryOptions {
     milestones: Option<usize>,
 }
 
+/// Restores the knowledge that goes with the save just loaded.
+fn restore_checkpoint(
+    runtime: &mut Runtime,
+    state_path: &Path,
+    progress: &Progress,
+    data: &pokebot_gamedata::GameData,
+) -> Result<()> {
+    let restored = checkpoint::restore(state_path, progress, data)?;
+    if let Some(warning) = &restored.warning {
+        runtime.error(format!("checkpoint: {warning}"));
+    }
+    runtime.emit(GameEvent::CheckpointRestored {
+        knowledge: Box::new(restored.knowledge),
+    })?;
+    runtime.info(format!(
+        "Checkpoint knowledge restored from {}",
+        restored.source
+    ));
+    Ok(())
+}
+
 fn story(
     args: &DeviceArgs,
     output: &OutputArgs,
@@ -481,11 +502,7 @@ fn story(
                     "continuing after: {}",
                     previous.milestones.join(", ")
                 ));
-                let knowledge = checkpoint::restore(&state_path, &previous, &data)?;
-                runtime.emit(GameEvent::CheckpointRestored {
-                    knowledge: Box::new(knowledge),
-                })?;
-                runtime.info("Checkpoint knowledge restored".to_string());
+                restore_checkpoint(&mut runtime, &state_path, &previous, &data)?;
                 previous
             }
             _ => {
@@ -539,11 +556,7 @@ fn story(
                             runtime.set_pose_hint(pose.clone());
                         }
                         executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
-                        let knowledge = checkpoint::restore(&state_path, &saved, &data)?;
-                        runtime.emit(GameEvent::CheckpointRestored {
-                            knowledge: Box::new(knowledge),
-                        })?;
-                        runtime.info("Checkpoint knowledge restored".to_string());
+                        restore_checkpoint(&mut runtime, &state_path, &saved, &data)?;
                         progress = saved;
                     }
                     Err(e) => return Err(e.into()),
@@ -556,8 +569,14 @@ fn story(
                 if let Some(dir) = options.progress.parent() {
                     std::fs::create_dir_all(dir)?;
                 }
+                // state.json first: if progress.json is not written after
+                // it, their identities differ and state.json is ignored.
+                checkpoint::store(
+                    &state_path,
+                    &checkpoint::Identity::of(&progress),
+                    &runtime.state().saved_knowledge(),
+                )?;
                 progress.store(&options.progress)?;
-                checkpoint::store(&state_path, &runtime.state().saved_knowledge())?;
                 let party = Party::from_state(runtime.state());
                 runtime.info(format!(
                     "checkpoint after {}: saved in-game at {}; party {}",

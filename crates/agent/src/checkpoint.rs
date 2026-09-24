@@ -1,11 +1,15 @@
-//! The knowledge that goes with a save file (`saves/state.json`), written
-//! after every in-game save and restored whenever that save is loaded.
+//! The knowledge that goes with a save file (`state.json`, beside
+//! `progress.json`), written after every in-game save and restored whenever
+//! that save is loaded. It carries the identity of the `progress.json` it was
+//! written with, so a `state.json` left over from another save is never
+//! trusted.
 
 use std::path::{Path, PathBuf};
 
 use pokebot_core::{Error, Result};
 use pokebot_gamedata::GameData;
-use pokebot_state::{Knowledge, KnowledgeSource, MoveSlot, PartyMon, SavedKnowledge};
+use pokebot_state::{Knowledge, MoveSlot, PartyMon, PlayerPose, SavedKnowledge};
+use serde::{Deserialize, Serialize};
 
 use crate::party::Party;
 use crate::Progress;
@@ -14,13 +18,54 @@ pub fn path_for(progress: &Path) -> PathBuf {
     progress.with_file_name("state.json")
 }
 
-pub fn store(path: &Path, knowledge: &SavedKnowledge) -> Result<()> {
-    let json =
-        serde_json::to_vec_pretty(knowledge).map_err(|e| Error::InvalidData(e.to_string()))?;
-    std::fs::write(path, json).map_err(|e| Error::io(path, e))
+/// What ties a `state.json` to its `progress.json`: the milestones done and
+/// where the game was saved, both written by the same checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub milestones: Vec<String>,
+    pub saved_at: Option<PlayerPose>,
 }
 
-pub fn load(path: &Path) -> Result<Option<SavedKnowledge>> {
+impl Identity {
+    pub fn of(progress: &Progress) -> Identity {
+        Identity {
+            milestones: progress.milestones.clone(),
+            saved_at: progress.saved_at.clone(),
+        }
+    }
+}
+
+/// The contents of `state.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Absent in files written before identities existed.
+    #[serde(default)]
+    pub identity: Option<Identity>,
+    #[serde(flatten)]
+    pub knowledge: SavedKnowledge,
+}
+
+/// Writes `path` atomically (a temporary file renamed over it), so a crash
+/// never leaves half a file.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).map_err(|e| Error::io(&tmp, e))?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
+}
+
+pub fn store(path: &Path, identity: &Identity, knowledge: &SavedKnowledge) -> Result<()> {
+    let checkpoint = Checkpoint {
+        identity: Some(identity.clone()),
+        knowledge: knowledge.clone(),
+    };
+    let json =
+        serde_json::to_vec_pretty(&checkpoint).map_err(|e| Error::InvalidData(e.to_string()))?;
+    write_atomic(path, &json)
+}
+
+pub fn load(path: &Path) -> Result<Option<Checkpoint>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -31,8 +76,11 @@ pub fn load(path: &Path) -> Result<Option<SavedKnowledge>> {
 }
 
 /// Knowledge from an older `progress.json` that only had a party: kept, but
-/// as tracked (stale) knowledge.
+/// as tracked (stale) knowledge. No party there means the party is unknown.
 pub fn legacy_knowledge(data: &GameData, party: &Party) -> SavedKnowledge {
+    if party.members.is_empty() {
+        return SavedKnowledge::default();
+    }
     let t = |v| Knowledge::tracked(v, None);
     let mons = party
         .members
@@ -58,22 +106,55 @@ pub fn legacy_knowledge(data: &GameData, party: &Party) -> SavedKnowledge {
         })
         .collect();
     SavedKnowledge {
-        party: Knowledge {
-            value: Some(mons),
-            source: KnowledgeSource::Tracked,
-            last_verified_frame: None,
-        },
+        party: Knowledge::tracked(mons, None),
         ..SavedKnowledge::default()
     }
 }
 
-/// The knowledge for a loaded save: `state.json`, or migrated from the
-/// legacy party in `progress.json`.
-pub fn restore(state_path: &Path, progress: &Progress, data: &GameData) -> Result<SavedKnowledge> {
-    Ok(match load(state_path)? {
-        Some(k) => k,
-        None => legacy_knowledge(data, &progress.party),
-    })
+/// The knowledge restored for a loaded save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    pub knowledge: SavedKnowledge,
+    /// Where it came from, for the log.
+    pub source: String,
+    /// Why `state.json` was not used, when it exists but can't be trusted.
+    pub warning: Option<String>,
+}
+
+/// The knowledge for a loaded save: `state.json` when it was written with
+/// this `progress.json`; otherwise migrated from the legacy party in
+/// `progress.json` (unknown when there is none).
+pub fn restore(state_path: &Path, progress: &Progress, data: &GameData) -> Result<Restored> {
+    let legacy = |warning: Option<String>| Restored {
+        knowledge: legacy_knowledge(data, &progress.party),
+        source: if progress.party.members.is_empty() {
+            "nothing known (no state.json for this save, no legacy party)".into()
+        } else {
+            "migrated from the legacy party in progress.json (tracked)".into()
+        },
+        warning,
+    };
+    let checkpoint = match load(state_path) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(legacy(None)),
+        Err(e) => return Ok(legacy(Some(format!("{e}: ignored")))),
+    };
+    let expected = Identity::of(progress);
+    match &checkpoint.identity {
+        Some(id) if *id == expected => Ok(Restored {
+            knowledge: checkpoint.knowledge,
+            source: format!("{}", state_path.display()),
+            warning: None,
+        }),
+        Some(_) => Ok(legacy(Some(format!(
+            "{} was written for another save (its milestones or save position differ from progress.json): ignored",
+            state_path.display()
+        )))),
+        None => Ok(legacy(Some(format!(
+            "{} has no identity (written before checkpoints were tied to progress.json): ignored",
+            state_path.display()
+        )))),
+    }
 }
 
 #[cfg(test)]
@@ -132,15 +213,108 @@ mod tests {
 
     #[test]
     fn store_and_load_round_trip() {
-        let dir = std::env::temp_dir().join(format!("pokebot-ckpt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("roundtrip");
         let path = path_for(&dir.join("progress.json"));
         assert_eq!(path, dir.join("state.json"));
         assert_eq!(load(&path).unwrap(), None);
         let mut k = SavedKnowledge::default();
         k.money = pokebot_state::Knowledge::observed(42, 7);
-        store(&path, &k).unwrap();
-        assert_eq!(load(&path).unwrap(), Some(k));
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        assert_eq!(
+            load(&path).unwrap(),
+            Some(Checkpoint {
+                identity: Some(id),
+                knowledge: k
+            })
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn progress(milestones: &[&str], x: i32) -> Progress {
+        Progress {
+            player_name: "RED".into(),
+            rival_name: "GREEN".into(),
+            gender: pokebot_state::Gender::Boy,
+            starter: crate::Starter::Bulbasaur,
+            milestones: milestones.iter().map(|m| m.to_string()).collect(),
+            saved_at: Some(pokebot_state::PlayerPose {
+                map: "PewterCity_PokemonCenter_1F".into(),
+                x,
+                y: 4,
+            }),
+            party: Party::default(),
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pokebot-ckpt-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn checkpoint_for_another_save_falls_back_to_legacy() {
+        let Some(d) = data() else { return };
+        let dir = temp_dir("mismatch");
+        let path = dir.join("state.json");
+        let mut k = SavedKnowledge::default();
+        k.money = Knowledge::observed(42, 7);
+        store(&path, &Identity::of(&progress(&["A", "B"], 7)), &k).unwrap();
+        // Same save: restored as stored.
+        let same = restore(&path, &progress(&["A", "B"], 7), &d).unwrap();
+        assert_eq!(same.knowledge, k);
+        assert!(same.warning.is_none());
+        // Another save (fewer milestones): the legacy migration applies.
+        let other = restore(&path, &progress(&["A"], 7), &d).unwrap();
+        assert_eq!(other.knowledge.money, Knowledge::unknown());
+        assert!(other.warning.is_some());
+        // Same milestones, saved elsewhere.
+        assert!(restore(&path, &progress(&["A", "B"], 8), &d)
+            .unwrap()
+            .warning
+            .is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_without_identity_is_not_trusted() {
+        let Some(d) = data() else { return };
+        let dir = temp_dir("noid");
+        let path = dir.join("state.json");
+        let mut k = SavedKnowledge::default();
+        k.money = Knowledge::observed(42, 7);
+        // The format before identities: the knowledge alone.
+        std::fs::write(&path, serde_json::to_vec(&k).unwrap()).unwrap();
+        assert_eq!(load(&path).unwrap().unwrap().identity, None);
+        let r = restore(&path, &progress(&["A"], 7), &d).unwrap();
+        assert_eq!(r.knowledge.money, Knowledge::unknown());
+        assert!(r.warning.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_legacy_party_is_unknown() {
+        let Some(d) = data() else { return };
+        let k = legacy_knowledge(&d, &Party::default());
+        assert_eq!(k.party, Knowledge::unknown());
+    }
+
+    #[test]
+    fn store_leaves_no_temp_file() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("state.json");
+        store(
+            &path,
+            &Identity::of(&progress(&["A"], 7)),
+            &SavedKnowledge::default(),
+        )
+        .unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state.json")]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

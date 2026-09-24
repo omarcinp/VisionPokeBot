@@ -155,6 +155,20 @@ pub fn battle_events(data: &GameData, party: &Party, battle: &BattleObservation)
         .iter()
         .find_map(|m| seen_as(data, &m.species, name).map(|s| (m, s)))
     else {
+        // A species the knowledge can't explain (e.g. restored from another
+        // save): with a single member it can only be that one, so the HUD
+        // corrects it.
+        if let ([member], Some(species)) = (party.members.as_slice(), data.species_named(name)) {
+            events.push(GameEvent::PartyObserved {
+                slot: member.slot,
+                species: Some(species.to_owned()),
+                nickname: None,
+                level: battle.player_level,
+                hp: battle.player_hp_numbers,
+                status: None,
+                held_item: None,
+            });
+        }
         return events;
     };
     let slot = member.slot;
@@ -314,6 +328,55 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn wrong_species_of_a_single_member_self_corrects() {
+        let Some(d) = data() else { return };
+        // Knowledge from another save: IVYSAUR Lv18, but the game has BULBASAUR.
+        let state = state_with(&d, "SPECIES_IVYSAUR", 18);
+        let events = battle_events(&d, &Party::from_state(&state), &hud("BULBASAUR", 14));
+        assert_eq!(
+            events,
+            vec![GameEvent::PartyObserved {
+                slot: 0,
+                species: Some("SPECIES_BULBASAUR".into()),
+                nickname: None,
+                level: Some(14),
+                hp: Some((28, 49)),
+                status: None,
+                held_item: None,
+            }]
+        );
+        let state = DefaultReducer.reduce(
+            &state,
+            &events
+                .into_iter()
+                .map(|event| EventRecord { frame_id: 2, event })
+                .collect::<Vec<_>>(),
+        );
+        let lead = Party::from_state(&state).lead().cloned().unwrap();
+        assert_eq!(
+            (lead.species.as_str(), lead.level),
+            ("SPECIES_BULBASAUR", 14)
+        );
+    }
+
+    #[test]
+    fn unknown_name_with_several_members_emits_nothing() {
+        let Some(d) = data() else { return };
+        let mut state = state_with(&d, "SPECIES_IVYSAUR", 18);
+        state = DefaultReducer.reduce(
+            &state,
+            &[EventRecord {
+                frame_id: 2,
+                event: GameEvent::PartyMonDerived {
+                    slot: 1,
+                    mon: Box::new(starter_mon(&d, "SPECIES_PIDGEY", 5)),
+                },
+            }],
+        );
+        assert!(battle_events(&d, &Party::from_state(&state), &hud("BULBASAUR", 14)).is_empty());
     }
 
     #[test]

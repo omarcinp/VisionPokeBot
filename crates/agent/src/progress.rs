@@ -38,6 +38,6 @@ impl Progress {
     pub fn store(&self, path: &Path) -> Result<()> {
         let json =
             serde_json::to_vec_pretty(self).map_err(|e| Error::InvalidData(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| Error::io(path, e))
+        crate::checkpoint::write_atomic(path, &json)
     }
 }
