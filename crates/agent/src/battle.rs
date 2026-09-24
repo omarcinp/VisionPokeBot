@@ -6,8 +6,9 @@ use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
 use pokebot_planner::evaluate::best_move;
 use pokebot_planner::Combatant;
-use pokebot_state::{BattleMenu, Observation, ScreenState};
+use pokebot_state::{BattleMenu, GameEvent, Observation, ScreenState};
 
+use crate::catch::{self, CatchMemory};
 use crate::party::{display_name, Party};
 use crate::{Action, Decision, Expectation};
 
@@ -42,6 +43,8 @@ pub struct BattleMemory {
     pub last_move: Option<String>,
     /// (party slot, move slot) of the last move chosen.
     pub last_slot: Option<(u8, u8)>,
+    /// Identifying the wild opponent and catching it.
+    pub catch: CatchMemory,
 }
 
 /// The opponent as a combatant, if its name and level can be read.
@@ -112,13 +115,29 @@ pub fn decide(
     memory: &mut BattleMemory,
     party: &Party,
     data: &GameData,
+    events: &mut Vec<GameEvent>,
 ) -> Option<Decision> {
     let battle = observation.battle.as_ref()?;
     let menu = battle.menu?;
+    // A catch attempt drives the menus (its risk check replaces fleeing);
+    // `None` means it was abandoned and the battle goes on as usual.
+    if memory.catch.attempt.is_some() {
+        if let Some(decision) =
+            catch::attempt_decision(observation, policy, memory, party, data, events)
+        {
+            return Some(decision);
+        }
+    }
+    // Wild battles: the opponent is identified (and the catch decided) on
+    // the command menu before the first choice.
+    if !memory.trainer && !memory.catch.decided && matches!(menu, BattleMenu::Command { .. }) {
+        return Some(Decision::Wait("identifying the wild opponent".into()));
+    }
     let low = battle.player_hp.is_some_and(|hp| hp < policy.flee_below);
     let no_attacks = choose_move(data, party, None, memory, policy).is_none();
-    let flee =
-        (low || no_attacks) && !memory.trainer && memory.run_attempts < policy.max_run_attempts;
+    let flee = (low || no_attacks || memory.catch.flee)
+        && !memory.trainer
+        && memory.run_attempts < policy.max_run_attempts;
     Some(match menu {
         BattleMenu::Command { column, row } if flee => step_toward(
             (column, row),
@@ -160,7 +179,7 @@ pub fn decide(
     })
 }
 
-fn step_toward(
+pub(crate) fn step_toward(
     at: (u8, u8),
     target: (u8, u8),
     cell: impl Fn(u8, u8) -> BattleMenu,

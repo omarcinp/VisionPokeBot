@@ -1,6 +1,6 @@
 //! Facts in dialogue text that change the bag, money or party: money won,
-//! items found or received (and the mart's Premier Ball bonus), the nurse's
-//! heal, and an empty move.
+//! items found or received (and the mart's Premier Ball bonus), balls
+//! thrown, the nurse's heal, and an empty move.
 
 use pokebot_gamedata::GameData;
 use pokebot_state::{GameEvent, Pocket};
@@ -47,6 +47,15 @@ impl TextTracker {
                 }
             }
         }
+        // A ball thrown in battle: "RED used POKé BALL!".
+        if let Some(item) = ball_thrown(&page, data) {
+            events.push(GameEvent::ItemsChanged {
+                pocket: Pocket::PokeBalls,
+                item,
+                delta: -1,
+                reason: "thrown".into(),
+            });
+        }
         // Buying 10+ Poké Balls at once: "I'll throw in a PREMIER BALL, too."
         if page.contains("PREMIER BALL, too") {
             events.push(GameEvent::ItemsChanged {
@@ -84,6 +93,20 @@ fn money_won(page: &str) -> Option<u32> {
     page.contains("for winning")
         .then(|| digits.parse().ok())
         .flatten()
+}
+
+/// "RED used POKé BALL!" → `ITEM_POKE_BALL`; only items of the Poké Balls
+/// pocket (moves and other items used are not balls thrown).
+fn ball_thrown(page: &str, data: &GameData) -> Option<String> {
+    let rest = &page[page.find(" used ")? + " used ".len()..];
+    let name = rest[..rest.find('!')?].trim();
+    let key = data.item_named(name)?;
+    (data.items[key]
+        .pocket
+        .as_deref()
+        .and_then(Pocket::from_decomp)
+        == Some(Pocket::PokeBalls))
+    .then(|| key.to_owned())
 }
 
 /// Kanto's gym badges in gym order, as the game spells them.
@@ -221,6 +244,38 @@ mod tests {
         for page in [
             "Here you are!\nThank you!",
             "POKé BALL, and you want 10.\nThat will be ¥2000. Okay?",
+        ] {
+            assert!(t.observe_page(&lines(page), &d, None).is_empty(), "{page}");
+        }
+    }
+
+    #[test]
+    fn thrown_ball_is_counted() {
+        let Some(d) = data() else { return };
+        let mut t = TextTracker::default();
+        let thrown = GameEvent::ItemsChanged {
+            pocket: Pocket::PokeBalls,
+            item: "ITEM_POKE_BALL".into(),
+            delta: -1,
+            reason: "thrown".into(),
+        };
+        assert_eq!(
+            t.observe_page(&lines("RED used\nPOKé BALL!"), &d, None),
+            vec![thrown.clone()]
+        );
+        // The next throw of the same battle, after the broke-free page.
+        assert!(t
+            .observe_page(&lines("Shoot!\nIt was so close, too!"), &d, None)
+            .is_empty());
+        assert_eq!(
+            t.observe_page(&lines("RED used\nPOKé BALL!"), &d, None),
+            vec![thrown]
+        );
+        // Other items and moves are not balls thrown.
+        for page in [
+            "RED used\nPOTION!",
+            "PIDGEY used\nTACKLE!",
+            "RED used\nPOKé DOLL!",
         ] {
             assert!(t.observe_page(&lines(page), &d, None).is_empty(), "{page}");
         }

@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::bag::PocketAudit;
 use crate::battle::{self, BattleMemory, BattlePolicy};
+use crate::catch;
 use crate::learn::MoveLearning;
 use crate::nav::{Destination, NavStatus, Navigator};
 use crate::new_game::{advance_or_wait, select};
@@ -601,7 +602,18 @@ impl Task for StoryTask {
             if let Some(data) = &self.data {
                 ctx.events
                     .extend(party::battle_events(data, &self.party, battle));
+                // Wild opponents are identified once, and a catch decided.
+                catch::identify(
+                    o,
+                    data,
+                    ctx.state,
+                    &self.party,
+                    &mut self.battle_memory,
+                    ctx.events,
+                );
             }
+            // The throw's result, the foe's status and the PC box, from text.
+            self.battle_memory.catch.observe(o);
             let loss_ok = matches!(step, StoryStep::Battle { loss_ok: true, .. });
             if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !loss_ok {
                 return Decision::Fail(format!(
@@ -611,13 +623,28 @@ impl Task for StoryTask {
             }
             self.quiet_frames = 0;
             if let Some(data) = self.data.clone() {
-                if let Some(decision) =
-                    battle::decide(o, &self.policy, &mut self.battle_memory, &self.party, &data)
-                {
+                if let Some(decision) = battle::decide(
+                    o,
+                    &self.policy,
+                    &mut self.battle_memory,
+                    &self.party,
+                    &data,
+                    ctx.events,
+                ) {
                     return decision;
                 }
             }
             if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+                // After a catch: "Give a nickname to the captured X?" → No
+                // (B answers No).
+                if catch::is_nickname_question(&d.lines.join(" ")) {
+                    return Decision::Act(Action::new(
+                        "nickname: NO",
+                        vec![ControllerCommand::Press(Button::B)],
+                        Expectation::MenuClosed,
+                        90,
+                    ));
+                }
                 // A is YES: never answer a question we don't understand.
                 return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
             }
@@ -629,6 +656,25 @@ impl Task for StoryTask {
         if self.in_battle && o.player.is_some() {
             self.in_battle = false;
             ctx.events.push(GameEvent::BattleEnded);
+            if let Some(data) = &self.data {
+                ctx.events
+                    .extend(self.battle_memory.catch.after_battle(data, ctx.state));
+            }
+        }
+        // Battle screens without the battle HUD: the Pokédex page after a
+        // first catch, and the battle bag during a throw (the frames around
+        // it too: its opening shows a lone ▶ that looks like a menu).
+        if self.in_battle {
+            if let Some(decision) = catch::dismiss_pokedex(&mut self.battle_memory.catch, o) {
+                self.quiet_frames = 0;
+                return decision;
+            }
+            if o.bag.is_some() || self.battle_memory.catch.thrower.is_some() {
+                self.quiet_frames = 0;
+                if let Some(data) = self.data.clone() {
+                    return catch::in_bag(o, &data, &mut self.battle_memory.catch, ctx.events);
+                }
+            }
         }
         // The pocket audit drives the Start menu and the bag itself (both
         // would otherwise be closed as unexpected menus below); dialogue
@@ -828,6 +874,7 @@ impl Task for StoryTask {
             if let Some((slot, move_slot)) = self.battle_memory.last_slot {
                 ctx.events.push(GameEvent::MoveUsed { slot, move_slot });
             }
+            self.battle_memory.catch.on_move_confirmed();
         }
         match (&action.expect, outcome) {
             (Expectation::MenuClosed, Outcome::Confirmed) if action.label.starts_with("answer") => {
@@ -1779,5 +1826,214 @@ mod tests {
             tick(&mut task, &o, &pokebot_state::GameState::default()),
             "mart: BUY"
         );
+    }
+    fn tick_events(
+        task: &mut StoryTask,
+        o: &Observation,
+        state: &pokebot_state::GameState,
+    ) -> (String, Vec<GameEvent>) {
+        let mut events = Vec::new();
+        let label = match task.next(&mut TaskContext {
+            observation: o,
+            state,
+            events: &mut events,
+        }) {
+            Decision::Act(a) => a.label,
+            Decision::Wait(r) => format!("wait: {r}"),
+            Decision::Done(r) => format!("done: {r}"),
+            Decision::Fail(r) => format!("fail: {r}"),
+        };
+        (label, events)
+    }
+
+    /// IVYSAUR Lv18 as the only party member, and 10 Poké Balls.
+    fn catch_state(data: &GameData) -> pokebot_state::GameState {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let mut mon = party::starter_mon(data, "SPECIES_IVYSAUR", 18);
+        mon.hp = pokebot_state::Knowledge::observed((54, 54), 1);
+        DefaultReducer.reduce(
+            &with_balls(10),
+            &[EventRecord {
+                frame_id: 1,
+                event: GameEvent::PartyMonDerived {
+                    slot: 0,
+                    mon: Box::new(mon),
+                },
+            }],
+        )
+    }
+
+    /// A wild-battle frame against PIDGEY Lv6 (not caught yet).
+    fn wild_frame(
+        frame: u64,
+        menu: Option<pokebot_state::BattleMenu>,
+        text: &[&str],
+    ) -> Observation {
+        use pokebot_state::{
+            BattleObservation, DialogueKind, DialogueObservation, Observed, Region,
+        };
+        let mut o = Observation::bare(
+            frame,
+            Observed {
+                value: ScreenState::BattleText,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(BattleObservation {
+            menu,
+            player_name: Some("IVYSAUR".into()),
+            player_level: Some(18),
+            player_hp_numbers: Some((54, 54)),
+            opponent_name: Some("PIDGEY".into()),
+            opponent_level: Some(6),
+            player_hp: Some(1000),
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: Some(false),
+            opponent_shiny: menu.map(|_| pokebot_state::ShinyReading::Normal),
+        });
+        if !text.is_empty() {
+            o.dialogue = Some(DialogueObservation {
+                kind: DialogueKind::BattleText,
+                region: Region::new(8, 119, 224, 34),
+                waiting_for_input: false,
+                arrow: None,
+                stable_frames: 10,
+                text_cells: vec![1; 4],
+                lines: text.iter().map(|l| (*l).to_owned()).collect(),
+                help: false,
+            });
+        }
+        o
+    }
+
+    fn battle_task() -> Option<(StoryTask, pokebot_state::GameState)> {
+        let (world, data) = story_fixture()?;
+        let state = catch_state(&data);
+        let task = one_milestone(world, data, vec![StoryStep::Settle { frames: 100_000 }]);
+        Some((task, state))
+    }
+
+    #[test]
+    fn a_catch_becomes_a_party_member_when_the_battle_ends() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let command = Some(pokebot_state::BattleMenu::Command { column: 0, row: 0 });
+        let mut all = Vec::new();
+        for f in [1, 2] {
+            let (_, events) = tick_events(&mut task, &wild_frame(f, command, &[]), &state);
+            all.extend(events);
+        }
+        assert!(all.contains(&GameEvent::SpeciesSeen {
+            species: "SPECIES_PIDGEY".into()
+        }));
+        assert!(task.battle_memory.catch.attempt.is_some(), "{all:?}");
+        for f in [3, 4] {
+            tick_events(
+                &mut task,
+                &wild_frame(f, None, &["Gotcha!", "PIDGEY was caught!"]),
+                &state,
+            );
+        }
+        // The Pokédex page: A once two frames show it.
+        let mut page = Observation::bare(5, wild_frame(5, None, &[]).screen, Default::default());
+        page.pokedex_page = true;
+        assert_eq!(
+            tick_events(&mut task, &page, &state).0,
+            "wait: confirming the Pokédex page"
+        );
+        page.frame_id = 6;
+        assert_eq!(
+            tick_events(&mut task, &page, &state).0,
+            "close the Pokédex page"
+        );
+        // "Give a nickname to the captured PIDGEY?" Yes/No → No.
+        let mut ask = wild_frame(7, None, &["Give a nickname to the", "captured PIDGEY?"]);
+        ask.battle.as_mut().unwrap().opponent_name = None;
+        ask.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        assert_eq!(tick_events(&mut task, &ask, &state).0, "nickname: NO");
+        // Back in the overworld: the catch joins the party.
+        let (_, events) = tick_events(&mut task, &located(8, "Route2", 7, 3), &state);
+        assert!(events.contains(&GameEvent::BattleEnded), "{events:?}");
+        assert!(events.contains(&GameEvent::SpeciesCaught {
+            species: "SPECIES_PIDGEY".into()
+        }));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PartyMonDerived { slot: 1, mon } if mon.species.value.as_deref() == Some("SPECIES_PIDGEY")
+        )), "{events:?}");
+    }
+
+    #[test]
+    fn other_questions_in_battle_still_fail() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut ask = wild_frame(1, None, &["Will you trade", "your POKéMON?"]);
+        ask.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        assert!(tick_events(&mut task, &ask, &state)
+            .0
+            .starts_with("fail: unexpected question in battle"));
+    }
+
+    #[test]
+    fn the_battle_bag_goes_to_the_throw_not_the_menu_closer() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let command = pokebot_state::BattleMenu::Command { column: 1, row: 0 };
+        for f in [1, 2] {
+            tick_events(&mut task, &wild_frame(f, Some(command), &[]), &state);
+        }
+        // Weakened foe and sleep skipped: straight to BAG.
+        let attempt = task.battle_memory.catch.attempt.as_mut().unwrap();
+        attempt.opened = true;
+        let mut low = wild_frame(3, Some(command), &[]);
+        low.battle.as_mut().unwrap().opponent_hp = Some(200);
+        tick_events(&mut task, &low, &state);
+        low.frame_id = 4;
+        assert_eq!(tick_events(&mut task, &low, &state).0, "choose BAG");
+        // The bag fading in shows a lone ▶ that reads as a 1-row menu.
+        let mut flicker = Observation::bare(5, low.screen.clone(), Default::default());
+        flicker.screen.value = ScreenState::Menu;
+        flicker.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(88, 12, 100, 16),
+            rows: 1,
+            cursor_row: 0,
+            cursor_y: 12,
+        });
+        assert_eq!(
+            tick_events(&mut task, &flicker, &state).0,
+            "wait: waiting for the battle bag"
+        );
+        let mut bag = Observation::bare(6, low.screen.clone(), Default::default());
+        bag.screen.value = ScreenState::Bag;
+        bag.bag = Some(pokebot_state::BagObservation {
+            pocket: "POKé BALLS".into(),
+            rows: vec![("POKé BALL".into(), Some(10)), ("CANCEL".into(), None)],
+            cursor: Some(0),
+            prompt: None,
+        });
+        tick_events(&mut task, &bag, &state);
+        bag.frame_id = 7;
+        let (label, events) = tick_events(&mut task, &bag, &state);
+        assert_eq!(label, "throw POKE_BALL: select it");
+        assert!(events.contains(&GameEvent::PocketObserved {
+            pocket: Pocket::PokeBalls,
+            items: vec![("ITEM_POKE_BALL".into(), 10)],
+        }));
     }
 }

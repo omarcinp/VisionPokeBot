@@ -12,7 +12,7 @@ use pokebot_state::{GameEvent, ItemList, Observation, Pocket};
 use crate::{Action, Decision, Expectation};
 
 /// Pocket titles in bag order (Left/Right step through them).
-const POCKETS: [(Pocket, &str); 3] = [
+pub(crate) const POCKETS: [(Pocket, &str); 3] = [
     (Pocket::Items, "ITEMS"),
     (Pocket::KeyItems, "KEY ITEMS"),
     (Pocket::PokeBalls, "POKé BALLS"),
@@ -34,20 +34,20 @@ pub fn pocket_from_title(title: &str) -> Option<Pocket> {
     found.next().is_none().then_some(*pocket)
 }
 
-fn pocket_index(pocket: Pocket) -> Option<usize> {
+pub(crate) fn pocket_index(pocket: Pocket) -> Option<usize> {
     POCKETS.iter().position(|(p, _)| *p == pocket)
 }
 
-fn is_cancel(name: &str) -> bool {
+pub(crate) fn is_cancel(name: &str) -> bool {
     fits("CANCEL", name)
 }
 
 /// Bag rows: (name or item key, count).
-type Rows = Vec<(String, Option<u16>)>;
+pub(crate) type Rows = Vec<(String, Option<u16>)>;
 
 /// A row's identity however its name read: `CANCEL`, the item constant, or
 /// the text itself when it doesn't resolve.
-fn item_key(data: &GameData, name: &str) -> String {
+pub(crate) fn item_key(data: &GameData, name: &str) -> String {
     if is_cancel(name) {
         "CANCEL".to_owned()
     } else {
@@ -56,7 +56,10 @@ fn item_key(data: &GameData, name: &str) -> String {
 }
 
 /// Rows as (item key, count): equal when they read the same items.
-fn by_item(data: &GameData, rows: &[(String, Option<u16>)]) -> Vec<(String, Option<u16>)> {
+pub(crate) fn by_item(
+    data: &GameData,
+    rows: &[(String, Option<u16>)],
+) -> Vec<(String, Option<u16>)> {
     rows.iter()
         .map(|(name, count)| (item_key(data, name), *count))
         .collect()
