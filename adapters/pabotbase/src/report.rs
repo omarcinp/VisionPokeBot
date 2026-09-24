@@ -14,6 +14,7 @@ pub enum SwitchInput {
     R,
     Plus,
     Minus,
+    Home,
     DpadUp,
     DpadDown,
     DpadLeft,
@@ -28,6 +29,7 @@ pub fn switch_input(button: Button) -> SwitchInput {
         Button::R => SwitchInput::R,
         Button::Start => SwitchInput::Plus,
         Button::Select => SwitchInput::Minus,
+        Button::Home => SwitchInput::Home,
         Button::Up => SwitchInput::DpadUp,
         Button::Down => SwitchInput::DpadDown,
         Button::Left => SwitchInput::DpadLeft,
@@ -76,7 +78,8 @@ pub fn encode_command(
     match kind {
         ControllerKind::WirelessProController => {
             let button3 = bit(SwitchInput::B, 2) | bit(SwitchInput::A, 3) | bit(SwitchInput::R, 6);
-            let button4 = bit(SwitchInput::Minus, 0) | bit(SwitchInput::Plus, 1);
+            let button4 =
+                bit(SwitchInput::Minus, 0) | bit(SwitchInput::Plus, 1) | bit(SwitchInput::Home, 4);
             let button5 = bit(SwitchInput::DpadDown, 0)
                 | bit(SwitchInput::DpadUp, 1)
                 | bit(SwitchInput::DpadRight, 2)
@@ -94,7 +97,8 @@ pub fn encode_command(
                 | u16::from(bit(SwitchInput::L, 4))
                 | u16::from(bit(SwitchInput::R, 5))
                 | (u16::from(has(SwitchInput::Minus)) << 8)
-                | (u16::from(has(SwitchInput::Plus)) << 9);
+                | (u16::from(has(SwitchInput::Plus)) << 9)
+                | (u16::from(has(SwitchInput::Home)) << 12);
             body.extend_from_slice(&buttons0.to_le_bytes());
             body.push(hat(
                 has(SwitchInput::DpadUp),

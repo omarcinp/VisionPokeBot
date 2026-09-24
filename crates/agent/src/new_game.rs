@@ -227,6 +227,11 @@ impl Task for NewGameTask {
                 _ => Decision::Wait("waiting for the new game to start".into()),
             },
             Phase::Intro => {
+                // The HELP System's menu has two rows too; it is not the
+                // gender question.
+                if o.dialogue.as_ref().is_some_and(|d| d.help) {
+                    return advance_or_wait(o.dialogue.as_ref(), "");
+                }
                 if let Some(menu) = o.menu.filter(|_| o.dialogue.is_some()) {
                     if menu.rows == 2 {
                         self.enter(Phase::Gender, ctx);
@@ -481,9 +486,19 @@ pub(crate) fn select(menu: &MenuObservation, row: u8, label: &str) -> Decision {
     ))
 }
 
-/// Presses A when the game waits for it, otherwise waits.
+/// Presses A when the game waits for it, otherwise waits. HELP System
+/// pages are closed with B instead: A there opens topics and never leaves.
 pub(crate) fn advance_or_wait(dialogue: Option<&DialogueObservation>, waiting: &str) -> Decision {
     match dialogue {
+        Some(d) if d.help => Decision::Act(Action::new(
+            "close the HELP System",
+            vec![ControllerCommand::Press(Button::B)],
+            Expectation::TextAdvanced {
+                kind: d.kind,
+                baseline: d.text_cells.clone(),
+            },
+            90,
+        )),
         Some(d) if d.ready_for_a() => Decision::Act(Action::new(
             "advance text",
             vec![ControllerCommand::Press(Button::A)],
@@ -495,5 +510,45 @@ pub(crate) fn advance_or_wait(dialogue: Option<&DialogueObservation>, waiting: &
         )),
         Some(_) => Decision::Wait("text is printing".into()),
         None => Decision::Wait(waiting.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pokebot_state::{DialogueKind, Region};
+
+    use super::*;
+
+    fn info_page(help: bool, waiting: bool) -> DialogueObservation {
+        DialogueObservation {
+            kind: DialogueKind::InfoPage,
+            region: Region::new(0, 16, 240, 144),
+            waiting_for_input: waiting,
+            arrow: None,
+            stable_frames: 0,
+            text_cells: vec![0; 4],
+            lines: Vec::new(),
+            help,
+        }
+    }
+
+    fn pressed(decision: Decision) -> Option<Vec<ControllerCommand>> {
+        match decision {
+            Decision::Act(action) => Some(action.commands),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn help_pages_are_closed_with_b() {
+        // Even with no arrow: menus in the HELP System show none.
+        let commands = pressed(advance_or_wait(Some(&info_page(true, false)), "")).unwrap();
+        assert_eq!(commands, vec![ControllerCommand::Press(Button::B)]);
+    }
+
+    #[test]
+    fn other_pages_advance_with_a() {
+        let commands = pressed(advance_or_wait(Some(&info_page(false, true)), "")).unwrap();
+        assert_eq!(commands, vec![ControllerCommand::Press(Button::A)]);
     }
 }

@@ -8,7 +8,7 @@
 use pokebot_core::RgbImage;
 
 use super::px;
-use crate::color::{near, Rgb};
+use crate::color::{near, Rgb, TOLERANCE};
 
 const INK: Rgb = [66, 65, 66];
 const ROWS: u32 = 7;
@@ -88,6 +88,10 @@ const GLYPHS: &[(char, [&str; 7])] = &[
     ),
     ('I', ["###", ".#.", ".#.", ".#.", ".#.", ".#.", "###"]),
     (
+        'K',
+        ["#..#", "#..#", "#.#.", "##..", "#.#.", "#..#", "#..#"],
+    ),
+    (
         'L',
         ["#...", "#...", "#...", "#...", "#...", "#...", "####"],
     ),
@@ -118,16 +122,22 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         'U',
         ["#..#", "#..#", "#..#", "#..#", "#..#", "#..#", ".##."],
     ),
+    (
+        'W',
+        ["#..#", "#..#", "#..#", "#..#", "#..#", "####", "#..#"],
+    ),
     ('Y', ["#.#", "#.#", "#.#", "#.#", ".#.", ".#.", ".#."]),
 ];
 
 fn ink(image: &RgbImage, x: u32, y: u32) -> bool {
-    x < image.width() && y < image.height() && near(px(image, x, y), INK, 12)
+    x < image.width() && y < image.height() && near(px(image, x, y), INK, TOLERANCE)
 }
 
 /// First row in `y0..y1` with ink between `x0..x1` (the text's top).
-fn text_top(image: &RgbImage, y0: u32, y1: u32, x0: u32, x1: u32) -> Option<u32> {
-    (y0..y1).find(|&y| (x0..x1).any(|x| ink(image, x, y)))
+/// A row needs `min` ink pixels: stray ink-coloured pixels (sprite edges,
+/// compression noise) don't start a line.
+fn text_top(image: &RgbImage, y0: u32, y1: u32, x0: u32, x1: u32, min: usize) -> Option<u32> {
+    (y0..y1).find(|&y| (x0..x1).filter(|&x| ink(image, x, y)).count() >= min)
 }
 
 /// Reads one line of HUD text starting at row `top`.
@@ -150,15 +160,29 @@ pub fn read_line(image: &RgbImage, top: u32, x0: u32, x1: u32) -> String {
         }
         last_end = Some(x);
         let width = (x - start) as usize;
-        let glyph = GLYPHS.iter().find(|(_, rows)| {
-            rows[0].len() == width
-                && rows.iter().enumerate().all(|(r, row)| {
-                    row.chars()
-                        .enumerate()
-                        .all(|(c, v)| (v == '#') == ink(image, start + c as u32, top + r as u32))
-                })
-        });
-        out.push(glyph.map_or('?', |(c, _)| *c));
+        // Pixels that differ from each glyph of this width; an exact match,
+        // else a unique glyph one pixel off (compressed captures).
+        let mut scored: Vec<(usize, char)> = GLYPHS
+            .iter()
+            .filter(|(_, rows)| rows[0].len() == width)
+            .map(|(c, rows)| {
+                let off = rows
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(r, row)| row.chars().enumerate().map(move |(x, v)| (r, x, v)))
+                    .filter(|&(r, x, v)| (v == '#') != ink(image, start + x as u32, top + r as u32))
+                    .count();
+                (off, *c)
+            })
+            .collect();
+        scored.sort();
+        let glyph = match scored.as_slice() {
+            [(0, c), ..] => Some(*c),
+            [(1, c)] => Some(*c),
+            [(1, c), (next, _), ..] if *next > 1 => Some(*c),
+            _ => None,
+        };
+        out.push(glyph.unwrap_or('?'));
     }
     out
 }
@@ -177,33 +201,35 @@ fn parse_name_line(text: &str) -> HudLine {
         None => (text, None),
     };
     // The gender sign is coloured, not ink; any stray `?` at the end is it.
+    // O and 0 are the same glyph; names have no digits.
     HudLine {
-        name: name.trim().trim_end_matches('?').trim().to_owned(),
+        name: name.trim().trim_end_matches('?').trim().replace('0', "O"),
         level,
     }
 }
 
 /// Our Pokémon's name line (the box bobs a pixel, so the top is searched).
 pub fn player_line(image: &RgbImage) -> Option<HudLine> {
-    let top = text_top(image, 76, 83, 138, 228)?;
+    let top = text_top(image, 76, 83, 138, 228, 6)?;
     Some(parse_name_line(&read_line(image, top, 138, 228)))
 }
 
 pub fn opponent_line(image: &RgbImage) -> Option<HudLine> {
-    let top = text_top(image, 18, 25, 16, 112)?;
+    let top = text_top(image, 18, 25, 16, 112, 6)?;
     Some(parse_name_line(&read_line(image, top, 16, 112)))
 }
 
 /// Our current and maximum HP (`20/ 20`).
 pub fn player_hp(image: &RgbImage) -> Option<(u16, u16)> {
     // The slash is a pixel taller than the digits: try both alignments.
-    let top = text_top(image, 94, 101, 184, 226)?;
+    let top = text_top(image, 94, 101, 184, 226, 3)?;
     (top..top + 2).find_map(|t| {
         let text: String = read_line(image, t, 184, 226)
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let (cur, max) = text.split_once('/')?;
+        // Specks at the box edge read as unknown glyphs around the numbers.
+        let (cur, max) = text.trim_matches('?').split_once('/')?;
         Some((cur.parse().ok()?, max.parse().ok()?))
     })
 }

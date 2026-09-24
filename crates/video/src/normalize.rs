@@ -34,6 +34,31 @@ impl Normalizer {
         Self { locator }
     }
 
+    /// Whether the letterbox around a fixed viewport is lit, i.e. the
+    /// console is showing something other than the game (the Switch HOME
+    /// menu, a system dialog). Always false for full-frame sources.
+    pub fn outside_viewport_lit(&self, frame: &CapturedFrame) -> bool {
+        let ViewportLocator::Fixed(rect) = self.locator else {
+            return false;
+        };
+        let image = &frame.image;
+        let (mut lit, mut total) = (0u32, 0u32);
+        let mut sample = |x0: u32, x1: u32| {
+            for y in (0..image.height()).step_by(8) {
+                for x in (x0..x1).step_by(8) {
+                    total += 1;
+                    let [r, g, b] = image.pixel(x, y);
+                    if u32::from(r) + u32::from(g) + u32::from(b) > 3 * 40 {
+                        lit += 1;
+                    }
+                }
+            }
+        };
+        sample(0, rect.x.min(image.width()));
+        sample((rect.x + rect.width).min(image.width()), image.width());
+        total > 0 && lit * 2 > total
+    }
+
     pub fn normalize(&self, frame: &CapturedFrame) -> Result<NormalizedFrame> {
         let image = &frame.image;
         let rect = match self.locator {
@@ -204,6 +229,23 @@ mod tests {
             .normalize(&captured(big))
             .unwrap();
         assert_eq!(out.image(), &src);
+    }
+
+    #[test]
+    fn lit_letterbox_means_outside_the_game() {
+        let rect = Rect {
+            x: 160,
+            y: 40,
+            width: 960,
+            height: 640,
+        };
+        let normalizer = Normalizer::new(ViewportLocator::Fixed(rect));
+        let game = letterbox(&pattern(), 4, (1280, 720), 160, 40);
+        assert!(!normalizer.outside_viewport_lit(&captured(game)));
+        let home_menu = RgbImage::filled(1280, 720, [45, 45, 45]);
+        assert!(normalizer.outside_viewport_lit(&captured(home_menu)));
+        let full = Normalizer::new(ViewportLocator::FullFrame);
+        assert!(!full.outside_viewport_lit(&captured(RgbImage::filled(240, 160, [200, 200, 200]))));
     }
 
     #[test]

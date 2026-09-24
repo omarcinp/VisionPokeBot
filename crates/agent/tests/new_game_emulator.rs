@@ -106,8 +106,20 @@ fn story_from_new_game_to_parcel_delivered() {
         return;
     };
     let world = std::sync::Arc::new(world);
+    // Battles need the game data and the fonts, as in `pokebot story`.
+    let (Ok(data), Ok(font), Ok(small_font)) = (
+        pokebot_gamedata::GameData::load(world_dir.join("gamedata.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_normal.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_small.json")),
+    ) else {
+        eprintln!("skipping: no game data or fonts (run tools/world/build.sh)");
+        return;
+    };
     let (video, controller, _) = launch(EmulatorConfig::new(core, rom)).expect("emulator");
-    let perception = pokebot_vision::FireRedPerception::with_world(std::sync::Arc::clone(&world));
+    let perception = pokebot_vision::FireRedPerception::with_world(std::sync::Arc::clone(&world))
+        .with_font(std::sync::Arc::new(font))
+        .with_small_font(std::sync::Arc::new(small_font));
+    let data = std::sync::Arc::new(data);
     let mut runtime = Runtime::with_perception(
         Devices {
             video: Box::new(video),
@@ -133,10 +145,22 @@ fn story_from_new_game_to_parcel_delivered() {
         x: 6,
         y: 6,
     });
+    // As `pokebot story` does: the starter is known to be received at Lv5.
+    runtime
+        .emit(pokebot_state::GameEvent::PartyMonDerived {
+            slot: 0,
+            mon: Box::new(pokebot_agent::party::starter_mon(
+                &data,
+                pokebot_agent::Starter::Bulbasaur.species(),
+                5,
+            )),
+        })
+        .unwrap();
     let mut story = pokebot_agent::StoryTask::new(
         world,
         pokebot_agent::opening(pokebot_agent::Starter::Bulbasaur),
-    );
+    )
+    .with_data(data);
     executor
         .run(&mut runtime, &mut story, &stop)
         .expect("story");

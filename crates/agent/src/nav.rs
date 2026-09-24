@@ -1,5 +1,6 @@
-//! Closed-loop walking: plan with A* on the world model, press one direction
-//! per tile, and confirm every step by locating the player on screen.
+//! Closed-loop walking: plan with A* on the world model, hold a direction
+//! along straight runs (tap single tiles), and confirm by locating the player
+//! on screen. Holds are cancelled as soon as something interrupts the walk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -17,6 +18,37 @@ use crate::{Action, Expectation, Outcome};
 const STEP_TIMEOUT: u64 = 30;
 /// Frames to wait for a warp's fade and the new map to be located.
 const WARP_TIMEOUT: u64 = 180;
+/// One walking step: 16 GBA frames.
+const TILE_MS: u64 = 268;
+/// Longest straight run walked with one hold.
+const MAX_RUN: usize = 8;
+
+/// Tiles to walk with one hold from the start of `path`: the run of plain
+/// one-tile steps in the first direction, excluding the path's last step
+/// (arriving at a warp, door or edge stays a tap). 1 means "just tap".
+pub fn straight_run(from: (i32, i32), path: &[Step]) -> usize {
+    let Some(first) = path.first() else {
+        return 0;
+    };
+    let mut prev = from;
+    let mut run = 0;
+    for step in &path[..path.len() - 1] {
+        let (dx, dy) = step.dir.delta();
+        let plain = (prev.0 + dx, prev.1 + dy) == step.to;
+        if step.dir != first.dir || !plain || run == MAX_RUN {
+            break;
+        }
+        prev = step.to;
+        run += 1;
+    }
+    run.max(1)
+}
+
+/// How long to hold a direction to walk `tiles` tiles: release inside the
+/// last tile, which the game then finishes.
+pub fn run_hold(tiles: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(TILE_MS * tiles as u64 - TILE_MS / 2)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Destination {
@@ -73,6 +105,8 @@ pub struct Navigator {
     facing: Option<Direction>,
     /// Taps in a row that did not move the player.
     stalled: u32,
+    /// Moves left to make with taps instead of holds (after a short hold).
+    single_steps: u32,
     pending: Option<(PlayerPose, Direction, (i32, i32))>,
     /// First hop out of the current map toward the destination (cached per map).
     hop: Option<(String, Hop)>,
@@ -86,6 +120,7 @@ impl Navigator {
             learned: HashMap::new(),
             facing: None,
             stalled: 0,
+            single_steps: 0,
             pending: None,
             hop: None,
         }
@@ -193,6 +228,14 @@ impl Navigator {
                 self.facing = Some(dir);
                 self.stalled = 0;
             }
+            // A hold that fell short or was cut off: replan from wherever
+            // we are, with taps for a bit (they learn what blocks the way).
+            (_, Expectation::PlayerAt(_)) => {
+                self.facing = Some(dir);
+                if outcome == Outcome::TimedOut {
+                    self.single_steps = 2;
+                }
+            }
             (Outcome::TimedOut, Expectation::PlayerMovedFrom(_)) => {
                 // First miss: the tap probably just turned the player.
                 // Second miss: something is in the way; avoid that tile.
@@ -245,6 +288,32 @@ impl Navigator {
             }
             return NavStatus::Fail(format!("no path {what} on {}", map.name));
         };
+        let run = straight_run((pose.x, pose.y), &path);
+        if run >= 2 && self.single_steps == 0 {
+            let step = path[0];
+            let end = path[run - 1].to;
+            let target = PlayerPose {
+                map: pose.map.clone(),
+                x: end.0,
+                y: end.1,
+            };
+            self.pending = Some((pose.clone(), step.dir, step.to));
+            return NavStatus::Act(
+                Action::new(
+                    format!("walk {what}: {:?} ×{run}", step.dir),
+                    vec![ControllerCommand::Hold {
+                        buttons: [direction_button(step.dir)].into_iter().collect(),
+                        duration: run_hold(run),
+                    }],
+                    Expectation::PlayerAt(target),
+                    // The last tile finishes after the release, and a moving
+                    // sprite is located a little late.
+                    STEP_TIMEOUT + 16 + 2 * run as u64,
+                )
+                .interruptible(),
+            );
+        }
+        self.single_steps = self.single_steps.saturating_sub(1);
         match path.first() {
             Some(step) => self.step(pose, *step, &format!("walk {what}: {:?}", step.dir)),
             None => NavStatus::Arrived,
@@ -301,6 +370,16 @@ impl Navigator {
         let Some(warp) = map.warps.get(index) else {
             return NavStatus::Fail(format!("{} has no warp {index}", map.name));
         };
+        // A plain tile beside a marked warp to the same place: use that one.
+        if !warp_usable(map, index) {
+            if let Some(marked) = map.warps.iter().position(|w| {
+                w.dest_map == warp.dest_map
+                    && w.dest_warp == warp.dest_warp
+                    && warp_is_marked(map, w)
+            }) {
+                return self.use_warp(map, pose, marked);
+            }
+        }
         let (wx, wy) = (warp.x, warp.y);
         let tile = map.tile(wx, wy);
         let push = |dir: Direction| {
@@ -401,6 +480,19 @@ fn warp_is_marked(map: &MapData, warp: &pokebot_world::Warp) -> bool {
     })
 }
 
+/// Whether warp `index` can be used. A warp event on a plain tile never
+/// fires when the map has a marked warp (arrow mat, door, stairs) to the same
+/// place beside it (e.g. the tiles flanking Oak's lab exit mat).
+pub fn warp_usable(map: &MapData, index: usize) -> bool {
+    let Some(warp) = map.warps.get(index) else {
+        return false;
+    };
+    warp_is_marked(map, warp)
+        || !map.warps.iter().any(|w| {
+            w.dest_map == warp.dest_map && w.dest_warp == warp.dest_warp && warp_is_marked(map, w)
+        })
+}
+
 /// Tiles blocked by objects that don't move: NPCs that only turn, cut trees,
 /// boulders, item balls. Wanderers are learned when met.
 pub fn static_obstacles(map: &MapData) -> Obstacles {
@@ -455,7 +547,7 @@ pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
         }
         // Warps: standing on one (mats, stairs, plain) or below a door.
         for (i, w) in map.warps.iter().enumerate() {
-            if w.dest_warp < 0 {
+            if w.dest_warp < 0 || !warp_usable(map, i) {
                 continue;
             }
             let door = map
@@ -517,7 +609,7 @@ pub fn route_exit(world: &World, from: &str, to: &str) -> Option<Hop> {
             .warps
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.dest_warp >= 0)
+            .filter(|(i, w)| w.dest_warp >= 0 && warp_usable(map, *i))
             .collect();
         ordered.sort_by_key(|(i, w)| (u8::from(!warp_is_marked(map, w)), *i));
         let warps = ordered
@@ -540,4 +632,78 @@ pub fn route_exit(world: &World, from: &str, to: &str) -> Option<Hop> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(dirs: &[Direction], from: (i32, i32)) -> Vec<Step> {
+        let mut at = from;
+        dirs.iter()
+            .map(|&dir| {
+                let (dx, dy) = dir.delta();
+                at = (at.0 + dx, at.1 + dy);
+                Step { dir, to: at }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn straight_run_merges_same_direction_steps_but_keeps_the_last_step() {
+        use Direction::*;
+        // Right×4 then Up: hold Right for 4 tiles.
+        assert_eq!(
+            straight_run((0, 0), &path(&[Right, Right, Right, Right, Up], (0, 0))),
+            4
+        );
+        // The final step stays a tap (warps, doors and edges need it).
+        assert_eq!(
+            straight_run((0, 0), &path(&[Right, Right, Right], (0, 0))),
+            2
+        );
+        // Too short to be worth a hold.
+        assert_eq!(straight_run((0, 0), &path(&[Right, Up, Up], (0, 0))), 1);
+        assert_eq!(straight_run((0, 0), &path(&[Up], (0, 0))), 1);
+        // Capped, so a long hold can't overshoot far if the timing drifts.
+        assert_eq!(straight_run((0, 0), &path(&[Down; 20], (0, 0))), MAX_RUN);
+    }
+
+    #[test]
+    fn a_ledge_jump_ends_the_run() {
+        // A ledge moves two tiles in one step: not a plain walk.
+        let mut steps = path(&[Direction::Down, Direction::Down], (0, 0));
+        steps.push(Step {
+            dir: Direction::Down,
+            to: (0, 4),
+        });
+        steps.push(Step {
+            dir: Direction::Down,
+            to: (0, 5),
+        });
+        assert_eq!(straight_run((0, 0), &steps), 2);
+        // Starting with the jump: no hold.
+        let jump_first = vec![
+            Step {
+                dir: Direction::Down,
+                to: (0, 2),
+            },
+            Step {
+                dir: Direction::Down,
+                to: (0, 3),
+            },
+            Step {
+                dir: Direction::Down,
+                to: (0, 4),
+            },
+        ];
+        assert_eq!(straight_run((0, 0), &jump_first), 1);
+    }
+
+    #[test]
+    fn hold_ends_inside_the_last_tile() {
+        // Released half a tile early: the game finishes the step it's in.
+        assert_eq!(run_hold(1).as_millis(), TILE_MS as u128 / 2);
+        assert_eq!(run_hold(4).as_millis(), (TILE_MS * 4 - TILE_MS / 2) as u128);
+    }
 }
