@@ -233,8 +233,22 @@ impl ToolStep for HuntStep {
     }
 
     fn expects(&self) -> Expects {
-        // The battle is played here, not as an interrupt.
-        Expects::BATTLE
+        // The battle is played here, not as an interrupt. Outside one,
+        // dialogue is a trainer's challenge (or an NPC's words) on the way
+        // to the grass: the interrupt wrapper follows it and fights the
+        // trainer, so the hunt must not claim it (flash-1: the hunt waited
+        // for the scene to settle in front of "Excuse me! You looked at
+        // me, didn't you?" until the stuck rule pressed B, then tried to
+        // catch the trainer's PIDGEY).
+        if self.battle.is_some() {
+            Expects::BATTLE
+        } else {
+            Expects {
+                dialogue: false,
+                battle: true,
+                menu: false,
+            }
+        }
     }
 }
 

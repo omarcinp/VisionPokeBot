@@ -310,7 +310,11 @@ impl<'a> ToolContext<'a> {
             return Ok(false);
         }
         let expects = self.expects;
-        if o.battle.is_some() && !expects.battle {
+        if o.battle.is_some() {
+            if expects.battle {
+                // The step plays its own battle, text and menus included.
+                return Ok(false);
+            }
             let outcome = self.invoke(&Intent::Battle {
                 policy: BattlePlan::Auto,
             });

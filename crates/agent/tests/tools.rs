@@ -275,6 +275,67 @@ fn unexpected_dialogue_after_an_action_runs_unstick() {
     assert_eq!(*seen.lock().unwrap(), vec![Intent::Unstick]);
 }
 
+/// A tool that records the intents it was invoked with and fails, so a
+/// step driven on a static frame ends instead of looping.
+struct Refuser {
+    seen: Arc<Mutex<Vec<Intent>>>,
+}
+
+impl Tool for Refuser {
+    fn name(&self) -> &str {
+        "Refuser"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::Battle { .. } | Intent::Unstick)
+    }
+
+    fn run(&mut self, intent: &Intent, _ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        self.seen.lock().unwrap().push(intent.clone());
+        ToolOutcome::failed("refused")
+    }
+}
+
+/// flash-1 on Route 3: a trainer spotted the player on the way to the
+/// grass ("Excuse me! You looked at me, didn't you?"). The hunt claimed
+/// dialogue as its own (it plays its battles) and waited for the scene to
+/// settle until the stuck rule pressed B; the trainer's PIDGEY was then
+/// hunted as a wild one. Outside a battle, the hunt leaves dialogue to
+/// the interrupt wrapper.
+#[test]
+fn a_trainers_challenge_during_a_catch_hunt_runs_unstick() {
+    let Some(d) = data() else { return };
+    let Some(spotted) = fixture("emu-trainer-spotted-route3.png") else {
+        return;
+    };
+    let (mut runtime, _) = runtime(&d, vec![spotted]);
+    runtime.set_pose_hint(pose("Route3", 15, 9));
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut toolbox = Toolbox::default();
+    toolbox.prepend(Box::new(Refuser {
+        seen: Arc::clone(&seen),
+    }));
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(toolbox);
+    let outcome = ctx.invoke(&Intent::Catch {
+        species: "SPECIES_SPEAROW".into(),
+        map: Some("Route3".into()),
+    });
+    let err = outcome
+        .result
+        .expect_err("the refused Unstick fails the hunt");
+    assert!(err.to_string().contains("refused"), "{err}");
+    assert_eq!(*seen.lock().unwrap(), vec![Intent::Unstick]);
+}
+
 #[test]
 fn the_nurses_welcome_is_identified_in_the_game_text() {
     let Some(d) = data() else { return };
