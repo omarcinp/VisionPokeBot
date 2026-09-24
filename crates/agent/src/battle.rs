@@ -140,6 +140,23 @@ pub fn choose_move(
     Some((slot, chosen))
 }
 
+/// Any move the game will accept when no damaging move can be chosen (the
+/// only one is disabled or out of PP): the first non-disabled move with PP,
+/// status moves included, in slot order. `None` when no move has PP (the
+/// game then uses STRUGGLE by itself).
+pub fn fallback_move(
+    data: &GameData,
+    party: &Party,
+    memory: &BattleMemory,
+) -> Option<(u8, String)> {
+    let lead = party.lead()?;
+    lead.moves
+        .iter()
+        .enumerate()
+        .find(|(_, m)| lead.pp_left(data, m) > 0 && memory.disabled.as_ref() != Some(*m))
+        .map(|(slot, m)| (slot as u8, m.clone()))
+}
+
 /// The next battle input, if a battle menu is open.
 pub fn decide(
     observation: &Observation,
@@ -194,8 +211,9 @@ pub fn decide(
         BattleMenu::Moves { column, row } => {
             let opponent = identify_opponent(data, observation);
             let Some((slot, name)) = choose_move(data, party, opponent.as_ref(), memory, policy)
+                .or_else(|| fallback_move(data, party, memory))
             else {
-                return Some(Decision::Fail("no damaging move has PP left".into()));
+                return Some(Decision::Fail("no move has PP left".into()));
             };
             memory.last_move = Some(name.clone());
             memory.last_slot = party.lead().map(|lead| (lead.slot, slot));
@@ -297,6 +315,68 @@ mod tests {
         // No damaging PP at all: nothing to choose (the battle policy runs).
         let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
         assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
+    }
+
+    /// Review: in a trainer battle with the only damaging move disabled,
+    /// the move menu failed the story. Any accepted move is chosen instead;
+    /// only a lead with no PP at all fails.
+    #[test]
+    fn a_trainer_battle_with_the_only_attack_disabled_uses_another_move() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        // Tackle out of PP, Vine Whip disabled: Sleep Powder (slot 2).
+        let party = ivysaur(&data, &[("MOVE_TACKLE", 35)]);
+        let mut memory = BattleMemory {
+            trainer: true,
+            disabled: Some("MOVE_VINE_WHIP".into()),
+            ..BattleMemory::default()
+        };
+        assert_eq!(choose_move(&data, &party, None, &memory, &policy), None);
+        assert_eq!(
+            fallback_move(&data, &party, &memory),
+            Some((1, "MOVE_SLEEP_POWDER".into()))
+        );
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: ScreenState::BattleMoveSelection,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 1, row: 0 }),
+            player_name: Some("IVYSAUR".into()),
+            player_level: Some(16),
+            player_hp_numbers: Some((50, 50)),
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: Some(1000),
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: None,
+            opponent_shiny: None,
+        });
+        let mut events = Vec::new();
+        match decide(&o, &policy, &mut memory, &party, &data, &mut events) {
+            Some(Decision::Act(a)) => assert_eq!(a.label, "choose move 2 (SLEEP_POWDER)"),
+            _ => panic!("unexpected decision"),
+        }
+        // No PP anywhere (the disabled move aside): fail.
+        let party = ivysaur(
+            &data,
+            &[
+                ("MOVE_TACKLE", 35),
+                ("MOVE_SLEEP_POWDER", 15),
+                ("MOVE_LEECH_SEED", 10),
+            ],
+        );
+        assert_eq!(fallback_move(&data, &party, &memory), None);
+        match decide(&o, &policy, &mut memory, &party, &data, &mut events) {
+            Some(Decision::Fail(r)) => assert_eq!(r, "no move has PP left"),
+            _ => panic!("unexpected decision"),
+        }
     }
 
     /// Live (Route 3, Lass Robin's JIGGLYPUFF): DISABLE on VINE WHIP, and the

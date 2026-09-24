@@ -231,8 +231,56 @@ pub struct StoryTask {
     /// A mandatory ball buy was tried in this milestone (never retried:
     /// with no money it would loop).
     mandatory_buy_tried: bool,
-    /// First frame a page waiting for A was not yet read on two frames.
-    unread_since: Option<u64>,
+    /// The page waiting for A that is not yet read on two frames.
+    unread: Option<UnreadPage>,
+    /// Last frame whose battle text went to the battle's readers.
+    battle_text_frame: Option<u64>,
+}
+
+/// A page waiting for A that hasn't been read on two frames yet: since
+/// when, and its reading. A page flickering between two readings (`alt`) is
+/// still the same page, so its wait stays bounded; any other text is a new
+/// page with a wait of its own.
+#[derive(Debug)]
+struct UnreadPage {
+    since: u64,
+    page: String,
+    alt: Option<String>,
+}
+
+impl UnreadPage {
+    /// Frames `page` has waited, restarting for a new page.
+    fn waited(slot: &mut Option<UnreadPage>, page: &str, frame: u64) -> u64 {
+        let same = slot
+            .as_ref()
+            .is_some_and(|u| u.page == page || u.alt.as_deref() == Some(page));
+        match slot {
+            Some(u) if same => {
+                if u.page != page {
+                    u.alt = Some(std::mem::replace(&mut u.page, page.to_owned()));
+                }
+            }
+            Some(u) if u.alt.is_none() && is_prefix_flicker(&u.page, page) => {
+                u.alt = Some(std::mem::replace(&mut u.page, page.to_owned()));
+            }
+            _ => {
+                *slot = Some(UnreadPage {
+                    since: frame,
+                    page: page.to_owned(),
+                    alt: None,
+                });
+            }
+        }
+        frame.saturating_sub(slot.as_ref().map_or(frame, |u| u.since))
+    }
+}
+
+/// Two readings of one page that differ in a character or so (a misread),
+/// as opposed to a different page.
+fn is_prefix_flicker(a: &str, b: &str) -> bool {
+    let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let longest = a.chars().count().max(b.chars().count());
+    longest > 0 && longest - common <= 2
 }
 
 /// Whether the nurse's "restored your POKéMON" was read during the current
@@ -269,6 +317,23 @@ impl HealWatch {
 }
 
 impl StoryTask {
+    /// A battle's first frame: fresh battle memory and `BattleStarted`.
+    fn begin_battle(&mut self, o: &Observation, events: &mut Vec<GameEvent>) {
+        if self.in_battle {
+            return;
+        }
+        self.in_battle = true;
+        self.battle_seen = true;
+        let trainer = self
+            .last_dialogue_frame
+            .is_some_and(|f| o.frame_id.saturating_sub(f) < TRAINER_DIALOGUE_WINDOW);
+        self.battle_memory = BattleMemory {
+            trainer,
+            ..BattleMemory::default()
+        };
+        events.push(GameEvent::BattleStarted);
+    }
+
     pub fn new(world: Arc<World>, milestones: Vec<Milestone>) -> Self {
         Self {
             world,
@@ -298,7 +363,8 @@ impl StoryTask {
             buy_at: None,
             buy_mart: None,
             mandatory_buy_tried: false,
-            unread_since: None,
+            unread: None,
+            battle_text_frame: None,
         }
     }
 
@@ -572,6 +638,23 @@ enum NavStatusOrDecision {
     Decision(Decision),
 }
 
+impl StoryTask {
+    /// Battle text to the battle's readers, once per frame: the throw's
+    /// result, the foe's status, the PC box ([`catch::observe`]) and
+    /// DISABLE on our lead ([`battle::observe_page`]).
+    fn observe_battle_text(&mut self, o: &Observation) {
+        if o.battle.is_none() || self.battle_text_frame == Some(o.frame_id) {
+            return;
+        }
+        self.battle_text_frame = Some(o.frame_id);
+        if let Some(page) = catch::observe(&mut self.battle_memory, o) {
+            if let Some(data) = &self.data {
+                battle::observe_page(&mut self.battle_memory, &page, &self.party, data);
+            }
+        }
+    }
+}
+
 impl Task for StoryTask {
     fn name(&self) -> &str {
         "Story"
@@ -627,12 +710,22 @@ impl Task for StoryTask {
                 // Wait for a second reading first (questions, with a menu,
                 // are answered instead).
                 if d.ready_for_a() && o.menu.is_none() && !self.tracker.applied(&d.lines) {
-                    let since = *self.unread_since.get_or_insert(o.frame_id);
-                    if o.frame_id.saturating_sub(since) < PAGE_READ_WAIT_FRAMES {
+                    let page = d.lines.join(" ");
+                    if UnreadPage::waited(&mut self.unread, &page, o.frame_id)
+                        < PAGE_READ_WAIT_FRAMES
+                    {
+                        // The battle's readers (catch results, DISABLE) need
+                        // this frame too.
+                        if o.battle.is_some() {
+                            self.begin_battle(o, ctx.events);
+                            self.observe_battle_text(o);
+                        }
                         return Decision::Wait("reading the page on a second frame".into());
                     }
+                    // Given up: advance it; the next page waits afresh.
+                    self.unread = None;
                 } else {
-                    self.unread_since = None;
+                    self.unread = None;
                 }
             }
             if let Some(list) = &o.move_list {
@@ -658,18 +751,7 @@ impl Task for StoryTask {
         // Battles interrupt whatever the step is doing (wild encounters,
         // trainers, the rival).
         if let Some(battle) = &o.battle {
-            if !self.in_battle {
-                self.in_battle = true;
-                self.battle_seen = true;
-                let trainer = self
-                    .last_dialogue_frame
-                    .is_some_and(|f| o.frame_id.saturating_sub(f) < TRAINER_DIALOGUE_WINDOW);
-                self.battle_memory = BattleMemory {
-                    trainer,
-                    ..BattleMemory::default()
-                };
-                ctx.events.push(GameEvent::BattleStarted);
-            }
+            self.begin_battle(o, ctx.events);
             if let Some(data) = &self.data {
                 ctx.events
                     .extend(party::battle_events(data, &self.party, battle));
@@ -683,12 +765,9 @@ impl Task for StoryTask {
                     ctx.events,
                 );
             }
-            // The throw's result, the foe's status and the PC box, from text.
-            if let Some(page) = catch::observe(&mut self.battle_memory, o) {
-                if let Some(data) = &self.data {
-                    battle::observe_page(&mut self.battle_memory, &page, &self.party, data);
-                }
-            }
+            // The throw's result, the foe's status, the PC box and DISABLE,
+            // from text.
+            self.observe_battle_text(o);
             let loss_ok = matches!(step, StoryStep::Battle { loss_ok: true, .. });
             if battle.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !loss_ok {
                 return Decision::Fail(format!(
@@ -2342,6 +2421,56 @@ mod tests {
         assert_eq!(
             tick_events(&mut task, &flicker(f), &state).0,
             "advance text"
+        );
+        // The next page (after the executor's pending A) still waits for
+        // its own second reading: the timed-out wait doesn't carry over.
+        let next = |f: u64| {
+            let mut o = money(f);
+            o.dialogue.as_mut().unwrap().lines =
+                ["RED got ¥64", "for winning!"].map(String::from).to_vec();
+            o
+        };
+        let f = f + 20;
+        let (label, events) = tick_events(&mut task, &next(f), &state);
+        assert_eq!(label, "wait: reading the page on a second frame");
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::MoneyChanged { .. })));
+        let (label, events) = tick_events(&mut task, &next(f + 1), &state);
+        assert!(events.contains(&GameEvent::MoneyChanged {
+            delta: 64,
+            reason: "won a battle".into()
+        }));
+        assert_eq!(label, "advance text");
+    }
+
+    /// Review: the early wait for a second reading returned before the
+    /// battle's text readers ran, so "IVYSAUR's VINE WHIP is disabled!"
+    /// (read once, then advanced) never marked the move.
+    #[test]
+    fn a_disable_refusal_page_marks_the_move_through_the_story() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let refusal = |f| {
+            let mut o = wild_frame(f, None, &["IVYSAUR’s VINE WHIP", "is disabled!"]);
+            let d = o.dialogue.as_mut().unwrap();
+            d.waiting_for_input = true;
+            d.arrow = Some(pokebot_state::Region::new(220, 150, 8, 8));
+            o
+        };
+        assert_eq!(
+            tick_events(&mut task, &refusal(1), &state).0,
+            "wait: reading the page on a second frame"
+        );
+        assert_eq!(task.battle_memory.disabled, None);
+        assert_eq!(
+            tick_events(&mut task, &refusal(2), &state).0,
+            "advance text"
+        );
+        assert_eq!(
+            task.battle_memory.disabled.as_deref(),
+            Some("MOVE_VINE_WHIP")
         );
     }
 
