@@ -128,9 +128,9 @@ pub fn restore(state_path: &Path, progress: &Progress, data: &GameData) -> Resul
     let legacy = |warning: Option<String>| Restored {
         knowledge: legacy_knowledge(data, &progress.party),
         source: if progress.party.members.is_empty() {
-            "nothing known (no state.json for this save, no legacy party)".into()
+            "nothing: no state.json for this save and no legacy party (party unknown)".into()
         } else {
-            "migrated from the legacy party in progress.json (tracked)".into()
+            "the legacy party in progress.json (migrated as Tracked)".into()
         },
         warning,
     };
