@@ -23,4 +23,6 @@ serde_json = "1.0.151"
 thiserror = "2.0.20"
 
 [dev-dependencies]
+pokebot-capture-card.workspace = true
 pokebot-emulator-libretro = { path = "../../adapters/emulator-libretro" }
+pokebot-pabotbase.workspace = true

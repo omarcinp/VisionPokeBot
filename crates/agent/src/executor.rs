@@ -200,6 +200,17 @@ impl Default for Executor {
     }
 }
 
+/// Bookkeeping of the executor's way back into the game when the console
+/// shows something else (HOME menu, a system dialog).
+#[derive(Debug, Default)]
+pub struct OutsideRecovery {
+    since: Option<u64>,
+    presses: u32,
+}
+
+/// Name under which actions run outside a task are recorded.
+const TOOL_TASK: &str = "tool";
+
 impl Executor {
     pub fn run(
         &self,
@@ -212,13 +223,11 @@ impl Executor {
             task: name.clone(),
             reason,
         };
-        let mut pending: Option<Pending> = None;
         let mut first_frame = None;
         let mut waiting_since: Option<(u64, String)> = None;
         // Recovery presses since the task last acted on its own.
         let mut nudged = false;
-        let mut outside_since: Option<u64> = None;
-        let mut outside_presses = 0u32;
+        let mut outside = OutsideRecovery::default();
         loop {
             if stop.load(Ordering::Relaxed) {
                 let _ = runtime.execute(ControllerCommand::Neutral);
@@ -230,122 +239,19 @@ impl Executor {
                 .cloned()
                 .expect("observe() sets the observation");
             let frame = observation.frame_id;
-            let now = Moment {
-                frame,
-                at: runtime
-                    .last_captured()
-                    .map_or_else(Instant::now, |c| c.captured_at),
-            };
             let first = *first_frame.get_or_insert(frame);
             if frame - first > self.max_frames {
                 let reason = format!("gave up after {} frames", self.max_frames);
                 self.finish(runtime, &name, false, &reason)?;
                 return Err(fail(reason));
             }
+            // Outside the game (HOME menu, system dialog): nothing the task
+            // decides can help.
+            if self.recover_outside(runtime, &mut outside, &name)? {
+                continue;
+            }
 
             let mut events = Vec::new();
-            // Outside the game (HOME menu, system dialog): nothing the task
-            // decides can help; press Home (back to the game), then A.
-            if runtime.outside_game() {
-                let since = *outside_since.get_or_insert(frame);
-                if pending.is_none() && frame - since > OUTSIDE_GAME_FRAMES {
-                    let button = if outside_presses % 2 == 0 {
-                        Button::Home
-                    } else {
-                        Button::A
-                    };
-                    outside_presses += 1;
-                    outside_since = Some(frame);
-                    let action = Action::new(
-                        format!("recover: the console left the game, press {button:?}"),
-                        vec![ControllerCommand::Press(button)],
-                        Expectation::InputsDone,
-                        30,
-                    );
-                    runtime.error(format!("{name}: {}", action.label));
-                    runtime.execute(action.commands[0].clone())?;
-                }
-                continue;
-            }
-            outside_since = None;
-            outside_presses = 0;
-            if let Some(p) = &mut pending {
-                let idle = runtime.is_idle()?;
-                // Something came up mid-hold (a wild battle, a trainer, an
-                // NPC talking): stop the inputs now, let the task replan.
-                let interrupted = p.action.interruptible
-                    && !idle
-                    && (observation.dialogue.is_some()
-                        || observation.battle.is_some()
-                        || observation.menu.is_some()
-                        || observation.screen.value == ScreenState::Transition);
-                let track = p.note_frame(now, &observation, idle, self.frame_clock);
-                // A walking hold whose player fell behind the prediction:
-                // it is blocked; release now instead of finishing the hold.
-                let stalled = !interrupted && matches!(track, Track::Stalled { .. });
-                if interrupted || stalled {
-                    runtime.execute(ControllerCommand::Neutral)?;
-                }
-                let allowance = self.allowance(p.action.timing.map(|(kind, _)| kind));
-                let outcome = if interrupted {
-                    Some(Outcome::Interrupted)
-                } else if stalled {
-                    Some(Outcome::Stalled)
-                } else if p.confirmations >= CONFIRM_FRAMES {
-                    Some(Outcome::Confirmed)
-                } else if p.idle_since.is_some_and(|since| {
-                    frame - since > p.action.timeout_frames.max(CONFIRM_FRAMES.into()) + allowance
-                }) {
-                    Some(Outcome::TimedOut)
-                } else {
-                    None
-                };
-                if let Some(outcome) = outcome {
-                    let p = pending.take().expect("pending");
-                    // Timing data for tuning inputs on slower devices.
-                    runtime.record(
-                        "ActionOutcome",
-                        serde_json::json!({
-                            "task": name,
-                            "label": p.action.label,
-                            "confirmed": outcome == Outcome::Confirmed,
-                            "outcome": format!("{outcome:?}"),
-                            "frames": frame - p.issued_frame(),
-                            "after_idle": p.idle_since.map(|i| frame - i),
-                            "timeout": p.action.timeout_frames,
-                            "track": format!("{track:?}"),
-                        }),
-                    )?;
-                    if outcome == Outcome::TimedOut {
-                        runtime.explain(
-                            format!(
-                                "{name}: \"{}\" not confirmed after {} frames",
-                                p.action.label,
-                                frame - p.issued_frame()
-                            ),
-                            &p.action,
-                        );
-                    }
-                    if outcome == Outcome::Confirmed {
-                        self.learn_timing(runtime, &p)?;
-                    }
-                    let state = runtime.state().clone();
-                    task.on_outcome(
-                        &p.action,
-                        outcome,
-                        &mut TaskContext {
-                            observation: &observation,
-                            state: &state,
-                            events: &mut events,
-                        },
-                    );
-                }
-                for event in events {
-                    runtime.emit(event)?;
-                }
-                continue;
-            }
-
             let state = runtime.state().clone();
             let decision = task.next(&mut TaskContext {
                 observation: &observation,
@@ -359,17 +265,38 @@ impl Executor {
                 Decision::Act(action) => {
                     waiting_since = None;
                     nudged = false;
-                    runtime.explain(format!("{name}: {}", action.label), &action);
-                    for command in &action.commands {
-                        runtime.execute(command.clone())?;
-                    }
-                    let issued = Moment {
-                        frame,
-                        at: Instant::now(),
+                    let (action, outcome) = match self.run_pending(
+                        runtime,
+                        &name,
+                        action,
+                        stop,
+                        &observation,
+                        first + self.max_frames,
+                    )? {
+                        Ok(done) => done,
+                        Err(reason) => {
+                            self.finish(runtime, &name, false, &reason)?;
+                            return Err(fail(reason));
+                        }
                     };
-                    let mut p = Pending::new(action, issued, &observation);
-                    p.tracker = self.hold_tracker(&p);
-                    pending = Some(p);
+                    let observation = runtime
+                        .observation()
+                        .cloned()
+                        .expect("observe() sets the observation");
+                    let state = runtime.state().clone();
+                    let mut events = Vec::new();
+                    task.on_outcome(
+                        &action,
+                        outcome,
+                        &mut TaskContext {
+                            observation: &observation,
+                            state: &state,
+                            events: &mut events,
+                        },
+                    );
+                    for event in events {
+                        runtime.emit(event)?;
+                    }
                 }
                 Decision::Wait(reason) => {
                     let (since, _) = waiting_since.get_or_insert((frame, reason.clone()));
@@ -379,14 +306,7 @@ impl Executor {
                     // the safe answer (NO) to an unexpected question.
                     if !nudged && waited > self.max_wait_frames / 2 {
                         nudged = true;
-                        let action = Action::new(
-                            format!("recover: stuck waiting ({reason}), press B"),
-                            vec![ControllerCommand::Press(Button::B)],
-                            Expectation::InputsDone,
-                            30,
-                        );
-                        runtime.error(format!("{name}: {}", action.label));
-                        runtime.execute(action.commands[0].clone())?;
+                        self.nudge(runtime, &name, &reason)?;
                         continue;
                     }
                     if waited > self.max_wait_frames {
@@ -405,6 +325,202 @@ impl Executor {
                 }
             }
         }
+    }
+
+    /// Runs one action to its outcome: issues its inputs, then observes
+    /// until its expectation holds, it times out, or (when interruptible)
+    /// something comes up or the walk stalls. The runtime's observation is
+    /// the frame the outcome was decided on. Tools use this to act without
+    /// a [`Task`].
+    pub fn run_action(
+        &self,
+        runtime: &mut Runtime,
+        action: Action,
+        stop: &AtomicBool,
+    ) -> Result<Outcome, ExecutorError> {
+        if runtime.observation().is_none() {
+            runtime.observe()?;
+        }
+        let observation = runtime
+            .observation()
+            .cloned()
+            .expect("observe() sets the observation");
+        let deadline = observation.frame_id + self.max_frames;
+        match self.run_pending(runtime, TOOL_TASK, action, stop, &observation, deadline)? {
+            Ok((_, outcome)) => Ok(outcome),
+            Err(reason) => Err(ExecutorError::TaskFailed {
+                task: TOOL_TASK.to_owned(),
+                reason,
+            }),
+        }
+    }
+
+    /// The pending half of the loop: issues `action` from `issued_on` and
+    /// observes until it has an outcome. `Err(reason)` in the inner result
+    /// when `deadline` (a frame id) passes first.
+    #[allow(clippy::type_complexity)]
+    fn run_pending(
+        &self,
+        runtime: &mut Runtime,
+        name: &str,
+        action: Action,
+        stop: &AtomicBool,
+        issued_on: &Observation,
+        deadline: u64,
+    ) -> Result<Result<(Action, Outcome), String>, ExecutorError> {
+        runtime.explain(format!("{name}: {}", action.label), &action);
+        for command in &action.commands {
+            runtime.execute(command.clone())?;
+        }
+        let issued = Moment {
+            frame: issued_on.frame_id,
+            at: Instant::now(),
+        };
+        let mut p = Pending::new(action, issued, issued_on);
+        p.tracker = self.hold_tracker(&p);
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                let _ = runtime.execute(ControllerCommand::Neutral);
+                return Err(ExecutorError::Stopped);
+            }
+            runtime.observe()?;
+            let observation = runtime
+                .observation()
+                .cloned()
+                .expect("observe() sets the observation");
+            let frame = observation.frame_id;
+            let now = Moment {
+                frame,
+                at: runtime
+                    .last_captured()
+                    .map_or_else(Instant::now, |c| c.captured_at),
+            };
+            if frame > deadline {
+                return Ok(Err(format!("gave up after {} frames", self.max_frames)));
+            }
+            // Outside the game: the action can't show its effect; wait for
+            // the game to be back (the caller recovers between actions).
+            if runtime.outside_game() {
+                continue;
+            }
+            let idle = runtime.is_idle()?;
+            // Something came up mid-hold (a wild battle, a trainer, an
+            // NPC talking): stop the inputs now, let the task replan.
+            let interrupted = p.action.interruptible
+                && !idle
+                && (observation.dialogue.is_some()
+                    || observation.battle.is_some()
+                    || observation.menu.is_some()
+                    || observation.screen.value == ScreenState::Transition);
+            let track = p.note_frame(now, &observation, idle, self.frame_clock);
+            // A walking hold whose player fell behind the prediction:
+            // it is blocked; release now instead of finishing the hold.
+            let stalled = !interrupted && matches!(track, Track::Stalled { .. });
+            if interrupted || stalled {
+                runtime.execute(ControllerCommand::Neutral)?;
+            }
+            let allowance = self.allowance(p.action.timing.map(|(kind, _)| kind));
+            let outcome = if interrupted {
+                Some(Outcome::Interrupted)
+            } else if stalled {
+                Some(Outcome::Stalled)
+            } else if p.confirmations >= CONFIRM_FRAMES {
+                Some(Outcome::Confirmed)
+            } else if p.idle_since.is_some_and(|since| {
+                frame - since > p.action.timeout_frames.max(CONFIRM_FRAMES.into()) + allowance
+            }) {
+                Some(Outcome::TimedOut)
+            } else {
+                None
+            };
+            let Some(outcome) = outcome else {
+                continue;
+            };
+            // Timing data for tuning inputs on slower devices.
+            runtime.record(
+                "ActionOutcome",
+                serde_json::json!({
+                    "task": name,
+                    "label": p.action.label,
+                    "confirmed": outcome == Outcome::Confirmed,
+                    "outcome": format!("{outcome:?}"),
+                    "frames": frame - p.issued_frame(),
+                    "after_idle": p.idle_since.map(|i| frame - i),
+                    "timeout": p.action.timeout_frames,
+                    "track": format!("{track:?}"),
+                }),
+            )?;
+            if outcome == Outcome::TimedOut {
+                runtime.explain(
+                    format!(
+                        "{name}: \"{}\" not confirmed after {} frames",
+                        p.action.label,
+                        frame - p.issued_frame()
+                    ),
+                    &p.action,
+                );
+            }
+            if outcome == Outcome::Confirmed {
+                self.learn_timing(runtime, &p)?;
+            }
+            return Ok(Ok((p.action, outcome)));
+        }
+    }
+
+    /// Outside the game (HOME menu, system dialog) on the current frame:
+    /// after [`OUTSIDE_GAME_FRAMES`] presses Home (back to the game), then
+    /// A, alternating. `true` while outside (the caller observes again).
+    pub fn recover_outside(
+        &self,
+        runtime: &mut Runtime,
+        recovery: &mut OutsideRecovery,
+        name: &str,
+    ) -> Result<bool, ExecutorError> {
+        if !runtime.outside_game() {
+            recovery.since = None;
+            recovery.presses = 0;
+            return Ok(false);
+        }
+        let frame = runtime.observation().map_or(0, |o| o.frame_id);
+        let since = *recovery.since.get_or_insert(frame);
+        if frame - since > OUTSIDE_GAME_FRAMES {
+            let button = if recovery.presses % 2 == 0 {
+                Button::Home
+            } else {
+                Button::A
+            };
+            recovery.presses += 1;
+            recovery.since = Some(frame);
+            let action = Action::new(
+                format!("recover: the console left the game, press {button:?}"),
+                vec![ControllerCommand::Press(button)],
+                Expectation::InputsDone,
+                30,
+            );
+            runtime.error(format!("{name}: {}", action.label));
+            runtime.execute(action.commands[0].clone())?;
+        }
+        Ok(true)
+    }
+
+    /// One B press when a wait has gone on too long: it closes menus and
+    /// pages the task doesn't know, advances text, and is the safe answer
+    /// (NO) to an unexpected question.
+    pub fn nudge(
+        &self,
+        runtime: &mut Runtime,
+        name: &str,
+        reason: &str,
+    ) -> Result<(), ExecutorError> {
+        let action = Action::new(
+            format!("recover: stuck waiting ({reason}), press B"),
+            vec![ControllerCommand::Press(Button::B)],
+            Expectation::InputsDone,
+            30,
+        );
+        runtime.error(format!("{name}: {}", action.label));
+        runtime.execute(action.commands[0].clone())?;
+        Ok(())
     }
 
     /// Extra frames an action of `kind` may take to show its effect.
