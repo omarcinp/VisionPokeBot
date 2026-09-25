@@ -1239,7 +1239,7 @@ impl Task for StoryTask {
             }
             _ => {
                 if let Some(nav) = &mut self.nav {
-                    nav.on_outcome(action, outcome);
+                    nav.on_outcome(action, outcome, ctx.observation);
                 }
             }
         }

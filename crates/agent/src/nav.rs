@@ -332,11 +332,13 @@ impl Navigator {
         }
     }
 
-    /// Books the executor's verdict; the tile learnt to be blocked, if any.
+    /// Books the executor's verdict, seen on `observation` (the frame the
+    /// action ended on); the tile learnt to be blocked, if any.
     pub fn on_outcome(
         &mut self,
         action: &Action,
         outcome: Outcome,
+        observation: &Observation,
     ) -> Option<(String, (i32, i32))> {
         if action
             .timing
@@ -345,6 +347,19 @@ impl Navigator {
             // A turn in place: the walker has nothing in flight.
             return None;
         }
+        // A tap that timed out into a battle's fade, a dialogue or a menu
+        // was interrupted, not blocked (flash-7: a wild encounter on
+        // MtMoon_1F (20, 25) learnt the tile the player had just stepped
+        // onto).
+        let busy = observation.dialogue.is_some()
+            || observation.battle.is_some()
+            || observation.menu.is_some()
+            || observation.screen.value == pokebot_state::ScreenState::Transition;
+        let outcome = if outcome == Outcome::TimedOut && busy {
+            Outcome::Interrupted
+        } else {
+            outcome
+        };
         let done = self.walker.on_outcome(action, outcome)?;
         if done.faced {
             self.facing = Some(done.dir);
@@ -1148,7 +1163,7 @@ mod tests {
             panic!("expected a hold");
         };
         assert!(hold.label.ends_with("Left ×2"), "{}", hold.label);
-        assert!(nav.on_outcome(&hold, Outcome::Stalled).is_none());
+        assert!(nav.on_outcome(&hold, Outcome::Stalled, &o).is_none());
         assert_eq!(nav.facing(), Some(Direction::Left));
         // The tap Left he blocks is learnt at once (no second miss).
         let NavStatus::Act(tap) = nav.next(&o) else {
@@ -1157,7 +1172,7 @@ mod tests {
         assert!(tap.label.ends_with("Left"), "{}", tap.label);
         assert!(matches!(tap.expect, Expectation::PlayerMovedFrom(_)));
         assert_eq!(
-            nav.on_outcome(&tap, Outcome::TimedOut),
+            nav.on_outcome(&tap, Outcome::TimedOut, &o),
             Some(("MtMoon_1F".to_owned(), (15, 17)))
         );
         // The detour turns Down and steps, without Left again.
@@ -1173,6 +1188,68 @@ mod tests {
             panic!("expected a step");
         };
         assert!(first.label.starts_with("turn Down"), "{}", first.label);
+    }
+
+    /// Flash-7: on MtMoon_1F a hold stalled because a wild encounter
+    /// froze the player, the follow-up tap timed out during the battle's
+    /// fade, and (20, 25), the tile the player had just stepped onto, was
+    /// learnt as blocked.
+    #[test]
+    fn a_tap_timing_out_into_a_transition_learns_nothing() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "MtMoon_1F".into(),
+            x: 19,
+            y: 25,
+        };
+        let observation = |screen: ScreenState, located: bool| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: screen,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = located.then(|| PoseObservation {
+                pose: pose.clone(),
+                score: 1000,
+            });
+            o
+        };
+        let mut nav = Navigator::new(
+            Arc::new(world),
+            Destination::Warp {
+                map: "MtMoon_1F".into(),
+                warp: 0,
+            },
+        );
+        nav.facing = Some(Direction::Right);
+        let quiet = observation(ScreenState::Unknown, true);
+        // Two taps for a bit after a stalled hold.
+        nav.walker
+            .note_tap(pose.clone(), Direction::Right, (20, 25), true);
+        let tap = Action::new(
+            "walk to warp (5, 6): Right",
+            vec![],
+            Expectation::PlayerMovedFrom(pose.clone()),
+            30,
+        )
+        .timed(InputKind::WalkTile, 1);
+        let fade = observation(ScreenState::Transition, false);
+        assert_eq!(nav.on_outcome(&tap, Outcome::TimedOut, &fade), None);
+        assert!(nav.learned().on_map("MtMoon_1F").is_empty());
+        // The same miss on a quiet frame is a block.
+        nav.walker
+            .note_tap(pose.clone(), Direction::Right, (20, 25), true);
+        assert_eq!(
+            nav.on_outcome(&tap, Outcome::TimedOut, &quiet),
+            Some(("MtMoon_1F".to_owned(), (20, 25)))
+        );
     }
 
     #[test]

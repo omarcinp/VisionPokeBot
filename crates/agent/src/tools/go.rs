@@ -200,7 +200,7 @@ impl ToolStep for GoStep {
     }
 
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
-        if let Some((map, (x, y))) = self.nav.on_outcome(action, outcome) {
+        if let Some((map, (x, y))) = self.nav.on_outcome(action, outcome, ctx.observation) {
             ctx.events.push(GameEvent::TileBlocked { map, x, y });
         }
     }

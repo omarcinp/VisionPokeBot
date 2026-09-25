@@ -75,11 +75,17 @@ impl HoldTracker {
     /// A hold of `tiles` tiles issued from `from`, judged by `sync`'s
     /// estimate of a walking tile.
     pub fn new(from: PlayerPose, tiles: usize, sync: &Syncer) -> Self {
+        Self::with_turn(from, tiles, sync, 0.0)
+    }
+
+    /// As [`HoldTracker::new`], for a hold that first turns the player
+    /// (`turn_ms` before the first tile).
+    pub fn with_turn(from: PlayerPose, tiles: usize, sync: &Syncer, turn_ms: f64) -> Self {
         let e = sync.estimate(InputKind::WalkTile);
         Self {
             from,
             tiles,
-            latency_ms: e.latency_ms,
+            latency_ms: e.latency_ms + turn_ms,
             unit_ms: e.unit_ms.max(1.0),
             stall_after_ms: e.spread_ms.max(STALL_MIN_MS),
             lag_since_ms: None,
@@ -222,18 +228,30 @@ impl Walker {
                 x: end.0,
                 y: end.1,
             };
+            // A hold in a new direction turns the player first (flash-7:
+            // an 8-tile hold after a turn walked 7 tiles, released half a
+            // tile early minus the turn); hold that much longer.
+            let turn_ms = if facing == Some(step.dir) {
+                0.0
+            } else {
+                sync.estimate(InputKind::Turn).unit_ms
+            };
             self.pending = Some(Pending {
                 from: pose.clone(),
                 dir: step.dir,
                 to: step.to,
                 facing: facing == Some(step.dir),
             });
-            self.hold = Some((HoldTracker::new(pose.clone(), run, sync), now));
+            self.hold = Some((
+                HoldTracker::with_turn(pose.clone(), run, sync, turn_ms),
+                now,
+            ));
             return WalkStep::Hold {
                 dir: step.dir,
                 tiles: run,
                 target,
-                duration: sync.hold_for(InputKind::WalkTile, run),
+                duration: sync.hold_for(InputKind::WalkTile, run)
+                    + Duration::from_millis(turn_ms.round() as u64),
                 timeout_frames: sync.timeout_frames(InputKind::WalkTile, run),
             };
         }
@@ -369,7 +387,7 @@ mod tests {
         let step = w.next(
             &observation(1, Some((3, 7))),
             &path_right((3, 7), 5),
-            None,
+            Some(Direction::Right),
             &sync,
             t0,
         );
@@ -383,6 +401,19 @@ mod tests {
                 timeout_frames: 30 + 16 + 8,
             }
         );
+        // Facing another way: the hold also covers the turn (8 frames).
+        let mut w = Walker::new();
+        let step = w.next(
+            &observation(1, Some((3, 7))),
+            &path_right((3, 7), 5),
+            Some(Direction::Down),
+            &sync,
+            t0,
+        );
+        assert!(
+            matches!(step, WalkStep::Hold { duration, .. } if duration == Duration::from_millis(268 * 4 - 134 + 134)),
+            "{step:?}"
+        );
     }
 
     #[test]
@@ -395,7 +426,7 @@ mod tests {
             w.next(
                 &observation(1, Some((3, 7))),
                 &path_right((3, 7), 6),
-                None,
+                Some(Direction::Right),
                 &sync,
                 t0
             ),
