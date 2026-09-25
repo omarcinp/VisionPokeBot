@@ -388,6 +388,18 @@ interval `[lo, hi]` for the IV (0–31) and a tracked EV total (0–255 each,
 - Vitamins and the EV-reducing berries adjust the tracked EVs like any
   other delta.
 
+**Plausibility of every reading.** A number read from the screen is
+checked against what the belief already allows before it is believed:
+current HP ≤ max HP; max HP inside the interval the stat formula gives
+for the species, level and IV/EV intervals (a Lv 6 Bulbasaur's max HP is
+20–22, never 2); level never decreases; PP ≤ max PP. A reading outside
+its interval is dropped, logged as `implausible_reading { fact, read,
+allowed, frame }` with the frame kept as a fixture candidate, and the
+fact keeps its previous value (a HUD read of `3/ 21` recorded as `3/2`
+made a dying Bulbasaur look healthy on the first Switch goal run, see
+§8.1). Two consecutive implausible reads of the same field trigger a
+re-read of that field on the next frames before any decision uses it.
+
 The evaluator (`planner::evaluate`) takes the intervals: the worst case
 (lowest IVs) for the "no Pokémon may faint" rule and the expected case for
 readiness planning. Until an individual has any observation, the interval
@@ -861,6 +873,69 @@ The `pokebot story` command keeps running the old milestones; a new
 `--dry-run` prints the plan without touching the console, which is the main
 development tool for the planner and the way the use case below is checked
 before hardware.
+
+### 8.1 Safety guard: health is a standing invariant, not a plan step
+
+The planner's `LeadHp` precondition (§4.6) only acts when a plan is made.
+Health changes during a step (every wild battle on a walk, every turn of
+a training hunt), so a **guard** checks it continuously and can take over
+from whatever intent is running:
+
+**Invariant.** For the remainder of the current step, the probability
+that any party member faints stays under the risk limit (default 2 %,
+the catch policy's limit). It is evaluated after every battle turn,
+after every battle, and before every walking leg, from:
+
+- **Leg risk**: P(at least one wild encounter on the rest of the leg)
+  from the encounter tiles on its path and the area's rate (the same
+  computation as passive progress, §4.6.2); trainers whose line of sight
+  covers the path count as certain battles.
+- **Battle risk**: per possible opponent (the area's wild table weighted
+  by slot share, or the known trainer party), the evaluator's worst case
+  P(faint) from the current HP (lowest IVs, the opponent's most damaging
+  move, crits). In battle, before each turn: if the foe's maximum damage
+  this turn can reach our HP, a wild battle is fled at once (RUN; a
+  failed RUN is re-evaluated next turn), a trainer battle uses a healing
+  item if one is held, otherwise the best move only if it KOs first by
+  speed order.
+- P(faint on the step) = Σ over encounters of P(encounter) × P(faint |
+  encounter), combined with the chance of failing to flee.
+
+**Take-over.** When the invariant fails, the guard returns
+`Outcome::Interrupted { reason: Unsafe }` from `ToolContext::act`, and the
+goal loop runs a **recovery** chosen by the ranking below before resuming
+the plan where it was (no full replan unless the recovery itself fails).
+
+**Recovery ranking.** Candidates, each with its own P(faint) and cost
+(time, money):
+
+1. **Free and certain**: a free heal (a Pokémon Center nurse, Mom's
+   house, any object whose script heals) reachable by a route with zero
+   risk (no encounter tiles, no unbeaten trainer sight lines, or only
+   risk the flee rule makes impossible to lose). If one exists it is
+   always chosen, whatever it costs in time.
+2. **Items**: a healing item held in the bag (Potion, Super Potion, …;
+   used from the overworld Bag → item → party member, closed-loop like
+   every menu), chosen as the cheapest item that restores enough HP to
+   satisfy the invariant for the rest of the step.
+3. **Weighted**: if neither holds, the remaining options (a free heal
+   over a risky route, buying Potions at a reachable mart, Escape Rope
+   or Teleport to the respawn, walking only on non-encounter tiles with
+   a detour, Repel if held) are ranked by
+   `risk_weight × P(faint) + time_s + money_weight × money`, with
+   `risk_weight` large (default: one faint is worth 3 600 s, i.e. a lost
+   hour) and any option above the risk limit excluded unless nothing is
+   under it, in which case the least risky one is taken and logged
+   `unsafe_recovery`. The weights are in `data/rules/safety.json`.
+
+**Stock.** Because items are the second line of defence, the ball-stock
+policy of the catching design becomes a supplies policy: keep at least
+two Potions (four once the party has more than one battler), bought
+with the balls.
+
+The guard is independent of the planner and the tools: it reads the
+belief (with the plausibility checks of §3.6), the world model and the
+evaluator, and it is the same code on the emulator and on the Switch.
 
 ## 9. Use cases
 
