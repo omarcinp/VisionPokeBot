@@ -352,6 +352,12 @@ impl Run<'_, '_> {
             ctx.scheduler.assumptions = step.assumes.clone();
             let outcome = ctx.invoke(&intent);
             ctx.scheduler.assumptions.clear();
+            if outcome.result.is_ok() {
+                // The step establishing what it assumed absent (a trainer
+                // beaten, a flag set) is its effect, not a contradiction;
+                // the next step's own check covers the rest.
+                ctx.scheduler.invalidated = None;
+            }
             self.report.learned.extend(outcome.learned.iter().cloned());
             self.report.saved_at_end = false;
             match outcome.result {

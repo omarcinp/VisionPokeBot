@@ -16,6 +16,7 @@ use pokebot_world::events::{Condition, Effect, Script, Val};
 use pokebot_world::World;
 
 use super::effects::{path_events, path_labels, LabelIndex};
+use super::talk::TalkStep;
 use super::{
     progress, Answer, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
@@ -549,17 +550,37 @@ impl Tool for DialogueTool {
         else {
             return ToolOutcome::failed("not a RunScript");
         };
-        let mut conversation = Conversation::new(
+        let conversation = Conversation::new(
             Arc::clone(&ctx.world),
             Arc::clone(&ctx.data),
             Some(script.clone()),
             *path,
             answers.clone(),
         );
-        let result = ctx
-            .drive(&mut conversation)
-            .and_then(|_| finish(ctx, &conversation));
-        result.into()
+        // An object's script starts by talking to it: approach and press A
+        // unless its conversation is already on screen.
+        let on_screen = ctx.observation().is_some_and(|o| o.dialogue.is_some());
+        let object = ctx
+            .world
+            .events()
+            .and_then(|e| e.script(script))
+            .filter(|s| s.kind == "object")
+            .and_then(|s| Some((s.map.clone()?, s.local_id?)));
+        if let (false, Some((map, object))) = (on_screen, object) {
+            let mut step = match TalkStep::new(ctx, &map, object, answers.clone()) {
+                Ok(step) => step,
+                Err(e) => return Err::<(), _>(e).into(),
+            };
+            step.conversation = conversation;
+            return ctx
+                .drive(&mut step)
+                .and_then(|_| finish(ctx, &step.conversation))
+                .into();
+        }
+        let mut conversation = conversation;
+        ctx.drive(&mut conversation)
+            .and_then(|_| finish(ctx, &conversation))
+            .into()
     }
 }
 
