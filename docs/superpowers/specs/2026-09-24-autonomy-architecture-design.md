@@ -267,11 +267,20 @@ each step a tool with its own expectations:
 
 1. Locate the player (no menu).
 2. Restore `state.json` if its identity matches `progress.json`.
-3. If flags needed by the goal are `Unknown`, and only then: open the
-   Trainer Card (badges), the party menu (species/level/HP), the Bag pockets
-   that matter, and the Fly map if Fly is available. Each is a probe (§4.3),
-   so the planner decides which are worth it; nothing is opened "just in
-   case".
+3. **Audit the core facts, always, before the first plan.** The core
+   facts are the ones every decision depends on and that a checkpoint can
+   carry stale: the party (species, level, current/max HP, status, for
+   every member: party menu, ≈6 s), the lead's moves and PP (summary
+   moves page, ≈5 s per member whose PP isn't `Observed`), badges, money
+   and the Pokédex count (Trainer Card, ≈8 s), and the Items and Poké
+   Balls pockets (≈10 s each). About 40 s in all. They are not priced as
+   probes and the planner cannot skip them: a plan made on an unread
+   party is a plan made blind. The audit re-runs after every CONTINUE
+   (a reload restores the cartridge, not the belief), after a white-out,
+   and whenever the plausibility checks (§3.6) reject two readings of a
+   core fact in a row.
+4. Everything else (story flags, the Fly map, PC boxes, the full
+   Pokédex) stays a probe priced by the planner (§4.3).
 
 Every event since then updates the belief, and every in-game save writes
 `state.json` as today.
@@ -936,6 +945,64 @@ with the balls.
 The guard is independent of the planner and the tools: it reads the
 belief (with the plausibility checks of §3.6), the world model and the
 evaluator, and it is the same code on the emulator and on the Switch.
+
+### 8.2 Scheduler: events, layers and urgency
+
+The goal loop is a **scheduler** over a queue of goals, not a single
+goal. The user's long-term goal is one entry at the lowest priority;
+**needs** are injected by rules as the belief changes.
+
+**Events reach the layer they invalidate.** Every `GameEvent` is routed
+by a table (`data/rules/routing.json`) to the lowest layer that must
+react, and only that layer recomputes:
+
+| Layer | Recomputes | Example events |
+|---|---|---|
+| Motion | the current leg's path | an NPC moved onto the path, a tile learnt blocked |
+| Step (tool) | the current tool's next action | a battle ended, a dialogue page read |
+| Plan | the goal planner, from the current belief | a step failed, an assumption contradicted, an item gained or lost, a species caught |
+| Scheduler | which goal runs; may preempt | HP, status, faint, PP, party size, ball or potion stock, money below a need |
+
+**Needs and urgency.** `data/rules/needs.json` defines needs as
+predicates on the belief with an urgency computed from risk, not from a
+single threshold. The central quantity is the **party's margin**: the
+expected number of battles the party can still take before a faint
+becomes likely, summed over every member able to fight (HP share ×
+level advantage over the area's wild levels, from the evaluator). A low
+lead with healthy teammates is a small need; the same HP on the only
+usable member is urgent.
+
+| Class | Condition (defaults) | Effect |
+|---|---|---|
+| **Immediate** | in battle: the foe's max damage this turn can faint the active member and no teammate can take over safely | flee (wild) or item / KO-first (trainer); §8.1 per-turn rule |
+| **Urgent** | P(faint on the rest of the current step) > risk limit (§8.1), or margin < 1 battle, or the last usable member below 50 % | preempt the running step at the next safe point (no menu or battle open), run the recovery ranking of §8.1, resume |
+| **Soon** | margin < 3 battles, a member below 50 %, PP of the best damaging move under 5, balls or potions under their reserve | no preemption: the planner inserts the fix into the current plan where it detours least before a deadline (below) |
+| **Background** | nice to have: a cheap audit on the way, topping up stock at a mart the plan passes | inserted only at zero or near-zero detour |
+
+**Soon needs are solved on the way.** For a Soon need with deadline D (the
+point on the current plan where the margin is predicted to hit the
+Urgent line, from the leg risks of §8.1), the planner evaluates each
+insertion point `p` before D along the plan's route and each option `o`
+that satisfies the need (a heal spot, a mart for potions, a held item):
+detour(p, o) = route(p → o) + route(o → next(p)) − route(p → next(p)),
+plus the option's own cost. It picks the minimum; free heals win ties,
+and a zero-risk free heal on the way is always taken. The route planner
+already prices both terms, so this is one pass over the plan, not a new
+search.
+
+**Running from wild battles.** At the start of every wild battle the
+battle tool decides fight, catch or flee from the same risk: flee at
+once when P(faint in this battle) exceeds the risk limit, when the
+margin is at or below the Urgent line, or when the battle has no value
+to the running plan (not a catch target, no experience needed for a
+`Train` step, not blocking the path); otherwise fight or catch, and
+re-check every turn (§8.1). A failed flee is re-evaluated next turn.
+Held Repels are used when the leg risk is the problem and a Repel covers
+the rest of the leg.
+
+**Priorities are data.** Urgency thresholds, the risk limit, the margin
+model's constants and the routing table are in `data/rules/*.json`,
+hot-reloaded like the rest (§2.2).
 
 ## 9. Use cases
 
