@@ -24,6 +24,8 @@ use crate::{checkpoint, Action, Decision, Executor, Outcome, Task, TaskContext};
 /// conversation or cutscene before a tool starts walking or opens a menu;
 /// scripts often pause between lines.
 pub const SETTLE_FRAMES: u32 = 90;
+/// Frames in a row the white-out screen must show before it counts.
+pub const WHITEOUT_FRAMES: u32 = 30;
 /// A battle that starts this soon after dialogue is a trainer battle (the
 /// trainer talks first); wild battles start without any.
 const TRAINER_DIALOGUE_WINDOW: u64 = 600;
@@ -150,6 +152,8 @@ pub struct ToolContext<'a> {
     last_map: Option<String>,
     last_dialogue_frame: Option<u64>,
     outside: OutsideRecovery,
+    /// Frames in a row the white-out screen has shown.
+    whiteout_frames: u32,
 }
 
 impl<'a> ToolContext<'a> {
@@ -180,6 +184,7 @@ impl<'a> ToolContext<'a> {
             last_map: None,
             last_dialogue_frame: None,
             outside: OutsideRecovery::default(),
+            whiteout_frames: 0,
         }
     }
 
@@ -317,11 +322,18 @@ impl<'a> ToolContext<'a> {
         if self.runtime.outside_game() {
             return Ok(false);
         }
-        // The white-out screens: nothing to handle here; the goal loop
-        // ends the run and the session reloads the save.
+        // The white-out screens (seen for a while: a battle wipe's black
+        // frames can look like one for an instant): nothing to handle
+        // here; the goal loop ends the run and the session reloads the
+        // save.
         if o.screen.value == ScreenState::Whiteout {
-            return Err(ToolError::Failed("whited out".into()));
+            self.whiteout_frames += 1;
+            if self.whiteout_frames >= WHITEOUT_FRAMES {
+                return Err(ToolError::Failed("whited out".into()));
+            }
+            return Ok(false);
         }
+        self.whiteout_frames = 0;
         let expects = self.expects;
         if o.battle.is_some() {
             if expects.battle {

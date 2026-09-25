@@ -477,6 +477,13 @@ mod tests {
         image.put_pixel(120, 80, [255, 255, 255]);
         let o = FireRedPerception::default().observe(&frame(1, image));
         assert_ne!(o.screen.value, ScreenState::Whiteout);
+        // Flash-8: the Poké Ball wipe into a trainer battle (black with a
+        // piece of the ball) ended the run as a white-out on Route 3.
+        let Some(wipe) = fixture("emu-trainer-battle-wipe-black.png") else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(2, wipe));
+        assert_ne!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
     }
 
     #[test]
