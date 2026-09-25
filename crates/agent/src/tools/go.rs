@@ -386,6 +386,7 @@ fn surf_entry(world: &World, leg: &Leg) -> Option<((i32, i32), (i32, i32))> {
     let walk = Walk {
         obstacles: &obstacles,
         surf: true,
+        opened: None,
     };
     let to = (leg.to.x, leg.to.y);
     let path = find_path_with(
@@ -713,6 +714,12 @@ mod tests {
             pp: Knowledge::observed((30, 30), 1),
         });
         state.party = Knowledge::observed(vec![mon], 1);
+        // Until Bill's ticket, a Slowbro and a lass stand in front of the
+        // tree (Cerulean's entry script puts them there).
+        state
+            .world
+            .flags
+            .insert("FLAG_GOT_SS_TICKET".into(), Knowledge::observed(true, 1));
         if badges {
             state
                 .world

@@ -9,6 +9,7 @@ pub mod belief_adapter;
 pub mod evaluate;
 pub mod goals;
 pub mod intents;
+pub mod levels;
 pub mod methods;
 pub mod prepare;
 

@@ -1,10 +1,13 @@
-//! HTN-style methods (`data/rules/methods.json`, spec §4.2): fixed
-//! decompositions of compound goals the search would otherwise have to
-//! rediscover (`GetBadge(3)` needs Cut first; the League needs the eight
-//! badges, Strength and the Elite Four in order). A method lists the
-//! subgoals to plan in order before the goal itself; the planner tries it
-//! before searching from primitives and falls back when it can't be met.
-//! Methods are data, so another game brings its own.
+//! HTN-style methods (`data/rules/methods.json`, spec §4.2): optional
+//! decompositions of compound goals, kept as search hints only. The planner
+//! derives what it needs from the world itself: reaching a map no open
+//! route leads to is decomposed into what the route needs, in the order
+//! the walk meets it, through only what the story provides before that map
+//! ([`crate::levels`]), so no game progress depends on this file. A method
+//! that matches is tried first (it can make a search shorter); when it
+//! can't be met the derived decompositions and the primitive intents are
+//! searched as without it. Methods are data, so another game may bring its
+//! own.
 
 use std::path::Path;
 

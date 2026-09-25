@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::behavior::{arrow_warp, is_water, stair_warp, WARP_DOOR};
 use crate::events::{Condition, Effect, Val};
+use crate::gates::{self, is_local_flag, is_local_var, Gates};
 use crate::obstacles::{blockers, wander_tiles, Passage};
 use crate::path::{reach, Obstacles, Reach, Walk};
 use crate::predicate::{check, BeliefView, Predicate, Requirement, Truth};
@@ -237,6 +238,8 @@ pub enum UnknownPolicy {
     /// Unknown counts as false: the edge is blocked.
     Pessimistic,
     /// Unknown is assumed true at a price: the route lists the assumptions.
+    /// An infinite price means the fact is too unlikely to assume: it
+    /// counts as false (the route is a blocked alternative needing it).
     Optimistic { penalty_of: fn(&Predicate) -> f64 },
 }
 
@@ -287,6 +290,11 @@ pub fn fly_requirement(dest: &str) -> Requirement {
     ]
 }
 
+/// (map, how each predicate its ways need stands): a cached terrain.
+type TerrainKey = (String, Vec<u8>);
+/// Tiles reached, per map.
+pub type TilesByMap = BTreeMap<String, BTreeSet<(i32, i32)>>;
+
 /// `(map, from, surf, terrain hash)`: what a cached flood depends on.
 type FloodKey = (String, (i32, i32), bool, u64);
 
@@ -301,8 +309,17 @@ struct Way {
 struct MapInfo {
     /// Tiles of stationary objects nothing removes.
     walls: Obstacles,
-    /// Tiles of stationary objects with a way past, by tile.
+    /// Tiles of stationary objects with a way past, and of gates the story
+    /// opens (triggers, objects placed by scripts), by tile.
     blockers: BTreeMap<(i32, i32), Vec<Way>>,
+    /// Tiles whose own collision a script lifts (an opened door), with the
+    /// ways that open them.
+    openable: BTreeMap<(i32, i32), Vec<Way>>,
+    /// Every predicate a way past a blocker or an openable tile requires:
+    /// what the map's terrain depends on.
+    relevant: Vec<Predicate>,
+    /// Digest of the walls.
+    walls_hash: u64,
     wander: BTreeSet<(i32, i32)>,
     outdoor: bool,
 }
@@ -311,6 +328,8 @@ struct MapInfo {
 /// ways the pass rules out, and the price of the tiles it may cross.
 struct Terrain {
     obstacles: Obstacles,
+    /// Collision tiles a way opens for this search.
+    opened: Obstacles,
     /// Blocker tiles the pass may cross, with the cheapest allowed way.
     passable: BTreeMap<(i32, i32), Way>,
     hash: u64,
@@ -326,6 +345,20 @@ pub struct PlaceGraph {
     fly_spots: Vec<Place>,
     maps: BTreeMap<String, MapInfo>,
     floods: RefCell<HashMap<FloodKey, Rc<Reach>>>,
+    /// Walk edges from a place to the other places of its map, per flood.
+    walks: RefCell<HashMap<FloodKey, Rc<Vec<Edge>>>>,
+    /// Terrains per (map, how each predicate it depends on stands).
+    terrains: RefCell<HashMap<TerrainKey, Rc<Terrain>>>,
+    /// Passages the story opens and closes ([`crate::gates`]).
+    gates: Gates,
+    /// Every predicate an edge or a passage requires, and the vars they
+    /// compare: what a route can depend on.
+    relevant: BTreeSet<Predicate>,
+    relevant_vars: BTreeSet<String>,
+    /// Maps whose entry script takes over on arrival (every path of an
+    /// `on_frame` script that fires on each load fights or warps: the
+    /// Champion's room): nobody walks there.
+    intercepted: BTreeSet<String>,
 }
 
 impl PlaceGraph {
@@ -338,6 +371,12 @@ impl PlaceGraph {
             fly_spots: Vec::new(),
             maps: BTreeMap::new(),
             floods: RefCell::new(HashMap::new()),
+            walks: RefCell::new(HashMap::new()),
+            terrains: RefCell::new(HashMap::new()),
+            gates: gates::derive(world),
+            relevant: BTreeSet::new(),
+            relevant_vars: BTreeSet::new(),
+            intercepted: BTreeSet::new(),
         };
         let mut maps: Vec<&MapData> = world.maps().collect();
         maps.sort_by(|a, b| a.name.cmp(&b.name));
@@ -368,11 +407,80 @@ impl PlaceGraph {
             }
             // Two objects on one tile: a wall wins.
             blockers_by_tile.retain(|t, _| !walls.contains(t));
+            let mut openable = BTreeMap::new();
+            for (&tile, gate) in g.gates.get(&map.name).into_iter().flatten() {
+                if walls.contains(&tile) {
+                    continue;
+                }
+                let base_open = map.tile(tile.0, tile.1).is_some_and(|t| t.collision == 0);
+                let ways = |reqs: &[Requirement]| -> Vec<Way> {
+                    reqs.iter()
+                        .map(|r| Way {
+                            requires: r.clone(),
+                            cost_s: 0.0,
+                        })
+                        .collect()
+                };
+                if !base_open {
+                    if !gate.ways.is_empty() {
+                        openable.insert(tile, ways(&gate.ways));
+                    }
+                    continue;
+                }
+                if gate.ways.iter().any(Vec::is_empty) {
+                    continue;
+                }
+                if gate.ways.is_empty() {
+                    walls.insert(tile);
+                    blockers_by_tile.remove(&tile);
+                    continue;
+                }
+                let gate_ways = ways(&gate.ways);
+                match blockers_by_tile.get_mut(&tile) {
+                    // An object on a gated tile: both must let the player by.
+                    Some(existing) => {
+                        let mut joint = Vec::new();
+                        for a in existing.iter() {
+                            for b in &gate_ways {
+                                let mut requires = a.requires.clone();
+                                requires.extend(b.requires.iter().cloned());
+                                requires.sort();
+                                requires.dedup();
+                                joint.push(Way {
+                                    requires,
+                                    cost_s: a.cost_s + b.cost_s,
+                                });
+                            }
+                        }
+                        *existing = joint;
+                    }
+                    None => {
+                        blockers_by_tile.insert(tile, gate_ways);
+                    }
+                }
+            }
+            let mut relevant: Vec<Predicate> = blockers_by_tile
+                .values()
+                .chain(openable.values())
+                .flatten()
+                .flat_map(|w| w.requires.iter().cloned())
+                .collect();
+            relevant.sort();
+            relevant.dedup();
+            let walls_hash = {
+                let sorted: BTreeSet<_> = walls.iter().copied().collect();
+                let mut h = std::hash::DefaultHasher::new();
+                sorted.hash(&mut h);
+                h.finish()
+            };
             g.maps.insert(
                 map.name.clone(),
                 MapInfo {
                     walls,
                     blockers: blockers_by_tile,
+                    openable,
+                    relevant,
+                    walls_hash,
                     wander: wander_tiles(map),
                     outdoor: map.is_outdoor(),
                 },
@@ -403,12 +511,87 @@ impl PlaceGraph {
         }
         if let Some(events) = world.events() {
             g.add_script_warps(world, events);
+            for (map, ms) in &events.map_scripts {
+                let takes_over = ms.on_frame.iter().any(|f| {
+                    // Local vars are 0 on every load: such a frame always runs.
+                    is_local_var(&f.var)
+                        && f.value.as_int() == Some(0)
+                        && f.script
+                            .as_deref()
+                            .and_then(|l| events.script(l))
+                            .is_some_and(|s| {
+                                !s.paths.is_empty()
+                                    && s.paths.iter().all(|p| {
+                                        p.does.iter().any(|e| {
+                                            matches!(e, Effect::Warp { .. } | Effect::Battle { .. })
+                                        })
+                                    })
+                            })
+                });
+                if takes_over {
+                    g.intercepted.insert(map.clone());
+                }
+            }
         }
         for edges in g.edges.values_mut() {
             edges.sort_by(|a, b| (&a.kind, &a.to, &a.requires).cmp(&(&b.kind, &b.to, &b.requires)));
             edges.dedup_by(|a, b| a.kind == b.kind && a.to == b.to && a.requires == b.requires);
         }
+        let mut relevant: BTreeSet<Predicate> = BTreeSet::new();
+        relevant.extend(surf_requirement());
+        for spot in &g.fly_spots {
+            relevant.extend(fly_requirement(&spot.map));
+        }
+        for edges in g.edges.values() {
+            for e in edges {
+                relevant.extend(e.requires.iter().cloned());
+            }
+        }
+        for info in g.maps.values() {
+            for ways in info.blockers.values().chain(info.openable.values()) {
+                for w in ways {
+                    relevant.extend(w.requires.iter().cloned());
+                }
+            }
+        }
+        g.relevant_vars = relevant
+            .iter()
+            .filter_map(|p| match p {
+                Predicate::Var { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        g.relevant = relevant;
         g
+    }
+
+    /// Whether the story opens or closes passages on `map` ([`crate::gates`]).
+    pub fn has_gates(&self, map: &str) -> bool {
+        self.gates.contains_key(map)
+    }
+
+    /// Whether a route can depend on `p` (an edge or passage requires it,
+    /// or it sets a var one compares): the rest of a belief leaves routes
+    /// unchanged, so caches may ignore it.
+    pub fn route_relevant(&self, p: &Predicate) -> bool {
+        match p {
+            Predicate::Var { name, .. } => self.relevant_vars.contains(name),
+            // Item counts compare against any threshold.
+            Predicate::HasItem { item, .. } => self
+                .relevant
+                .iter()
+                .any(|q| matches!(q, Predicate::HasItem { item: i, .. } if i == item)),
+            Predicate::Flag { name, is } => {
+                self.relevant.contains(p)
+                    || self.relevant.contains(&Predicate::Flag {
+                        name: name.clone(),
+                        is: !is,
+                    })
+                    || Predicate::from_flag(name, true) != *p
+                        && self.relevant.contains(&Predicate::from_flag(name, true))
+            }
+            _ => self.relevant.contains(p),
+        }
     }
 
     pub fn params(&self) -> &RouteParams {
@@ -471,17 +654,32 @@ impl PlaceGraph {
             if !map.in_bounds(ax, ay) {
                 continue;
             }
+            // A warp a script covers up or opens works in those states.
+            let gate = self.gates.get(&map.name).and_then(|g| g.get(&(w.x, w.y)));
+            let ways: Vec<Requirement> = match gate {
+                Some(g) => match &g.warp_ways {
+                    Some(ways) => ways.clone(),
+                    None if (ax, ay) != (w.x, w.y) => g.ways.clone(),
+                    None => vec![Vec::new()],
+                },
+                None => vec![Vec::new()],
+            };
+            if ways.is_empty() {
+                continue;
+            }
             let from = self.add_place(&map.name, ax, ay, PlaceKind::Warp);
             let to = self.add_place(&dest.name, dx, dy, PlaceKind::Warp);
-            self.add_edge(
-                &from,
-                Edge {
-                    to,
-                    kind: EdgeKind::Warp,
-                    cost_s: self.params.warp_s,
-                    requires: Vec::new(),
-                },
-            );
+            for requires in ways {
+                self.add_edge(
+                    &from,
+                    Edge {
+                        to: to.clone(),
+                        kind: EdgeKind::Warp,
+                        cost_s: self.params.warp_s,
+                        requires,
+                    },
+                );
+            }
         }
     }
 
@@ -550,43 +748,221 @@ impl PlaceGraph {
         }
     }
 
-    /// Object and trigger scripts whose paths warp: an edge per path whose
-    /// conditions the belief can answer.
+    /// The values each var can hold: 0 at the start and whatever a script
+    /// sets it to. A path comparing a var outside them never runs (the
+    /// fall-through of a switch on the starter).
+    fn var_domains(events: &crate::events::Events) -> BTreeMap<String, BTreeSet<i64>> {
+        let mut out: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+        for script in events.scripts.values() {
+            for path in &script.paths {
+                for e in &path.does {
+                    if let Effect::Var { var, change } = e {
+                        let values = out
+                            .entry(var.clone())
+                            .or_insert_with(|| BTreeSet::from([0]));
+                        match change.eq.as_ref().and_then(Val::as_int) {
+                            Some(v) => {
+                                values.insert(v);
+                            }
+                            // Added to, or set from a symbol: anything.
+                            None => {
+                                values.insert(i64::MIN);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Object, trigger and map-entry scripts whose paths warp: an edge per
+    /// path whose conditions the belief can answer. A trigger's own var
+    /// condition is part of the requirement; a map's `on_frame` script
+    /// warps from wherever the player lands on the map. Paths that fight
+    /// on the way are left to the goal planner (a battle is a step, not a
+    /// walk).
     fn add_script_warps(&mut self, world: &World, events: &crate::events::Events) {
+        let domains = Self::var_domains(events);
         for (label, script) in &events.scripts {
             let Some(map) = script.map.as_deref().and_then(|m| world.map(m)) else {
                 continue;
             };
-            let origin = match script.kind.as_str() {
+            let mut extra: Requirement = Vec::new();
+            let origins: Vec<(i32, i32)> = match script.kind.as_str() {
                 "object" => script
                     .local_id
                     .and_then(|id| map.objects.iter().find(|o| o.local_id == id))
                     .and_then(|o| Some((o.x?, o.y?)))
-                    .and_then(|(x, y)| self.tile_beside(map, x, y)),
-                "trigger" => events
-                    .triggers
+                    .and_then(|(x, y)| self.tile_beside(map, x, y))
+                    .into_iter()
+                    .collect(),
+                // A panel (an elevator's floor menu): stood in front of.
+                "sign" => map
+                    .signs
                     .iter()
-                    .find(|t| t.map == map.name && t.script.as_deref() == Some(label))
-                    .map(|t| (t.x, t.y)),
-                _ => None,
+                    .filter(|s| s.script.as_deref() == Some(label.as_str()))
+                    .filter_map(|s| self.tile_beside(map, s.x, s.y))
+                    .take(1)
+                    .collect(),
+                "trigger" => {
+                    let t = events
+                        .triggers
+                        .iter()
+                        .find(|t| t.map == map.name && t.script.as_deref() == Some(label));
+                    if let Some(t) = t {
+                        match requirement_of(&t.when) {
+                            Some(r) => extra = r,
+                            None => continue,
+                        }
+                    }
+                    t.map(|t| (t.x, t.y)).into_iter().collect()
+                }
+                "map" => {
+                    let frame = events.map_scripts.get(&map.name).and_then(|ms| {
+                        ms.on_frame
+                            .iter()
+                            .find(|f| f.script.as_deref() == Some(label.as_str()))
+                    });
+                    let Some(frame) = frame else { continue };
+                    self.add_entry_walks(map, label, script);
+                    if !is_local_var(&frame.var) {
+                        let Some(value) = frame.value.as_int() else {
+                            continue;
+                        };
+                        extra.push(Predicate::Var {
+                            name: frame.var.clone(),
+                            op: crate::predicate::CmpOp::Eq,
+                            value,
+                        });
+                    }
+                    self.places_on(&map.name)
+                        .iter()
+                        .filter(|p| p.kind == PlaceKind::Warp)
+                        .map(|p| (p.x, p.y))
+                        .collect()
+                }
+                _ => Vec::new(),
             };
-            let Some((ox, oy)) = origin else {
+            for (ox, oy) in origins {
+                self.add_script_warps_from(world, map, label, script, (ox, oy), &extra, &domains);
+            }
+        }
+    }
+
+    /// A map's `on_frame` script that walks the player in from where the
+    /// warps land (the Elite Four rooms, whose doors are walls to walk
+    /// through): an edge from each landing to where the walk ends. The
+    /// frame's own var condition is left out: the story always arrives in
+    /// the state the walk is written for.
+    fn add_entry_walks(&mut self, map: &MapData, label: &str, script: &crate::events::Script) {
+        let landings: Vec<(i32, i32)> = self
+            .places_on(&map.name)
+            .iter()
+            .filter(|p| p.kind == PlaceKind::Warp)
+            .map(|p| (p.x, p.y))
+            .collect();
+        for path in &script.paths {
+            if path
+                .does
+                .iter()
+                .any(|e| matches!(e, Effect::Battle { .. } | Effect::Warp { .. }))
+            {
+                continue;
+            }
+            let (dx, dy) = path.does.iter().fold((0, 0), |(x, y), e| match e {
+                Effect::MovePlayer { move_player } => (x + move_player.0, y + move_player.1),
+                _ => (x, y),
+            });
+            if (dx, dy) == (0, 0) {
+                continue;
+            }
+            let Some(requires) = requirement_of(&path.when) else {
                 continue;
             };
+            for &(ox, oy) in &landings {
+                let (tx, ty) = (ox + dx, oy + dy);
+                if !map.tile(tx, ty).is_some_and(|t| t.collision == 0) {
+                    continue;
+                }
+                let from = self.add_place(&map.name, ox, oy, PlaceKind::Script);
+                let to = self.add_place(&map.name, tx, ty, PlaceKind::Script);
+                let tiles = (dx.abs() + dy.abs()) as f64;
+                self.add_edge(
+                    &from,
+                    Edge {
+                        to,
+                        kind: EdgeKind::ScriptWarp {
+                            script: label.to_string(),
+                        },
+                        cost_s: self.params.talk_s + tiles * self.params.tile_s,
+                        requires: requires.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_script_warps_from(
+        &mut self,
+        world: &World,
+        map: &MapData,
+        label: &str,
+        script: &crate::events::Script,
+        (ox, oy): (i32, i32),
+        extra: &[Predicate],
+        domains: &BTreeMap<String, BTreeSet<i64>>,
+    ) {
+        {
             for path in &script.paths {
-                let Some(requires) = requirement_of(&path.when) else {
+                if path.does.iter().any(|e| matches!(e, Effect::Battle { .. })) {
+                    continue;
+                }
+                let Some(mut requires) = requirement_of(&path.when) else {
                     continue;
                 };
+                // A var compared outside the values it can hold: never.
+                let possible = |name: &str| -> Option<&BTreeSet<i64>> {
+                    domains.get(name).filter(|d| !d.contains(&i64::MIN))
+                };
+                let mut vars: BTreeMap<&str, Vec<(crate::predicate::CmpOp, i64)>> = BTreeMap::new();
+                for q in &requires {
+                    if let Predicate::Var { name, op, value } = q {
+                        vars.entry(name).or_default().push((*op, *value));
+                    }
+                }
+                if vars.iter().any(|(name, cmps)| {
+                    let domain = possible(name)
+                        .cloned()
+                        .unwrap_or_else(|| BTreeSet::from([0]));
+                    !domain
+                        .iter()
+                        .any(|v| cmps.iter().all(|(op, x)| op.holds(*v, *x)))
+                }) {
+                    continue;
+                }
+                requires.extend(extra.iter().cloned());
+                requires.sort();
+                requires.dedup();
+                // An elevator sets where its door leads, then the player
+                // walks out: a warp all the same.
+                let dynamic_exit = map.warps.iter().any(|w| w.dest_map == "MAP_DYNAMIC");
                 for effect in &path.does {
-                    let Effect::Warp {
-                        warp,
-                        warp_id,
-                        x,
-                        y,
-                        ..
-                    } = effect
-                    else {
-                        continue;
+                    let (warp, warp_id, x, y) = match effect {
+                        Effect::Warp {
+                            warp,
+                            warp_id,
+                            x,
+                            y,
+                        } => (warp, warp_id, x, y),
+                        Effect::SetWarp {
+                            set_warp,
+                            warp_id,
+                            x,
+                            y,
+                        } if dynamic_exit => (set_warp, warp_id, x, y),
+                        _ => continue,
                     };
                     let Some(dest) = world.name_of(warp).and_then(|n| world.map(n)) else {
                         continue;
@@ -615,7 +991,7 @@ impl PlaceGraph {
                         Edge {
                             to,
                             kind: EdgeKind::ScriptWarp {
-                                script: label.clone(),
+                                script: label.to_string(),
                             },
                             cost_s: self.params.talk_s + self.params.warp_s,
                             requires: requires.clone(),
@@ -655,26 +1031,34 @@ impl PlaceGraph {
         let mut obstacles = info.walls.clone();
         let mut passable = BTreeMap::new();
         for (&tile, ways) in &info.blockers {
-            let mut best: Option<Way> = None;
+            let mut best: Option<(usize, Way)> = None;
             for way in ways {
                 let c = check(belief, &way.requires);
-                if !pass.allows(&unmet_of(&c, policy)) {
+                let unmet = unmet_of(&c, policy);
+                if !pass.allows(&unmet) {
                     continue;
                 }
                 let held = c.truth() == Truth::True;
                 let cost_s = if held { 0.0 } else { way.cost_s };
-                if best.as_ref().is_none_or(|b| cost_s < b.cost_s) {
-                    best = Some(Way {
-                        requires: if held {
-                            Vec::new()
-                        } else {
-                            way.requires.clone()
+                // The way that lacks the least, then the cheapest.
+                let better = best
+                    .as_ref()
+                    .is_none_or(|(n, b)| (unmet.len(), cost_s) < (*n, b.cost_s));
+                if better {
+                    best = Some((
+                        unmet.len(),
+                        Way {
+                            requires: if held {
+                                Vec::new()
+                            } else {
+                                way.requires.clone()
+                            },
+                            cost_s,
                         },
-                        cost_s,
-                    });
+                    ));
                 }
             }
-            match best {
+            match best.map(|(_, w)| w) {
                 Some(way) => {
                     passable.insert(tile, way);
                 }
@@ -683,10 +1067,46 @@ impl PlaceGraph {
                 }
             }
         }
+        let mut opened = Obstacles::new();
+        for (&tile, ways) in &info.openable {
+            let mut best: Option<(usize, Way)> = None;
+            for way in ways {
+                let c = check(belief, &way.requires);
+                let unmet = unmet_of(&c, policy);
+                if !pass.allows(&unmet) {
+                    continue;
+                }
+                let held = c.truth() == Truth::True;
+                let requires = if held {
+                    Vec::new()
+                } else {
+                    way.requires.clone()
+                };
+                let key = (unmet.len(), way.cost_s);
+                if best.as_ref().is_none_or(|(n, b)| key < (*n, b.cost_s)) {
+                    best = Some((
+                        unmet.len(),
+                        Way {
+                            requires,
+                            cost_s: way.cost_s,
+                        },
+                    ));
+                }
+            }
+            if let Some((_, way)) = best {
+                opened.insert(tile);
+                passable.insert(tile, way);
+            }
+        }
         let hash = {
-            let sorted: BTreeSet<_> = obstacles.iter().copied().collect();
             let mut h = std::hash::DefaultHasher::new();
-            sorted.hash(&mut h);
+            info.walls_hash.hash(&mut h);
+            let blocked: BTreeSet<_> = obstacles
+                .iter()
+                .filter(|t| !info.walls.contains(t))
+                .copied()
+                .collect();
+            blocked.hash(&mut h);
             for (tile, way) in &passable {
                 tile.hash(&mut h);
                 way.requires.hash(&mut h);
@@ -696,9 +1116,47 @@ impl PlaceGraph {
         };
         Terrain {
             obstacles,
+            opened,
             passable,
             hash,
         }
+    }
+
+    /// [`PlaceGraph::terrain`], cached by how the predicates the map's ways
+    /// require stand for this search (held, assumed, lacking and allowed,
+    /// lacking and not): the rest of the belief doesn't change it.
+    fn cached_terrain(
+        &self,
+        map: &str,
+        belief: &dyn BeliefView,
+        policy: UnknownPolicy,
+        pass: Pass,
+    ) -> Rc<Terrain> {
+        let info = &self.maps[map];
+        let codes: Vec<u8> = info
+            .relevant
+            .iter()
+            .map(|p| {
+                let c = check(belief, std::slice::from_ref(p));
+                let unmet = unmet_of(&c, policy);
+                if c.truth() == Truth::True {
+                    0
+                } else if unmet.is_empty() {
+                    1
+                } else if pass.allows(&unmet) {
+                    3
+                } else {
+                    2
+                }
+            })
+            .collect();
+        let key = (map.to_string(), codes);
+        if let Some(t) = self.terrains.borrow().get(&key) {
+            return Rc::clone(t);
+        }
+        let t = Rc::new(self.terrain(map, belief, policy, pass));
+        self.terrains.borrow_mut().insert(key, Rc::clone(&t));
+        t
     }
 
     /// The flood from `from` on `map` over `terrain`, from the cache when
@@ -732,6 +1190,7 @@ impl PlaceGraph {
         let walk = Walk {
             obstacles: &terrain.obstacles,
             surf,
+            opened: Some(&terrain.opened),
         };
         let r = Rc::new(reach(map, from, &walk, extra));
         self.floods.borrow_mut().insert(key, Rc::clone(&r));
@@ -796,10 +1255,13 @@ fn step_len(from: (i32, i32), to: (i32, i32)) -> u32 {
 /// The belief-checkable requirement of a script path, or `None` when a
 /// condition can't be expressed (the path is then not an edge). The
 /// player's own answers and facing are free choices, not conditions.
-fn requirement_of(when: &[Condition]) -> Option<Requirement> {
+pub fn requirement_of(when: &[Condition]) -> Option<Requirement> {
     let mut req = Vec::new();
     for c in when {
         match c {
+            // Script-local state is the script's own business.
+            Condition::Flag { flag, .. } if is_local_flag(flag) => {}
+            Condition::Var { var, .. } if is_local_var(var) => {}
             Condition::Flag { flag, is } => req.push(Predicate::from_flag(flag, *is)),
             // Trainer ids are flags in the game (`TRAINER_FLAGS_START + id`).
             Condition::Trainer { trainer, defeated } => req.push(Predicate::Flag {
@@ -819,6 +1281,15 @@ fn requirement_of(when: &[Condition]) -> Option<Requirement> {
                 known: true,
             } => req.push(Predicate::PartyHasMove { mv: r#move.clone() }),
             Condition::Answer { .. } | Condition::Choice { .. } => {}
+            // What a menu or a special returns (an elevator's floor list
+            // position), bag space, money: the player's side of the
+            // script, not a fact to route on.
+            Condition::Special { .. }
+            | Condition::ResultOf { .. }
+            | Condition::BagSpace { .. }
+            | Condition::Money { .. }
+            | Condition::Coins { .. }
+            | Condition::PartySize { .. } => {}
             Condition::Var { var, .. } if var == "VAR_FACING" => {}
             Condition::Var { var, cmp } => {
                 let ops = [
@@ -895,6 +1366,10 @@ struct Found {
 enum Goal<'a> {
     Place(&'a Place),
     Map(&'a str),
+    /// Explore everything reachable.
+    Nowhere,
+    /// Any of these tiles of a map (the spots around an NPC).
+    Tiles(&'a [Place]),
 }
 
 impl Goal<'_> {
@@ -902,8 +1377,71 @@ impl Goal<'_> {
         match self {
             Goal::Place(p) => *key == p.key(),
             Goal::Map(m) => key.0 == m,
+            Goal::Nowhere => false,
+            Goal::Tiles(ts) => ts.iter().any(|p| *key == p.key()),
         }
     }
+
+    /// The goal's tiles that are no place of the graph (walked to
+    /// explicitly when the search is on their map).
+    fn tiles(&self) -> &[Place] {
+        match self {
+            Goal::Place(p) => std::slice::from_ref(*p),
+            Goal::Tiles(ts) => ts,
+            _ => &[],
+        }
+    }
+}
+
+/// Every map the player can reach from `from` over edges whose
+/// requirements hold (under `policy` for unknown ones).
+pub fn reachable_maps(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    policy: UnknownPolicy,
+) -> BTreeSet<String> {
+    reachable(world, graph, belief, from, policy).0
+}
+
+/// [`reachable_maps`], plus for each reached map whose passages the story
+/// opens ([`PlaceGraph::has_gates`]) the tiles reached on it.
+pub fn reachable(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    policy: UnknownPolicy,
+) -> (BTreeSet<String>, TilesByMap) {
+    let mut places = BTreeSet::new();
+    let start = Place::from(from);
+    search(
+        world,
+        graph,
+        belief,
+        &start,
+        Goal::Nowhere,
+        policy,
+        Pass::Open,
+        Some(&mut places),
+    );
+    places.insert((from.map.clone(), from.x, from.y));
+    let maps: BTreeSet<String> = places.iter().map(|k| k.0.clone()).collect();
+    let mut tiles: BTreeMap<String, BTreeSet<(i32, i32)>> = BTreeMap::new();
+    for (name, x, y) in &places {
+        if !graph.has_gates(name) || graph.intercepted.contains(name) {
+            continue;
+        }
+        let (Some(map), true) = (world.map(name), graph.maps.contains_key(name)) else {
+            continue;
+        };
+        let terrain = graph.cached_terrain(name, belief, policy, Pass::Open);
+        let surf_ok = Pass::Open.allows(&unmet_of(&check(belief, &surf_requirement()), policy));
+        let flood = graph.flood(map, (*x, *y), surf_ok, &terrain);
+        tiles.entry(name.clone()).or_default().extend(flood.tiles());
+    }
+    (maps, tiles)
 }
 
 /// Cheapest route from `from` to `to` (§5.2). Dijkstra over places (no
@@ -941,6 +1479,54 @@ pub fn route_to_map(
     plan(world, graph, belief, from, Goal::Map(map), policy)
 }
 
+/// [`route_to_map`] without the blocked alternatives: only the open route
+/// (one search instead of several).
+pub fn open_route_to_map(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    map: &str,
+    policy: UnknownPolicy,
+) -> RouteResult {
+    plan_with(world, graph, belief, from, Goal::Map(map), policy, false)
+}
+
+/// The open route to the nearest (cheapest) of `tiles` of `map`, one
+/// search for all of them; no blocked alternatives.
+pub fn open_route_to_tiles(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    map: &str,
+    tiles: &[(i32, i32)],
+    policy: UnknownPolicy,
+) -> RouteResult {
+    let places: Vec<Place> = tiles.iter().map(|&(x, y)| Place::tile(map, x, y)).collect();
+    plan_with(
+        world,
+        graph,
+        belief,
+        from,
+        Goal::Tiles(&places),
+        policy,
+        false,
+    )
+}
+
+/// [`route`] without the blocked alternatives.
+pub fn open_route(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    to: &Place,
+    policy: UnknownPolicy,
+) -> RouteResult {
+    plan_with(world, graph, belief, from, Goal::Place(to), policy, false)
+}
+
 fn plan(
     world: &World,
     graph: &PlaceGraph,
@@ -949,12 +1535,24 @@ fn plan(
     goal: Goal,
     policy: UnknownPolicy,
 ) -> RouteResult {
+    plan_with(world, graph, belief, from, goal, policy, true)
+}
+
+fn plan_with(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    goal: Goal,
+    policy: UnknownPolicy,
+    with_blocked: bool,
+) -> RouteResult {
     let start = Place::from(from);
-    let open = search(world, graph, belief, &start, goal, policy, Pass::Open);
+    let open = search(world, graph, belief, &start, goal, policy, Pass::Open, None);
     let open_cost = open.as_ref().map_or(f64::INFINITY, |f| f.cost_s);
     let mut blocked = Vec::new();
     let mut forbidden: Vec<Predicate> = Vec::new();
-    while blocked.len() < MAX_BLOCKED_SETS {
+    while with_blocked && blocked.len() < MAX_BLOCKED_SETS {
         let alt = search(
             world,
             graph,
@@ -963,6 +1561,7 @@ fn plan(
             goal,
             policy,
             Pass::Forbid(&forbidden),
+            None,
         );
         let Some(alt) = alt else { break };
         if alt.unmet.is_empty() || alt.cost_s >= open_cost {
@@ -988,8 +1587,9 @@ fn plan(
 }
 
 /// A settled node's way in: the leg, what it assumed and what it lacked.
-type Came = BTreeMap<PlaceKey, (PlaceKey, Leg, Vec<Predicate>, Vec<Predicate>)>;
+type Came = HashMap<PlaceKey, (PlaceKey, Leg, Vec<Predicate>, Vec<Predicate>)>;
 
+#[allow(clippy::too_many_arguments)]
 fn search(
     world: &World,
     graph: &PlaceGraph,
@@ -998,33 +1598,42 @@ fn search(
     goal: Goal,
     policy: UnknownPolicy,
     pass: Pass,
+    settled: Option<&mut BTreeSet<PlaceKey>>,
 ) -> Option<Found> {
     let surf_ok = pass.allows(&unmet_of(&check(belief, &surf_requirement()), policy));
-    let mut dist: BTreeMap<PlaceKey, f64> = BTreeMap::new();
-    let mut came: Came = BTreeMap::new();
-    let mut done: BTreeSet<PlaceKey> = BTreeSet::new();
+    let mut dist: HashMap<PlaceKey, f64> = HashMap::new();
+    let mut came: Came = HashMap::new();
+    let mut done: std::collections::HashSet<PlaceKey> = std::collections::HashSet::new();
     let mut terrains: BTreeMap<String, Rc<Terrain>> = BTreeMap::new();
     let mut open = BinaryHeap::new();
     dist.insert(start.key(), 0.0);
     open.push(Reverse((Cost(0.0), start.key())));
     let mut relax = |from: &Place,
-                     edge: Edge,
+                     edge: &Edge,
                      g: f64,
-                     dist: &mut BTreeMap<PlaceKey, f64>,
+                     dist: &mut HashMap<PlaceKey, f64>,
                      open: &mut BinaryHeap<Reverse<(Cost, PlaceKey)>>| {
-        let c = check(belief, &edge.requires);
-        let unmet = unmet_of(&c, policy);
-        if !pass.allows(&unmet) {
-            return;
-        }
-        let mut assumed = Vec::new();
-        let mut penalty = 0.0;
-        if let UnknownPolicy::Optimistic { penalty_of } = policy {
-            for p in &c.unknown {
-                penalty += penalty_of(p);
-                assumed.push(p.clone());
+        let (unmet, assumed, penalty) = if edge.requires.is_empty() {
+            (Vec::new(), Vec::new(), 0.0)
+        } else {
+            let c = check(belief, &edge.requires);
+            let unmet = unmet_of(&c, policy);
+            if !pass.allows(&unmet) {
+                return;
             }
-        }
+            let mut assumed = Vec::new();
+            let mut penalty = 0.0;
+            if let UnknownPolicy::Optimistic { penalty_of } = policy {
+                for p in &c.unknown {
+                    let price = penalty_of(p);
+                    if price.is_finite() {
+                        penalty += price;
+                        assumed.push(p.clone());
+                    }
+                }
+            }
+            (unmet, assumed, penalty)
+        };
         let ng = g + edge.cost_s + penalty;
         let key = edge.to.key();
         let better = match dist.get(&key) {
@@ -1045,10 +1654,10 @@ fn search(
                     from.key(),
                     Leg {
                         from: from.clone(),
-                        to: edge.to,
-                        kind: edge.kind,
+                        to: edge.to.clone(),
+                        kind: edge.kind.clone(),
                         cost_s: edge.cost_s,
-                        requires: edge.requires,
+                        requires: edge.requires.clone(),
                     },
                     assumed,
                     unmet,
@@ -1058,6 +1667,7 @@ fn search(
         }
     };
     let mut reached: Option<PlaceKey> = None;
+    let mut fly_edges: Option<Vec<Edge>> = None;
     while let Some(Reverse((Cost(g), key))) = open.pop() {
         if done.contains(&key) {
             continue;
@@ -1078,45 +1688,106 @@ fn search(
         if !graph.maps.contains_key(&here.map) {
             continue;
         }
+        if graph.intercepted.contains(&here.map) && key != start.key() {
+            // Arriving here hands the player to the map's script.
+            for edge in graph.edges_from(&here.map, here.x, here.y) {
+                if edge.to.map != here.map && !done.contains(&edge.to.key()) {
+                    relax(&here, edge, g, &mut dist, &mut open);
+                }
+            }
+            continue;
+        }
         let terrain = terrains
             .entry(here.map.clone())
-            .or_insert_with(|| Rc::new(graph.terrain(&here.map, belief, policy, pass)))
+            .or_insert_with(|| graph.cached_terrain(&here.map, belief, policy, pass))
             .clone();
         // Walk to the map's other places (and the goal if it is here).
         let flood = graph.flood(map, (here.x, here.y), surf_ok, &terrain);
-        let mut targets: Vec<&Place> = graph.places_on(&here.map).iter().collect();
-        if let Goal::Place(to) = goal {
-            if to.map == here.map && !graph.places.contains_key(&to.key()) {
-                targets.push(to);
+        let walk_key = (here.map.clone(), (here.x, here.y), surf_ok, terrain.hash);
+        let cached = graph.walks.borrow().get(&walk_key).map(Rc::clone);
+        let walks = match cached {
+            Some(w) => w,
+            None => {
+                let w: Vec<Edge> = graph
+                    .places_on(&here.map)
+                    .iter()
+                    .filter(|t| t.key() != key)
+                    .filter_map(|t| graph.walk_edge(map, (here.x, here.y), &flood, &terrain, t))
+                    .collect();
+                let w = Rc::new(w);
+                graph.walks.borrow_mut().insert(walk_key, Rc::clone(&w));
+                w
+            }
+        };
+        for edge in walks.iter() {
+            if !done.contains(&edge.to.key()) {
+                relax(&here, edge, g, &mut dist, &mut open);
             }
         }
-        for target in targets {
-            if target.key() == key || done.contains(&target.key()) {
-                continue;
-            }
-            if let Some(edge) = graph.walk_edge(map, (here.x, here.y), &flood, &terrain, target) {
-                relax(&here, edge, g, &mut dist, &mut open);
+        for to in goal.tiles() {
+            if to.map == here.map
+                && !graph.places.contains_key(&to.key())
+                && to.key() != key
+                && !done.contains(&to.key())
+            {
+                if let Some(edge) = graph.walk_edge(map, (here.x, here.y), &flood, &terrain, to) {
+                    relax(&here, &edge, g, &mut dist, &mut open);
+                }
             }
         }
         for edge in graph.edges_from(&here.map, here.x, here.y) {
             if !done.contains(&edge.to.key()) {
-                relax(&here, edge.clone(), g, &mut dist, &mut open);
-            }
-        }
-        if graph.maps[&here.map].outdoor {
-            for spot in &graph.fly_spots {
-                if spot.key() == key || done.contains(&spot.key()) {
-                    continue;
-                }
-                let edge = Edge {
-                    to: spot.clone(),
-                    kind: EdgeKind::Fly,
-                    cost_s: graph.params.fly_s,
-                    requires: fly_requirement(&spot.map),
-                };
                 relax(&here, edge, g, &mut dist, &mut open);
             }
         }
+        if graph.maps[&here.map].outdoor {
+            // The Fly edges this search may take, worked out once: the same
+            // from every outdoor place.
+            let flights = fly_edges.get_or_insert_with(|| {
+                graph
+                    .fly_spots
+                    .iter()
+                    .filter(|spot| {
+                        // Flying somewhere never visited (or unlikely to
+                        // have been) means going there first: never the
+                        // cheaper way, so not even a blocked one. A visit
+                        // the belief can't tell stays a blocked
+                        // alternative under the pessimistic policy: a look
+                        // at the fly map settles it.
+                        let visited = Predicate::Visited {
+                            map: spot.map.clone(),
+                        };
+                        let never = match belief.eval(&visited) {
+                            Truth::False => true,
+                            Truth::Unknown => match policy {
+                                UnknownPolicy::Optimistic { penalty_of } => {
+                                    !penalty_of(&visited).is_finite()
+                                }
+                                UnknownPolicy::Pessimistic => false,
+                            },
+                            Truth::True => false,
+                        };
+                        let requires = fly_requirement(&spot.map);
+                        !never && pass.allows(&unmet_of(&check(belief, &requires), policy))
+                    })
+                    .map(|spot| Edge {
+                        to: spot.clone(),
+                        kind: EdgeKind::Fly,
+                        cost_s: graph.params.fly_s,
+                        requires: fly_requirement(&spot.map),
+                    })
+                    .collect()
+            });
+            for edge in flights.iter() {
+                if edge.to.key() == key || done.contains(&edge.to.key()) {
+                    continue;
+                }
+                relax(&here, edge, g, &mut dist, &mut open);
+            }
+        }
+    }
+    if let Some(out) = settled {
+        out.extend(done.iter().cloned());
     }
     let reached = reached?;
     let cost_s = *dist.get(&reached)?;
@@ -1178,8 +1849,14 @@ fn coalesce_walks(legs: Vec<Leg>) -> Vec<Leg> {
 /// The predicates an edge lacks under `policy`.
 fn unmet_of(c: &crate::predicate::Check, policy: UnknownPolicy) -> Vec<Predicate> {
     let mut unmet = c.failed.clone();
-    if matches!(policy, UnknownPolicy::Pessimistic) {
-        unmet.extend(c.unknown.iter().cloned());
+    match policy {
+        UnknownPolicy::Pessimistic => unmet.extend(c.unknown.iter().cloned()),
+        UnknownPolicy::Optimistic { penalty_of } => unmet.extend(
+            c.unknown
+                .iter()
+                .filter(|p| !penalty_of(p).is_finite())
+                .cloned(),
+        ),
     }
     unmet.sort();
     unmet.dedup();
