@@ -496,7 +496,8 @@ impl ToolStep for Conversation {
                 {
                     self.gained_item = true;
                 }
-                ctx.events.extend(tracked);
+                ctx.events
+                    .extend(tracked.into_iter().filter(crate::track::tool_emits));
                 if self.recognised.is_empty()
                     && self.pages.len() >= UNKNOWN_AFTER_PAGES
                     && !self.unknown_logged

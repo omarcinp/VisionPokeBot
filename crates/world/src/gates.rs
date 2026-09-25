@@ -400,7 +400,7 @@ fn sets_var(path: &ScriptPath, var: &str) -> Option<i64> {
 
 /// The paths of the scripts a map runs when it is entered (`on_load`,
 /// `on_transition`, `on_resume`), per script.
-fn entry_scripts<'e>(events: &'e Events, map: &str) -> Vec<&'e [ScriptPath]> {
+pub(crate) fn entry_scripts<'e>(events: &'e Events, map: &str) -> Vec<&'e [ScriptPath]> {
     let Some(ms) = events.map_scripts.get(map) else {
         return Vec::new();
     };

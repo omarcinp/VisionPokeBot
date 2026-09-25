@@ -14,6 +14,8 @@ const LOG_CAPACITY: usize = 2000;
 pub enum LogKind {
     Action,
     Event,
+    /// A value in the state changed (see `pokebot_state::StateChange`).
+    Change,
     /// Planner/goal decisions and progress.
     Goal,
     Info,

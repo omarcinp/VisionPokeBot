@@ -163,7 +163,8 @@ impl ToolStep for BattleStep {
             let tracked = self
                 .tracker
                 .observe_page(&d.lines, &data, self.memory.last_slot);
-            ctx.events.extend(tracked);
+            ctx.events
+                .extend(tracked.into_iter().filter(crate::track::tool_emits));
             if d.ready_for_a() && o.menu.is_none() && !self.tracker.applied(&d.lines) {
                 let since = *self.unread_since.get_or_insert(o.frame_id);
                 if o.frame_id.saturating_sub(since) < PAGE_READ_WAIT_FRAMES {
@@ -268,9 +269,9 @@ impl ToolStep for BattleStep {
         }
         if self.in_battle && o.player.is_some() {
             self.in_battle = false;
+            // Where a catch went (party or PC) is the runtime's sensor's to
+            // tell, from the same pages.
             ctx.events.push(GameEvent::BattleEnded);
-            ctx.events
-                .extend(self.memory.catch.after_battle(&data, ctx.state));
             return Decision::Done(match self.caught() {
                 Some(species) => format!("battle over: caught {species}"),
                 None => "battle over".into(),

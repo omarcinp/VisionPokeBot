@@ -3,7 +3,9 @@
 use super::share;
 use crate::text::Font;
 use pokebot_core::RgbImage;
-use pokebot_state::{PartyMenuObservation, Region, Status, SummaryObservation, SummaryPage};
+use pokebot_state::{
+    PartyMenuObservation, PartyRowObservation, Region, Status, SummaryObservation, SummaryPage,
+};
 
 fn read(image: &RgbImage, font: &Font, x: u32, y: u32, w: u32, h: u32) -> String {
     font.read(image, Region::new(x, y, w, h), &[])
@@ -61,20 +63,8 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
             moves.push((name, pp));
         }
     }
-    // The status sprite is 32x8, centred at (16,38). Its background
-    // palette distinguishes ailments without trying to read tiny letters.
-    let status = [
-        ([197, 98, 197], Status::Poisoned),
-        ([189, 189, 24], Status::Paralyzed),
-        ([164, 164, 139], Status::Asleep),
-        ([139, 180, 230], Status::Frozen),
-        ([230, 115, 82], Status::Burned),
-        ([180, 32, 32], Status::Fainted),
-    ]
-    .into_iter()
-    .find_map(|(color, status)| {
-        (share(image, Region::new(0, 34, 32, 8), color, 1) > 300).then_some(status)
-    });
+    // The status sprite is 32x8, centred at (16,38).
+    let status = ailment_icon(image, Region::new(0, 34, 32, 8), [255, 251, 255]);
     // Healthy summary background is pale lavender with horizontal lines.
     let status = status.or_else(|| {
         (share(image, Region::new(0, 34, 32, 8), [239, 227, 247], 1) > 650)
@@ -90,6 +80,24 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
         status,
         moves,
     })
+}
+
+/// The ailment icon (`status_icons`, 32×8) drawn in `region`: its
+/// background colour tells the ailment without reading its tiny letters.
+/// Colours that match `background` (the surface the icon sits on) are
+/// not evidence of an icon.
+fn ailment_icon(image: &RgbImage, region: Region, background: crate::color::Rgb) -> Option<Status> {
+    [
+        ([197, 98, 197], Status::Poisoned),
+        ([189, 189, 24], Status::Paralyzed),
+        ([164, 164, 139], Status::Asleep),
+        ([139, 180, 230], Status::Frozen),
+        ([230, 115, 82], Status::Burned),
+        ([180, 32, 32], Status::Fainted),
+    ]
+    .into_iter()
+    .filter(|(color, _)| !crate::color::near(*color, background, crate::color::TOLERANCE))
+    .find_map(|(color, status)| (share(image, region, color, 1) > 300).then_some(status))
 }
 
 pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
@@ -182,7 +190,100 @@ pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
         options,
         option_cursor,
         able,
+        members: Vec::new(),
     })
+}
+
+/// Where one panel prints its facts (`sPartyBoxInfoRects` in the windows
+/// of `sSinglePartyMenuWindowTemplate`, in FONT_SMALL glyph cells): the
+/// lead's window is at (8, 24), the others' at (96, 8 + 24(i − 1)).
+/// Measured on `emu-party-cant-use.png`: the white ink sits in cell rows
+/// 4..=10 with its shadow on row 11.
+struct Panel {
+    name: Region,
+    level: Region,
+    hp: Region,
+    /// Rows at the top of the level cell that belong to the name above.
+    level_overlap: Region,
+    /// Rows at the top of the HP cell that belong to the HP bar.
+    hp_overlap: Region,
+    /// The ailment icon sprite (32×8, centred on `sPartyMenuSpriteCoords`'
+    /// status coordinates), drawn instead of the level.
+    icon: Region,
+}
+
+fn panel(slot: u8) -> Panel {
+    if slot == 0 {
+        return Panel {
+            name: Region::new(32, 35, 56, 12),
+            level: Region::new(40, 44, 32, 12),
+            hp: Region::new(38, 60, 50, 12),
+            level_overlap: Region::new(40, 44, 32, 3),
+            hp_overlap: Region::new(38, 60, 50, 4),
+            icon: Region::new(40, 48, 32, 8),
+        };
+    }
+    let y = 8 + 24 * (u32::from(slot) - 1);
+    Panel {
+        name: Region::new(118, y + 3, 50, 12),
+        level: Region::new(128, y + 12, 32, 12),
+        hp: Region::new(196, y + 12, 42, 12),
+        level_overlap: Region::new(128, y + 12, 32, 3),
+        hp_overlap: Region::new(196, y + 12, 42, 3),
+        icon: Region::new(128, y + 15, 32, 8),
+    }
+}
+
+/// Every occupied panel's nickname, level, HP and ailment, index = slot.
+/// Fields under the open action window read as `None`; so do fields that
+/// don't read cleanly (the sensor validates what's left).
+pub fn members(
+    image: &RgbImage,
+    small: &Font,
+    menu: &PartyMenuObservation,
+) -> Vec<PartyRowObservation> {
+    let covered = (!menu.options.is_empty())
+        .then(|| super::menu::detect(image))
+        .flatten()
+        .filter(|m| m.window.x >= 140)
+        // The window's frame reaches a few pixels beyond its white interior.
+        .map(|m| m.window.inflate(6));
+    let visible = |r: Region| covered.is_none_or(|c| !c.intersects(&r));
+    let text = |r: Region, exclude: &[Region]| {
+        visible(r).then(|| small.read(image, r, exclude).join(" ").trim().to_owned())
+    };
+    // The small font's 0 and O are the same bitmap (ties read as the
+    // letter): numbers read with O for 0.
+    let number = |r: Region, exclude: &[Region]| text(r, exclude).map(|t| t.replace('O', "0"));
+    (0..menu.count)
+        .map(|slot| {
+            let p = panel(slot);
+            let nickname = text(p.name, &[]).filter(|n| !n.is_empty());
+            let level = number(p.level, &[p.level_overlap])
+                .and_then(|t| t.strip_prefix("Lv").and_then(|n| n.trim().parse().ok()))
+                .filter(|n| (1..=100).contains(n));
+            let hp = number(p.hp, &[p.hp_overlap]).and_then(|t| pair(&t));
+            // The level is printed only without an ailment; without it,
+            // the icon's colour, unless that is the panel's own (the FRZ
+            // icon's blue is within tolerance of the panels' blue).
+            let background = image.pixel(p.icon.x - 4, p.icon.y + 3);
+            let icon = (level.is_none() && visible(p.icon))
+                .then(|| ailment_icon(image, p.icon, background))
+                .flatten();
+            let status = match (hp, icon) {
+                (Some((0, _)), _) => Some(Status::Fainted),
+                (_, Some(status)) => Some(status),
+                _ if level.is_some() => Some(Status::Healthy),
+                _ => None,
+            };
+            PartyRowObservation {
+                nickname,
+                level,
+                hp,
+                status,
+            }
+        })
+        .collect()
 }
 
 /// The action window opened on a member (right half, above the prompt):
@@ -357,6 +458,75 @@ mod tests {
             if let Ok(image) = load(name) {
                 assert!(menu(&image, &font).is_none(), "{name}");
             }
+        }
+    }
+
+    /// The panels' printed facts (emulator, Route 3 save): five members
+    /// with the prompt showing, the action window hiding the lower
+    /// panels, and teaching (ABLE!/NOT ABLE! where the HP was).
+    #[test]
+    fn reads_every_members_panel() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(font), Ok(small)) = (
+            Font::load(root.join("data/world/font_normal.json")),
+            Font::load(root.join("data/world/font_small.json")),
+        ) else {
+            return;
+        };
+        let load = |name: &str| pokebot_video::png::load(root.join("captures/fixtures").join(name));
+        let rows = |name: &str| {
+            let image = load(name).ok()?;
+            let m = menu(&image, &font).expect(name);
+            Some(members(&image, &small, &m))
+        };
+        let row = |name: &str, level, hp| PartyRowObservation {
+            nickname: Some(String::from(name)),
+            level: Some(level),
+            hp,
+            status: Some(Status::Healthy),
+        };
+        if let Some(r) = rows("emu-party-cant-use.png") {
+            assert_eq!(
+                r,
+                vec![
+                    row("IVYSAUR", 26, Some((64, 75))),
+                    row("GEODUDE", 8, Some((26, 26))),
+                    row("ZUBAT", 8, Some((26, 26))),
+                    row("PARAS", 8, Some((25, 25))),
+                    row("CLEFAIRY", 8, Some((30, 30))),
+                ]
+            );
+        }
+        if let Some(r) = rows("emu-party-menu.png") {
+            assert_eq!(r, vec![row("IVYSAUR", 18, Some((54, 54)))]);
+        }
+        if let Some(r) = rows("emu-party-field-moves.png") {
+            assert_eq!(r.len(), 5);
+            assert_eq!(r[0], row("IVYSAUR", 26, Some((64, 75))));
+            assert_eq!(r[1], row("GEODUDE", 8, Some((26, 26))));
+            // Under the action window: nothing is read there.
+            assert_eq!(r[3].hp, None);
+            assert_eq!(r[4].hp, None);
+        }
+        // Switch (JPEG-softened), a one-member party: the prompt, and the
+        // action window (which covers no part of the lead's panel).
+        for (name, level, hp) in [
+            ("switch-party-choose-lv14.png", 14, (35, 37)),
+            ("switch-party-actions-lv14.png", 14, (35, 37)),
+            ("switch-party-choose-lv15.png", 15, (39, 39)),
+        ] {
+            if let Some(r) = rows(name) {
+                assert_eq!(r, vec![row("BULBASAUR", level, Some(hp))], "{name}");
+            }
+        }
+        // 60/ 60: the zeros read as the letter O in the small font.
+        if let Some(r) = rows("switch-party-choose-ivysaur-60.png") {
+            assert_eq!(r, vec![row("IVYSAUR", 22, Some((60, 60)))]);
+        }
+        if let Some(r) = rows("emu-teach-which.png") {
+            assert_eq!(r.len(), 5);
+            assert!(r.iter().all(|m| m.hp.is_none()), "{r:?}");
+            assert_eq!(r[3], row("PARAS", 8, None));
         }
     }
 }

@@ -1,3 +1,4 @@
+mod audit;
 mod devices;
 mod fleet;
 mod goal;
@@ -217,10 +218,17 @@ enum Command {
         /// Restrict localization to this map
         #[arg(long)]
         map: Option<String>,
+        /// With --map: track from this tile as "x,y" (the search a pose
+        /// hint makes: 3 tiles around it, including views mid-step)
+        #[arg(long, requires = "map")]
+        near: Option<String>,
         /// Read text with this font (see tools/world/build.sh); skipped if missing
         #[arg(long, default_value = "data/world/font_normal.json")]
         font: PathBuf,
     },
+    /// Replay recorded sessions through perception and report what it
+    /// misses: unrecognised screens grouped by layout, partial readings.
+    Audit(audit::AuditArgs),
     /// Verify and summarize a recorded session without any device.
     Replay {
         session: PathBuf,
@@ -367,8 +375,10 @@ fn main() -> Result<()> {
             out,
             world,
             map,
+            near,
             font,
-        } => inspect(images, viewport, out, world, map, font),
+        } => inspect(images, viewport, out, world, map, near, font),
+        Command::Audit(args) => audit::run(args),
         Command::Replay {
             session,
             from_frame,
@@ -763,7 +773,8 @@ fn story(
     let devices = devices::open(args)?;
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
-    let mut runtime = Runtime::with_perception(devices, perception);
+    let mut runtime = Runtime::with_perception(devices, perception)
+        .with_sensor(pokebot_sense::Sensor::new(Arc::clone(&data)));
     let (telemetry, _) = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
     let syncer = args.syncer()?;
@@ -1177,11 +1188,18 @@ fn inspect(
     out: Option<PathBuf>,
     world: Option<PathBuf>,
     map: Option<String>,
+    near: Option<String>,
     font: PathBuf,
 ) -> Result<()> {
     if out.is_some() && paths.len() > 1 {
         bail!("--out needs a single image");
     }
+    let near = near
+        .map(|spec| -> Result<(i32, i32)> {
+            let (x, y) = spec.split_once(',').context("--near takes x,y")?;
+            Ok((x.trim().parse()?, y.trim().parse()?))
+        })
+        .transpose()?;
     let world = world.map(pokebot_world::World::load).transpose()?;
     let small_font_path = font.with_file_name("font_small.json");
     let font = font
@@ -1246,23 +1264,51 @@ fn inspect(
         if let Some(world) = &world {
             let started = std::time::Instant::now();
             let localizer = pokebot_world::Localizer::new(world);
-            let exclude = [pokebot_world::localize::PLAYER_SPRITE];
+            let mut exclude = vec![pokebot_world::localize::PLAYER_SPRITE];
+            exclude.extend(
+                pokebot_vision::detect::map_popup::detect(normalized.image()).map(|p| p.covers),
+            );
             let found = match &map {
                 Some(name) => {
                     let data = world
                         .map(name)
                         .with_context(|| format!("unknown map {name}"))?;
-                    localizer.locate_in(normalized.image(), data, None, 0, &exclude)
+                    localizer.locate_in(normalized.image(), data, near, 3, &exclude)
                 }
                 None => localizer.locate_anywhere(normalized.image(), &exclude),
             };
             match found {
-                Some(p) => println!(
-                    "  player at {} (score {}) in {:?}",
-                    p.pose,
-                    p.score,
-                    started.elapsed()
-                ),
+                Some(p) => {
+                    println!(
+                        "  player at {} (score {}) in {:?}",
+                        p.pose,
+                        p.score,
+                        started.elapsed()
+                    );
+                    if let Some(map) = world.map(&p.pose.map) {
+                        let scan = pokebot_world::sprites::SpriteDetector::default().scan(
+                            0,
+                            normalized.image(),
+                            world,
+                            map,
+                            &p.pose,
+                            &[],
+                        );
+                        for s in &scan.sprites {
+                            let id = s.local_id.map_or("?".into(), |id| format!("#{id}"));
+                            let facing = s.facing.map(|f| format!(" facing {f:?}"));
+                            println!(
+                                "  sprite at ({}, {}) {id}{}",
+                                s.x,
+                                s.y,
+                                facing.unwrap_or_default()
+                            );
+                        }
+                        if !scan.absent.is_empty() {
+                            println!("  objects absent: {:?}", scan.absent);
+                        }
+                    }
+                }
                 None => println!("  player not located ({:?})", started.elapsed()),
             }
         }
@@ -1305,7 +1351,7 @@ fn sprite_palettes(data: &pokebot_gamedata::GameData) -> pokebot_vision::shiny::
 }
 
 fn describe_observation(o: &Observation) -> String {
-    let mut parts = vec![format!("{:?}", o.screen.value)];
+    let mut parts = vec![format!("{:?}/{}", o.screen.value, o.screen.detector)];
     if let Some(d) = &o.dialogue {
         parts.push(format!(
             "{:?}{}",
@@ -1371,6 +1417,33 @@ fn describe_observation(o: &Observation) -> String {
     }
     if let Some(n) = &o.naming {
         parts.push(format!("naming {:?}, {} typed", n.focus, n.typed));
+    }
+    if let Some(m) = &o.party_menu {
+        parts.push(format!(
+            "party {} ▶{:?} prompt {:?} options {:?}",
+            m.count, m.selected, m.prompt, m.options
+        ));
+        for (slot, r) in m.members.iter().enumerate() {
+            parts.push(format!(
+                "#{slot} {:?} Lv{:?} HP {:?} {:?}",
+                r.nickname, r.level, r.hp, r.status
+            ));
+        }
+    }
+    if let Some(s) = &o.summary {
+        parts.push(format!(
+            "summary {:?} {:?} Lv{:?} HP {:?} {:?}",
+            s.page, s.nickname, s.level, s.hp, s.status
+        ));
+    }
+    if let Some(c) = &o.trainer_card {
+        parts.push(format!(
+            "card badges {:?} dex {:?} money {:?}",
+            c.badges, c.pokedex_count, c.money
+        ));
+    }
+    if let Some(name) = &o.map_popup {
+        parts.push(format!("map popup {name:?}"));
     }
     parts.join(" | ")
 }

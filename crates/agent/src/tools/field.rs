@@ -1178,6 +1178,7 @@ mod tests {
             options: options.iter().map(|s| (*s).to_owned()).collect(),
             option_cursor: cursor,
             able: Vec::new(),
+            members: Vec::new(),
         }
     }
 

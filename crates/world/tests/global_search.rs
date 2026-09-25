@@ -52,3 +52,37 @@ fn the_parallel_search_matches_the_sequential_one() {
         assert_eq!(parallel, sequential, "{fixture}");
     }
 }
+
+/// Switch: standing in a Pokémon Center, every Center matches alike. The
+/// plain global search still names one (as before); the unambiguous one,
+/// used past a stale hint, doesn't guess.
+#[test]
+fn lookalike_maps_are_no_unambiguous_answer() {
+    let Some(world) = world() else {
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Ok(frame) =
+        pokebot_video::png::load(root.join("captures/fixtures/switch-plan-budget-center.png"))
+    else {
+        return;
+    };
+    let localizer = Localizer::new(&world);
+    let any = localizer
+        .locate_anywhere(&frame, &[PLAYER_SPRITE])
+        .expect("some Center");
+    assert!(any.pose.map.ends_with("PokemonCenter_1F"), "{}", any.pose);
+    assert_eq!(
+        localizer.locate_anywhere_unambiguous(&frame, &[PLAYER_SPRITE]),
+        None
+    );
+    // A map of its own is found either way.
+    let Ok(gym) = pokebot_video::png::load(root.join("captures/fixtures/switch-pewter-gym.png"))
+    else {
+        return;
+    };
+    let found = localizer
+        .locate_anywhere_unambiguous(&gym, &[PLAYER_SPRITE])
+        .expect("the gym");
+    assert_eq!(found.pose.map, "PewterCity_Gym");
+}

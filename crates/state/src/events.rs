@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BoxMon, Direction, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
-    ScreenState, Status,
+    ScreenState, Status, ViewState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +150,16 @@ pub enum GameEvent {
         pocket: Pocket,
         items: ItemList,
     },
+    /// Rows of a pocket seen without seeing all of it (a scrolled list):
+    /// their counts are observed, the rest of the pocket is unchanged.
+    PocketRowsObserved {
+        pocket: Pocket,
+        items: ItemList,
+    },
+    /// How many Pokémon the party menu lists.
+    PartySizeObserved {
+        size: u8,
+    },
     MoneyObserved {
         amount: u32,
     },
@@ -231,13 +241,14 @@ pub enum GameEvent {
         x: i32,
         y: i32,
     },
-    /// An NPC was seen at a tile of `map`.
+    /// An NPC was seen at a tile of `map` (facing which way, when the
+    /// sprite showed it).
     NpcSeen {
         map: String,
         local_id: u32,
         x: i32,
         y: i32,
-        facing: Direction,
+        facing: Option<Direction>,
     },
     /// An NPC's scripted tile was looked at and it was not there.
     NpcAbsent {
@@ -275,6 +286,10 @@ pub enum GameEvent {
     /// puts the player at the respawn spot (`Healed` and `PlayerLocated`
     /// follow from the agent).
     WhitedOut,
+    /// What the screen shows changed (see [`ViewState`]).
+    ViewObserved {
+        view: Box<ViewState>,
+    },
 }
 
 /// An event and the frame it was derived at.

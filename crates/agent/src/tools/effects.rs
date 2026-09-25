@@ -143,7 +143,9 @@ pub fn translate(
                 value,
             }])
         }
-        Effect::Give { give, count, .. } => item_event(data, give, *count, "script gave it"),
+        // The game prints "RED received/obtained/found X!" for every item
+        // a script gives, and the runtime's sensor counts it from the text.
+        Effect::Give { give, .. } => skip(&format!("give {give} (the sensor reads it)")),
         Effect::Take { take, count } => item_event(data, take, -*count, "script took it"),
         Effect::Warp { warp, .. } => match map_name(warp) {
             Some(map) => Ok(vec![GameEvent::MapVisited { map }]),

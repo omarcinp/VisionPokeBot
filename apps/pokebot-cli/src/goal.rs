@@ -367,7 +367,8 @@ fn execute(
     let devices = devices::open(&args.devices)?;
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
-    let mut runtime = Runtime::with_perception(devices, perception);
+    let mut runtime = Runtime::with_perception(devices, perception)
+        .with_sensor(pokebot_sense::Sensor::new(Arc::clone(&pd.data)));
     let (telemetry, session_dir) =
         attach_outputs(&mut runtime, &args.output, &video_name, &controller_name)?;
     runtime.echo_events(true);

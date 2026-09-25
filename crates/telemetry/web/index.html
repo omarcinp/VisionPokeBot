@@ -221,6 +221,7 @@
   td.k { white-space: nowrap; font-weight: 600; }
   td.s { overflow-wrap: anywhere; }
   tr.action td.k { color: var(--action); } tr.event td.k { color: var(--event); }
+  tr.change td.k { color: var(--event); opacity: 0.75; }
   tr.goal td.k, tr.goal td.s { color: var(--goal); }
   tr.info td.k { color: var(--info); } tr.error td.k, tr.error td.s { color: var(--error); }
   tr[data-detail] { cursor: pointer; } tr.open + tr.detail { display: table-row; }
@@ -310,6 +311,7 @@
       <label><input type="checkbox" data-kind="goal" checked> goal</label>
       <label><input type="checkbox" data-kind="action" checked> actions</label>
       <label><input type="checkbox" data-kind="event" checked> events</label>
+      <label><input type="checkbox" data-kind="change" checked> changes</label>
       <label><input type="checkbox" data-kind="info" checked> info</label>
       <label><input type="checkbox" data-kind="error" checked> errors</label>
       <label><input type="checkbox" id="follow" checked> follow</label>

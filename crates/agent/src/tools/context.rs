@@ -6,11 +6,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use pokebot_core::NormalizedFrame;
 use pokebot_gamedata::GameData;
-use pokebot_runtime::Runtime;
+use pokebot_runtime::{Notice, Origin, Runtime};
 use pokebot_state::{GameEvent, GameState, Observation, PlayerPose, ScreenState};
 use pokebot_world::World;
 
@@ -162,6 +163,23 @@ pub struct ToolContext<'a> {
     /// The world's story passages ([`pokebot_world::gates::derive`]),
     /// derived once.
     gates: std::cell::OnceCell<Arc<pokebot_world::gates::Gates>>,
+    /// Facts the runtime's sensor read, not yet handed to the scheduler.
+    perceived: Receiver<Notice>,
+}
+
+/// Sensor facts a tool learns from (not the screen classification, the
+/// pose or the view, which the tools read from observations).
+fn sensed(event: &GameEvent) -> bool {
+    !matches!(
+        event,
+        GameEvent::ScreenChanged { .. }
+            | GameEvent::PlayerLocated { .. }
+            | GameEvent::PlayerMoved { .. }
+            | GameEvent::MapChanged { .. }
+            | GameEvent::FramesDroppedByCard { .. }
+            | GameEvent::FramesDroppedByProcessing { .. }
+            | GameEvent::ViewObserved { .. }
+    )
 }
 
 impl<'a> ToolContext<'a> {
@@ -173,7 +191,11 @@ impl<'a> ToolContext<'a> {
         stop: &'a AtomicBool,
     ) -> Self {
         let syncer = executor.syncer.clone();
+        let perceived = runtime.subscribe(|n| {
+            matches!(n, Notice::Event { record, origin: Origin::Perception } if sensed(&record.event))
+        });
         Self {
+            perceived,
             runtime,
             executor,
             world,
@@ -266,6 +288,12 @@ impl<'a> ToolContext<'a> {
     /// outcome.
     pub fn emit(&mut self, event: GameEvent) -> Result<(), ToolError> {
         self.runtime.emit(event.clone())?;
+        self.learn(event);
+        Ok(())
+    }
+
+    /// An event into the scheduler's needs and the running tool's outcome.
+    fn learn(&mut self, event: GameEvent) {
         if self
             .scheduler
             .event(&event, self.runtime.state(), &self.data)
@@ -280,7 +308,17 @@ impl<'a> ToolContext<'a> {
             self.next_need_check = 0;
         }
         self.learned.push(event);
-        Ok(())
+    }
+
+    /// Hands what the sensor read since the last call to the scheduler and
+    /// the running tool (it reads every frame, including those the
+    /// executor observes while an action is pending).
+    fn take_perceived(&mut self) {
+        while let Ok(notice) = self.perceived.try_recv() {
+            if let Notice::Event { record, .. } = notice {
+                self.learn(record.event);
+            }
+        }
     }
 
     pub fn info(&self, message: impl Into<String>) {
@@ -307,6 +345,7 @@ impl<'a> ToolContext<'a> {
     }
 
     fn note_frame(&mut self, o: &Observation) -> Result<(), ToolError> {
+        self.take_perceived();
         let busy = o.dialogue.is_some()
             || o.menu.is_some()
             || o.battle.is_some()

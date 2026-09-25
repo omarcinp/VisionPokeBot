@@ -12,6 +12,7 @@ pub mod path;
 pub mod places;
 pub mod predicate;
 pub mod route;
+pub mod sprites;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -79,6 +79,9 @@ pub struct GameState {
     /// Flags, vars, visited maps, respawn point and NPCs.
     #[serde(default)]
     pub world: crate::WorldBelief,
+    /// What the screen shows now (not saved with the game).
+    #[serde(default)]
+    pub view: crate::ViewState,
 }
 
 impl GameState {

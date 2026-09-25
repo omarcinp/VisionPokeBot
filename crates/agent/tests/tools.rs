@@ -551,20 +551,16 @@ fn script_effects_become_tracked_events() {
         }),
         Err(Skipped(_))
     ));
-    assert_eq!(
+    assert!(matches!(
         t(&Effect::Give {
             give: "ITEM_POKE_BALL".into(),
             count: 5,
             text: None,
             find: false
         }),
-        Ok(vec![GameEvent::ItemsChanged {
-            pocket: Pocket::PokeBalls,
-            item: "ITEM_POKE_BALL".into(),
-            delta: 5,
-            reason: "script gave it".into()
-        }])
-    );
+        // The sensor counts a gift from the text the game prints.
+        Err(Skipped(_))
+    ));
     assert_eq!(
         t(&Effect::Take {
             take: "ITEM_POKE_BALL".into(),
@@ -614,7 +610,8 @@ fn script_effects_become_tracked_events() {
             );
         }
     }
-    // A whole path: Brock's TM path records the run, the badge and the TM.
+    // A whole path: Brock's TM path records the run and the badge; the TM
+    // is the sensor's to count from "RED received TM39 from BROCK.".
     let (events, log) = path_events(
         d.world.events().unwrap(),
         "PewterCity_Gym_EventScript_Brock",
@@ -635,12 +632,12 @@ fn script_effects_become_tracked_events() {
         flag: "FLAG_BADGE01_GET".into(),
         value: true
     }));
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::ItemsChanged { item, delta: 1, .. } if item == "ITEM_TM39"
-    )));
-    // The battle and the text lines are skipped, and said so.
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::ItemsChanged { .. })));
+    // The battle, the gift and the text lines are skipped, and said so.
     assert!(log.iter().any(|l| l.contains("battle")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("ITEM_TM39")), "{log:?}");
 }
 
 /// `Go` one tile and `Heal` at the nearest Center on the virtual console

@@ -60,7 +60,18 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
     let (kind, region) = if is_message_box(image) {
         (DialogueKind::MessageBox, MESSAGE_TEXT)
     } else if super::battle::is_battle_text_box(image) {
-        (DialogueKind::BattleText, BATTLE_TEXT)
+        // The level-up stats window covers the box's right side; its white
+        // and grey ink would outvote the message's ("BULBASAUR grew to /
+        // LV. 15!" read as nothing on switch-goal-15 frame 87930).
+        let region = if super::battle::is_level_up_panel(image) {
+            Region {
+                width: super::battle::LEVEL_UP_PANEL_LEFT - BATTLE_TEXT.x,
+                ..BATTLE_TEXT
+            }
+        } else {
+            BATTLE_TEXT
+        };
+        (DialogueKind::BattleText, region)
     } else if is_info_page(image) {
         (DialogueKind::InfoPage, INFO_BODY)
     } else {
