@@ -13,6 +13,12 @@ pub struct CapturedFrame {
     /// Monotonic per-source counter. Gaps mean the device produced frames the
     /// consumer did not read (e.g. a real-time source outpacing the bot).
     pub frame_id: u64,
+    /// How many frames the source had handed out before this one. A
+    /// `frame_id` gap with no matching `delivered` gap is frames the device
+    /// never delivered (a capture card sending empty buffers); a `delivered`
+    /// gap is frames the consumer was too slow to read. Sources that deliver
+    /// every frame id use `frame_id`.
+    pub delivered: u64,
     pub captured_at: Instant,
     pub image: RgbImage,
 }

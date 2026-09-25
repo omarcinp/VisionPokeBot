@@ -66,6 +66,7 @@ impl VideoSource for ReplayVideoSource {
         self.next += 1;
         Ok(CapturedFrame {
             frame_id: record.frame_id,
+            delivered: record.delivered.unwrap_or(record.frame_id),
             captured_at: self.epoch + Duration::from_micros(record.elapsed_us),
             image,
         })
@@ -95,6 +96,7 @@ mod tests {
         let image = RgbImage::filled(240, 160, [shade, 0, 0]);
         let captured = CapturedFrame {
             frame_id: id,
+            delivered: id,
             captured_at: Instant::now(),
             image: image.clone(),
         };

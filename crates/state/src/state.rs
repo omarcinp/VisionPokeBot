@@ -60,7 +60,12 @@ pub struct GameState {
     pub screen: Knowledge<ScreenState>,
     pub synchronization: SynchronizationState,
     pub input: InputState,
-    pub dropped_frames: u64,
+    /// Frames the video device did not deliver, during windows reported as
+    /// slow (see `FrameDropPolicy`); routine dropping is not counted.
+    pub frames_dropped_by_card: u64,
+    /// Delivered frames the bot did not read, during windows reported as
+    /// slow.
+    pub frames_dropped_by_processing: u64,
     pub progression: Progression,
     pub player: PlayerState,
     pub in_battle: bool,

@@ -17,7 +17,8 @@ use pokebot_core::{
 };
 use pokebot_replay::SessionRecorder;
 use pokebot_state::{
-    DefaultReducer, EventExtractor, EventRecord, GameEvent, GameState, Observation, StateReducer,
+    DefaultReducer, EventExtractor, EventRecord, FrameArrival, GameEvent, GameState, Observation,
+    StateReducer,
 };
 use pokebot_telemetry::{LogKind, Telemetry};
 use pokebot_video::Normalizer;
@@ -111,7 +112,9 @@ impl Runtime {
         self.outside_game = self.devices.normalizer.outside_viewport_lit(&captured);
         self.dark = Normalizer::dark(&captured);
         let observation = self.perception.observe(&frame);
-        let events = self.extractor.observe(&observation);
+        let events = self
+            .extractor
+            .observe(&observation, FrameArrival::from(&captured));
         self.apply(&events)?;
         if let Some(recorder) = &mut self.recorder {
             recorder.record_frame(&captured, &frame)?;
@@ -347,7 +350,26 @@ fn summarize(event: &GameEvent) -> String {
             command_id,
             command,
         } => format!("InputIssued #{command_id} {}", describe(command)),
-        GameEvent::FramesDropped { missing } => format!("FramesDropped {missing}"),
+        GameEvent::FramesDroppedByCard {
+            missing,
+            delivered,
+            window_ms,
+        } => format!(
+            "FramesDroppedByCard {missing} in {} ({}% of the frames, {} delivered)",
+            seconds(*window_ms),
+            percent(*missing, *delivered),
+            per_second(*delivered, *window_ms)
+        ),
+        GameEvent::FramesDroppedByProcessing {
+            missing,
+            seen,
+            window_ms,
+        } => format!(
+            "FramesDroppedByProcessing {missing} in {} ({}% of the delivered frames, {} processed)",
+            seconds(*window_ms),
+            percent(*missing, *seen),
+            per_second(*seen, *window_ms)
+        ),
         GameEvent::PartyMonDerived { slot, mon } => format!(
             "Party {slot}: {} Lv{} (derived)",
             mon.species.value.as_deref().unwrap_or("?"),
@@ -415,6 +437,19 @@ fn summarize(event: &GameEvent) -> String {
     }
 }
 
+fn seconds(ms: u64) -> String {
+    format!("{:.1} s", ms as f64 / 1000.0)
+}
+
+/// `missing` as a share of `missing + kept`.
+fn percent(missing: u64, kept: u64) -> u64 {
+    missing * 100 / (missing + kept).max(1)
+}
+
+fn per_second(frames: u64, ms: u64) -> String {
+    format!("{:.0} fps", frames as f64 * 1000.0 / ms.max(1) as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use pokebot_controller::NullController;
@@ -433,6 +468,7 @@ mod tests {
             self.1 += 1;
             Ok(CapturedFrame {
                 frame_id: self.1 - 1,
+                delivered: self.1 - 1,
                 captured_at: std::time::Instant::now(),
                 image,
             })

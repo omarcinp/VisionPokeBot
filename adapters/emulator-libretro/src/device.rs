@@ -332,6 +332,7 @@ fn step(core: &mut Core, shared: &Shared) -> Result<()> {
     let frame_id = state.latest.as_ref().map_or(0, |f| f.frame_id + 1);
     state.latest = Some(CapturedFrame {
         frame_id,
+        delivered: frame_id,
         captured_at: Instant::now(),
         image,
     });

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use pokebot_core::{CapturedFrame, Error, Result, VideoSource};
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
+use v4l::video::capture::Parameters;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
@@ -94,6 +95,13 @@ impl CaptureCardVideoSource {
             format.height = height;
             format =
                 Capture::set_format(&device, &format).map_err(|e| device_err("set format", e))?;
+            // A new size resets the frame rate to the driver's default; ask
+            // for the GBA's 60 fps (the driver picks the nearest it has).
+            Capture::set_params(&device, &Parameters::with_fps(60))
+                .map_err(|e| device_err("set frame rate", e))?;
+        }
+        if !config.controls.is_empty() {
+            set_controls(&device, &config.controls).map_err(|e| device_err("set controls", e))?;
         }
         if !config.controls.is_empty() {
             set_controls(&device, &config.controls).map_err(|e| device_err("set controls", e))?;
@@ -130,6 +138,7 @@ impl CaptureCardVideoSource {
                     let _device = device; // keep the fd open while streaming
                     let mut last_sequence: Option<u32> = None;
                     let mut frame_id = 0u64;
+                    let mut delivered = 0u64;
                     // Buffers queued before streaming started can hold stale
                     // frames (v4l2loopback keeps its last ones), which would
                     // show up as a huge sequence gap. Skip one full ring.
@@ -150,10 +159,14 @@ impl CaptureCardVideoSource {
                             continue;
                         }
                         let used = (meta.bytesused as usize).min(bytes.len());
+                        // Torn/corrupt buffers are skipped but keep their frame
+                        // id: they count as frames the card never delivered.
+                        // An MS2109 at 1080p sends every other frame as an
+                        // empty 4-byte buffer.
                         let image = match pixel_format.decode(&bytes[..used], width, height, stride)
                         {
                             Ok(image) => image,
-                            Err(_) => continue, // torn/corrupt buffer: wait for the next one
+                            Err(_) => continue,
                         };
                         // Advance by the driver's sequence gap; restarts count as +1.
                         frame_id += match last_sequence {
@@ -164,9 +177,11 @@ impl CaptureCardVideoSource {
                         last_sequence = Some(meta.sequence);
                         lock(&shared.latest).frame = Some(CapturedFrame {
                             frame_id,
+                            delivered,
                             captured_at: Instant::now(),
                             image,
                         });
+                        delivered += 1;
                         shared.ready.notify_all();
                     }
                 })

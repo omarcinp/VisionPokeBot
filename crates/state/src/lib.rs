@@ -14,7 +14,7 @@ mod reducer;
 mod screen;
 mod state;
 
-pub use events::{EventExtractor, EventRecord, GameEvent};
+pub use events::{EventExtractor, EventRecord, FrameArrival, FrameDropPolicy, GameEvent};
 pub use inventory::{Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, SavedKnowledge, BOXES};
 pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
