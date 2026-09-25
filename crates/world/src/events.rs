@@ -259,6 +259,19 @@ pub enum Effect {
     Coins {
         coins: Val,
     },
+    /// `setmetatile x, y, METATILE_*, impassable`: the tile becomes walkable
+    /// (`open`) or a wall until the map is loaded again.
+    Metatile {
+        metatile: (i32, i32),
+        open: bool,
+        #[serde(default)]
+        tile: Option<String>,
+    },
+    /// `applymovement LOCALID_PLAYER, ...`: the player is walked this net
+    /// number of tiles `(dx, dy)` (a trigger turning the player back).
+    MovePlayer {
+        move_player: (i32, i32),
+    },
     Other(serde_json::Map<String, serde_json::Value>),
 }
 
@@ -338,6 +351,15 @@ pub struct ObjectRef {
     pub script: Option<String>,
 }
 
+/// The state a new game starts in (`EventScript_ResetAllMapFlags`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Initial {
+    /// Flags set when a game starts (most `FLAG_HIDE_*` of people who
+    /// appear later in the story); every other flag starts clear.
+    #[serde(default)]
+    pub set: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Events {
     pub rom: String,
@@ -347,6 +369,8 @@ pub struct Events {
     pub map_scripts: BTreeMap<String, MapScripts>,
     pub triggers: Vec<TriggerEvent>,
     pub objects: Vec<ObjectRef>,
+    #[serde(default)]
+    pub initial: Initial,
 }
 
 impl Events {

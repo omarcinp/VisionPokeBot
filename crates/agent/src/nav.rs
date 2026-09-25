@@ -434,6 +434,7 @@ impl Navigator {
         let walk = Walk {
             obstacles: &obstacles,
             surf: self.surf,
+            opened: None,
         };
         let Some(path) = find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, heuristic)
         else {

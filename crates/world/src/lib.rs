@@ -5,6 +5,7 @@
 pub mod behavior;
 pub mod dialogue;
 pub mod events;
+pub mod gates;
 pub mod localize;
 pub mod obstacles;
 pub mod path;

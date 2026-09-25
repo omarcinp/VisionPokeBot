@@ -177,6 +177,8 @@ pub fn translate(
         Effect::RemoveObject { .. } => skip("remove_object"),
         Effect::Mart { .. } => skip("mart"),
         Effect::Coins { .. } => skip("coins"),
+        Effect::Metatile { .. } => skip("metatile"),
+        Effect::MovePlayer { .. } => skip("move_player"),
         Effect::Other(map) => {
             let keys: Vec<&str> = map.keys().map(String::as_str).collect();
             skip(&format!("unknown effect {}", keys.join(",")))

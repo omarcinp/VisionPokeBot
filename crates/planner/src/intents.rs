@@ -14,8 +14,12 @@ use pokebot_gamedata::mechanics::{ball_multiplier, catch_probability};
 use pokebot_gamedata::GameData;
 use pokebot_state::{PlayerPose, Pocket};
 use pokebot_world::events::{Condition, DexCount, Effect as ScriptEffect, ScriptPath, Val};
+use pokebot_world::gates::{is_local_flag, is_local_var};
 use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
-use pokebot_world::route::{route, route_to_map, Place, PlaceGraph, RouteResult, UnknownPolicy};
+use pokebot_world::route::{
+    open_route, open_route_to_map, route, route_to_map, Place, PlaceGraph, RouteResult,
+    UnknownPolicy,
+};
 use pokebot_world::World;
 use serde::{Deserialize, Serialize};
 
@@ -252,7 +256,7 @@ pub trait GoalBelief: BeliefView {
 
 /// A screen the bot can open to turn an `Unknown` fact into an `Observed`
 /// one (spec §4.3), with its measured cost.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeFact {
     /// Badges and money.
@@ -354,7 +358,7 @@ pub enum Effect {
 }
 
 /// Something a tool can carry out.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Intent {
     /// Reach a map (any tile of it).
@@ -500,6 +504,46 @@ impl PlanContext<'_> {
             self.belief,
             pose,
             map,
+            self.policy,
+        ))
+    }
+
+    /// [`PlanContext::route_to`] without the blocked alternatives.
+    pub fn open_route_to(&self, map: &str) -> Option<RouteResult> {
+        let pose = self.pose.as_ref()?;
+        Some(open_route_to_map(
+            self.world,
+            self.graph,
+            self.belief,
+            pose,
+            map,
+            self.policy,
+        ))
+    }
+
+    /// The open route to the cheapest of `tiles` of `map`, in one search.
+    pub fn open_route_to_tiles(&self, map: &str, tiles: &[(i32, i32)]) -> Option<RouteResult> {
+        let pose = self.pose.as_ref()?;
+        Some(pokebot_world::route::open_route_to_tiles(
+            self.world,
+            self.graph,
+            self.belief,
+            pose,
+            map,
+            tiles,
+            self.policy,
+        ))
+    }
+
+    /// [`PlanContext::route_to_tile`] without the blocked alternatives.
+    pub fn open_route_to_tile(&self, map: &str, x: i32, y: i32) -> Option<RouteResult> {
+        let pose = self.pose.as_ref()?;
+        Some(open_route(
+            self.world,
+            self.graph,
+            self.belief,
+            pose,
+            &Place::tile(map, x, y),
             self.policy,
         ))
     }
@@ -747,6 +791,13 @@ pub fn path_preconditions(path: &ScriptPath) -> Vec<GoalPredicate> {
     let mut seen: BTreeMap<String, GoalPredicate> = BTreeMap::new();
     let mut out = Vec::new();
     for c in &path.when {
+        // Script-local state (`FLAG_TEMP_*`, `VAR_TEMP_*`) is the script's
+        // own business, not something to plan for.
+        match c {
+            Condition::Flag { flag, .. } if is_local_flag(flag) => continue,
+            Condition::Var { var, .. } if is_local_var(var) => continue,
+            _ => {}
+        }
         let Some(p) = GoalPredicate::from_condition(c) else {
             continue;
         };

@@ -30,6 +30,8 @@ fn walkable_elevation(a: u8, b: u8) -> bool {
 pub struct Walk<'a> {
     pub obstacles: &'a Obstacles,
     pub surf: bool,
+    /// Tiles walkable despite their collision (a door a script opened).
+    pub opened: Option<&'a Obstacles>,
 }
 
 /// The tile reached by pressing `dir` from `from`, if the move is legal.
@@ -46,6 +48,7 @@ pub fn step(
         &Walk {
             obstacles,
             surf: false,
+            opened: None,
         },
     )
 }
@@ -69,7 +72,8 @@ pub fn step_with(map: &MapData, from: (i32, i32), dir: Direction, walk: &Walk) -
     // Water sits one elevation below the shore; surfing on and off it is
     // the one elevation change the game allows.
     let shore = walk.surf && (is_water(here.behavior) || is_water(target.behavior));
-    let blocked = target.collision != 0
+    let opened = walk.opened.is_some_and(|o| o.contains(&to));
+    let blocked = (target.collision != 0 && !opened)
         || target.behavior == COUNTER
         || (is_water(target.behavior) && !walk.surf)
         || walk.obstacles.contains(&to)
@@ -99,6 +103,7 @@ pub fn find_path(
         &Walk {
             obstacles,
             surf: false,
+            opened: None,
         },
         |_| 0,
         goal,
@@ -130,6 +135,11 @@ pub struct Reach {
 }
 
 impl Reach {
+    /// Every tile reached.
+    pub fn tiles(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.cost.keys().copied()
+    }
+
     /// Weighted cost (tiles plus penalties) to `to`; `None` if unreachable.
     pub fn cost(&self, to: (i32, i32)) -> Option<i32> {
         self.cost.get(&to).copied()

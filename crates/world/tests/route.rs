@@ -630,3 +630,63 @@ fn route_to_map_reaches_mt_moon_b2f_from_route3() {
     assert!(here.legs.is_empty());
     assert_eq!(here.cost_s, 0.0);
 }
+
+/// Passages the story opens, derived from the scripts (no place named in
+/// the code): the Saffron guard wants tea, the Route 23 guard the Cascade
+/// Badge, the ghost the Silph Scope; Lorelei's door opens once she is
+/// beaten, and the League walks through it only then.
+#[test]
+fn story_gates_come_from_the_scripts() {
+    let Some(world) = world() else { return };
+    if world.events().is_none_or(|e| e.initial.set.is_empty()) {
+        return; // events.json built before gates were compiled
+    }
+    let gates = pokebot_world::gates::derive(&world);
+    let ways = |map: &str, x: i32, y: i32| gates[map][&(x, y)].ways.clone();
+    let flag = |f: &str| Predicate::from_flag(f, true);
+    assert!(ways("Route5_SouthEntrance", 4, 5).contains(&vec![flag("FLAG_GOT_TEA")]));
+    assert!(ways("Route23", 12, 148).contains(&vec![Predicate::Badge { n: 2 }]));
+    assert!(
+        ways("PokemonTower_6F", 11, 15).contains(&vec![Predicate::HasItem {
+            item: "ITEM_SILPH_SCOPE".into(),
+            n: 1
+        }])
+    );
+    let door = &gates["PokemonLeague_LoreleisRoom"][&(6, 2)];
+    assert_eq!(
+        door.warp_ways,
+        Some(vec![vec![flag("FLAG_DEFEATED_LORELEI")]])
+    );
+
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let from = pose("IndigoPlateau_PokemonCenter_1F", 7, 10);
+    let closed = MapBelief::default().flag("FLAG_SYS_NATIONAL_DEX", false);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &closed,
+        &from,
+        "PokemonLeague_BrunosRoom",
+        UnknownPolicy::Pessimistic,
+    );
+    print("Indigo -> Bruno, Lorelei unbeaten", &r);
+    assert!(!r.found());
+    assert!(r
+        .blocked
+        .iter()
+        .any(|(req, _)| req.contains(&flag("FLAG_DEFEATED_LORELEI"))));
+    let open = closed.flag("FLAG_DEFEATED_LORELEI", true);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &open,
+        &from,
+        "PokemonLeague_BrunosRoom",
+        UnknownPolicy::Pessimistic,
+    );
+    print("Indigo -> Bruno, Lorelei beaten", &r);
+    assert!(r.found());
+    assert!(r.legs.iter().any(
+        |l| matches!(&l.kind, EdgeKind::ScriptWarp { script } if script.contains("EnterRoom"))
+    ));
+}

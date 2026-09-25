@@ -1,6 +1,18 @@
 //! Goal planner (spec §4): backward-chaining A\* from a goal predicate to
 //! the intents that establish it, priced through the route planner and
-//! bounded by methods, a depth limit, a node budget and a wall clock.
+//! bounded by a depth limit, a node budget and a wall clock.
+//!
+//! The story is not scripted: every script path of the compiled events
+//! (objects, signs, triggers, map entry scripts) is a candidate for the
+//! facts it establishes, and closed routes are opened by what their gates
+//! need ([`pokebot_world::gates`]). A relaxed forward pass over the world
+//! ([`crate::levels`]) says how far into the story each fact lies; reaching
+//! a map with no open route is decomposed into what the route through the
+//! earlier facts needs, in the order the walk meets it (a derived method).
+//! What the knowledge implies fills the start state: the flags a known flag
+//! came with, the vars a scene moved on, the choice a party member records
+//! (the starter), and the gates the way from home to the player's position
+//! must have opened.
 //!
 //! The open set holds partial plans. Each expansion takes the last unmet
 //! predicate of a plan and either drops it (the belief plus the plan's
@@ -43,9 +55,10 @@ use pokebot_state::priors::NO_EVIDENCE;
 use pokebot_state::{Fact, PlayerPose, Priors, SavedKnowledge, WorldBelief};
 use pokebot_world::behavior::TALL_GRASS;
 use pokebot_world::events::{Condition, DexCount, Effect as ScriptEffect};
+use pokebot_world::gates::{is_local_flag, is_local_var};
 use pokebot_world::obstacles::{blockers, static_obstacles, Passage};
 use pokebot_world::path::{reach, Reach, Walk};
-use pokebot_world::predicate::{BeliefView, Predicate, Truth};
+use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
 use pokebot_world::route::{EdgeKind, PlaceGraph, RouteParams, RouteResult, UnknownPolicy};
 use pokebot_world::{MapData, World};
 use serde::{Deserialize, Serialize};
@@ -56,6 +69,7 @@ use crate::intents::{
     CostParams, Effect, GoalBelief, GoalPredicate, Intent, Obtain, PlanContext, ProbeFact,
     LEAD_HP_MIN,
 };
+use crate::levels::{Achiever, Levels, Start};
 use crate::methods::Methods;
 use crate::prepare::{plan_preparation, Area, PlanStep, Request};
 
@@ -87,6 +101,8 @@ const NEAREST_AREAS: usize = 12;
 const PASSIVE_LIKELY: f64 = 0.5;
 /// Expectations below this are not recorded on a step.
 const EXPECTED_MIN: f64 = 0.02;
+/// Methods planned inside one another at most (each is a nested search).
+const MAX_NESTING: u32 = 24;
 /// Throws the catch policy makes at most for one wild Pokémon.
 const MAX_THROWS: u32 = 20;
 /// Wild Pokémon average IV, for the catch odds of what the walk meets.
@@ -100,7 +116,8 @@ pub struct PlanOptions {
     /// A wrong assumption dearer than this makes a probe mandatory (§4.3).
     pub expensive_secs: f64,
     /// Subgoal nesting allowed through intent preconditions (a route's
-    /// unknown requirements count as one level each).
+    /// unknown requirements count as one level each). The whole story is
+    /// a few dozen levels deep; the node budget bounds the search.
     pub max_depth: u8,
     /// Partial plans expanded before giving up.
     pub node_budget: usize,
@@ -144,7 +161,7 @@ impl Default for PlanOptions {
     fn default() -> Self {
         PlanOptions {
             expensive_secs: 600.0,
-            max_depth: 8,
+            max_depth: 40,
             node_budget: 20_000,
             confidence: 0.9,
             candidates_per_goal: 8,
@@ -155,6 +172,39 @@ impl Default for PlanOptions {
         }
     }
 }
+
+/// The belief with what the story provides before a level made unknown
+/// rather than false, for routing through it ([`Session::bound_route`]).
+struct BoundBelief<'b, 'a> {
+    base: &'b StateBelief<'a>,
+    levels: &'b Levels,
+    below: u32,
+}
+
+impl BeliefView for BoundBelief<'_, '_> {
+    fn eval(&self, p: &Predicate) -> Truth {
+        match self.base.eval(p) {
+            Truth::True => Truth::True,
+            t if self.levels.level(p).is_some_and(|l| l < self.below) => {
+                let _ = t;
+                Truth::Unknown
+            }
+            t => t,
+        }
+    }
+}
+
+impl GoalBelief for BoundBelief<'_, '_> {
+    fn eval_goal(&self, p: &GoalPredicate) -> Truth {
+        match p {
+            GoalPredicate::World(w) => self.eval(w),
+            other => self.base.eval_goal(other),
+        }
+    }
+}
+
+/// Price per story level of a fact a bounded route relies on.
+const LEVEL_STEP_S: f64 = 600.0;
 
 /// One step of a plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -351,9 +401,24 @@ pub struct Planner<'a> {
     crossings: BTreeMap<String, BTreeMap<(i32, i32), Crossing>>,
     /// (map, local id) → an object's tile.
     objects: BTreeMap<(String, u32), (i32, i32)>,
-    /// Flags the story sets (scripts, removed objects, trainers): clear
-    /// until then, so unlikely without evidence.
-    progress_flags: BTreeSet<String>,
+    /// Flags the story sets (scripts, removed objects, trainers) and the
+    /// ones a new game starts with: what a flag nothing observed most
+    /// likely is.
+    story: StoryPrior,
+    /// Map → (script, path) of the paths that fight and then warp there
+    /// (the Champion's room into the Hall of Fame): the only ways into
+    /// some maps, planned as steps rather than walked.
+    warp_scripts: BTreeMap<String, Vec<(String, usize)>>,
+    /// Var → (value, script, path) of every path that leaves it at a value.
+    var_effects: BTreeMap<String, Vec<(i64, String, usize)>>,
+    /// Trigger script → (map, the var condition the coord event fires on).
+    triggers: BTreeMap<String, (String, Option<(String, i64)>)>,
+    /// Map script → the var condition of its `on_frame` entry.
+    frames: BTreeMap<String, (String, i64)>,
+    /// Map → what pushing its boulders takes (Strength and its badge).
+    boulders: BTreeMap<String, Vec<GoalPredicate>>,
+    /// What the story can do, for the reachability pass.
+    achievers: Vec<Achiever>,
     /// Map → encounter tiles to route to (two per cluster, largest first).
     grass: BTreeMap<String, Vec<(i32, i32)>>,
 }
@@ -373,7 +438,34 @@ impl<'a> Planner<'a> {
         let mut battle_triggers: BTreeMap<String, Vec<BattleTrigger>> = BTreeMap::new();
         let mut objects = BTreeMap::new();
         let mut progress_flags = BTreeSet::new();
+        let mut initial_flags = BTreeSet::new();
+        let mut triggers = BTreeMap::new();
+        let mut frames = BTreeMap::new();
         if let Some(events) = world.events() {
+            initial_flags.extend(events.initial.set.iter().cloned());
+            for t in &events.triggers {
+                let Some(label) = &t.script else { continue };
+                let own = t.when.iter().find_map(|c| match c {
+                    Condition::Var { var, cmp } => cmp
+                        .eq
+                        .as_ref()
+                        .and_then(|v| v.as_int())
+                        .map(|v| (var.clone(), v)),
+                    _ => None,
+                });
+                triggers
+                    .entry(label.clone())
+                    .or_insert_with(|| (t.map.clone(), own));
+            }
+            for ms in events.map_scripts.values() {
+                for f in &ms.on_frame {
+                    if let (Some(label), Some(v)) = (&f.script, f.value.as_int()) {
+                        frames
+                            .entry(label.clone())
+                            .or_insert_with(|| (f.var.clone(), v));
+                    }
+                }
+            }
             for (label, script) in &events.scripts {
                 for path in &script.paths {
                     for e in &path.does {
@@ -412,7 +504,9 @@ impl<'a> Planner<'a> {
                 let Some(script) = t.script.as_deref().and_then(|s| events.script(s)) else {
                     continue;
                 };
-                let trainer = script.paths.iter().find_map(|path| {
+                // Every trainer the trigger may fight, with the path's
+                // conditions (the rival's team follows the starter).
+                for path in &script.paths {
                     let undefeated = path.when.iter().any(|c| {
                         matches!(
                             c,
@@ -422,15 +516,21 @@ impl<'a> Planner<'a> {
                             }
                         )
                     });
-                    undefeated
+                    let Some(trainer) = undefeated
                         .then(|| crate::intents::first_battle(path))
                         .flatten()
-                });
-                if let Some(trainer) = trainer {
-                    battle_triggers
-                        .entry(t.map.clone())
-                        .or_default()
-                        .push(((t.x, t.y), trainer.to_string()));
+                    else {
+                        continue;
+                    };
+                    let pre: Vec<GoalPredicate> = crate::intents::path_preconditions(path)
+                        .into_iter()
+                        .filter(|g| matches!(g, GoalPredicate::World(_)))
+                        .collect();
+                    battle_triggers.entry(t.map.clone()).or_default().push((
+                        (t.x, t.y),
+                        trainer.to_string(),
+                        pre,
+                    ));
                 }
             }
             for o in &events.objects {
@@ -445,6 +545,47 @@ impl<'a> Planner<'a> {
         for v in battle_triggers.values_mut() {
             v.sort();
             v.dedup();
+        }
+        let mut warp_scripts: BTreeMap<String, Vec<(String, usize)>> = BTreeMap::new();
+        if let Some(events) = world.events() {
+            for (label, script) in &events.scripts {
+                for (i, path) in script.paths.iter().enumerate() {
+                    if !path
+                        .does
+                        .iter()
+                        .any(|e| matches!(e, ScriptEffect::Battle { .. }))
+                    {
+                        continue;
+                    }
+                    let dest = path.does.iter().find_map(|e| match e {
+                        ScriptEffect::Warp { warp, .. } => world.name_of(warp),
+                        _ => None,
+                    });
+                    if let Some(dest) = dest {
+                        warp_scripts
+                            .entry(dest.to_string())
+                            .or_default()
+                            .push((label.clone(), i));
+                    }
+                }
+            }
+        }
+        let mut var_effects: BTreeMap<String, Vec<(i64, String, usize)>> = BTreeMap::new();
+        for (p, sources) in &scripts_by_effect {
+            if let GoalPredicate::World(Predicate::Var {
+                name,
+                op: CmpOp::Eq,
+                value,
+            }) = p
+            {
+                for (label, idx) in sources {
+                    var_effects.entry(name.clone()).or_default().push((
+                        *value,
+                        label.clone(),
+                        *idx,
+                    ));
+                }
+            }
         }
         let mut grass = BTreeMap::new();
         let mut crossings = BTreeMap::new();
@@ -496,13 +637,24 @@ impl<'a> Planner<'a> {
             items.sort();
             items.dedup();
         }
+        let mut boulders: BTreeMap<String, Vec<GoalPredicate>> = BTreeMap::new();
+        for gate in world.places().map(|p| p.gates.as_slice()).unwrap_or(&[]) {
+            if gate.kind == "boulder" {
+                boulders.entry(gate.map.clone()).or_insert_with(|| {
+                    vec![
+                        GoalPredicate::party_has_move(&gate.requires.r#move),
+                        GoalPredicate::flag(&gate.requires.badge, true),
+                    ]
+                });
+            }
+        }
         let mut centers: Vec<String> = world
             .places()
             .map(|p| p.heal_spots.iter().map(|h| h.respawn_map.clone()).collect())
             .unwrap_or_default();
         centers.sort();
         centers.dedup();
-        Planner {
+        let mut planner = Planner {
             world,
             graph,
             data,
@@ -518,9 +670,21 @@ impl<'a> Planner<'a> {
             battle_triggers,
             crossings,
             objects,
-            progress_flags,
+            story: StoryPrior {
+                progress: progress_flags,
+                initial: initial_flags,
+                implied: BTreeMap::new(),
+            },
+            warp_scripts,
+            var_effects,
+            triggers,
+            frames,
+            boulders,
+            achievers: Vec::new(),
             grass,
-        }
+        };
+        planner.achievers = planner.build_achievers();
+        planner
     }
 
     /// Plans `goal` from `knowledge` at `pose`. An already-true goal yields
@@ -531,9 +695,13 @@ impl<'a> Planner<'a> {
         knowledge: &SavedKnowledge,
         pose: Option<PlayerPose>,
     ) -> Result<Plan, PlanError> {
+        let original = knowledge;
+        let inferred = self.infer_choices(knowledge);
+        let knowledge = inferred.as_ref().unwrap_or(knowledge);
         let mut base = StateBelief::new(knowledge, self.data, pose.clone());
+        base.floors = self.var_floors(knowledge);
         base.confidence = self.options.confidence;
-        let session = Session {
+        let mut session = Session {
             planner: self,
             base,
             expanded: Cell::new(0),
@@ -543,6 +711,7 @@ impl<'a> Planner<'a> {
             partial: RefCell::new(None),
             prefix: RefCell::new(Vec::new()),
             routes: RefCell::new(HashMap::new()),
+            open_routes: RefCell::new(HashMap::new()),
             reaches: RefCell::new(HashMap::new()),
             hops: pose
                 .as_ref()
@@ -555,8 +724,45 @@ impl<'a> Planner<'a> {
             seq: Cell::new(0),
             trace: std::env::var_os("POKEBOT_PLAN_TRACE").is_some(),
             spent: RefCell::new([0.0; 4]),
+            levels: Rc::new(Levels::unknown()),
+            bound_routes: RefCell::new(HashMap::new()),
+            story: StoryPrior {
+                implied: self.implied_flags(knowledge),
+                ..self.story.clone()
+            },
+            spot_needs_cache: RefCell::new(HashMap::new()),
+            candidate_memo: RefCell::new(HashMap::new()),
         };
-        let penalty = self.penalty_model(&knowledge.world);
+        if let Some(pose) = &pose {
+            let (flags, floors) = self.position_implied(&session.base, &session.story, pose);
+            if session.trace {
+                eprintln!("[plan] where the player is implies {flags:?} and {floors:?}");
+            }
+            for (f, v) in flags {
+                session.story.implied.entry(f).or_insert(v);
+            }
+            for (var, floor) in floors {
+                let entry = session.base.floors.entry(var).or_insert(floor);
+                *entry = (*entry).max(floor);
+            }
+            let t = Instant::now();
+            let levels = crate::levels::compute(
+                self.world,
+                self.graph,
+                pose,
+                &self.achievers,
+                self.start_of(knowledge, &session.base, pose, &session.story),
+            );
+            if session.trace {
+                eprintln!(
+                    "[plan] story reachability: {} passes, {:.2} s",
+                    levels.passes,
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            session.levels = Rc::new(levels);
+        }
+        let penalty = self.penalty_model(&knowledge.world, &session.story);
         EDGE_PENALTY.with(|cell| *cell.borrow_mut() = Some(penalty));
         let root = OpenGoal {
             p: goal.clone(),
@@ -610,8 +816,588 @@ impl<'a> Planner<'a> {
             intents,
             assumes,
             cost_s: sub.cost - saved - repeated + audits,
-            belief_snapshot: snapshot_id(knowledge),
+            belief_snapshot: snapshot_id(original),
         })
+    }
+
+    /// What must hold for the player to start `script` once on `map`:
+    /// an object present (its hide flag clear), a trigger's var at the
+    /// value it fires on (a switch only a pushed boulder can press takes
+    /// Strength instead), a map entry script's frame var at its value.
+    /// `None` when the script can't be started at all.
+    pub(crate) fn start_conditions(
+        &self,
+        script: &pokebot_world::events::Script,
+        label: &str,
+        map: &str,
+    ) -> Option<Vec<GoalPredicate>> {
+        let mut out = Vec::new();
+        let var_holds = |var: &str, v: i64, out: &mut Vec<GoalPredicate>| {
+            if !is_local_var(var) {
+                out.push(GoalPredicate::World(Predicate::Var {
+                    name: var.to_string(),
+                    op: CmpOp::Eq,
+                    value: v,
+                }));
+            }
+        };
+        match script.kind.as_str() {
+            "object" => {
+                let hidden = script
+                    .local_id
+                    .and_then(|id| {
+                        self.world
+                            .map(map)?
+                            .objects
+                            .iter()
+                            .find(|o| o.local_id == id)
+                    })
+                    .and_then(|o| o.flag.clone())
+                    .filter(|f| !is_local_flag(f));
+                if let Some(flag) = hidden {
+                    out.push(GoalPredicate::flag(&flag, false));
+                }
+            }
+            "sign" => {}
+            "trigger" => {
+                let (_, own) = self.triggers.get(label)?;
+                if let Some((var, v)) = own {
+                    let settable = *v == 0
+                        || self
+                            .var_effects
+                            .get(var)
+                            .is_some_and(|e| e.iter().any(|(set, _, _)| set == v));
+                    if settable || is_local_var(var) {
+                        var_holds(var, *v, &mut out);
+                    } else {
+                        // No script moves the var there: the game fires it
+                        // for a boulder pushed onto the tile.
+                        out.extend(self.boulders.get(map)?.iter().cloned());
+                    }
+                }
+            }
+            "map" => {
+                if let Some((var, v)) = self.frames.get(label) {
+                    var_holds(var, *v, &mut out);
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// Where the player stands to start a script: next to its object or
+    /// sign, on its trigger tile.
+    pub(crate) fn script_spots(
+        &self,
+        script: &pokebot_world::events::Script,
+        label: &str,
+        map: &str,
+    ) -> Vec<(i32, i32)> {
+        let Some(m) = self.world.map(map) else {
+            return Vec::new();
+        };
+        let beside = |(x, y): (i32, i32)| -> Vec<(i32, i32)> {
+            [(x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)]
+                .into_iter()
+                .filter(|&(nx, ny)| m.tile(nx, ny).is_some_and(|t| t.collision == 0))
+                .collect()
+        };
+        let mut out = Vec::new();
+        match script.kind.as_str() {
+            "object" => {
+                if let Some(id) = script.local_id {
+                    if let Some(t) = self.objects.get(&(map.to_string(), id)) {
+                        out.extend(beside(*t));
+                    }
+                    // Where the map's entry scripts put it (the old man
+                    // lying across Viridian's road until the tutorial).
+                    for t in self.placed(map, id) {
+                        out.extend(beside(t));
+                    }
+                }
+            }
+            "sign" => {
+                for sign in m
+                    .signs
+                    .iter()
+                    .filter(|s| s.script.as_deref() == Some(label))
+                {
+                    out.extend(beside((sign.x, sign.y)));
+                }
+            }
+            "trigger" => {
+                if let Some(events) = self.world.events() {
+                    out.extend(
+                        events
+                            .triggers
+                            .iter()
+                            .filter(|t| t.map == map && t.script.as_deref() == Some(label))
+                            .map(|t| (t.x, t.y)),
+                    );
+                }
+            }
+            _ => {}
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The tiles a map's entry scripts may move object `id` to.
+    fn placed(&self, map: &str, id: u32) -> Vec<(i32, i32)> {
+        let Some(events) = self.world.events() else {
+            return Vec::new();
+        };
+        let Some(ms) = events.map_scripts.get(map) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for label in ms
+            .on_load
+            .iter()
+            .chain(&ms.on_transition)
+            .chain(&ms.on_resume)
+        {
+            for path in events.script(label).iter().flat_map(|s| s.paths.iter()) {
+                for e in &path.does {
+                    if let ScriptEffect::MoveObject { move_object, x, y } = e {
+                        if let (Some(o), Some(x), Some(y)) =
+                            (move_object.as_int(), x.as_int(), y.as_int())
+                        {
+                            if o == i64::from(id) {
+                                out.push((x as i32, y as i32));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// What the story can do, for the reachability pass ([`crate::levels`]):
+    /// every script path with the world facts it needs and establishes,
+    /// the HMs teaching their move, the marts selling their items.
+    fn build_achievers(&self) -> Vec<Achiever> {
+        let mut out = Vec::new();
+        let world_only = |v: Vec<GoalPredicate>| -> Vec<Predicate> {
+            v.into_iter()
+                .filter_map(|g| match g {
+                    GoalPredicate::World(p) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        };
+        if let Some(events) = self.world.events() {
+            for (label, script) in &events.scripts {
+                let Some(map) = &script.map else { continue };
+                let Some(start) = self.start_conditions(script, label, map) else {
+                    continue;
+                };
+                let spots = if self.graph.has_gates(map) {
+                    self.script_spots(script, label, map)
+                } else {
+                    Vec::new()
+                };
+                for (i, path) in script.paths.iter().enumerate() {
+                    let mut pre = world_only(start.clone());
+                    pre.extend(world_only(crate::intents::path_preconditions(path)));
+                    let effects = world_only(path_effects_in(path, map, self.world));
+                    if effects.is_empty() {
+                        continue;
+                    }
+                    out.push(Achiever {
+                        map: Some(map.clone()),
+                        pre,
+                        effects,
+                        script: Some((label.clone(), i)),
+                        spots: spots.clone(),
+                    });
+                }
+            }
+        }
+        for hm in [
+            "ITEM_HM01",
+            "ITEM_HM02",
+            "ITEM_HM03",
+            "ITEM_HM04",
+            "ITEM_HM05",
+            "ITEM_HM06",
+            "ITEM_HM07",
+        ] {
+            let (Some(mv), Some(badge)) =
+                (crate::intents::hm_move(hm), crate::intents::hm_badge(hm))
+            else {
+                continue;
+            };
+            out.push(Achiever {
+                map: None,
+                pre: vec![
+                    Predicate::HasItem {
+                        item: hm.to_string(),
+                        n: 1,
+                    },
+                    Predicate::Badge { n: badge },
+                ],
+                effects: vec![Predicate::PartyHasMove { mv: mv.to_string() }],
+                script: None,
+                spots: Vec::new(),
+            });
+        }
+        for (map, items) in &self.marts {
+            out.push(Achiever {
+                map: Some(map.clone()),
+                pre: Vec::new(),
+                effects: items
+                    .iter()
+                    .map(|i| Predicate::HasItem {
+                        item: i.clone(),
+                        n: 1,
+                    })
+                    .collect(),
+                script: None,
+                spots: Vec::new(),
+            });
+        }
+        out
+    }
+
+    /// Choices the event graph records (spec §3.2 inference): a var that
+    /// only scripts giving a Pokémon set (`VAR_STARTER_MON`) holds the
+    /// value every path giving a party member's species sets it to. `None`
+    /// when nothing new is learnt.
+    fn infer_choices(&self, knowledge: &SavedKnowledge) -> Option<SavedKnowledge> {
+        let events = self.world.events()?;
+        let party: Vec<String> = knowledge
+            .party
+            .value
+            .iter()
+            .flatten()
+            .filter_map(|m| m.species.value.clone())
+            .collect();
+        if party.is_empty() {
+            return None;
+        }
+        let gives = |p: &pokebot_world::events::ScriptPath| {
+            p.does
+                .iter()
+                .any(|e| matches!(e, ScriptEffect::GiveMon { .. }))
+        };
+        // Vars only written by paths that give a Pokémon.
+        let mut choice_vars: BTreeMap<&str, bool> = BTreeMap::new();
+        for script in events.scripts.values() {
+            for path in &script.paths {
+                for e in &path.does {
+                    if let ScriptEffect::Var { var, .. } = e {
+                        if !is_local_var(var) {
+                            let ok = choice_vars.entry(var).or_insert(true);
+                            *ok &= gives(path);
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = knowledge.clone();
+        let mut learnt = false;
+        for species in &party {
+            let mut common: Option<BTreeSet<(String, i64)>> = None;
+            for script in events.scripts.values() {
+                for path in &script.paths {
+                    let gives_it = path.does.iter().any(|e| {
+                        matches!(e, ScriptEffect::GiveMon { givemon: pokebot_world::events::Val::Sym(s), .. } if s == species)
+                    });
+                    if !gives_it {
+                        continue;
+                    }
+                    let set: BTreeSet<(String, i64)> = path
+                        .does
+                        .iter()
+                        .filter_map(|e| match e {
+                            ScriptEffect::Var { var, change }
+                                if choice_vars.get(var.as_str()) == Some(&true) =>
+                            {
+                                Some((var.clone(), change.eq.as_ref()?.as_int()?))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    common = Some(match common {
+                        None => set,
+                        Some(c) => c.intersection(&set).cloned().collect(),
+                    });
+                }
+            }
+            for (var, value) in common.unwrap_or_default() {
+                let Ok(value) = u16::try_from(value) else {
+                    continue;
+                };
+                if out.world.var(&var).value.is_none() {
+                    out.world
+                        .vars
+                        .insert(var, pokebot_state::Knowledge::derived(value, 0));
+                    learnt = true;
+                }
+            }
+        }
+        learnt.then_some(out)
+    }
+
+    /// What being where the player is implies (spec §3.2: "we are on an
+    /// island → Surf or the ferry was used"): the passages the way from
+    /// home to here needs were opened, so the facts they need hold. The
+    /// way is the route from the first heal location (home) to the pose's
+    /// map with every unknown fact assumable. Returns flags and var floors
+    /// the knowledge doesn't already settle.
+    fn position_implied(
+        &self,
+        base: &StateBelief<'_>,
+        story: &StoryPrior,
+        pose: &PlayerPose,
+    ) -> (BTreeMap<String, bool>, BTreeMap<String, i64>) {
+        let mut flags = BTreeMap::new();
+        let mut floors = BTreeMap::new();
+        let Some(home) = self.world.places().and_then(|p| p.heal_spots.first()) else {
+            return (flags, floors);
+        };
+        if home.map == pose.map || self.world.map(&home.map).is_none() {
+            return (flags, floors);
+        }
+        let from = PlayerPose {
+            map: home.map.clone(),
+            x: home.x,
+            y: home.y,
+        };
+        let priors = self.priors.cloned();
+        let story = story.clone();
+        let belief = base.knowledge.world.clone();
+        let alt = self.options.unknown_edge_alt_s;
+        // Only story facts are inferred: the party's moves, the bag and the
+        // places visited are for the belief to know (a Fly or Surf the
+        // party may not have would explain anything).
+        let model: PenaltyModel = Rc::new(move |p: &Predicate| match p {
+            Predicate::Flag { .. } | Predicate::Var { .. } | Predicate::Badge { .. } => {
+                let prob = world_prior(priors.as_ref(), &story, &belief, p);
+                (1.0 - prob) * alt + 1.0
+            }
+            _ => f64::INFINITY,
+        });
+        let previous = EDGE_PENALTY.with(|cell| cell.replace(Some(model)));
+        let r = pokebot_world::route::open_route_to_map(
+            self.world,
+            self.graph,
+            base,
+            &from,
+            &pose.map,
+            UnknownPolicy::Optimistic {
+                penalty_of: edge_penalty,
+            },
+        );
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = previous);
+        for p in &r.assumes {
+            match p {
+                Predicate::Flag { name, is } => {
+                    flags.insert(name.clone(), *is);
+                }
+                Predicate::Badge { n } => {
+                    flags.insert(Predicate::badge_flag(*n), true);
+                }
+                Predicate::Var { name, op, value } => {
+                    let floor = match op {
+                        CmpOp::Gt => value + 1,
+                        CmpOp::Ge | CmpOp::Eq => *value,
+                        _ => continue,
+                    };
+                    if floor > 0 {
+                        let e = floors.entry(name.clone()).or_insert(floor);
+                        *e = (*e).max(floor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (flags, floors)
+    }
+
+    /// Flags implied by the flags known set (spec §3.2 inference): every
+    /// path that sets a known flag also sets (or clears) these. Only flags
+    /// the knowledge doesn't have.
+    fn implied_flags(&self, knowledge: &SavedKnowledge) -> BTreeMap<String, bool> {
+        let mut out = BTreeMap::new();
+        let Some(events) = self.world.events() else {
+            return out;
+        };
+        let known: BTreeSet<&str> = knowledge
+            .world
+            .flags
+            .iter()
+            .filter(|(_, k)| k.value == Some(true))
+            .map(|(f, _)| f.as_str())
+            .collect();
+        if known.is_empty() {
+            return out;
+        }
+        let mut common: BTreeMap<&str, Option<BTreeMap<String, bool>>> = BTreeMap::new();
+        for script in events.scripts.values() {
+            let Some(map) = &script.map else { continue };
+            for path in &script.paths {
+                let effects = path_effects_in(path, map, self.world);
+                let sets: Vec<&str> = known
+                    .iter()
+                    .copied()
+                    .filter(|f| effects.contains(&GoalPredicate::flag(f, true)))
+                    .collect();
+                if sets.is_empty() {
+                    continue;
+                }
+                let flags: BTreeMap<String, bool> = effects
+                    .iter()
+                    .filter_map(|e| match e {
+                        GoalPredicate::World(Predicate::Flag { name, is })
+                            if !is_local_flag(name) =>
+                        {
+                            Some((name.clone(), *is))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for f in sets {
+                    let entry = common.entry(f).or_insert(None);
+                    *entry = Some(match entry.take() {
+                        None => flags.clone(),
+                        Some(c) => c
+                            .into_iter()
+                            .filter(|(k, v)| flags.get(k) == Some(v))
+                            .collect(),
+                    });
+                }
+            }
+        }
+        for flags in common.into_values().flatten() {
+            for (flag, v) in flags {
+                if knowledge.world.flag(&flag).value.is_none() {
+                    out.insert(flag, v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Lower bounds on unknown vars from the flags known set (spec §3.2
+    /// inference): every path that sets the flag moves the var to at least
+    /// this (the badge from Brock means Pewter's scene var moved on).
+    fn var_floors(&self, knowledge: &SavedKnowledge) -> BTreeMap<String, i64> {
+        let mut out: BTreeMap<String, i64> = BTreeMap::new();
+        let Some(events) = self.world.events() else {
+            return out;
+        };
+        let set: BTreeSet<&str> = knowledge
+            .world
+            .flags
+            .iter()
+            .filter(|(_, k)| k.value == Some(true))
+            .map(|(f, _)| f.as_str())
+            .collect();
+        if set.is_empty() {
+            return out;
+        }
+        let mut common: BTreeMap<&str, Option<BTreeMap<String, i64>>> = BTreeMap::new();
+        for script in events.scripts.values() {
+            for path in &script.paths {
+                let sets: Vec<&str> =
+                    path.does
+                        .iter()
+                        .filter_map(|e| match e {
+                            ScriptEffect::Set { set: f }
+                            | ScriptEffect::Defeated { defeated: f } => Some(f.as_str()),
+                            _ => None,
+                        })
+                        .filter(|f| set.contains(f))
+                        .collect();
+                if sets.is_empty() {
+                    continue;
+                }
+                let mut vars: BTreeMap<String, i64> = BTreeMap::new();
+                for e in &path.does {
+                    if let ScriptEffect::Var { var, change } = e {
+                        if is_local_var(var) {
+                            continue;
+                        }
+                        if let Some(v) = change.eq.as_ref().and_then(|v| v.as_int()) {
+                            vars.insert(var.clone(), v);
+                        }
+                    }
+                }
+                for f in sets {
+                    let entry = common.entry(f).or_insert(None);
+                    *entry = Some(match entry.take() {
+                        None => vars.clone(),
+                        Some(c) => c
+                            .into_iter()
+                            .filter_map(|(k, v)| vars.get(&k).map(|w| (k, v.min(*w))))
+                            .collect(),
+                    });
+                }
+            }
+        }
+        for vars in common.into_values().flatten() {
+            for (var, v) in vars {
+                if knowledge.world.var(&var).value.is_none() && v > 0 {
+                    let floor = out.entry(var).or_insert(v);
+                    *floor = (*floor).max(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// What holds before the plan does anything, for the reachability
+    /// pass: the facts the knowledge has, the story's start for the rest.
+    fn start_of(
+        &self,
+        knowledge: &SavedKnowledge,
+        base: &StateBelief<'_>,
+        pose: &PlayerPose,
+        story: &StoryPrior,
+    ) -> Start {
+        let w = &knowledge.world;
+        let mut start = Start {
+            initial: self.story.initial.clone(),
+            ..Start::default()
+        };
+        for (name, k) in &w.flags {
+            if let Some(v) = k.value {
+                start.flags.insert(name.clone(), v);
+            }
+        }
+        for (name, k) in &w.vars {
+            if let Some(v) = k.value {
+                start.vars.insert(name.clone(), i64::from(v));
+            }
+        }
+        for (name, v) in &story.implied {
+            start.flags.entry(name.clone()).or_insert(*v);
+        }
+        for (name, floor) in &base.floors {
+            start.vars.entry(name.clone()).or_insert(*floor);
+        }
+        for (map, k) in &w.visited {
+            if k.value == Some(true) {
+                start.maps.insert(map.clone());
+            }
+        }
+        start.maps.insert(pose.map.clone());
+        for pocket in knowledge.bag.pockets.values() {
+            for (item, n) in pocket.value.iter().flatten() {
+                *start.items.entry(item.clone()).or_default() += u32::from(*n);
+            }
+        }
+        for member in base.party_members().unwrap_or_default() {
+            start.moves.extend(member.moves);
+        }
+        start
     }
 
     /// Whether planning `goal` turns on the party: what it is made of
@@ -637,33 +1423,64 @@ impl<'a> Planner<'a> {
     /// else the no-evidence rate.
     pub fn prior(&self, belief: &WorldBelief, p: &GoalPredicate) -> f64 {
         match p {
-            GoalPredicate::World(w) => world_prior(self.priors, &self.progress_flags, belief, w),
+            GoalPredicate::World(w) => world_prior(self.priors, &self.story, belief, w),
             _ => NO_EVIDENCE,
         }
     }
 
-    fn penalty_model(&self, belief: &WorldBelief) -> PenaltyModel {
+    fn penalty_model(&self, belief: &WorldBelief, story: &StoryPrior) -> PenaltyModel {
         let priors = self.priors.cloned();
-        let progress = self.progress_flags.clone();
+        let progress = story.clone();
         let belief = belief.clone();
         let alt = self.options.unknown_edge_alt_s;
         Rc::new(move |p: &Predicate| {
             let prob = world_prior(priors.as_ref(), &progress, &belief, p);
-            (1.0 - prob) * alt
+            // A fact the story makes unlikely (a place never reached, a
+            // flag still at its start value) is not assumed: the route
+            // that needs it is a blocked one, and what establishes it is
+            // planned.
+            if prob < NO_EVIDENCE {
+                f64::INFINITY
+            } else {
+                (1.0 - prob) * alt
+            }
         })
     }
+}
+
+/// What the story says about a fact nothing observed: a new game starts
+/// with the `initial` flags set and every other flag clear, every var at 0;
+/// the flags the story sets (`progress`) are then likelier still at their
+/// start value.
+#[derive(Debug, Clone, Default)]
+struct StoryPrior {
+    progress: BTreeSet<String>,
+    initial: BTreeSet<String>,
+    /// Flags the flags known set imply (every path that set a known flag
+    /// also set these): likely, though a later scene may have undone them.
+    implied: BTreeMap<String, bool>,
 }
 
 /// [`Planner::prior`] for a world predicate.
 fn world_prior(
     priors: Option<&Priors>,
-    progress: &BTreeSet<String>,
+    story: &StoryPrior,
     belief: &WorldBelief,
     p: &Predicate,
 ) -> f64 {
     let flag = |name: &str| {
         let p = priors.map_or(NO_EVIDENCE, |pr| pr.probability(belief, &Fact::flag(name)));
-        if p == NO_EVIDENCE && progress.contains(name) {
+        if p != NO_EVIDENCE {
+            p
+        } else if let Some(&v) = story.implied.get(name) {
+            if v {
+                1.0 - PROGRESS_FLAG_PRIOR
+            } else {
+                PROGRESS_FLAG_PRIOR
+            }
+        } else if story.initial.contains(name) {
+            1.0 - PROGRESS_FLAG_PRIOR
+        } else if story.progress.contains(name) {
             PROGRESS_FLAG_PRIOR
         } else {
             p
@@ -679,9 +1496,25 @@ fn world_prior(
             }
         }
         Predicate::Badge { n } => flag(&Predicate::badge_flag(*n)),
-        Predicate::Visited { map } => priors.map_or(NO_EVIDENCE, |pr| {
-            pr.probability(belief, &Fact::visited(map.clone()))
-        }),
+        // A place is unvisited until the story gets there.
+        Predicate::Visited { map } => {
+            let p = priors.map_or(NO_EVIDENCE, |pr| {
+                pr.probability(belief, &Fact::visited(map.clone()))
+            });
+            if p == NO_EVIDENCE {
+                PROGRESS_FLAG_PRIOR
+            } else {
+                p
+            }
+        }
+        // Vars start at 0 and the story moves them on.
+        Predicate::Var { op, value, .. } => {
+            if op.holds(0, *value) {
+                1.0 - PROGRESS_FLAG_PRIOR
+            } else {
+                PROGRESS_FLAG_PRIOR
+            }
+        }
         _ => NO_EVIDENCE,
     }
 }
@@ -923,6 +1756,27 @@ impl Node {
         Reverse((OrdF64(self.f), self.seq))
     }
 
+    /// What tells two partial plans apart: their steps, open goals and
+    /// assumptions (not the ids or the cost bookkeeping).
+    fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        for s in &self.plan {
+            s.planned.intent.hash(&mut h);
+            s.planned.unless.hash(&mut h);
+        }
+        0xffu8.hash(&mut h);
+        for g in &self.open {
+            g.p.hash(&mut h);
+            g.unless.hash(&mut h);
+            g.establish.hash(&mut h);
+            g.before.and_then(|id| self.position(id)).hash(&mut h);
+        }
+        self.assumed.hash(&mut h);
+        self.expected.hash(&mut h);
+        h.finish()
+    }
+
     fn position(&self, id: u64) -> Option<usize> {
         self.ids.iter().position(|i| *i == id)
     }
@@ -1036,12 +1890,22 @@ impl Passive {
 }
 
 type RouteKey = (String, Vec<GoalPredicate>);
-/// A trigger tile and the trainer its script fights.
-type BattleTrigger = ((i32, i32), String);
+/// A route through what the story provides before a level, if any.
+type BoundRoute = Option<Rc<RouteResult>>;
+/// A trigger tile, a trainer its script fights and the conditions of the
+/// path that fights it.
+type BattleTrigger = ((i32, i32), String, Vec<GoalPredicate>);
 /// What a stationary object's tile costs to cross, in tiles, and the
 /// trainer that must be beaten to cross it (none for a hidden object).
 type Crossing = (i32, Option<String>);
-type MethodKey = (String, Vec<GoalPredicate>, Option<GoalPredicate>);
+/// (method, facts held, condition, what the steps ahead leave the lead
+/// at: experience from their battles and the level they trained it to).
+type MethodKey = (String, Vec<GoalPredicate>, Option<GoalPredicate>, (u64, u8));
+/// (goal, facts established) → its candidates.
+type CandidateMemo = HashMap<(GoalPredicate, Vec<GoalPredicate>), Rc<Vec<Candidate>>>;
+/// (map, spots, route key) → what the walk to the spots needs.
+type SpotNeeds =
+    HashMap<(String, Vec<(i32, i32)>, u32, Vec<GoalPredicate>), Option<Vec<GoalPredicate>>>;
 /// The encounter tile chosen on a map and the route to it.
 type GrassRoute = Option<((i32, i32), Rc<RouteResult>)>;
 /// Floods by (map, start tile).
@@ -1066,6 +1930,7 @@ struct Session<'p, 'a> {
     /// their legs yield.
     prefix: RefCell<Vec<Step>>,
     routes: RefCell<HashMap<RouteKey, Rc<RouteResult>>>,
+    open_routes: RefCell<HashMap<RouteKey, Rc<RouteResult>>>,
     /// Floods from a tile of a map over its static obstacles (trigger
     /// checks): the map as the navigator sees it, no belief involved.
     reaches: RefCell<Reaches>,
@@ -1085,6 +1950,17 @@ struct Session<'p, 'a> {
     trace: bool,
     /// Seconds spent in (routes, grass routes, tile walks, readiness).
     spent: RefCell<[f64; 4]>,
+    /// How far into the story each fact lies ([`crate::levels`]).
+    levels: Rc<Levels>,
+    /// The story prior with what the knowledge implies.
+    story: StoryPrior,
+    /// Candidates per (goal, facts established) for goals whose candidates
+    /// don't depend on the walk ahead.
+    candidate_memo: RefCell<CandidateMemo>,
+    /// What the walk to a script's spots needs, per (map, spots, facts).
+    spot_needs_cache: RefCell<SpotNeeds>,
+    /// Routes through only what the story provides before a level.
+    bound_routes: RefCell<HashMap<(RouteKey, u32), BoundRoute>>,
 }
 
 impl<'p, 'a> Session<'p, 'a> {
@@ -1186,7 +2062,7 @@ impl<'p, 'a> Session<'p, 'a> {
             if let Intent::Go { dest } = &step.planned.intent {
                 if step.route.is_none() {
                     let belief = self.belief(&established);
-                    if let Some(r) = self.route_to(dest, &belief).filter(|r| r.found()) {
+                    if let Some(r) = self.open_route(dest, &belief).filter(|r| r.found()) {
                         step.planned = step.planned.clone().with_route(&r);
                         step.route = Some(r);
                     }
@@ -1350,7 +2226,7 @@ impl<'p, 'a> Session<'p, 'a> {
                         Some(r) => Some(Rc::clone(r)),
                         None => {
                             let belief = self.belief(&established);
-                            self.route_to(dest, &belief).filter(|r| r.found())
+                            self.open_route(dest, &belief).filter(|r| r.found())
                         }
                     };
                     let mut expected: BTreeMap<String, f64> = BTreeMap::new();
@@ -1465,7 +2341,7 @@ impl<'p, 'a> Session<'p, 'a> {
         if let Some((hops, center)) = near {
             let mut first = Vec::new();
             if hops > 0 {
-                let Some(route) = self.route_to(center, &self.base).filter(|r| r.found()) else {
+                let Some(route) = self.open_route(center, &self.base).filter(|r| r.found()) else {
                     return 0.0;
                 };
                 let go = Intent::Go {
@@ -1546,6 +2422,9 @@ impl<'p, 'a> Session<'p, 'a> {
         };
         heap.push((root.key(), root.seq));
         nodes.insert(root.seq, root);
+        // Partial plans already queued (the same steps and open goals reached
+        // by candidates that differ only in what they don't change).
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
         while let Some((_, seq)) = heap.pop() {
             let mut node = nodes.remove(&seq).expect("queued node");
             if self.nesting.get() == 0 {
@@ -1595,15 +2474,13 @@ impl<'p, 'a> Session<'p, 'a> {
                     successors = self.settle_unknown(node, goal, &belief);
                 }
                 Truth::False => {
-                    if goal.depth >= self.planner.options.max_depth
-                        || self.active.borrow().contains(&goal.p)
-                    {
+                    if goal.depth >= self.planner.options.max_depth || self.is_active(&goal.p) {
                         if self.trace {
                             eprintln!(
                                 "[plan]        dropped {} (depth {} / active {})",
                                 goal.p,
                                 goal.depth,
-                                self.active.borrow().contains(&goal.p)
+                                self.is_active(&goal.p)
                             );
                         }
                         continue;
@@ -1612,6 +2489,9 @@ impl<'p, 'a> Session<'p, 'a> {
                 }
             }
             for mut n in successors {
+                if !seen.insert(n.signature()) {
+                    continue;
+                }
                 n.seq = self.next_seq();
                 n.f = n.g + self.heuristic(&n.open);
                 heap.push((n.key(), n.seq));
@@ -1619,6 +2499,19 @@ impl<'p, 'a> Session<'p, 'a> {
             }
         }
         Err(Failure::NoPlan)
+    }
+
+    /// Whether `p` is being planned further up the nesting (reaching a map
+    /// and having visited it count as one).
+    fn is_active(&self, p: &GoalPredicate) -> bool {
+        let same = |a: &GoalPredicate| match (a, p) {
+            (
+                GoalPredicate::World(Predicate::At { map: x } | Predicate::Visited { map: x }),
+                GoalPredicate::World(Predicate::At { map: y } | Predicate::Visited { map: y }),
+            ) => x == y,
+            _ => a == p,
+        };
+        self.active.borrow().iter().any(same)
     }
 
     fn heuristic(&self, open: &[OpenGoal]) -> f64 {
@@ -1638,7 +2531,15 @@ impl<'p, 'a> Session<'p, 'a> {
     ) -> Vec<Node> {
         let opts = &self.planner.options;
         let p = goal.p.clone();
-        let prior = self.planner.prior(&self.base.knowledge.world, &p);
+        let prior = match &p {
+            GoalPredicate::World(w) => world_prior(
+                self.planner.priors,
+                &self.story,
+                &self.base.knowledge.world,
+                w,
+            ),
+            _ => NO_EVIDENCE,
+        };
         let probe =
             ProbeFact::for_predicate(&p, self.planner.data).filter(|fact| self.probe_allowed(fact));
         let pos = node.insert_pos(goal.before);
@@ -1765,21 +2666,36 @@ impl<'p, 'a> Session<'p, 'a> {
         let p = &goal.p;
         let pos = node.insert_pos(goal.before);
         if no_method != Some(p) {
+            // A method from the rules first, else the decompositions the
+            // world derives (the requirements of a closed route, in order).
+            let mut methods: Vec<Cow<'_, crate::methods::Method>> = Vec::new();
             if let Some(method) = self.planner.methods.for_goal(p) {
+                methods.push(Cow::Borrowed(method));
+            }
+            methods.extend(self.derived_methods(p, belief).into_iter().map(Cow::Owned));
+            for method in methods {
                 // The method's nested searches see what runs ahead of it.
                 let mark = self.prefix.borrow().len();
                 let ahead: Vec<Step> = node.plan[..pos.min(node.plan.len())].to_vec();
                 self.prefix.borrow_mut().extend(ahead);
-                let planned = self.plan_method(method, goal, &belief.established);
+                let planned = self.plan_method(&method, goal, &belief.established);
                 self.prefix.borrow_mut().truncate(mark);
                 match planned {
                     Ok(sub) => {
                         let mut n = node.clone();
                         let ids: Vec<u64> = sub.steps.iter().map(|_| self.next_seq()).collect();
-                        let first = ids[0];
+                        // What the step needs next goes ahead of the group;
+                        // for a trip opened first (a derived method), just
+                        // ahead of the trip itself, after what opened it
+                        // (least commitment, §4.6.1).
+                        let anchor = if p.at_map().is_some() {
+                            ids[ids.len() - 1]
+                        } else {
+                            ids[0]
+                        };
                         n.insert(pos, sub.steps.clone(), ids);
                         if let Some(c) = goal.before {
-                            n.anchors.insert(c, first);
+                            n.anchors.insert(c, anchor);
                         }
                         for a in &sub.assumes {
                             if !n.assumes.contains(a) {
@@ -1855,6 +2771,189 @@ impl<'p, 'a> Session<'p, 'a> {
         Ok(out)
     }
 
+    /// Decompositions of `p` the world implies (spec §4.2 methods, derived
+    /// rather than written): reaching a map no open route leads to means
+    /// first establishing what one of its closed routes needs (a badge the
+    /// guard checks, the flag a door opens on, Surf), one requirement after
+    /// the other, each planned with what the earlier ones established,
+    /// then the trip. One method per closed route, the likeliest cheapest
+    /// first (the route's cost plus a floor on each requirement); within
+    /// one, the cheapest requirement first.
+    fn derived_methods(
+        &self,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+    ) -> Vec<crate::methods::Method> {
+        let Some(map) = p.at_map() else {
+            return Vec::new();
+        };
+        let Some(route) = self.route_to(map, belief) else {
+            return Vec::new();
+        };
+        if route.found() {
+            return Vec::new();
+        }
+        let mut options: Vec<(OrdF64, crate::methods::Method)> = Vec::new();
+        // First the route through only what the story provides before the
+        // map is reached: what it needs, in story order.
+        let bound = self.levels.level(&Predicate::At {
+            map: map.to_string(),
+        });
+        if self.levels.known() {
+            let Some(below) = bound else {
+                return Vec::new();
+            };
+            if let Some(r) = self.bound_route(map, below, belief).filter(|r| r.found()) {
+                // What the route needs, in the order the walk meets it (the
+                // Route 23 badges one guard after the other, the trainer on
+                // the way before the fossil behind him).
+                let mut needs: Vec<GoalPredicate> = Vec::new();
+                let mut push = |g: GoalPredicate| {
+                    if !needs.contains(&g) {
+                        needs.push(g);
+                    }
+                };
+                for leg in &r.legs {
+                    if matches!(leg.kind, EdgeKind::Walk { .. })
+                        && leg.from.map == leg.to.map
+                        && self.planner.battle_triggers.contains_key(&leg.from.map)
+                    {
+                        for trainer in self.trainers_between(
+                            &leg.from.map,
+                            (leg.from.x, leg.from.y),
+                            (leg.to.x, leg.to.y),
+                        ) {
+                            let g = GoalPredicate::flag(&trainer, true);
+                            if belief.eval_goal(&g) != Truth::True {
+                                push(g);
+                            }
+                        }
+                    }
+                    for q in &leg.requires {
+                        if belief.eval(q) == Truth::True || self.assumable(q) {
+                            continue;
+                        }
+                        push(GoalPredicate::World(q.clone()));
+                    }
+                }
+                for q in &r.assumes {
+                    if belief.eval(q) != Truth::True && !self.assumable(q) {
+                        push(GoalPredicate::World(q.clone()));
+                    }
+                }
+                if !needs.is_empty() {
+                    let names: Vec<String> = needs.iter().map(ToString::to_string).collect();
+                    return vec![crate::methods::Method {
+                        name: format!("Open({map}: {})", names.join(" & ")),
+                        achieves: p.clone(),
+                        subgoals: needs,
+                        complete: false,
+                        note: None,
+                    }];
+                }
+            }
+        }
+        for (req, cost) in &route.blocked {
+            // A closed route needing what only comes after the map is no way
+            // there (Surf to reach the house that gives Surf).
+            if let Some(below) = bound.filter(|_| self.levels.known()) {
+                if req
+                    .iter()
+                    .any(|q| self.levels.level(q).is_none_or(|l| l >= below))
+                {
+                    continue;
+                }
+            }
+            let mut subgoals: Vec<(OrdF64, GoalPredicate)> = Vec::new();
+            let mut total = *cost;
+            for r in req {
+                let g = GoalPredicate::World(r.clone());
+                let bound = self.establish_bound(&g, belief, 1);
+                total += bound.min(self.planner.params.unsupported_s);
+                subgoals.push((OrdF64(bound), g));
+            }
+            subgoals.sort();
+            let names: Vec<String> = subgoals.iter().map(|(_, g)| g.to_string()).collect();
+            options.push((
+                OrdF64(total),
+                crate::methods::Method {
+                    name: format!("Open({map}: {})", names.join(" & ")),
+                    achieves: p.clone(),
+                    subgoals: subgoals.into_iter().map(|(_, g)| g).collect(),
+                    complete: false,
+                    note: None,
+                },
+            ));
+        }
+        options.sort_by(|a, b| (a.0, &a.1.name).cmp(&(b.0, &b.1.name)));
+        options.into_iter().map(|(_, m)| m).collect()
+    }
+
+    /// Whether the route planner assumes `q` when the belief can't answer
+    /// it (the story makes it likely); otherwise it has to be established.
+    fn assumable(&self, q: &Predicate) -> bool {
+        edge_penalty(q).is_finite() && self.base.eval(q) == Truth::Unknown
+    }
+
+    /// The route to `map` through only what the story provides before
+    /// level `below` ([`crate::levels`]): such facts not yet held are
+    /// assumed at a price that grows with their level, so the route needs
+    /// the earliest ones; its `assumes` are what the trip needs first.
+    fn bound_route(
+        &self,
+        map: &str,
+        below: u32,
+        belief: &StateBelief<'a>,
+    ) -> Option<Rc<RouteResult>> {
+        let key = ((map.to_string(), self.route_key(belief)), below);
+        if let Some(r) = self.bound_routes.borrow().get(&key) {
+            return r.clone();
+        }
+        let t = Instant::now();
+        let bounded = BoundBelief {
+            base: belief,
+            levels: &self.levels,
+            below,
+        };
+        let levels = Rc::clone(&self.levels);
+        let previous = EDGE_PENALTY.with(|cell| cell.borrow().clone());
+        let fallback = previous.clone();
+        let model: PenaltyModel = Rc::new(move |p: &Predicate| {
+            let usual = fallback.as_ref().map_or(0.0, |f| f(p));
+            if usual.is_finite() {
+                return usual;
+            }
+            match levels.level(p) {
+                Some(l) if l < below => LEVEL_STEP_S * f64::from(l + 1),
+                _ => f64::INFINITY,
+            }
+        });
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = Some(model));
+        let ctx = PlanContext {
+            world: self.planner.world,
+            graph: self.planner.graph,
+            data: self.planner.data,
+            belief: &bounded,
+            pose: self.base.pose.clone(),
+            params: self.planner.params.clone(),
+            policy: UnknownPolicy::Optimistic {
+                penalty_of: edge_penalty,
+            },
+        };
+        let r = ctx.open_route_to(map).map(Rc::new);
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = previous);
+        self.spent.borrow_mut()[0] += t.elapsed().as_secs_f64();
+        if self.trace {
+            eprintln!(
+                "[route] {map} below level {below}: found={} in {:.2} s",
+                r.as_ref().is_some_and(|r| r.found()),
+                t.elapsed().as_secs_f64()
+            );
+        }
+        self.bound_routes.borrow_mut().insert(key, r.clone());
+        r
+    }
+
     /// Plans a method's subgoals in order, then the goal from primitives
     /// unless the method is complete. Cached per facts held.
     fn plan_method(
@@ -1863,10 +2962,18 @@ impl<'p, 'a> Session<'p, 'a> {
         goal: &OpenGoal,
         established: &BTreeSet<GoalPredicate>,
     ) -> Result<SubPlan, Failure> {
+        // The readiness inside depends on how far the steps ahead leave
+        // the lead, so a decomposition is reused only from the same point.
+        let lead = {
+            let mut ahead = self.prefix.borrow().clone();
+            let passive = self.passive_walk(&mut ahead);
+            (passive.exp as u64, passive.lead_level.unwrap_or(0))
+        };
         let key: MethodKey = (
             method.name.clone(),
             established.iter().cloned().collect(),
             goal.unless.clone(),
+            lead,
         );
         if let Some(cached) = self.methods.borrow().get(&key) {
             return cached
@@ -1927,6 +3034,9 @@ impl<'p, 'a> Session<'p, 'a> {
             unless: goal.unless.clone(),
             establish,
         };
+        if self.nesting.get() >= MAX_NESTING {
+            return Err(Failure::NoPlan);
+        }
         // While the subgoals are planned the goal itself is off limits:
         // meeting it again (Cut needs the S.S. Anne, whose route would
         // like Cut) is a cycle, not a plan.
@@ -1977,15 +3087,7 @@ impl<'p, 'a> Session<'p, 'a> {
     }
 
     fn route_to(&self, map: &str, belief: &StateBelief<'a>) -> Option<Rc<RouteResult>> {
-        let key: RouteKey = (
-            map.to_string(),
-            belief
-                .established
-                .iter()
-                .filter(|p| matches!(p, GoalPredicate::World(_)))
-                .cloned()
-                .collect(),
-        );
+        let key: RouteKey = (map.to_string(), self.route_key(belief));
         if let Some(r) = self.routes.borrow().get(&key) {
             return Some(Rc::clone(r));
         }
@@ -2006,11 +3108,34 @@ impl<'p, 'a> Session<'p, 'a> {
         Some(r)
     }
 
-    fn established_key(belief: &StateBelief<'a>) -> Vec<GoalPredicate> {
+    /// The open route to `map` only (no blocked alternatives): for pricing
+    /// and positions, where what would open a closed route doesn't matter.
+    fn open_route(&self, map: &str, belief: &StateBelief<'a>) -> Option<Rc<RouteResult>> {
+        let key: RouteKey = (map.to_string(), self.route_key(belief));
+        if let Some(r) = self.routes.borrow().get(&key) {
+            return Some(Rc::clone(r));
+        }
+        if let Some(r) = self.open_routes.borrow().get(&key) {
+            return Some(Rc::clone(r));
+        }
+        let t = Instant::now();
+        let ctx = self.context(belief);
+        let r = Rc::new(ctx.open_route_to(map)?);
+        self.spent.borrow_mut()[0] += t.elapsed().as_secs_f64();
+        self.open_routes.borrow_mut().insert(key, Rc::clone(&r));
+        Some(r)
+    }
+
+    /// The established facts a route can depend on: the cache key of
+    /// routes planned against the belief.
+    fn route_key(&self, belief: &StateBelief<'a>) -> Vec<GoalPredicate> {
         belief
             .established
             .iter()
-            .filter(|p| matches!(p, GoalPredicate::World(_)))
+            .filter(|p| match p {
+                GoalPredicate::World(w) => self.planner.graph.route_relevant(w),
+                _ => false,
+            })
             .cloned()
             .collect()
     }
@@ -2018,30 +3143,33 @@ impl<'p, 'a> Session<'p, 'a> {
     /// The cheapest encounter tile of `map` to reach and the route to it
     /// (a map's grass may lie past a cave the landings don't cross).
     fn grass_route(&self, map: &str, belief: &StateBelief<'a>) -> GrassRoute {
-        let key: RouteKey = (map.to_string(), Self::established_key(belief));
+        let key: RouteKey = (map.to_string(), self.route_key(belief));
         if let Some(r) = self.grass_routes.borrow().get(&key) {
             return r.clone();
         }
         let t = Instant::now();
         let ctx = self.context(belief);
-        let mut best: GrassRoute = None;
-        for &(x, y) in self
+        // One search to the nearest of the map's encounter tiles.
+        let tiles = self
             .planner
             .grass
             .get(map)
             .map(Vec::as_slice)
-            .unwrap_or(&[])
-        {
-            let Some(r) = ctx.route_to_tile(map, x, y) else {
-                break;
-            };
-            if !r.found() {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(_, b)| r.cost_s < b.cost_s) {
-                best = Some(((x, y), Rc::new(r)));
-            }
-        }
+            .unwrap_or(&[]);
+        let best: GrassRoute = if tiles.is_empty() {
+            None
+        } else {
+            ctx.open_route_to_tiles(map, tiles)
+                .filter(|r| r.found())
+                .and_then(|r| {
+                    // No legs: the player already stands on one of them.
+                    let end = match r.legs.last() {
+                        Some(l) => (l.to.x, l.to.y),
+                        None => self.base.pose.as_ref().map(|p| (p.x, p.y))?,
+                    };
+                    Some((end, Rc::new(r)))
+                })
+        };
         self.grass_routes.borrow_mut().insert(key, best.clone());
         self.spent.borrow_mut()[1] += t.elapsed().as_secs_f64();
         if self.trace {
@@ -2072,6 +3200,7 @@ impl<'p, 'a> Session<'p, 'a> {
         let walk = Walk {
             obstacles: &obstacles,
             surf: false,
+            opened: None,
         };
         let extra = |t: (i32, i32)| ways.and_then(|w| w.get(&t)).map_or(0, |w| w.0);
         let r = Rc::new(reach(map, from, &walk, extra));
@@ -2142,7 +3271,16 @@ impl<'p, 'a> Session<'p, 'a> {
             .get(map)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        for (tile, trainer) in triggers {
+        let mut tiles_seen: BTreeSet<(i32, i32)> = BTreeSet::new();
+        for (tile, trainer, pre) in triggers {
+            // The trainer of the path the belief doesn't rule out, one per
+            // tile.
+            if tiles_seen.contains(tile)
+                || pre.iter().any(|p| self.base.eval_goal(p) == Truth::False)
+            {
+                continue;
+            }
+            tiles_seen.insert(*tile);
             let (Some(a), Some(b)) = (self.tile_walk(m, from, *tile), self.tile_walk(m, *tile, to))
             else {
                 continue;
@@ -2167,7 +3305,7 @@ impl<'p, 'a> Session<'p, 'a> {
         if pose.map == map {
             return Some((pose.x, pose.y));
         }
-        let r = self.route_to(map, belief).filter(|r| r.found())?;
+        let r = self.open_route(map, belief).filter(|r| r.found())?;
         r.legs.last().map(|l| (l.to.x, l.to.y))
     }
 
@@ -2184,7 +3322,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 _ => None,
             }));
         for dest in dests {
-            if let Some(r) = self.route_to(&dest, belief) {
+            if let Some(r) = self.open_route(&dest, belief) {
                 for leg in &r.legs {
                     out.insert(leg.from.map.clone());
                     out.insert(leg.to.map.clone());
@@ -2253,9 +3391,67 @@ impl<'p, 'a> Session<'p, 'a> {
         full: bool,
         surround: &Surround,
     ) -> Vec<Candidate> {
+        // What doesn't depend on the walk ahead is the same for the same
+        // facts: worked out once (the Silph Co. floors are asked for by
+        // every branch that crosses them).
+        let memo = !matches!(
+            p,
+            GoalPredicate::PokedexCaught { .. }
+                | GoalPredicate::PokedexSeen { .. }
+                | GoalPredicate::CanBeat { .. }
+        );
+        let key = (
+            p.clone(),
+            belief.established.iter().cloned().collect::<Vec<_>>(),
+        );
+        let mut out = match self.candidate_memo.borrow().get(&key).filter(|_| memo) {
+            Some(c) => (**c).clone(),
+            None => Vec::new(),
+        };
+        if out.is_empty() {
+            out = self.candidates_uncached(p, belief, surround);
+            if memo {
+                self.candidate_memo
+                    .borrow_mut()
+                    .insert(key, Rc::new(out.clone()));
+            }
+        }
+        if let Some(best) = out.first() {
+            self.min_costs
+                .borrow_mut()
+                .entry(p.clone())
+                .or_insert(best.cost);
+        }
+        if full {
+            out.truncate(self.planner.options.candidates_per_goal);
+        } else {
+            out.truncate(1);
+        }
+        out
+    }
+
+    /// [`Session::candidates`], all of them, sorted, without the memo.
+    fn candidates_uncached(
+        &self,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        surround: &Surround,
+    ) -> Vec<Candidate> {
         let ctx = self.context(belief);
         let mut out: Vec<Candidate> = match p {
-            GoalPredicate::World(Predicate::At { map }) => self.go_candidates(map, belief, &ctx),
+            GoalPredicate::World(Predicate::At { map }) => {
+                let mut v = self.go_candidates(map, belief, &ctx);
+                let scripted = self.script_candidates(p, belief, &ctx);
+                if !scripted.is_empty() {
+                    v.retain(|c| {
+                        !c.steps
+                            .iter()
+                            .any(|s| matches!(s.planned.intent, Intent::Unsupported { .. }))
+                    });
+                    v.extend(scripted);
+                }
+                v
+            }
             GoalPredicate::World(Predicate::Visited { map }) => {
                 let mut v = self.go_candidates(map, belief, &ctx);
                 for c in &mut v {
@@ -2311,6 +3507,30 @@ impl<'p, 'a> Session<'p, 'a> {
             }
         };
         out.retain(|c| c.cost.is_finite());
+        // What the story never provides can't be a precondition (a flag
+        // only a link battle sets, a var no script moves there).
+        if self.levels.known() {
+            out.retain(|c| {
+                let ok = c.preconditions.iter().all(|pre| match pre {
+                    GoalPredicate::World(q) => {
+                        belief.eval(q) == Truth::True || self.levels.level(q).is_some()
+                    }
+                    _ => true,
+                });
+                if !ok && self.trace {
+                    eprintln!(
+                        "[plan]        pruned {} for {p}: {:?}",
+                        c.sort_key().1,
+                        c.preconditions
+                            .iter()
+                            .filter(|pre| matches!(pre, GoalPredicate::World(q) if belief.eval(q) != Truth::True && self.levels.level(q).is_none()))
+                            .map(|g| g.to_string())
+                            .collect::<Vec<_>>()
+                    );
+                }
+                ok
+            });
+        }
         // Intents that failed this session the same way twice (spec §8,
         // `IntentInfeasible`) are left to the other branches.
         let infeasible = &belief.knowledge.world.infeasible;
@@ -2323,17 +3543,6 @@ impl<'p, 'a> Session<'p, 'a> {
         }
         out.sort_by_key(Candidate::sort_key);
         out.dedup_by(|a, b| a.preconditions == b.preconditions && a.effects() == b.effects());
-        if let Some(best) = out.first() {
-            self.min_costs
-                .borrow_mut()
-                .entry(p.clone())
-                .or_insert(best.cost);
-        }
-        if full {
-            out.truncate(self.planner.options.candidates_per_goal);
-        } else {
-            out.truncate(1);
-        }
         out
     }
 
@@ -2343,10 +3552,18 @@ impl<'p, 'a> Session<'p, 'a> {
     /// still stand (the first Switch goal run lost every plan when the
     /// heal at home failed twice).
     fn heal_candidates(&self, belief: &StateBelief<'a>, ctx: &PlanContext<'_>) -> Vec<Candidate> {
-        let mut spots: Vec<(OrdF64, &String, Intent)> = self
+        // Only the nearest by maps crossed are priced by a route.
+        let mut near: Vec<(u32, &String)> = self
             .planner
             .centers
             .iter()
+            .map(|c| (self.hops.get(c).copied().unwrap_or(u32::MAX), c))
+            .collect();
+        near.sort();
+        near.truncate(NEAREST_SHOPS * 2);
+        let mut spots: Vec<(OrdF64, &String, Intent)> = near
+            .into_iter()
+            .map(|(_, c)| c)
             .filter_map(|center| {
                 let intent = Intent::Heal {
                     center: center.clone(),
@@ -2384,7 +3601,7 @@ impl<'p, 'a> Session<'p, 'a> {
 
     /// Seconds to reach `map` by the open route; `None` when there is none.
     fn go_cost(&self, map: &str, belief: &StateBelief<'a>) -> Option<f64> {
-        self.route_to(map, belief)
+        self.open_route(map, belief)
             .filter(|r| r.found())
             .map(|r| r.cost_s)
     }
@@ -2509,32 +3726,81 @@ impl<'p, 'a> Session<'p, 'a> {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (label, idx) in self
-            .planner
-            .scripts_by_effect
-            .get(p)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-        {
-            let Some(script) = events.script(label) else {
+        for (label, idx) in self.effect_sources(p) {
+            let Some(script) = events.script(&label) else {
                 continue;
             };
-            // Only what the player can start by talking: map scripts run on
-            // their own and triggers on their tile.
-            if script.kind != "object" {
+            let (Some(map), Some(path)) = (&script.map, script.paths.get(idx)) else {
                 continue;
-            }
-            let (Some(map), Some(path)) = (&script.map, script.paths.get(*idx)) else {
+            };
+            // What starting the script takes beyond being on its map: an
+            // object must be there (not hidden by its flag), a trigger's or
+            // a map's entry script's var must hold its value.
+            let Some(start) = self.planner.start_conditions(script, &label, map) else {
                 continue;
             };
             let intent = Intent::RunScript {
                 script: label.clone(),
-                path: *idx,
+                path: idx,
                 answers: path_answers(path),
                 map: map.clone(),
             };
             let cost = intent.cost_s(ctx);
             let mut c = Candidate::single(intent, ctx, cost);
+            // An object whose script takes it away (an item ball, a fossil)
+            // is there as long as that script hasn't run: its presence is
+            // not a separate fact to plan for, unless the story starts with
+            // it hidden (the Silph Scope appears once Giovanni is beaten).
+            let own_hide: Vec<GoalPredicate> = c
+                .effects()
+                .into_iter()
+                .filter(|e| match e {
+                    GoalPredicate::World(Predicate::Flag { name, is: true }) => {
+                        !self.planner.story.initial.contains(name)
+                    }
+                    _ => false,
+                })
+                .filter_map(|e| e.negation())
+                .collect();
+            let start: Vec<GoalPredicate> = start
+                .into_iter()
+                .filter(|pre| !(script.kind == "object" && own_hide.contains(pre)))
+                .collect();
+            // On a map whose passages the story opens, being on the map is
+            // not being at the script: what the walk to it needs (the Silph
+            // Co. door a Card Key opens) comes first too.
+            let mut start = start;
+            if self.planner.graph.has_gates(map) {
+                let spots = self.planner.script_spots(script, &label, map);
+                // What the script itself establishes can't be a need of
+                // the walk to it (the old man's own road), nor can what
+                // only comes after it in the story.
+                let after = belief.with_established(c.effects().into_iter().collect());
+                let below = self.levels.fired(&label, idx).unwrap_or(u32::MAX);
+                for need in self
+                    .spot_needs(map, &spots, below, belief)
+                    .unwrap_or_default()
+                {
+                    if *p != need && after.eval_goal(&need) != Truth::True && !start.contains(&need)
+                    {
+                        start.push(need);
+                    }
+                }
+            }
+            // Right after being on the map, before the path's own conditions
+            // and the battle: whatever arms the script is planned first, so
+            // the readiness for its battle sees the training on the way.
+            let mut at = c
+                .preconditions
+                .iter()
+                .position(|q| q.at_map().is_some())
+                .map_or(0, |i| i + 1);
+            for pre in start {
+                if !c.preconditions.contains(&pre) {
+                    c.preconditions.insert(at, pre);
+                    at += 1;
+                }
+            }
             // Trainers whose trigger lies between where the player lands
             // on the map and the object.
             let object = script
@@ -2558,6 +3824,127 @@ impl<'p, 'a> Session<'p, 'a> {
             out.push(c);
         }
         out
+    }
+
+    /// What the walk to the nearest of `spots` on `map` needs beyond what
+    /// holds: the requirements of the open route to it, or else of the
+    /// route through what the story can provide. `None` when no spot can
+    /// be reached at all (the map's own gating is then left to the tools).
+    fn spot_needs(
+        &self,
+        map: &str,
+        spots: &[(i32, i32)],
+        below: u32,
+        belief: &StateBelief<'a>,
+    ) -> Option<Vec<GoalPredicate>> {
+        if spots.is_empty() {
+            return None;
+        }
+        let key = (
+            map.to_string(),
+            spots.to_vec(),
+            below,
+            self.route_key(belief),
+        );
+        if let Some(n) = self.spot_needs_cache.borrow().get(&key) {
+            return n.clone();
+        }
+        let t = Instant::now();
+        let ctx = self.context(belief);
+        let open = ctx.open_route_to_tiles(map, spots).filter(|r| r.found());
+        let needs = match open {
+            Some(r) => {
+                let mut v = Vec::new();
+                for leg in &r.legs {
+                    for q in &leg.requires {
+                        let g = GoalPredicate::World(q.clone());
+                        if belief.eval(q) != Truth::True && !v.contains(&g) {
+                            v.push(g);
+                        }
+                    }
+                }
+                Some(v)
+            }
+            None if self.levels.known() => {
+                // Through what the story provides at all.
+                let bounded = BoundBelief {
+                    base: belief,
+                    levels: &self.levels,
+                    below,
+                };
+                let levels = Rc::clone(&self.levels);
+                let previous = EDGE_PENALTY.with(|cell| cell.borrow().clone());
+                let fallback = previous.clone();
+                let model: PenaltyModel = Rc::new(move |p: &Predicate| {
+                    let usual = fallback.as_ref().map_or(0.0, |f| f(p));
+                    if usual.is_finite() {
+                        return usual;
+                    }
+                    match levels.level(p) {
+                        Some(l) if l < below => LEVEL_STEP_S * f64::from(l + 1),
+                        _ => f64::INFINITY,
+                    }
+                });
+                EDGE_PENALTY.with(|cell| *cell.borrow_mut() = Some(model));
+                let bctx = PlanContext {
+                    belief: &bounded,
+                    ..self.context(belief)
+                };
+                let r = bctx.open_route_to_tiles(map, spots).filter(|r| r.found());
+                EDGE_PENALTY.with(|cell| *cell.borrow_mut() = previous);
+                r.map(|r| {
+                    let mut v = Vec::new();
+                    for q in r
+                        .assumes
+                        .iter()
+                        .chain(r.legs.iter().flat_map(|l| l.requires.iter()))
+                    {
+                        let g = GoalPredicate::World(q.clone());
+                        if belief.eval(q) != Truth::True && !self.assumable(q) && !v.contains(&g) {
+                            v.push(g);
+                        }
+                    }
+                    v
+                })
+            }
+            None => None,
+        };
+        self.spent.borrow_mut()[0] += t.elapsed().as_secs_f64();
+        self.spot_needs_cache
+            .borrow_mut()
+            .insert(key, needs.clone());
+        needs
+    }
+
+    /// The (script, path) pairs whose effects establish `p`; for a var
+    /// compared other than by `==`, every path that leaves it at a value
+    /// that satisfies the comparison.
+    fn effect_sources(&self, p: &GoalPredicate) -> Vec<(String, usize)> {
+        match p {
+            GoalPredicate::World(Predicate::Var { name, op, value }) if *op != CmpOp::Eq => self
+                .planner
+                .var_effects
+                .get(name)
+                .map(|v| {
+                    v.iter()
+                        .filter(|(set, _, _)| op.holds(*set, *value))
+                        .map(|(_, label, idx)| (label.clone(), *idx))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            GoalPredicate::World(Predicate::At { map }) => self
+                .planner
+                .warp_scripts
+                .get(map)
+                .cloned()
+                .unwrap_or_default(),
+            _ => self
+                .planner
+                .scripts_by_effect
+                .get(p)
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
 
     /// The tile the player talks to an object at `(x, y)` from: below,
@@ -2916,7 +4303,7 @@ impl<'p, 'a> Session<'p, 'a> {
         let (lead, lead_cost, passive): (Vec<Step>, f64, Cow<'_, Passive>) = match stock {
             Some((mart, count, held, passive)) => {
                 let go = Intent::Go { dest: mart.clone() };
-                let route = self.route_to(&mart, belief).filter(|r| r.found())?;
+                let route = self.open_route(&mart, belief).filter(|r| r.found())?;
                 let mut go_step = Step::new(
                     PlannedIntent::new(go, route.cost_s).with_route(&route),
                     vec![
@@ -3253,11 +4640,16 @@ impl<'p, 'a> Session<'p, 'a> {
         };
         let plans = plan_preparation(&request, 1);
         let Some(plan) = plans.first() else {
-            return Some(self.unsupported(
-                format!("no training or catching readies the party for {trainer}"),
-                p,
-                ctx,
-            ));
+            // Nothing within reach improves the odds (the lead is at the
+            // top of its window): the battle is fought as the party stands
+            // and judged again then, priced as a full shortfall.
+            return Some(Candidate {
+                steps: Vec::new(),
+                lead: Vec::new(),
+                preconditions: Vec::new(),
+                assumes: Vec::new(),
+                cost: self.planner.params.unsupported_s,
+            });
         };
         let mut steps: Vec<Step> = Vec::new();
         let mut cost = 0.0;
@@ -3327,11 +4719,17 @@ impl<'p, 'a> Session<'p, 'a> {
             // goal loop replans after every `Train`); the shortfall is
             // priced so a way that gets there wins when there is one.
             let Some(last) = steps.last_mut() else {
-                return Some(self.unsupported(
-                    format!("no training or catching readies the party for {trainer}"),
-                    p,
-                    ctx,
-                ));
+                // Nothing to train further (the lead tops its window): the
+                // battle is fought as the party stands and judged again
+                // then, the shortfall priced.
+                let shortfall = (confidence - plan.min_confidence()) / confidence;
+                return Some(Candidate {
+                    steps: Vec::new(),
+                    lead: Vec::new(),
+                    preconditions: Vec::new(),
+                    assumes: Vec::new(),
+                    cost: shortfall * self.planner.params.unsupported_s,
+                });
             };
             let shortfall = (confidence - plan.min_confidence()) / confidence;
             last.planned.note = Some(format!(
@@ -3391,12 +4789,19 @@ impl<'p, 'a> Session<'p, 'a> {
         near.sort();
         near.truncate(TRAINING_AREAS * 2);
         // The nearest Center from here stands in for each area's.
-        let center = self
+        let mut near_centers: Vec<(u32, &String)> = self
             .planner
             .centers
             .iter()
+            .map(|c| (self.hops.get(c).copied().unwrap_or(u32::MAX), c))
+            .collect();
+        near_centers.sort();
+        near_centers.truncate(NEAREST_SHOPS);
+        let center = near_centers
+            .into_iter()
+            .map(|(_, c)| c)
             .filter_map(|c| {
-                let r = self.route_to(c, belief)?;
+                let r = self.open_route(c, belief)?;
                 r.found().then_some(r.cost_s)
             })
             .min_by(f64::total_cmp)
