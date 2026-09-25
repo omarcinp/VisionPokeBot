@@ -29,6 +29,13 @@ pub trait PerceptionSystem {
     /// Forgets the hint so the next frame is located from scratch (the
     /// goal loop's relocalisation: `locate_anywhere`).
     fn clear_pose_hint(&mut self) {}
+
+    /// A hint worked out rather than seen (one of several lookalike maps):
+    /// poses tracked from it are reported as inferred until the player
+    /// reaches a map the frame alone names.
+    fn set_pose_hint_inferred(&mut self, pose: PlayerPose) {
+        self.set_pose_hint(pose);
+    }
 }
 
 /// FireRed/LeafGreen perception.
@@ -41,6 +48,8 @@ pub struct FireRedPerception {
     /// Last located pose: where the next search starts (speed only; a wrong
     /// hint just means a wider search).
     hint: Option<PlayerPose>,
+    /// The map of an inferred hint: poses tracked on it are inferred too.
+    inferred: Option<String>,
     frames_since_global_search: u32,
     /// Previous frame's text cells and how long they have been unchanged.
     /// Text cells of the last dialogue and the frame they first appeared.
@@ -196,7 +205,7 @@ impl PerceptionSystem for FireRedPerception {
                 observation.map_popup = detect::map_popup::read(image, popup, font);
             }
             let covered = popup.map(|p| p.covers);
-            observation.player = self.locate(image, &observation, covered);
+            self.locate(image, &mut observation, covered);
             self.see_sprites(frame.frame_id, image, &mut observation, covered);
         }
         if observation.screen.value == ScreenState::Unknown
@@ -212,12 +221,19 @@ impl PerceptionSystem for FireRedPerception {
 
     fn set_pose_hint(&mut self, pose: PlayerPose) {
         self.hint = Some(pose);
+        self.inferred = None;
+    }
+
+    fn set_pose_hint_inferred(&mut self, pose: PlayerPose) {
+        self.inferred = Some(pose.map.clone());
+        self.hint = Some(pose);
     }
 
     /// Drops the hint and searches every map on the next frame (global
     /// search is switched on: without it nothing could be located again).
     fn clear_pose_hint(&mut self) {
         self.hint = None;
+        self.inferred = None;
         self.global_search = true;
         self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
     }
@@ -479,13 +495,14 @@ impl FireRedPerception {
 
     /// The player's pose, matching the frame outside the player sprite and
     /// any window drawn over the map (`popup`: the map-name popup's area).
-    fn locate(
-        &mut self,
-        image: &RgbImage,
-        observation: &Observation,
-        popup: Option<Region>,
-    ) -> Option<pokebot_state::PoseObservation> {
-        let world = self.world.clone()?;
+    /// Sets `observation.player`, or `pose_candidates` when the frame
+    /// matches several maps equally (maps sharing a layout, every Pokémon
+    /// Center): perception never picks one of those; the sensor does, from
+    /// the state, or the scheduler confirms the location.
+    fn locate(&mut self, image: &RgbImage, observation: &mut Observation, popup: Option<Region>) {
+        let Some(world) = self.world.clone() else {
+            return;
+        };
         let mut exclude = vec![PLAYER_SPRITE];
         if observation.dialogue.is_some() {
             exclude.push(Region::new(0, 112, 240, 48));
@@ -505,33 +522,54 @@ impl FireRedPerception {
         // looks at the hint's map and its neighbours, so a wrong hint (a
         // warp to somewhere unconnected, a reset) otherwise kept the player
         // unlocated for good (Switch audit: the Pewter Gym read score 994
-        // but was never searched). Past a hint, a map that looks like
-        // another (every Pokémon Center) is no answer: guessing one would
-        // replace a stale hint with a false one.
-        let stale = self.hint.is_some();
+        // but was never searched).
         let found = match tracked {
             Some(found) => {
                 self.frames_since_global_search = 0;
-                Some(found)
+                match &self.inferred {
+                    // Still on the inferred pose's map: as unconfirmed as it.
+                    Some(map) if *map == found.pose.map => {
+                        observation.pose_inferred = true;
+                        Some(found)
+                    }
+                    // Tracked off it through a warp: the new map counts once
+                    // no lookalike matches as well (the stairs of one Center
+                    // lead to a 2F like every other).
+                    Some(_) => {
+                        let mut all = localizer.locate_anywhere_candidates(image, &exclude);
+                        if all.len() == 1 {
+                            self.inferred = None;
+                            Some(all.remove(0))
+                        } else {
+                            self.inferred = Some(found.pose.map.clone());
+                            observation.pose_inferred = true;
+                            Some(found)
+                        }
+                    }
+                    None => Some(found),
+                }
             }
             None if !self.global_search => None,
             None => {
                 self.frames_since_global_search += 1;
                 if self.frames_since_global_search < GLOBAL_SEARCH_INTERVAL {
-                    return None;
+                    return;
                 }
                 self.frames_since_global_search = 0;
-                if stale {
-                    localizer.locate_anywhere_unambiguous(image, &exclude)
+                let mut all = localizer.locate_anywhere_candidates(image, &exclude);
+                if all.len() == 1 {
+                    self.inferred = None;
+                    Some(all.remove(0))
                 } else {
-                    localizer.locate_anywhere(image, &exclude)
+                    observation.pose_candidates = all;
+                    None
                 }
             }
         };
         if let Some(found) = &found {
             self.hint = Some(found.pose.clone());
         }
-        found
+        observation.player = found;
     }
 
     /// The sprites around the located player, and the objects seen not to

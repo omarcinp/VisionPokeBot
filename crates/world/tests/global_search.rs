@@ -76,6 +76,16 @@ fn lookalike_maps_are_no_unambiguous_answer() {
         localizer.locate_anywhere_unambiguous(&frame, &[PLAYER_SPRITE]),
         None
     );
+    // The candidates are every Center, on the same tile: what perception
+    // reports instead of a guess.
+    let candidates = localizer.locate_anywhere_candidates(&frame, &[PLAYER_SPRITE]);
+    assert!(candidates.len() >= 2, "{candidates:?}");
+    let maps: Vec<&str> = candidates.iter().map(|c| c.pose.map.as_str()).collect();
+    assert!(maps.contains(&"PewterCity_PokemonCenter_1F"), "{maps:?}");
+    assert!(maps.contains(&"ViridianCity_PokemonCenter_1F"), "{maps:?}");
+    assert!(candidates
+        .iter()
+        .all(|c| (c.pose.x, c.pose.y) == (candidates[0].pose.x, candidates[0].pose.y)));
     // A map of its own is found either way.
     let Ok(gym) = pokebot_video::png::load(root.join("captures/fixtures/switch-pewter-gym.png"))
     else {

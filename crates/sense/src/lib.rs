@@ -22,6 +22,7 @@
 //! | Pokédex list | species seen and caught |
 //! | Fly map | fly spots visited |
 //! | field (player located) | NPCs seen on a tile, NPCs whose whole reach is empty |
+//! | overworld matching several maps | the one the state points at (the committed pose's map, a map its warps lead to, the respawn point) as an inferred pose, else `LocationAmbiguous` |
 //! | anything | the view: text, menu, opponent, sprites on the field |
 
 mod field;
@@ -122,6 +123,11 @@ struct MoveMenu {
 
 pub struct Sensor {
     data: Arc<GameData>,
+    /// Where warps lead, to tell lookalike maps apart (off without it).
+    world: Option<Arc<pokebot_world::World>>,
+    /// The lookalike maps last resolved or announced, so each ambiguous
+    /// stretch is decided once.
+    ambiguous: Option<Vec<String>>,
     page: Confirm<String>,
     hud: Confirm<Hud>,
     opponent: Confirm<(String, Option<bool>, Option<u8>)>,
@@ -169,6 +175,8 @@ impl Sensor {
     pub fn new(data: Arc<GameData>) -> Self {
         Self {
             data,
+            world: None,
+            ambiguous: None,
             page: Confirm::default(),
             hud: Confirm::default(),
             opponent: Confirm::default(),
@@ -193,6 +201,12 @@ impl Sensor {
         }
     }
 
+    /// Tells lookalike maps apart by where the committed pose's warps lead.
+    pub fn with_world(mut self, world: Arc<pokebot_world::World>) -> Self {
+        self.world = Some(world);
+        self
+    }
+
     /// The facts `o` confirms, given what the state already holds.
     pub fn observe(&mut self, o: &Observation, state: &GameState) -> Vec<GameEvent> {
         let mut events = Vec::new();
@@ -205,6 +219,7 @@ impl Sensor {
         if o.player.is_some() || o.battle.is_some() {
             self.party_screens = false;
         }
+        self.location(o, state, &mut events);
         self.text(o, state, &mut events);
         self.battle(o, state, &mut events);
         // Back on the field: a catch goes to the party or the PC.
@@ -246,6 +261,81 @@ impl Sensor {
             }
         }
         events
+    }
+
+    /// A frame that matches several maps equally (they share a layout):
+    /// the one the state points at becomes an inferred pose, in this
+    /// order: the committed pose's map (still in the same Center), a map
+    /// the committed map's warps or edges lead to (walked in from the
+    /// town), the respawn point (a white-out or a reset left no pose).
+    /// With none or several, `LocationAmbiguous` for the scheduler.
+    fn location(&mut self, o: &Observation, state: &GameState, events: &mut Vec<GameEvent>) {
+        if o.player.is_some() {
+            self.ambiguous = None;
+            return;
+        }
+        if o.pose_candidates.len() < 2 {
+            return;
+        }
+        let mut maps: Vec<String> = o
+            .pose_candidates
+            .iter()
+            .map(|c| c.pose.map.clone())
+            .collect();
+        maps.sort();
+        if self.ambiguous.as_ref() == Some(&maps) {
+            return;
+        }
+        self.ambiguous = Some(maps);
+        let committed = state.player.pose.value.as_ref();
+        let only = |keep: &dyn Fn(&str) -> bool| {
+            let mut hits = o.pose_candidates.iter().filter(|c| keep(&c.pose.map));
+            let first = hits.next()?;
+            hits.next().is_none().then(|| first.pose.clone())
+        };
+        let same = committed.and_then(|p| only(&|m| m == p.map));
+        // Maps `map`'s warps and edges lead to.
+        let leads = |map: &str| -> Vec<String> {
+            let Some(world) = self.world.as_ref() else {
+                return Vec::new();
+            };
+            let Some(from) = world.map(map) else {
+                return Vec::new();
+            };
+            from.warps
+                .iter()
+                .filter_map(|w| world.name_of(&w.dest_map))
+                .chain(
+                    from.connections
+                        .iter()
+                        .filter_map(|c| world.name_of(&c.map)),
+                )
+                .map(str::to_owned)
+                .collect()
+        };
+        let next_door = || {
+            let leads = leads(&committed?.map);
+            only(&|m| leads.iter().any(|l| l == m))
+        };
+        // The respawn point is the spot outside the Center (`HealSpot`):
+        // the player is on it or in the Center its door leads to.
+        let respawn = || {
+            let spot = state.world.respawn.value.as_ref()?;
+            if committed.is_some() {
+                return None;
+            }
+            let leads = leads(&spot.map);
+            only(&|m| m == spot.map || leads.iter().any(|l| l == m))
+        };
+        match same.or_else(next_door).or_else(respawn) {
+            Some(pose) => events.push(GameEvent::PlayerInferred {
+                pose,
+                candidates: Vec::new(),
+            }),
+            None => events.push(GameEvent::LocationAmbiguous {
+                candidates: o.pose_candidates.iter().map(|c| c.pose.clone()).collect(),
+            }),
+        }
     }
 
     /// A fully printed page, applied once.

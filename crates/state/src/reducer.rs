@@ -1,5 +1,6 @@
 use crate::{
-    EventRecord, GameEvent, GameState, GoalStatus, Knowledge, ScreenState, SynchronizationState,
+    EventRecord, GameEvent, GameState, GoalStatus, Knowledge, KnowledgeSource, ScreenState,
+    SynchronizationState,
 };
 
 pub trait StateReducer {
@@ -65,6 +66,20 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::PlayerMoved { to, .. }
                 | GameEvent::MapChanged { to, .. } => {
                     state.player.pose = Knowledge::observed(to.clone(), record.frame_id);
+                    state.player.candidates.clear();
+                }
+                GameEvent::PlayerInferred { pose, candidates } => {
+                    state.player.pose = Knowledge::derived(pose.clone(), record.frame_id);
+                    if !candidates.is_empty() {
+                        state.player.candidates = candidates.clone();
+                    }
+                }
+                GameEvent::LocationAmbiguous { candidates } => {
+                    state.player.candidates = candidates.clone();
+                    // The last pose may be right, but nothing confirms it.
+                    if state.player.pose.value.is_some() {
+                        state.player.pose.source = KnowledgeSource::Assumed;
+                    }
                 }
                 GameEvent::BadgeEarned { badge } => {
                     let mut badges = state.progression.badges.value.take().unwrap_or_default();

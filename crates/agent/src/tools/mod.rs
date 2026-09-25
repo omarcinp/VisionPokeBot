@@ -15,6 +15,7 @@ pub mod effects;
 pub mod field;
 mod go;
 mod heal;
+mod locate;
 pub mod lookup;
 mod medicine;
 pub mod menu;
@@ -194,6 +195,10 @@ pub enum Intent {
     Save,
     /// Get out of an unrecognised screen (§7.4).
     Unstick,
+    /// Find out which of several lookalike maps the player is on (the
+    /// state's `player.candidates`), by walking out to one that names
+    /// itself.
+    ConfirmLocation,
     /// Teach the TM or HM `item` (`ITEM_HM01`) to `member`: a species
     /// constant (the first party member of that species), `lead`, or
     /// `slot:N`. With four moves known, the lowest-value move is forgotten
@@ -231,6 +236,7 @@ impl Intent {
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
+            Intent::ConfirmLocation => "ConfirmLocation",
             Intent::Teach { .. } => "Teach",
             Intent::FieldMove { .. } => "FieldMove",
         }
@@ -406,6 +412,7 @@ impl std::fmt::Display for Intent {
             Intent::Probe { fact } => write!(f, "Probe {fact:?}"),
             Intent::Save => write!(f, "Save"),
             Intent::Unstick => write!(f, "Unstick"),
+            Intent::ConfirmLocation => write!(f, "ConfirmLocation"),
             Intent::Teach { item, member } => write!(f, "Teach {item} to {member}"),
             Intent::FieldMove { mv, at, push } => {
                 write!(f, "FieldMove {mv}")?;
@@ -519,6 +526,7 @@ impl Default for Toolbox {
     fn default() -> Self {
         Toolbox::new(vec![
             Box::new(go::GoTool),
+            Box::new(locate::ConfirmLocationTool),
             Box::new(talk::TalkTool),
             Box::new(DialogueTool),
             Box::new(heal::HealTool),

@@ -35,6 +35,15 @@ pub enum StateChange {
         from: PlayerPose,
         to: PlayerPose,
     },
+    /// The frame matches several maps and the state can't tell which: the
+    /// player is on one of `candidates` (the scheduler confirms it).
+    LocationAmbiguous {
+        candidates: Vec<PlayerPose>,
+    },
+    /// A frame named the map again after the location was ambiguous.
+    LocationConfirmed {
+        pose: Option<PlayerPose>,
+    },
     BattleStarted,
     BattleEnded,
 
@@ -254,6 +263,18 @@ pub fn diff(old: &GameState, new: &GameState) -> Vec<StateChange> {
         });
     }
     pose(&mut out, &old.player.pose, &new.player.pose);
+    match (
+        old.player.candidates.is_empty(),
+        new.player.candidates.is_empty(),
+    ) {
+        (true, false) => out.push(StateChange::LocationAmbiguous {
+            candidates: new.player.candidates.clone(),
+        }),
+        (false, true) => out.push(StateChange::LocationConfirmed {
+            pose: new.player.pose.value.clone(),
+        }),
+        _ => {}
+    }
     match (old.in_battle, new.in_battle) {
         (false, true) => out.push(StateChange::BattleStarted),
         (true, false) => out.push(StateChange::BattleEnded),
@@ -644,6 +665,40 @@ mod tests {
             pp: Knowledge::observed((35, 35), 1),
         });
         m
+    }
+
+    #[test]
+    fn an_ambiguous_location_is_announced_and_its_confirmation_too() {
+        let center = |map: &str| PlayerPose {
+            map: map.into(),
+            x: 7,
+            y: 7,
+        };
+        let a = GameState::default();
+        let mut b = a.clone();
+        b.player.candidates = vec![
+            center("PewterCity_PokemonCenter_1F"),
+            center("ViridianCity_PokemonCenter_1F"),
+        ];
+        assert_eq!(
+            diff(&a, &b),
+            vec![StateChange::LocationAmbiguous {
+                candidates: b.player.candidates.clone()
+            }]
+        );
+        let mut c = b.clone();
+        c.player.candidates.clear();
+        c.player.pose = Knowledge::observed(
+            PlayerPose {
+                map: "PewterCity".into(),
+                x: 13,
+                y: 26,
+            },
+            9,
+        );
+        assert!(diff(&b, &c).contains(&StateChange::LocationConfirmed {
+            pose: c.player.pose.value.clone()
+        }));
     }
 
     #[test]

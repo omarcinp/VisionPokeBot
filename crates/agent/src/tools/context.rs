@@ -470,7 +470,10 @@ impl<'a> ToolContext<'a> {
         // A conversation or scene being followed is not an overworld
         // boundary: its gaps (people walking off) are not the time to
         // leave for a heal (the rival's scene was left half-recorded).
-        if o.player.is_some()
+        // With the location unconfirmed no frame is located, and that need
+        // is served from right there.
+        let unconfirmed = !self.runtime.state().player.candidates.is_empty();
+        if (o.player.is_some() || unconfirmed)
             && !expects.dialogue
             && o.dialogue.is_none()
             && o.menu.is_none()
@@ -503,6 +506,12 @@ impl<'a> ToolContext<'a> {
         };
         self.scheduler.recovering = true;
         let result = (|| {
+            if need == Need::ConfirmLocation {
+                self.info("scheduler: suspend task, confirm the location");
+                self.invoke(&Intent::ConfirmLocation).result?;
+                self.scheduler.queue.retain(|n| *n != Need::ConfirmLocation);
+                return Ok(true);
+            }
             if need == Need::AuditParty {
                 self.info("scheduler: suspend task, audit party facts");
                 self.invoke(&Intent::Probe {

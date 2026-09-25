@@ -61,6 +61,21 @@ pub enum GameEvent {
         from: PlayerPose,
         to: PlayerPose,
     },
+    /// Where the player is, worked out rather than seen: the frame matches
+    /// several maps equally (they share a layout) and the state picks one
+    /// (the committed pose's map, a map its warps lead to, the respawn
+    /// point). With `candidates`, a pose taken as a working hypothesis
+    /// while the location is confirmed.
+    PlayerInferred {
+        pose: PlayerPose,
+        #[serde(default)]
+        candidates: Vec<PlayerPose>,
+    },
+    /// The frame matches several maps equally and nothing in the state
+    /// tells them apart: the player is on one of `candidates`.
+    LocationAmbiguous {
+        candidates: Vec<PlayerPose>,
+    },
     /// Over a window of `window_ms`, the video device delivered `delivered`
     /// frames and never delivered `missing` (driver drops, empty buffers),
     /// too few for the [`FrameDropPolicy`]. Faster windows are not reported.
@@ -455,7 +470,13 @@ impl EventExtractor {
                     _ => 1,
                 };
                 if count >= self.confirm_frames {
-                    events.push(match self.pose.take() {
+                    let from = self.pose.take();
+                    events.push(match from {
+                        // Tracked from an inferred pose: still inferred.
+                        _ if observation.pose_inferred => GameEvent::PlayerInferred {
+                            pose: seen.clone(),
+                            candidates: Vec::new(),
+                        },
                         None => GameEvent::PlayerLocated { pose: seen.clone() },
                         Some(from) if from.map != seen.map => GameEvent::MapChanged {
                             from,

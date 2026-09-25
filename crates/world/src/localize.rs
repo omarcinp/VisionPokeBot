@@ -552,11 +552,23 @@ impl<'w> Localizer<'w> {
         frame: &RgbImage,
         exclude: &[Region],
     ) -> Option<PoseObservation> {
+        let mut top = self.locate_anywhere_candidates(frame, exclude);
+        (top.len() == 1).then(|| top.remove(0))
+    }
+
+    /// Every map's pose that matches the frame best, in map name order:
+    /// one when the frame names its map, several when maps share a layout
+    /// (every Pokémon Center), none when nothing matches.
+    pub fn locate_anywhere_candidates(
+        &self,
+        frame: &RgbImage,
+        exclude: &[Region],
+    ) -> Vec<PoseObservation> {
         let found = self.search_all(frame, exclude);
-        let best = found.iter().map(|o| o.score).max()?;
-        let mut top = found.into_iter().filter(|o| o.score == best);
-        let first = top.next()?;
-        top.next().is_none().then_some(first)
+        let Some(best) = found.iter().map(|o| o.score).max() else {
+            return Vec::new();
+        };
+        found.into_iter().filter(|o| o.score == best).collect()
     }
 
     /// Every map's best pose, in map name order.

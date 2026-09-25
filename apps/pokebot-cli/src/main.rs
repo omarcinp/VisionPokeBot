@@ -774,7 +774,7 @@ fn story(
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::with_perception(devices, perception)
-        .with_sensor(pokebot_sense::Sensor::new(Arc::clone(&data)));
+        .with_sensor(pokebot_sense::Sensor::new(Arc::clone(&data)).with_world(Arc::clone(&world)));
     let (telemetry, _) = attach_outputs(&mut runtime, output, &video_name, &controller_name)?;
     runtime.echo_events(true);
     let syncer = args.syncer()?;
