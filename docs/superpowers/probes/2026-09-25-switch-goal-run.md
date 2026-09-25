@@ -70,3 +70,13 @@ placeholders (6000 s each), e.g. step 8 against Misty right after step 7
 `Train(BULBASAUR to Lv20)`. The loop will hit the first at step 8 and
 replan; expect `out of replans` cycles until the planner can express a
 catch/party plan there.
+
+## Cycle 2 (restart proven on the hardware)
+
+After the 240 s wait: `console: the game is on screen` → `ContinueGame
+completed` (frame 89552) → `continuing after: … DeliverParcel` → `Checkpoint
+knowledge restored from saves/switch/state.json` → RED back in Oak's lab at
+the DeliverParcel save. Plan 1 of cycle 2: 81 steps (the trainer-card probe
+is no longer needed; its result is in the checkpoint), step 1 `Go(Route22)`
+again at 10/22 HP — failure 1 above will repeat until a Heal is planned or
+the battle tool runs at low HP.
