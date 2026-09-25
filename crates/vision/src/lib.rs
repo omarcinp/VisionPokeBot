@@ -195,6 +195,10 @@ impl PerceptionSystem for FireRedPerception {
             let cursor = detect::menu::cursor_region(image, m);
             observation.menu_lines = font.read(image, m.window, &[cursor]);
         }
+        observation.save_badge_count = self
+            .small_font
+            .as_deref()
+            .and_then(|font| detect::save::badge_count(image, font));
         observation.dialogue = dialogue;
         observation.menu = menu;
         let in_battle = battle.is_some();

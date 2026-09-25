@@ -147,6 +147,25 @@ tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --sav
 
 Each process runs in its own systemd user unit (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`; `systemctl --user status <unit>`), so runs outlive the shell or agent session that started them. `sg video` gives the unit access to the capture card.
 
+### Trainer badges and Pokémon details
+
+Open the player’s name in the Start menu to read the Trainer Card. Its badge
+icons update both the planner’s flags and the detailed web view. The SAVE panel
+also supplies a badge total. Totals of 0 and 8 identify the entire set; 1 suggests
+Brock’s Boulder Badge and 7 suggests every badge except Giovanni’s Earth Badge.
+Those two assumptions appear with dashed outlines until the card is read, and
+never become confirmed planner flags. Counts 2–6 do not imply a gym order.
+
+A Pokémon’s Info and Skills pages supply IDNo., OT, Attack, Defense, Sp. Atk,
+Sp. Def, Speed, Exp. Points, Exp. Points to the next level, and Ability. The bot
+reads these during its party audit and whenever those pages are viewed while a
+bot process is observing, including manual control. Each party card shows the
+latest readings and an expandable **Stat history**, with before/after values,
+level and frame. Unread fields remain unknown; repeated readings do not add
+history entries. The last 512 changes per member are kept in saved checkpoints
+and survive a reload or roster audit. Historical values from before this reader
+was installed cannot be reconstructed automatically.
+
 ### Capture and manual control
 
 The hub owns one capture session for the Switch (`--switch-device /dev/video0`).

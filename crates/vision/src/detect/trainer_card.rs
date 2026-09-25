@@ -151,6 +151,15 @@ mod tests {
         assert_eq!(card.pokedex_count, None, "no font, no count");
     }
 
+    #[test]
+    fn switch_capture_reads_the_same_badge_slots() {
+        let Some(image) = fixture("switch-trainer-card.png") else {
+            return;
+        };
+        let card = detect(&image, None).unwrap();
+        assert_eq!(card.badges, vec![1]);
+    }
+
     /// The fixture (Route 3 save) prints `POKéDEX 2`.
     #[test]
     fn the_pokedex_count_is_read_from_the_card() {

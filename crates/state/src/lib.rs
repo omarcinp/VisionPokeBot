@@ -9,6 +9,7 @@
 //! `priors` gives a probability for the rest, both from rule files under
 //! [`RULES_DIR`].
 
+pub mod badges;
 mod belief;
 mod change;
 mod events;
@@ -40,7 +41,7 @@ pub use observation::{
     PokedexListObservation, PoseObservation, Region, ShinyReading, ShopObservation,
     SpriteObservation, TrainerCardObservation,
 };
-pub use party::{MoveSlot, PartyMon, Status};
+pub use party::{MoveSlot, PartyDetailChange, PartyMon, PokemonDetails, Status, SummaryDetails};
 pub use priors::{PriorRule, Priors};
 pub use reducer::{DefaultReducer, StateReducer};
 pub use screen::ScreenState;

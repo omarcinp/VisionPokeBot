@@ -1209,6 +1209,7 @@ version = "0.1.0"
 dependencies = [
  "pokebot-core",
  "pokebot-gamedata",
+ "pokebot-sense",
  "pokebot-state",
  "pokebot-video",
  "pokebot-world",

@@ -132,6 +132,16 @@
   .badge.on svg { fill: var(--c); stroke: #fff; filter: drop-shadow(0 0 4px var(--c)); }
   .badge-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
 
+  .badge.assumed { border-style: dashed; border-color: var(--c); opacity: .65; }
+  .badge.assumed svg { stroke: var(--c); }
+  .mon-details { grid-column: 1 / -1; border-top: 1px solid var(--line, #303946); padding-top: 8px; }
+  .mon-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 12px; margin: 0; font-size: 12px; }
+  .mon-facts div { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+  .mon-facts dt { color: var(--muted); } .mon-facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+  .mon-history { font-size: 12px; } .mon-history .history-scroll { max-height: 260px; overflow: auto; }
+  .mon-history table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .mon-history th, .mon-history td { padding: 5px 4px; text-align: left; border-bottom: 1px solid #303946; overflow-wrap: anywhere; }
+  .mon-note { color: var(--muted); font-size: 11px; margin: 6px 0 0; }
   /* Party */
   .party { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
   .mon { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 8px; border-radius: 10px;
@@ -238,7 +248,7 @@
     header .opt { display: none; }
     main { padding: 0 0 env(safe-area-inset-bottom); gap: 8px; }
     .card { border-radius: 0; border-left: 0; border-right: 0; padding: 10px; }
-    #video-card { padding: 0 0 8px; position: sticky; top: var(--hdr, 38px); z-index: 4; border-top: 0; }
+    #video-card { padding: 0 0 8px; position: static; border-top: 0; }
     #video-card h2 { display: none; }
     .screen-wrap { border-radius: 0; max-width: none; }
     .toolbar { padding: 0 10px; }
@@ -349,7 +359,7 @@
     <section class="card">
       <h2>Trainer <span class="right legend" title="where each value came from">
         <span><i class="dot Observed"></i> seen</span><span><i class="dot Derived"></i> derived</span>
-        <span><i class="dot Tracked"></i> tracked</span><span><i class="dot Unknown"></i> unknown</span></span></h2>
+        <span><i class="dot Tracked"></i> tracked</span><span><i class="dot Assumed"></i> assumed</span><span><i class="dot Unknown"></i> unknown</span></span></h2>
       <div class="trainer">
         <div><div class="lbl">Player</div><div class="val" id="t-player">–</div></div>
         <div><div class="lbl">Rival</div><div class="val" id="t-rival">–</div></div>
@@ -584,12 +594,24 @@ const BADGES = [
 $('badges').innerHTML = BADGES.map(([key, name, color, shape]) =>
   `<div class="badge" id="badge-${key}" style="--c:${color}" title="${name} Badge"><svg viewBox="0 0 24 24">${shape}</svg></div>`).join('');
 
-function renderBadges(k) {
-  const earned = (k && k.value) || [];
-  for (const [key] of BADGES) $('badge-' + key).classList.toggle('on', earned.includes(key));
-  setText('badge-note', !k || k.source === 'Unknown'
-    ? 'Badges: not seen yet (read from "received the …BADGE" text)'
-    : `${earned.length} / 8 badges`);
+const LEADERS = ['Brock', 'Misty', 'Lt. Surge', 'Erika', 'Koga', 'Sabrina', 'Blaine', 'Giovanni'];
+function renderBadges(st) {
+  const pr = st.progression || {}, k = pr.badges;
+  const earned = val(k) || [], inferred = val(pr.badge_inference) || [];
+  const count = val(pr.badge_count);
+  BADGES.forEach(([key, name], i) => {
+    const el = $('badge-' + key), on = earned.includes(key), assumed = !on && inferred.includes(key);
+    const flag = (st.world?.flags || {})[`FLAG_BADGE0${i+1}_GET`];
+    const source = on ? (flag?.source || k?.source || 'Observed') : assumed ? 'Assumed from save count' : flag?.value === false ? 'Not earned' : 'Unknown';
+    el.classList.toggle('on', on); el.classList.toggle('assumed', assumed);
+    el.title = `${name} Badge · ${LEADERS[i]} · ${source}`;
+    el.setAttribute('aria-label', el.title);
+  });
+  let note = count != null ? `${count} / 8 badges` : earned.length ? `${earned.length} confirmed badges` : 'Badges not read yet';
+  if (inferred.some(b => !earned.includes(b))) note += ' · dashed badges are assumed from the save total';
+  else if (count != null && count > earned.length) note += ` · ${earned.length} identities confirmed`;
+  if (count !== earned.length || count == null || inferred.length) note += ' · open your name in the Start menu to read the Trainer Card';
+  setText('badge-note', note);
 }
 
 // ---------------------------------------------------------------- party / trainer
@@ -597,6 +619,23 @@ function renderBadges(k) {
 function hpBar(cur, max) {
   const f = max ? cur / max : 0;
   return `<div class="bar"><i class="${hpClass(f)}" style="width:${(f * 100).toFixed(1)}%"></i></div>`;
+}
+
+const DETAIL_FIELDS = [
+  ['trainer_id', 'IDNo.'], ['original_trainer', 'OT'],
+  ['attack', 'Attack'], ['defense', 'Defense'], ['sp_attack', 'Sp. Atk'],
+  ['sp_defense', 'Sp. Def'], ['speed', 'Speed'], ['exp_points', 'Exp. Points'],
+  ['next_level', 'Next level'], ['ability', 'Ability'],
+];
+function renderMonDetails(m) {
+  const facts = m.details || {}, history = m.history || [];
+  const labels = Object.fromEntries(DETAIL_FIELDS);
+  const key = encodeURIComponent([val(m.nickname), val(m.species), val(facts.trainer_id)].join('|'));
+  const rows = [...history].reverse().map(h => `<tr><td>${esc(labels[h.field] || h.field)}</td><td>${esc(h.from ?? 'Unknown')} → ${esc(h.to)}</td><td>${esc(h.level ?? '?')}</td><td>${esc(h.frame_id)}</td></tr>`).join('');
+  return `<div class="mon-details"><dl class="mon-facts">${DETAIL_FIELDS.map(([field, label]) => `<div><dt>${label}</dt><dd>${esc(val(facts[field]) ?? '—')} ${dot(facts[field])}</dd></div>`).join('')}</dl>
+    <details class="mon-history" data-member="${key}"><summary>Stat history · ${history.length} changes</summary>
+    ${rows ? `<div class="history-scroll"><table><thead><tr><th>Field</th><th>Change</th><th>Lv</th><th>Frame</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="mon-note">Open the Pokémon’s Info and Skills pages to start recording its details.</p>'}
+    <p class="mon-note">Last 512 observed changes, retained with the saved checkpoint. “Next level” is Exp. Points remaining.</p></details></div>`;
 }
 
 function renderMon(m, i) {
@@ -622,7 +661,7 @@ function renderMon(m, i) {
       <div class="hp">${hp ? hpBar(hp[0], hp[1]) : hpBar(0, 0)}<span>${hp ? `${hp[0]}/${hp[1]}` : '?'}</span> ${dot(m.hp)}</div>
       <div class="moves">${moves || '<small>moves unknown</small>'}</div>
       ${held ? `<div class="held">holds ${esc(prettyConst(held))}</div>` : ''}
-    </div></div>`;
+    </div>${renderMonDetails(m)}</div>`;
 }
 
 function renderParty(k) {
@@ -633,7 +672,14 @@ function renderParty(k) {
   if (box._html === html) return setHtml($('party-src'), `${dot(k)} ${party.length}/6`);
   // Reuse loaded sprites so HP/PP updates don't make them blink.
   const old = new Map([...box.querySelectorAll('.sprite img')].map((img) => [img.getAttribute('src'), img]));
+  const expanded = new Set([...box.querySelectorAll('.mon-history[open]')].map(el => el.dataset.member));
+  const scrolls = new Map([...box.querySelectorAll('.mon-history')].map(el => [el.dataset.member, el.querySelector('.history-scroll')?.scrollTop || 0]));
   setHtml(box, html);
+  for (const el of box.querySelectorAll('.mon-history')) {
+    el.open = expanded.has(el.dataset.member);
+    const scroll = el.querySelector('.history-scroll');
+    if (scroll) scroll.scrollTop = scrolls.get(el.dataset.member) || 0;
+  }
   for (const img of box.querySelectorAll('.sprite img')) {
     const keep = old.get(img.getAttribute('src'));
     if (keep) { img.replaceWith(keep); old.delete(img.getAttribute('src')); }
@@ -655,7 +701,7 @@ function renderTrainer(st) {
   const pose = st.player && st.player.pose;
   const p = val(pose);
   setHtml($('t-loc'), p ? `${esc(prettyMap(p.map))} <small style="color:var(--muted)">(${p.x}, ${p.y})</small> ${dot(pose)}` : `? ${dot(pose)}`);
-  renderBadges(pr.badges);
+  renderBadges(st);
 }
 
 function renderBag(bag) {
