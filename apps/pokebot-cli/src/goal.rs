@@ -4,13 +4,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use pokebot_agent::checkpoint;
-use pokebot_agent::console::bring_up_game;
 use pokebot_agent::goal::{self, GoalOptions, GoalReport, DEFAULT_MAX_REPLANS};
-use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolOutcome, Toolbox};
-use pokebot_agent::{ContinueTask, Executor, Progress};
+use pokebot_agent::goal_session::{self, CycleEnd, MilestoneOptions, Runner, Session, Start};
+use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};
+use pokebot_agent::{
+    opening, Executor, ExecutorError, NewGameConfig, Progress, Starter, SyncerHandle,
+};
 use pokebot_core::Error;
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
@@ -20,13 +23,14 @@ use pokebot_planner::{
 use pokebot_runtime::Runtime;
 use pokebot_state::inference::InferenceRules;
 use pokebot_state::{GameEvent, PlayerPose, Priors, SavedKnowledge, RULES_DIR};
+use pokebot_telemetry::Telemetry;
 use pokebot_vision::FireRedPerception;
 use pokebot_world::route::{PlaceGraph, RouteParams};
 use pokebot_world::World;
 
 use crate::devices::{self, DeviceArgs};
 use crate::{
-    attach_outputs, restore_checkpoint, sprite_palettes, write_bundle, OutputArgs, TimingKeeper,
+    attach_outputs, pause, sprite_palettes, write_bundle, GenderArg, OutputArgs, TimingKeeper,
     CONSOLE_SNAPSHOTS,
 };
 
@@ -62,8 +66,34 @@ pub struct GoalArgs {
     #[command(flatten)]
     pub output: OutputArgs,
     /// Continue the saved game (title → CONTINUE) and restore its checkpoint
-    #[arg(long)]
+    #[arg(long, conflicts_with = "new_game")]
     pub r#continue: bool,
+    /// Start with a new game (soft reset, intro, names), play the opening
+    /// milestones (bedroom → Mom → Oak → starter → rival → parcel) through
+    /// the story, save, and only then run the goal. Overwrites the save.
+    #[arg(long, requires = "save_game")]
+    pub new_game: bool,
+    #[arg(long, value_enum, default_value_t = GenderArg::Boy)]
+    pub gender: GenderArg,
+    /// The player's name (1–7 letters)
+    #[arg(long, default_value = "RED")]
+    pub player: String,
+    /// The rival's name (GREEN, GARY, KAZ, TORU from the list; else typed)
+    #[arg(long, default_value = "GREEN")]
+    pub rival: String,
+    #[arg(long, value_enum, default_value_t = Starter::Bulbasaur)]
+    pub starter: Starter,
+    /// Tries per opening milestone; a failed attempt reloads the last save
+    #[arg(long, default_value_t = 5)]
+    pub attempts: u32,
+    /// Never stop: when the goal run ends (satisfied or not) or fails, wait
+    /// --restart-wait seconds (still observing), then soft reset, CONTINUE
+    /// the last save and run the goal again. Keeps the Switch in use.
+    #[arg(long, requires = "save_game")]
+    pub restart: bool,
+    /// Seconds between one cycle's end and the next soft reset
+    #[arg(long, default_value_t = 240)]
+    pub restart_wait: u64,
     /// Save in-game after every step that changed the belief and at the
     /// end; write the checkpoint (`state.json`, `progress.json`)
     #[arg(long)]
@@ -84,6 +114,14 @@ impl GoalArgs {
         self.progress
             .clone()
             .unwrap_or_else(|| self.state.with_file_name("progress.json"))
+    }
+
+    /// `state.json` beside an explicit `--progress` (a checkpoint's two
+    /// files are always written side by side), else `--state`.
+    fn state_path(&self) -> PathBuf {
+        self.progress
+            .as_deref()
+            .map_or_else(|| self.state.clone(), checkpoint::path_for)
     }
 }
 
@@ -279,21 +317,35 @@ fn execute(
     stop: &AtomicBool,
 ) -> Result<()> {
     let progress_path = args.progress_path();
-    let previous = if args.r#continue {
-        Some(Progress::load(&progress_path).with_context(|| {
+    let start = if args.new_game {
+        Start::NewGame
+    } else if args.r#continue {
+        Start::Continue
+    } else {
+        Start::AsIs
+    };
+    if start == Start::Continue {
+        Progress::load(&progress_path).with_context(|| {
             format!(
                 "--continue needs the progress file {} (written by --save-game)",
                 progress_path.display()
             )
-        })?)
-    } else {
-        Progress::load(&progress_path).ok()
-    };
-    if args.save_game && previous.is_none() {
+        })?;
+    }
+    if args.save_game && start == Start::AsIs && Progress::load(&progress_path).is_err() {
         bail!(
-            "--save-game needs a progress file to tie the checkpoint to ({}); play the story with --save-game first",
+            "--save-game needs a progress file to tie the checkpoint to ({}); play the story with --save-game first, or start with --new-game",
             progress_path.display()
         );
+    }
+    let new_game = NewGameConfig {
+        gender: args.gender.into(),
+        player_name: args.player.to_ascii_uppercase(),
+        rival_name: args.rival.to_ascii_uppercase(),
+        soft_reset: true,
+    };
+    if start == Start::NewGame {
+        new_game.validate().map_err(anyhow::Error::msg)?;
     }
     let font_path = args.world.join("font_normal.json");
     let font = pokebot_vision::text::Font::load(&font_path)
@@ -309,8 +361,9 @@ fn execute(
         .with_font(Arc::new(font))
         .with_small_font(Arc::new(small_font))
         .with_palettes(Arc::new(sprite_palettes(&pd.data)))
-        // Without CONTINUE the player is wherever the game was left.
-        .with_global_search(!args.r#continue);
+        // Without CONTINUE or a new game the player is wherever the game
+        // was left.
+        .with_global_search(start == Start::AsIs);
     let devices = devices::open(&args.devices)?;
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
@@ -331,115 +384,26 @@ fn execute(
         frame_clock: args.devices.frame_clock(),
         ..Executor::default()
     };
-    let started = std::time::Instant::now();
-    let result = (|| -> Result<GoalReport> {
-        // Where the game is: CONTINUE from the title, or as it stands.
-        if args.r#continue {
-            let previous = previous.as_ref().expect("checked above");
-            if let Some(pose) = &previous.saved_at {
-                runtime.set_pose_hint(pose.clone());
-            }
-            bring_up_game(&mut runtime, stop, Some(Path::new(CONSOLE_SNAPSHOTS)))?;
-            executor.run(&mut runtime, &mut ContinueTask::default(), stop)?;
-            runtime.info(format!(
-                "continuing after: {}",
-                previous.milestones.join(", ")
-            ));
-            restore_checkpoint(&mut runtime, &args.state, previous, &pd.data)?;
-        } else {
-            match checkpoint::load(&args.state) {
-                Ok(Some(c)) => {
-                    if let Some(pose) = c.identity.as_ref().and_then(|i| i.saved_at.clone()) {
-                        runtime.set_pose_hint(pose);
-                    }
-                    runtime.emit(GameEvent::CheckpointRestored {
-                        knowledge: Box::new(c.knowledge),
-                    })?;
-                    runtime.info(format!("knowledge restored from {}", args.state.display()));
-                }
-                Ok(None) => runtime.info(format!(
-                    "no checkpoint at {}: planning from what the screen shows",
-                    args.state.display()
-                )),
-                Err(e) => runtime.error(format!("checkpoint {}: {e}", args.state.display())),
-            }
-        }
-        let planner = pd.planner();
-        let mut toolbox = Toolbox::default();
-        let mut ctx = ToolContext::new(
-            &mut runtime,
-            &executor,
-            Arc::clone(&pd.world),
-            Arc::clone(&pd.data),
-            stop,
-        );
-        if args.save_game {
-            let previous = previous.clone().expect("checked above");
-            ctx = ctx.with_checkpoint(args.state.clone(), checkpoint::Identity::of(&previous));
-            toolbox.prepend(Box::new(ProgressSave {
-                progress: previous,
-                path: progress_path.clone(),
-            }));
-        }
-        ctx = ctx.with_toolbox(toolbox);
-        let on_status = telemetry.clone().map(|t| {
-            Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
-        });
-        let opts = GoalOptions {
-            max_replans: args.max_replans,
-            save_game: args.save_game,
-            session_dir: session_dir.clone(),
-            on_status,
-        };
-        ctx.info(format!("goal: {goal}"));
-        let report = goal::run(goal, &mut ctx, &planner, opts)?;
-        // The end state is the checkpoint, whether or not the last step
-        // changed anything.
-        if args.save_game
-            && report.satisfied
-            && !report.saved_at_end
-            && !stop.load(Ordering::Relaxed)
-        {
-            ctx.invoke(&Intent::Save).result?;
-        }
-        Ok(report)
-    })();
-    match &result {
-        Ok(report) => {
-            let summary = format!(
-                "Goal {}: {} in {:.1} s ({} plans, {} steps run, {} skipped, {} failures, {} facts learned)",
-                report.goal,
-                report.outcome,
-                started.elapsed().as_secs_f64(),
-                report.plans.len(),
-                report.steps_run,
-                report.steps_skipped,
-                report.failures.len(),
-                report.learned.len()
-            );
-            if report.satisfied {
-                runtime.info(&summary);
-            } else {
-                runtime.error(&summary);
-                for f in &report.failures {
-                    runtime.error(format!("  failed: {f}"));
-                }
-                if let Some(plan) = report.last_plan() {
-                    runtime.error("last plan:");
-                    print_plan(plan);
-                }
-                if let Ok(dir) = write_bundle(&runtime, &args.bundles, "goal", &report.outcome) {
-                    runtime.error(format!("debug bundle: {}", dir.display()));
-                }
-            }
-        }
-        Err(e) => {
-            runtime.error(format!("Goal: {e:#}"));
-            if let Ok(dir) = write_bundle(&runtime, &args.bundles, "goal", &e.to_string()) {
-                runtime.error(format!("debug bundle: {}", dir.display()));
-            }
-        }
-    }
+    let mut runner = CliRunner {
+        args,
+        goal,
+        pd,
+        runtime,
+        executor,
+        telemetry,
+        syncer,
+        session_dir,
+        state_path: args.state_path(),
+        progress_path,
+        new_game,
+        stop,
+    };
+    let session = Session {
+        start,
+        restart: args.restart.then(|| Duration::from_secs(args.restart_wait)),
+    };
+    let report = goal_session::run(session, &mut runner);
+    let CliRunner { mut runtime, .. } = runner;
     if args.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
         while !stop.load(Ordering::Relaxed) {
@@ -451,10 +415,257 @@ fn execute(
         }
     }
     runtime.finish()?;
-    match result {
-        Ok(report) if report.satisfied => Ok(()),
-        Ok(report) => bail!("goal {} not reached: {}", report.goal, report.outcome),
-        Err(e) => Err(e),
+    match report.last {
+        CycleEnd::Satisfied(_) => Ok(()),
+        CycleEnd::Unsatisfied(outcome) => bail!("goal {goal} not reached: {outcome}"),
+        CycleEnd::Failed(e) => bail!("{e}"),
+        CycleEnd::Stopped => bail!("stopped by user"),
+    }
+}
+
+/// One goal cycle against the devices: bring the game to where the cycle
+/// starts (a new game and the opening milestones, CONTINUE, or as it
+/// stands), run the goal loop, save at the end.
+struct CliRunner<'a> {
+    args: &'a GoalArgs,
+    goal: &'a GoalPredicate,
+    pd: &'a PlannerData,
+    runtime: Runtime,
+    executor: Executor,
+    telemetry: Option<Telemetry>,
+    syncer: SyncerHandle,
+    session_dir: Option<PathBuf>,
+    progress_path: PathBuf,
+    state_path: PathBuf,
+    new_game: NewGameConfig,
+    stop: &'a AtomicBool,
+}
+
+impl CliRunner<'_> {
+    /// The game brought to the cycle's start; the progress to tie saves to.
+    fn bring_up(&mut self, start: Start) -> Result<Option<Progress>> {
+        let snapshots = Some(Path::new(CONSOLE_SNAPSHOTS));
+        match start {
+            Start::NewGame => {
+                let mut progress = goal_session::start_new_game(
+                    &mut self.runtime,
+                    &self.executor,
+                    &self.new_game,
+                    self.args.starter,
+                    &self.pd.data,
+                    self.stop,
+                    snapshots,
+                )?;
+                let bundles = self.args.bundles.clone();
+                let mut on_failure = |runtime: &Runtime, milestone: &str, reason: &str| {
+                    runtime.error(format!("NOTIFY retry: {milestone}: {reason}"));
+                    match write_bundle(runtime, &bundles, milestone, reason) {
+                        Ok(dir) => runtime.error(format!("debug bundle: {}", dir.display())),
+                        Err(e) => runtime.error(format!("debug bundle: {e:#}")),
+                    }
+                };
+                let mut opts = MilestoneOptions {
+                    world: Arc::clone(&self.pd.world),
+                    data: Arc::clone(&self.pd.data),
+                    syncer: Arc::clone(&self.syncer),
+                    save_game: self.args.save_game,
+                    progress_path: &self.progress_path,
+                    attempts: self.args.attempts,
+                    console_snapshots: snapshots,
+                    on_failure: &mut on_failure,
+                };
+                self.runtime.info(format!(
+                    "new game done: playing the opening milestones ({}) before the goal",
+                    opening(self.args.starter)
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                goal_session::play_milestones(
+                    &mut self.runtime,
+                    &self.executor,
+                    &mut opts,
+                    opening(self.args.starter),
+                    &mut progress,
+                    self.stop,
+                )?;
+                self.runtime.info(format!(
+                    "opening done ({}); handing over to the goal",
+                    progress.milestones.join(", ")
+                ));
+                Ok(Some(progress))
+            }
+            Start::Continue => {
+                let previous = Progress::load(&self.progress_path).with_context(|| {
+                    format!("loading {} to CONTINUE from", self.progress_path.display())
+                })?;
+                goal_session::continue_game(
+                    &mut self.runtime,
+                    &self.executor,
+                    &previous,
+                    &self.state_path,
+                    &self.pd.data,
+                    self.stop,
+                    snapshots,
+                )?;
+                Ok(Some(previous))
+            }
+            Start::AsIs => {
+                match checkpoint::load(&self.state_path) {
+                    Ok(Some(c)) => {
+                        if let Some(pose) = c.identity.as_ref().and_then(|i| i.saved_at.clone()) {
+                            self.runtime.set_pose_hint(pose);
+                        }
+                        self.runtime.emit(GameEvent::CheckpointRestored {
+                            knowledge: Box::new(c.knowledge),
+                        })?;
+                        self.runtime.info(format!(
+                            "knowledge restored from {}",
+                            self.state_path.display()
+                        ));
+                    }
+                    Ok(None) => self.runtime.info(format!(
+                        "no checkpoint at {}: planning from what the screen shows",
+                        self.state_path.display()
+                    )),
+                    Err(e) => self
+                        .runtime
+                        .error(format!("checkpoint {}: {e}", self.state_path.display())),
+                }
+                Ok(Progress::load(&self.progress_path).ok())
+            }
+        }
+    }
+
+    fn play(&mut self, start: Start) -> Result<GoalReport> {
+        let previous = self.bring_up(start)?;
+        if self.args.save_game && previous.is_none() {
+            bail!(
+                "--save-game needs a progress file to tie the checkpoint to ({})",
+                self.progress_path.display()
+            );
+        }
+        let planner = self.pd.planner();
+        let mut toolbox = Toolbox::default();
+        let mut ctx = ToolContext::new(
+            &mut self.runtime,
+            &self.executor,
+            Arc::clone(&self.pd.world),
+            Arc::clone(&self.pd.data),
+            self.stop,
+        );
+        if self.args.save_game {
+            let previous = previous.expect("checked above");
+            ctx = ctx.with_checkpoint(self.state_path.clone(), checkpoint::Identity::of(&previous));
+            toolbox.prepend(Box::new(ProgressSave {
+                progress: previous,
+                path: self.progress_path.clone(),
+            }));
+        }
+        ctx = ctx.with_toolbox(toolbox);
+        let on_status = self.telemetry.clone().map(|t| {
+            Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
+        });
+        let opts = GoalOptions {
+            max_replans: self.args.max_replans,
+            save_game: self.args.save_game,
+            session_dir: self.session_dir.clone(),
+            on_status,
+        };
+        ctx.info(format!("goal: {}", self.goal));
+        let report = goal::run(self.goal, &mut ctx, &planner, opts)?;
+        // The end state is the checkpoint, whether or not the last step
+        // changed anything.
+        if self.args.save_game
+            && report.satisfied
+            && !report.saved_at_end
+            && !self.stop.load(Ordering::Relaxed)
+        {
+            ctx.invoke(&Intent::Save).result?;
+        }
+        Ok(report)
+    }
+}
+
+/// Ctrl-C, from any of the layers a cycle runs through.
+fn was_stopped(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<ExecutorError>(),
+        Some(ExecutorError::Stopped)
+    ) || matches!(e.downcast_ref::<ToolError>(), Some(ToolError::Stopped))
+}
+
+impl Runner for CliRunner<'_> {
+    fn cycle(&mut self, start: Start, cycle: u64) -> CycleEnd {
+        let started = std::time::Instant::now();
+        if cycle > 1 {
+            self.runtime.info(format!("goal cycle {cycle}: {start:?}"));
+        }
+        let result = self.play(start);
+        let runtime = &self.runtime;
+        match result {
+            Ok(report) => {
+                let summary = format!(
+                    "Goal {}: {} in {:.1} s ({} plans, {} steps run, {} skipped, {} failures, {} facts learned)",
+                    report.goal,
+                    report.outcome,
+                    started.elapsed().as_secs_f64(),
+                    report.plans.len(),
+                    report.steps_run,
+                    report.steps_skipped,
+                    report.failures.len(),
+                    report.learned.len()
+                );
+                if report.satisfied {
+                    runtime.info(&summary);
+                    return CycleEnd::Satisfied(summary);
+                }
+                runtime.error(&summary);
+                for f in &report.failures {
+                    runtime.error(format!("  failed: {f}"));
+                }
+                if let Some(plan) = report.last_plan() {
+                    runtime.error("last plan:");
+                    print_plan(plan);
+                }
+                if let Ok(dir) = write_bundle(runtime, &self.args.bundles, "goal", &report.outcome)
+                {
+                    runtime.error(format!("debug bundle: {}", dir.display()));
+                }
+                if report.outcome == "stopped" || self.stop.load(Ordering::Relaxed) {
+                    return CycleEnd::Stopped;
+                }
+                CycleEnd::Unsatisfied(report.outcome)
+            }
+            Err(e) => {
+                if was_stopped(&e) || self.stop.load(Ordering::Relaxed) {
+                    runtime.info("Goal: stopped by user");
+                    return CycleEnd::Stopped;
+                }
+                runtime.error(format!("Goal: {e:#}"));
+                if let Ok(dir) = write_bundle(runtime, &self.args.bundles, "goal", &e.to_string()) {
+                    runtime.error(format!("debug bundle: {}", dir.display()));
+                }
+                CycleEnd::Failed(format!("{e:#}"))
+            }
+        }
+    }
+
+    fn wait(&mut self, duration: Duration) {
+        pause(&mut self.runtime, duration, self.stop);
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn has_checkpoint(&self) -> bool {
+        Progress::load(&self.progress_path).is_ok()
+    }
+
+    fn log(&self, message: &str) {
+        self.runtime.error(format!("NOTIFY {message}"));
     }
 }
 
