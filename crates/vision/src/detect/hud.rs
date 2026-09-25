@@ -1,8 +1,9 @@
 //! Battle HUD text: Pokémon names, levels and our HP numbers.
 //!
-//! The HUD font is a fixed 7-pixel-tall bitmap font in dark gray. Glyph
-//! shapes were measured from recorded battles (letters labelled from known
-//! names); characters not in the table read as `?`, and names are resolved
+//! The HUD font is a fixed 7-pixel-tall bitmap font in dark gray: the
+//! small font's ink rows (`data/world/font_small.json`, rows 4–10) without
+//! its shadow. Glyph shapes were measured from recorded battles and the
+//! missing letters taken from that font; characters not in the table read as `?`, and names are resolved
 //! against a caller-supplied dictionary, so partial knowledge still works.
 
 use pokebot_core::RgbImage;
@@ -79,6 +80,10 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         ["####", "#...", "#...", "###.", "#...", "#...", "####"],
     ),
     (
+        'F',
+        ["####", "#...", "#...", "###.", "#...", "#...", "#..."],
+    ),
+    (
         'G',
         [".##.", "#..#", "#...", "#.##", "#..#", "#..#", ".##."],
     ),
@@ -87,6 +92,10 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         ["#..#", "#..#", "#..#", "####", "#..#", "#..#", "#..#"],
     ),
     ('I', ["###", ".#.", ".#.", ".#.", ".#.", ".#.", "###"]),
+    (
+        'J',
+        ["...#", "...#", "...#", "...#", "#..#", "#..#", ".##."],
+    ),
     (
         'K',
         ["#..#", "#..#", "#.#.", "##..", "#.#.", "#..#", "#..#"],
@@ -123,10 +132,22 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         ["#..#", "#..#", "#..#", "#..#", "#..#", "#..#", ".##."],
     ),
     (
+        'V',
+        ["#..#", "#..#", "#..#", "#..#", "#..#", "#.#.", ".#.."],
+    ),
+    (
         'W',
         ["#..#", "#..#", "#..#", "#..#", "#..#", "####", "#..#"],
     ),
+    (
+        'X',
+        ["#..#", "#..#", "#..#", ".##.", "#..#", "#..#", "#..#"],
+    ),
     ('Y', ["#.#", "#.#", "#.#", "#.#", ".#.", ".#.", ".#."]),
+    (
+        'Z',
+        ["####", "...#", "..#.", "..#.", ".#..", ".#..", "####"],
+    ),
 ];
 
 fn ink(image: &RgbImage, x: u32, y: u32) -> bool {
