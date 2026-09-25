@@ -9,9 +9,12 @@
 use pokebot_core::RgbImage;
 
 use super::px;
-use crate::color::{near, Rgb, TOLERANCE};
+use crate::color::{near, Rgb};
 
 const INK: Rgb = [66, 65, 66];
+// The Switch capture shifts dark HUD ink toward brown over the pale battle
+// background. The final `1` of `9/21` differed by 31 in blue from INK.
+const INK_TOLERANCE: u8 = 36;
 const ROWS: u32 = 7;
 
 /// Glyph shapes, rows top to bottom (`#` = ink).
@@ -151,7 +154,7 @@ const GLYPHS: &[(char, [&str; 7])] = &[
 ];
 
 fn ink(image: &RgbImage, x: u32, y: u32) -> bool {
-    x < image.width() && y < image.height() && near(px(image, x, y), INK, TOLERANCE)
+    x < image.width() && y < image.height() && near(px(image, x, y), INK, INK_TOLERANCE)
 }
 
 /// First row in `y0..y1` with ink between `x0..x1` (the text's top).
@@ -236,8 +239,8 @@ pub fn player_line(image: &RgbImage) -> Option<HudLine> {
 }
 
 pub fn opponent_line(image: &RgbImage) -> Option<HudLine> {
-    let top = text_top(image, 18, 25, 16, 112, 6)?;
-    Some(parse_name_line(&read_line(image, top, 16, 112)))
+    let top = text_top(image, 18, 25, 16, 104, 6)?;
+    Some(parse_name_line(&read_line(image, top, 16, 104)))
 }
 
 /// Our current and maximum HP (`20/ 20`).
@@ -275,6 +278,26 @@ pub fn resolve<'a>(read: &str, candidates: impl IntoIterator<Item = &'a str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switch_wild_level_is_read() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../captures/fixtures/switch-mankey-level3.png");
+        let Ok(im) = pokebot_video::png::load(path) else {
+            return;
+        };
+        assert_eq!(opponent_line(&im).unwrap().level, Some(3));
+    }
+
+    #[test]
+    fn switch_hp_maximum_keeps_its_last_digit() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-hp-9-of-21.png"))
+        else {
+            return;
+        };
+        assert_eq!(player_hp(&image), Some((9, 21)));
+    }
 
     #[test]
     fn parses_hud_lines() {

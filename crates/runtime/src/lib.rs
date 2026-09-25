@@ -436,6 +436,11 @@ fn summarize(event: &GameEvent) -> String {
         } => {
             format!("Party {slot} seen: {species:?} Lv{level:?} HP {hp:?}")
         }
+        GameEvent::PartyAudited { members } => format!(
+            "Party audited: {} members, HP {:?}",
+            members.len(),
+            members.iter().map(|m| m.hp.value).collect::<Vec<_>>()
+        ),
         GameEvent::MovesObserved { slot, moves } => format!("Party {slot} moves {moves:?}"),
         GameEvent::MovePpObserved {
             slot,

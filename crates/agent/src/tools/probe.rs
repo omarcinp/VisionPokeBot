@@ -35,6 +35,44 @@ use crate::{Action, Decision, Expectation, Outcome};
 
 pub struct ProbeTool;
 
+/// Refresh visible facts after CONTINUE or the new-game opening.
+pub fn audit_core(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    ctx.info("startup audit: party summaries, trainer card, bag");
+    for fact in [
+        ProbeFact::Party,
+        ProbeFact::TrainerCard,
+        ProbeFact::Pocket {
+            pocket: Pocket::Items,
+        },
+        ProbeFact::Pocket {
+            pocket: Pocket::KeyItems,
+        },
+        ProbeFact::Pocket {
+            pocket: Pocket::PokeBalls,
+        },
+        ProbeFact::Pocket {
+            pocket: Pocket::TmCase,
+        },
+        ProbeFact::Pocket {
+            pocket: Pocket::BerryPouch,
+        },
+    ] {
+        ctx.invoke(&Intent::Probe { fact }).result?;
+    }
+    if ctx.state().money.value.is_none() {
+        return Err(ToolError::Failed("startup audit: money unreadable".into()));
+    }
+    ctx.scheduler.enabled = true;
+    let party = ctx.state().party.value.clone().unwrap_or_default();
+    ctx.emit(GameEvent::PartyAudited { members: party })?;
+    for _ in 0..2 {
+        if !ctx.service_needs()? {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// The pocket audit as a step: Start opens the menu only once the scene
 /// has settled (pressed during a scripted pause it lands mid-cutscene).
 struct AuditStep {
@@ -62,6 +100,29 @@ impl ToolStep for AuditStep {
 
 /// Reads `pocket` through the Start menu and closes every menu again.
 pub fn audit_pocket(ctx: &mut ToolContext<'_>, pocket: Pocket) -> Result<String, ToolError> {
+    if matches!(pocket, Pocket::TmCase | Pocket::BerryPouch) {
+        let item = if pocket == Pocket::TmCase {
+            "ITEM_TM_CASE"
+        } else {
+            "ITEM_BERRY_POUCH"
+        };
+        let keys = ctx
+            .state()
+            .bag
+            .pockets
+            .get(&Pocket::KeyItems)
+            .and_then(|k| k.value.as_ref())
+            .ok_or_else(|| ToolError::Failed("audit KEY ITEMS before nested containers".into()))?;
+        if !keys.iter().any(|(name, n)| name == item && *n > 0) {
+            ctx.emit(GameEvent::PocketObserved {
+                pocket,
+                items: vec![],
+            })?;
+            return Ok(format!(
+                "{pocket:?}: container absent from audited KEY ITEMS"
+            ));
+        }
+    }
     let mut step = AuditStep {
         audit: PocketAudit::new(pocket),
         data: Arc::clone(&ctx.data),
@@ -96,6 +157,7 @@ pub fn trainer_card_events(card: &TrainerCardObservation) -> Vec<GameEvent> {
         })
         .collect();
     events.extend(pokedex_count_event(None, card.pokedex_count));
+    events.extend(card.money.map(|amount| GameEvent::MoneyObserved { amount }));
     events
 }
 
@@ -243,6 +305,9 @@ impl ToolStep for TrainerCardStep {
             }
             "card" => {
                 let card = o.trainer_card.clone().expect("card phase");
+                if card.money.is_none() {
+                    return self.retries.wait(o, "reading the trainer card's money");
+                }
                 match self.candidate.take() {
                     Some((frame, first)) if frame < o.frame_id => {
                         if first != card {
@@ -653,6 +718,7 @@ impl Tool for ProbeTool {
             return ToolOutcome::failed("not a Probe");
         };
         match fact {
+            ProbeFact::Party => super::party_audit::audit(ctx).into(),
             ProbeFact::Pocket { pocket } => audit_pocket(ctx, *pocket).map(|_| ()).into(),
             ProbeFact::TrainerCard => probe_trainer_card(ctx).map(|_| ()).into(),
             ProbeFact::FlyMap => probe_fly_map(ctx).map(|_| ()).into(),
@@ -675,6 +741,7 @@ mod tests {
     #[test]
     fn the_card_gives_every_badge_flag_and_the_caught_count() {
         let card = TrainerCardObservation {
+            money: None,
             badges: vec![1, 3],
             pokedex_count: Some(4),
         };
@@ -692,6 +759,7 @@ mod tests {
         }
         assert_eq!(events.get(8), count.as_ref());
         let unread = TrainerCardObservation {
+            money: None,
             badges: vec![],
             pokedex_count: None,
         };

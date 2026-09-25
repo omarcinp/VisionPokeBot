@@ -141,6 +141,122 @@ struct FakeTools {
     seen: Arc<Mutex<Vec<Intent>>>,
 }
 
+#[test]
+fn urgent_event_suspends_and_resumes_the_same_running_tool() {
+    use pokebot_agent::tools::{StepContext, ToolStep};
+    use pokebot_agent::Decision;
+    use pokebot_state::{Knowledge, Status};
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut mon = pokebot_agent::party::starter_mon(&d.data, "SPECIES_BULBASAUR", 20);
+    mon.hp = Knowledge::observed((100, 100), 0);
+    mon.status = Knowledge::observed(Status::Healthy, 0);
+    struct Work {
+        mon: pokebot_state::PartyMon,
+        wounded: bool,
+    }
+    impl ToolStep for Work {
+        fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+            if !self.wounded {
+                self.wounded = true;
+                let mut mon = self.mon.clone();
+                mon.hp = Knowledge::observed((10, 100), ctx.observation.frame_id);
+                ctx.events
+                    .push(GameEvent::PartyAudited { members: vec![mon] });
+                return Decision::Wait("health changed during work".into());
+            }
+            if ctx.state.party.value.as_ref().unwrap()[0].hp.value == Some((100, 100)) {
+                Decision::Done("resumed original work".into())
+            } else {
+                Decision::Wait("work suspended until safe".into())
+            }
+        }
+    }
+    struct WorkTool {
+        mon: pokebot_state::PartyMon,
+        calls: Arc<Mutex<u32>>,
+    }
+    impl Tool for WorkTool {
+        fn name(&self) -> &str {
+            "Work"
+        }
+        fn serves(&self, i: &Intent) -> bool {
+            matches!(i, Intent::Go { .. })
+        }
+        fn run(&mut self, _: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+            *self.calls.lock().unwrap() += 1;
+            ctx.drive(&mut Work {
+                mon: self.mon.clone(),
+                wounded: false,
+            })
+            .map(|_| ())
+            .into()
+        }
+    }
+    struct Recover {
+        mon: pokebot_state::PartyMon,
+        calls: Arc<Mutex<u32>>,
+    }
+    impl Tool for Recover {
+        fn name(&self) -> &str {
+            "Recover"
+        }
+        fn serves(&self, i: &Intent) -> bool {
+            matches!(i, Intent::Heal { .. })
+        }
+        fn run(&mut self, _: &Intent, _: &mut ToolContext<'_>) -> ToolOutcome {
+            *self.calls.lock().unwrap() += 1;
+            ToolOutcome {
+                result: Ok(()),
+                learned: vec![GameEvent::PartyAudited {
+                    members: vec![self.mon.clone()],
+                }],
+                pose: None,
+            }
+        }
+    }
+    let work_calls = Arc::new(Mutex::new(0));
+    let recover_calls = Arc::new(Mutex::new(0));
+    let toolbox = Toolbox::new(vec![
+        Box::new(WorkTool {
+            mon: mon.clone(),
+            calls: Arc::clone(&work_calls),
+        }),
+        Box::new(Recover {
+            mon: mon.clone(),
+            calls: Arc::clone(&recover_calls),
+        }),
+    ]);
+    let mut rt = runtime(&d, frame);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut rt,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(toolbox);
+    ctx.scheduler.enabled = true;
+    ctx.emit(GameEvent::PartyAudited { members: vec![mon] })
+        .unwrap();
+    let result = ctx.invoke(&Intent::Go {
+        dest: pokebot_agent::tools::Dest::Map {
+            map: FIXTURE_POSE.0.into(),
+        },
+    });
+    assert!(result.is_ok(), "{:?}", result.result);
+    assert_eq!(*work_calls.lock().unwrap(), 1, "original tool was retained");
+    assert_eq!(
+        *recover_calls.lock().unwrap(),
+        1,
+        "urgent recovery ran once"
+    );
+    assert!(ctx.scheduler.queue.is_empty());
+}
+
 impl Tool for FakeTools {
     fn name(&self) -> &str {
         "Fake"
@@ -309,6 +425,20 @@ impl Harness {
         before: Vec<GameEvent>,
     ) -> (GoalReport, BTreeSet<String>) {
         let mut runtime = runtime(d, frame);
+        // These tests exercise the goal executor, not startup auditing.
+        // Give the scripted run a known healthy lead so its safety gate
+        // leaves the fake plan under test in control.
+        runtime
+            .emit(GameEvent::PartyMonDerived {
+                slot: 0,
+                mon: Box::new(pokebot_state::PartyMon {
+                    species: pokebot_state::Knowledge::derived("SPECIES_BULBASAUR".into(), 0),
+                    level: pokebot_state::Knowledge::derived(6, 0),
+                    hp: pokebot_state::Knowledge::derived((22, 22), 0),
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
         for e in before {
             runtime.emit(e).unwrap();
         }
@@ -343,6 +473,37 @@ fn temp_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[test]
+fn urgent_health_is_healed_before_the_campaign_plan() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = FakePlanner::new(vec![
+        plan(vec![step(Planned::Heal {
+            center: "PalletTown_PlayersHouse_1F".into(),
+        })]),
+        plan(vec![step(catch())]),
+    ]);
+    let h = Harness::new(vec![
+        ("Heal", vec![Ok(vec![GameEvent::Healed])]),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let low_hp = GameEvent::PartyObserved {
+        slot: 0,
+        species: None,
+        nickname: None,
+        level: None,
+        hp: Some((10, 22)),
+        status: None,
+        held_item: None,
+    };
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![low_hp]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["Heal", "Catch"]);
+    assert_eq!(report.plans.len(), 2);
+    assert!(report.plans[0].reason.starts_with("urgent health"));
 }
 
 #[test]
@@ -675,12 +836,15 @@ fn planner_intents_convert_to_tool_intents() {
         }),
         Err(ToolError::Unsupported(_))
     ));
-    assert!(matches!(
+    assert_eq!(
         conv(&Planned::Probe {
             fact: PlannedFact::Party
-        }),
-        Err(ToolError::Unsupported(_))
-    ));
+        })
+        .unwrap(),
+        Intent::Probe {
+            fact: ProbeFact::Party
+        }
+    );
     assert!(matches!(
         conv(&Planned::Unsupported {
             reason: "link trade".into(),

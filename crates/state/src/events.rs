@@ -82,6 +82,11 @@ pub enum GameEvent {
         slot: u8,
         mon: Box<PartyMon>,
     },
+    /// Atomic, complete roster read through the party summaries. Replaces
+    /// stale slots and their old identities, including a smaller party.
+    PartyAudited {
+        members: Vec<crate::PartyMon>,
+    },
     /// Fields of a party member read from the screen (`None` = not shown).
     PartyObserved {
         slot: u8,

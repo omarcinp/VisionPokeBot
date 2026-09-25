@@ -729,7 +729,15 @@ pub fn identify(
         events.push(log(format!("{species}: no catch, the lead is unknown")));
         return;
     };
-    let Some(hp) = battle.player_hp_numbers.or(member.hp) else {
+    let Some(hp) = battle
+        .player_hp_numbers
+        .filter(|hp| crate::party::plausible_hp_for(*hp, member.level, Some(&member.species)))
+        .or_else(|| {
+            member.hp.filter(|hp| {
+                crate::party::plausible_hp_for(*hp, member.level, Some(&member.species))
+            })
+        })
+    else {
         events.push(log(format!("{species}: no catch, our HP is unknown")));
         return;
     };
@@ -798,6 +806,7 @@ pub(crate) fn attempt_decision(
     let command = matches!(menu, BattleMenu::Command { .. });
     let reading = battle
         .player_hp_numbers
+        .filter(|hp| crate::party::plausible_hp_for(*hp, member.level, Some(&member.species)))
         .zip(battle.opponent_hp)
         .map(|(us, foe)| (command, us, foe));
     let confirmed = match (reading, memory.catch.hud) {

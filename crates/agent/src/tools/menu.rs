@@ -226,6 +226,8 @@ pub fn screen_open(o: &Observation) -> bool {
         || o.fly_map.is_some()
         || o.pokedex_list.is_some()
         || o.pokedex_page
+        || o.party_menu.is_some()
+        || o.summary.is_some()
 }
 
 /// Closes everything with B until the player is located in the overworld

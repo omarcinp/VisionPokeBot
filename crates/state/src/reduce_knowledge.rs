@@ -10,6 +10,9 @@ use crate::{
 /// Applies `event` if it is a knowledge event; returns whether it was one.
 pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> bool {
     match event {
+        GameEvent::PartyAudited { members } => {
+            state.party = Knowledge::observed(members.clone(), frame);
+        }
         GameEvent::PartyMonDerived { slot, mon } => {
             *member(state, *slot, KnowledgeSource::Derived, frame) = (**mon).clone();
         }
@@ -463,6 +466,13 @@ mod tests {
             .unwrap()
             .pp;
         assert_eq!(pp.value, Some((35, 35)));
+    }
+
+    #[test]
+    fn a_heal_does_not_invent_an_unknown_hp_total() {
+        let healed = run(vec![starter(), GameEvent::Healed]);
+        let hp = &healed.party.value.as_ref().unwrap()[0].hp;
+        assert_eq!(hp.value, None);
     }
 
     #[test]

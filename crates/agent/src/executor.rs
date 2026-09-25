@@ -123,13 +123,16 @@ impl Pending {
         if idle && self.idle_since.is_none() {
             self.idle_since = Some(now.frame);
         }
-        if idle && met {
-            self.confirmations += 1;
+        if met {
             self.met_since.get_or_insert(now);
         } else {
-            self.confirmations = 0;
             self.met_since = None;
         }
+        self.confirmations = if idle && met {
+            self.confirmations + 1
+        } else {
+            0
+        };
         match &mut self.tracker {
             // Once the buttons are released the timeout takes over.
             Some(tracker) if !idle => {
@@ -413,6 +416,12 @@ impl Executor {
                     || observation.menu.is_some()
                     || observation.screen.value == ScreenState::Transition);
             let track = p.note_frame(now, &observation, idle, self.frame_clock);
+            // Release a directional hold as soon as its destination is
+            // visible. Waiting for idle here lets an overlong hold walk
+            // past the target and then teaches that delay as tile speed.
+            if !idle && p.tracker.is_some() && p.action.expect.met(&observation) {
+                runtime.execute(ControllerCommand::Neutral)?;
+            }
             // A walking hold whose player fell behind the prediction:
             // it is blocked; release now instead of finishing the hold.
             let stalled = !interrupted && matches!(track, Track::Stalled { .. });
@@ -636,6 +645,23 @@ mod tests {
             frame,
             at: t0 + Duration::from_millis(frame * 20),
         }
+    }
+
+    #[test]
+    fn movement_timing_ends_at_arrival_not_controller_idle() {
+        let t0 = Instant::now();
+        let action = Action::new("walk", vec![], Expectation::PlayerAt(pose(4)), 30)
+            .timed(InputKind::WalkTile, 4);
+        let mut p = Pending::new(action, moment(t0, 0), &observation(0, Some(0)));
+        p.note_frame(moment(t0, 14), &observation(14, Some(1)), false, false);
+        p.note_frame(moment(t0, 54), &observation(54, Some(4)), false, false);
+        p.note_frame(moment(t0, 200), &observation(200, Some(4)), true, false);
+        p.note_frame(moment(t0, 201), &observation(201, Some(4)), true, false);
+        assert_eq!(
+            p.timing_sample(false),
+            Some((InputKind::WalkTile, 4, 280.0, 800.0))
+        );
+        assert_eq!(p.confirmations, 2);
     }
 
     /// A hold of 4 tiles: the player leaves the start tile on frame 20 and

@@ -144,6 +144,8 @@ pub struct ToolContext<'a> {
     pub checkpoint: Option<(PathBuf, checkpoint::Identity)>,
     /// Where unrecognised dialogue is saved (frame and text).
     pub unknown_dir: PathBuf,
+    pub scheduler: crate::scheduler::Scheduler,
+    next_need_check: u64,
     toolbox: Toolbox,
     expects: Expects,
     depth: usize,
@@ -176,6 +178,8 @@ impl<'a> ToolContext<'a> {
             blocked: Blocked::default(),
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
+            scheduler: crate::scheduler::Scheduler::default(),
+            next_need_check: 0,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,
@@ -240,6 +244,19 @@ impl<'a> ToolContext<'a> {
     /// outcome.
     pub fn emit(&mut self, event: GameEvent) -> Result<(), ToolError> {
         self.runtime.emit(event.clone())?;
+        if self
+            .scheduler
+            .event(&event, self.runtime.state(), &self.data)
+        {
+            self.runtime.explain(
+                "scheduler: needs changed",
+                &serde_json::json!({
+                    "layer": crate::scheduler::layer(&event), "queue": self.scheduler.queue,
+                    "cause": event, "destination": self.scheduler.destination,
+                }),
+            );
+            self.next_need_check = 0;
+        }
         self.learned.push(event);
         Ok(())
     }
@@ -273,6 +290,8 @@ impl<'a> ToolContext<'a> {
             || o.battle.is_some()
             || o.bag.is_some()
             || o.shop.is_some()
+            || o.party_menu.is_some()
+            || o.summary.is_some()
             || o.screen.value == ScreenState::Transition
             || self.runtime.outside_game();
         self.quiet_frames = if busy {
@@ -351,7 +370,101 @@ impl<'a> ToolContext<'a> {
             let outcome = self.invoke(&Intent::Unstick);
             return outcome.result.map(|()| true);
         }
+        if o.player.is_some()
+            && o.dialogue.is_none()
+            && o.menu.is_none()
+            && o.battle.is_none()
+            && o.party_menu.is_none()
+            && o.summary.is_none()
+            && self.quiet_frames >= SETTLE_FRAMES
+            && o.frame_id >= self.next_need_check
+        {
+            self.next_need_check = o.frame_id + 180;
+            if self.service_needs()? {
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    /// Suspend only at an overworld boundary; nested recovery tools cannot
+    /// trigger another recovery. The caller's task stays on the stack.
+    pub fn service_needs(&mut self) -> Result<bool, ToolError> {
+        use crate::scheduler::{self, Need};
+        if !self.scheduler.enabled || self.scheduler.recovering {
+            return Ok(false);
+        }
+        if let Some(why) = self.scheduler.invalidated.take() {
+            return Err(ToolError::Replan(why));
+        }
+        let Some(need) = self.scheduler.queue.front().copied() else {
+            return Ok(false);
+        };
+        self.scheduler.recovering = true;
+        let result = (|| {
+            if need == Need::AuditParty {
+                self.info("scheduler: suspend task, audit party facts");
+                self.invoke(&Intent::Probe {
+                    fact: super::ProbeFact::Party,
+                })
+                .result?;
+                return Ok(true);
+            }
+            let pose = self
+                .pose()
+                .ok_or_else(|| ToolError::Failed("recovery: player not located".into()))?;
+            let urgent = need == Need::HealUrgent;
+            let graph = self
+                .scheduler
+                .graph
+                .get_or_insert_with(|| scheduler::graph(&self.world));
+            let candidate = scheduler::recovery(
+                &self.world,
+                graph,
+                self.runtime.state(),
+                &self.data,
+                &pose,
+                self.scheduler.destination.as_deref(),
+                urgent,
+            );
+            let Some(candidate) = candidate else {
+                return if urgent {
+                    Err(ToolError::Failed(
+                        "urgent recovery: no known safe route to a healer".into(),
+                    ))
+                } else {
+                    Ok(false)
+                };
+            };
+            if !urgent
+                && candidate.added_travel_s + candidate.encounter_risk_s + candidate.item_cost_s
+                    > 20.0
+            {
+                return Ok(false);
+            }
+            self.runtime
+                .explain("scheduler: suspend task for recovery", &candidate);
+            if let Some(item) = candidate.medicine {
+                super::medicine::use_item(self, &item)?;
+            } else {
+                self.invoke(&Intent::Heal {
+                    center: Some(candidate.map),
+                })
+                .result?;
+            }
+            if matches!(
+                scheduler::health(self.state().party.value.as_deref(), &self.data),
+                Some(Need::HealUrgent | Need::AuditParty)
+            ) {
+                return Err(ToolError::Failed(
+                    "recovery did not establish safe party health".into(),
+                ));
+            }
+            self.info("scheduler: recovery verified, resume suspended task");
+            Ok(true)
+        })();
+        self.scheduler.recovering = false;
+        result
     }
 
     /// Runs `step` until it is done or fails, one frame per decision, with
@@ -459,11 +572,30 @@ impl<'a> ToolContext<'a> {
             Err(e) => return e.into(),
         };
         self.runtime.info(format!("tool {}: {intent}", tool.name()));
+        let recovering = self.scheduler.recovering;
+        if matches!(intent, Intent::Heal { .. } | Intent::Probe { .. }) {
+            self.scheduler.recovering = true;
+        }
+        let destination = self.scheduler.destination.clone();
+        if self.depth == 0 {
+            match intent {
+                Intent::Go { dest } => self.scheduler.destination = Some(dest.map().to_owned()),
+                Intent::Train { map, .. } | Intent::Beat { map, .. } => {
+                    self.scheduler.destination = Some(map.clone())
+                }
+                Intent::Catch { map: Some(map), .. } => {
+                    self.scheduler.destination = Some(map.clone())
+                }
+                _ => {}
+            }
+        }
         let expects = self.expects;
         let learned = std::mem::take(&mut self.learned);
         self.depth += 1;
         let mut outcome = tool.run(intent, self);
         self.depth -= 1;
+        self.scheduler.recovering = recovering;
+        self.scheduler.destination = destination;
         self.toolbox.put_back(index, tool);
         // Events the tool returned on top of what it emitted.
         for event in outcome.learned.drain(..) {

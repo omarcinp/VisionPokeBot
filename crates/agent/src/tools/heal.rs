@@ -1,18 +1,20 @@
 //! `Heal`: talk to the healer of a heal spot (the nurse of the given
 //! Pokémon Center, Mom at home: whichever object on that map has a heal
-//! effect in its script; or the nearest Center), answer YES, and make sure
-//! the heal is on record: the healer always heals, so a missed line is
-//! inferred, and the spot becomes the respawn point.
+//! effect in its script; or a costed reachable healer). Answer YES, then
+//! verify HP, status and PP through the party summaries.
 
 use pokebot_state::GameEvent;
 
-use super::lookup::{healer_on, nearest_nurse};
+use super::lookup::healer_on;
 use super::{progress, Answer, Intent, Tool, ToolContext, ToolError, ToolOutcome};
 
 pub struct HealTool;
 
 /// The healer to talk to for `center` (a map), or the nearest nurse.
-pub fn nurse_for(ctx: &ToolContext<'_>, center: Option<&str>) -> Result<(String, u32), ToolError> {
+pub fn nurse_for(
+    ctx: &mut ToolContext<'_>,
+    center: Option<&str>,
+) -> Result<(String, u32), ToolError> {
     match center {
         Some(map) => healer_on(&ctx.world, map)
             .map(|id| (map.to_owned(), id))
@@ -23,38 +25,77 @@ pub fn nurse_for(ctx: &ToolContext<'_>, center: Option<&str>) -> Result<(String,
             let pose = ctx
                 .pose()
                 .ok_or_else(|| ToolError::Failed("player not located".into()))?;
-            nearest_nurse(&ctx.world, &pose.map)
-                .ok_or_else(|| ToolError::Failed("no Pokémon Center found".into()))
+            let graph = ctx
+                .scheduler
+                .graph
+                .get_or_insert_with(|| crate::scheduler::graph(&ctx.world));
+            let mut choice = crate::scheduler::recovery(
+                &ctx.world,
+                graph,
+                ctx.runtime.state(),
+                &ctx.data,
+                &pose,
+                None,
+                true,
+            )
+            .ok_or_else(|| ToolError::Failed("no known safe route to recovery".into()))?;
+            // Heal specifically requests a healer. Medicines are selected
+            // by the scheduler before invoking this tool.
+            if choice.medicine.is_some() {
+                let mut without_items = ctx.runtime.state().clone();
+                without_items.bag.pockets.clear();
+                choice = crate::scheduler::recovery(
+                    &ctx.world,
+                    graph,
+                    &without_items,
+                    &ctx.data,
+                    &pose,
+                    None,
+                    true,
+                )
+                .ok_or_else(|| ToolError::Failed("no known safe route to a healer".into()))?;
+            }
+            let nurse = healer_on(&ctx.world, &choice.map)
+                .ok_or_else(|| ToolError::Failed("selected healer disappeared".into()))?;
+            Ok((choice.map, nurse))
         }
     }
 }
 
 pub fn heal(ctx: &mut ToolContext<'_>, center: Option<&str>) -> Result<(), ToolError> {
     let (map, nurse) = nurse_for(ctx, center)?;
-    let before = ctx
-        .state()
-        .party
-        .value
-        .as_ref()
-        .map(|p| p.iter().map(|m| m.hp.value).collect::<Vec<_>>());
     let outcome = ctx.invoke(&Intent::Talk {
         map: map.clone(),
         object: nurse,
         answers: vec![Answer::Yes],
     });
     outcome.result?;
-    if !outcome
-        .learned
-        .iter()
-        .any(|e| matches!(e, GameEvent::Healed))
-    {
-        ctx.emit(GameEvent::Healed)?;
-        ctx.emit(progress(
-            "Heal",
-            "heal inferred: the nurse's text was not read",
-        ))?;
+    ctx.invoke(&Intent::Probe {
+        fact: super::ProbeFact::Party,
+    })
+    .result?;
+    let verified = ctx.state().party.value.as_ref().is_some_and(|party| {
+        !party.is_empty()
+            && party.iter().all(|mon| {
+                mon.hp.value.is_some_and(|(hp, max)| hp == max && max > 0)
+                    && mon.status.value == Some(pokebot_state::Status::Healthy)
+                    && mon
+                        .moves
+                        .iter()
+                        .flatten()
+                        .all(|m| m.pp.value.is_some_and(|(pp, max)| pp == max))
+            })
+    });
+    if !verified {
+        return Err(ToolError::Failed(
+            "healer conversation ended, but menu audit did not confirm full recovery".into(),
+        ));
     }
-    let _ = before;
+    ctx.emit(GameEvent::Healed)?;
+    ctx.emit(progress(
+        "Heal",
+        "full party recovery verified in summaries",
+    ))?;
     if let Some(spot) = ctx.world.places().and_then(|p| {
         p.heal_spots
             .iter()

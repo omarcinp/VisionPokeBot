@@ -29,6 +29,11 @@ pub(crate) fn fits(name: &str, read: &str) -> bool {
 
 /// The pocket whose title reads like `title` (`?` wildcards; unique match).
 pub fn pocket_from_title(title: &str) -> Option<Pocket> {
+    match title {
+        "TM CASE" => return Some(Pocket::TmCase),
+        "BERRY POUCH" => return Some(Pocket::BerryPouch),
+        _ => {}
+    }
     let mut found = POCKETS.iter().filter(|(_, name)| fits(name, title));
     let (pocket, _) = found.next()?;
     found.next().is_none().then_some(*pocket)
@@ -40,6 +45,69 @@ pub(crate) fn pocket_index(pocket: Pocket) -> Option<usize> {
 
 pub(crate) fn is_cancel(name: &str) -> bool {
     fits("CANCEL", name)
+}
+
+/// Select one known item and its USE/OPEN action, checking both cursors.
+pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expectation) -> Decision {
+    let Some(bag) = &o.bag else {
+        return Decision::Wait("waiting for bag".into());
+    };
+    let press = |button, expect| {
+        Decision::Act(Action::new(
+            "select bag item",
+            vec![ControllerCommand::Press(button)],
+            expect,
+            120,
+        ))
+    };
+    if let Some((options, cursor)) = &bag.prompt {
+        let Some(target) = options.iter().position(|s| s == "USE" || s == "OPEN") else {
+            return Decision::Fail("item has no USE or OPEN action".into());
+        };
+        if usize::from(*cursor) == target {
+            return press(Button::A, opened);
+        }
+        return press(
+            if usize::from(*cursor) < target {
+                Button::Down
+            } else {
+                Button::Up
+            },
+            Expectation::BagPromptAt(target as u8),
+        );
+    }
+    let Some(cursor) = bag.cursor else {
+        return Decision::Wait("reading item cursor".into());
+    };
+    if let Some(target) = bag
+        .rows
+        .iter()
+        .position(|(name, _)| data.item_named(name) == Some(item))
+    {
+        if usize::from(cursor) == target {
+            return press(Button::A, Expectation::BagPrompt);
+        }
+        return press(
+            if usize::from(cursor) < target {
+                Button::Down
+            } else {
+                Button::Up
+            },
+            Expectation::BagCursorAt(if usize::from(cursor) < target {
+                cursor + 1
+            } else {
+                cursor - 1
+            }),
+        );
+    }
+    press(
+        if bag.rows.iter().any(|(name, _)| is_cancel(name)) {
+            Button::Up
+        } else {
+            Button::Down
+        },
+        Expectation::InputsDone,
+    )
 }
 
 /// Bag rows: (name or item key, count).
@@ -158,9 +226,7 @@ impl PocketAudit {
         data: &GameData,
         events: &mut Vec<GameEvent>,
     ) -> Decision {
-        let Some(target) = pocket_index(self.pocket) else {
-            return Decision::Fail(format!("{:?} is not a bag pocket", self.pocket));
-        };
+        let target = pocket_index(self.pocket).unwrap_or(1);
         let phase = if self.observed.is_some() {
             Phase::Close
         } else if let Some(bag) = &o.bag {
@@ -210,6 +276,16 @@ impl PocketAudit {
             Phase::StartMenu => self.start_menu(o),
             Phase::Pocket => {
                 let bag = o.bag.as_ref().expect("bag phase");
+                if pocket_index(self.pocket).is_none()
+                    && pocket_from_title(&bag.pocket) == Some(Pocket::KeyItems)
+                {
+                    let (item, title) = if self.pocket == Pocket::TmCase {
+                        ("ITEM_TM_CASE", "TM CASE")
+                    } else {
+                        ("ITEM_BERRY_POUCH", "BERRY POUCH")
+                    };
+                    return select_item(o, data, item, Expectation::BagPocket(title.into()));
+                }
                 let Some(at) = pocket_from_title(&bag.pocket).and_then(pocket_index) else {
                     return self.wait(o, "reading the pocket title");
                 };

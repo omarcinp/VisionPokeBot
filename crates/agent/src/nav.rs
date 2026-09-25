@@ -674,7 +674,7 @@ impl Navigator {
 /// Where to talk to `(x, y)` from: an adjacent tile, or across a counter
 /// (the tile between is a counter, e.g. Pokémon Center nurses, clerks), with
 /// the direction to face.
-fn facing_spots(map: &MapData, x: i32, y: i32) -> Vec<((i32, i32), Direction)> {
+pub(crate) fn facing_spots(map: &MapData, x: i32, y: i32) -> Vec<((i32, i32), Direction)> {
     Direction::ALL
         .iter()
         .flat_map(|&dir| {

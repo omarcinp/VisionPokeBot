@@ -144,6 +144,35 @@ pub struct TrainerCardObservation {
     /// when the digits didn't read.
     #[serde(default)]
     pub pokedex_count: Option<u16>,
+    #[serde(default)]
+    pub money: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartyMenuObservation {
+    pub count: u8,
+    pub selected: Option<u8>,
+    pub actions: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SummaryPage {
+    Info,
+    Skills,
+    Moves,
+}
+
+/// Only values actually read on the currently visible summary page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryObservation {
+    pub page: SummaryPage,
+    pub nickname: String,
+    pub level: Option<u8>,
+    pub species: Option<String>,
+    pub held_item: Option<String>,
+    pub hp: Option<(u16, u16)>,
+    pub status: Option<crate::Status>,
+    pub moves: Vec<(String, Option<(u8, u8)>)>,
 }
 
 /// The region map (the Fly destination map, or the Town Map): which fly spots
@@ -284,6 +313,10 @@ pub struct Observation {
     /// The Pokédex numerical list.
     #[serde(default)]
     pub pokedex_list: Option<PokedexListObservation>,
+    #[serde(default)]
+    pub party_menu: Option<PartyMenuObservation>,
+    #[serde(default)]
+    pub summary: Option<SummaryObservation>,
 }
 
 impl DialogueObservation {
@@ -317,6 +350,8 @@ impl Observation {
             trainer_card: None,
             fly_map: None,
             pokedex_list: None,
+            party_menu: None,
+            summary: None,
         }
     }
 }

@@ -115,6 +115,24 @@ impl PerceptionSystem for FireRedPerception {
             observation.menu = Some(menu);
             return observation;
         }
+        if let Some(font) = self.font.as_deref() {
+            let summary = detect::party::summary(image, font);
+            let party_menu = if summary.is_none() {
+                detect::party::menu(image, font)
+            } else {
+                None
+            };
+            if summary.is_some() || party_menu.is_some() {
+                let mut observation = Observation::bare(
+                    frame.frame_id,
+                    screen(ScreenState::PartyMenu, "party-summary"),
+                    metrics,
+                );
+                observation.summary = summary;
+                observation.party_menu = party_menu;
+                return observation;
+            }
+        }
         if detect::pokedex::is_page(image) {
             let mut observation = Observation::bare(
                 frame.frame_id,

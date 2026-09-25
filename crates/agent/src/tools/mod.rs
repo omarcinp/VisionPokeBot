@@ -15,7 +15,9 @@ pub mod effects;
 mod go;
 mod heal;
 pub mod lookup;
+mod medicine;
 pub mod menu;
+mod party_audit;
 pub mod probe;
 mod save;
 mod talk;
@@ -107,8 +109,11 @@ pub enum BattlePlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "fact", rename_all = "snake_case")]
 pub enum ProbeFact {
+    Party,
     /// The items of a bag pocket (`PocketObserved`).
-    Pocket { pocket: Pocket },
+    Pocket {
+        pocket: Pocket,
+    },
     /// The badges on the trainer card.
     TrainerCard,
     /// The lit towns on the Fly map.
@@ -292,9 +297,7 @@ impl Intent {
                     }
                     pokebot_planner::ProbeFact::FlyMap => ProbeFact::FlyMap,
                     pokebot_planner::ProbeFact::Pokedex => ProbeFact::Pokedex,
-                    pokebot_planner::ProbeFact::Party => {
-                        return Err(ToolError::Unsupported("party probe: no tool yet".into()))
-                    }
+                    pokebot_planner::ProbeFact::Party => ProbeFact::Party,
                     pokebot_planner::ProbeFact::PcBoxes => {
                         return Err(ToolError::Unsupported("PC box probe: no tool yet".into()))
                     }
@@ -386,6 +389,8 @@ impl std::fmt::Display for Intent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("replan: {0}")]
+    Replan(String),
     #[error("{0}")]
     Failed(String),
     #[error("unsupported: {0}")]
@@ -506,7 +511,7 @@ impl Toolbox {
     /// planner names them (`pokebot_planner::ProbeFact::kind`): the party
     /// and the PC boxes have no tool yet.
     pub fn supported_probes() -> std::collections::BTreeSet<String> {
-        ["trainer_card", "bag_pocket", "fly_map", "pokedex"]
+        ["party", "trainer_card", "bag_pocket", "fly_map", "pokedex"]
             .into_iter()
             .map(str::to_owned)
             .collect()

@@ -59,6 +59,10 @@ impl Action {
 /// What must be visible for an action to count as successful.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Expectation {
+    PartyList,
+    PartySelected(u8),
+    PartyActions,
+    SummaryPage(pokebot_state::SummaryPage),
     /// The dialogue's text changed (new page) or the dialogue closed.
     TextAdvanced {
         kind: DialogueKind,
@@ -123,6 +127,16 @@ pub enum Expectation {
 impl Expectation {
     pub fn met(&self, observation: &Observation) -> bool {
         match self {
+            Self::PartyList => observation.party_menu.as_ref().is_some_and(|m| !m.actions),
+            Self::PartySelected(slot) => observation
+                .party_menu
+                .as_ref()
+                .is_some_and(|m| !m.actions && m.selected == Some(*slot)),
+            Self::PartyActions => observation.party_menu.as_ref().is_some_and(|m| m.actions),
+            Self::SummaryPage(page) => observation
+                .summary
+                .as_ref()
+                .is_some_and(|s| s.page == *page),
             Expectation::TextAdvanced { kind, baseline } => match &observation.dialogue {
                 Some(d) if d.kind == *kind => {
                     changed_cells(baseline, &d.text_cells) >= TEXT_CHANGE_CELLS

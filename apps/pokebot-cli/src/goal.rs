@@ -565,6 +565,7 @@ impl CliRunner<'_> {
             }));
         }
         ctx = ctx.with_toolbox(toolbox);
+        pokebot_agent::tools::probe::audit_core(&mut ctx)?;
         let on_status = self.telemetry.clone().map(|t| {
             Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
         });

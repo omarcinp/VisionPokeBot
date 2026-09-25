@@ -220,7 +220,8 @@ impl Walker {
         let Some(step) = path.first().copied() else {
             return WalkStep::Arrived;
         };
-        let run = straight_run((pose.x, pose.y), path);
+        // Keep hardware feedback frequent even across long straight roads.
+        let run = straight_run((pose.x, pose.y), path).min(4);
         if run >= 2 && self.single_steps == 0 {
             let end = path[run - 1].to;
             let target = PlayerPose {
@@ -430,7 +431,7 @@ mod tests {
                 &sync,
                 t0
             ),
-            WalkStep::Hold { tiles: 5, .. }
+            WalkStep::Hold { tiles: 4, .. }
         ));
         // Tile 1 done at 268 ms, tile 2 at 536 ms: the player is seen on
         // tile 1 at 300 ms, fine.

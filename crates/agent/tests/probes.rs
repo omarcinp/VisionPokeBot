@@ -261,6 +261,7 @@ impl Game {
                     Default::default(),
                 );
                 o.trainer_card = Some(TrainerCardObservation {
+                    money: Some(3000),
                     badges: self.badges.clone(),
                     pokedex_count: self.pokedex_count,
                 });
@@ -425,6 +426,7 @@ fn the_trainer_card_probe_reads_the_badges_and_closes_the_menus() {
     });
     assert!(outcome.is_ok(), "{:?}", outcome.result);
     let learned = &outcome.learned;
+    assert!(learned.contains(&GameEvent::MoneyObserved { amount: 3000 }));
     assert_eq!(flag(learned, "FLAG_BADGE01_GET"), Some(true));
     for n in 2..=8 {
         assert_eq!(

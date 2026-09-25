@@ -9,6 +9,7 @@ pub mod main_menu;
 pub mod menu;
 pub mod move_list;
 pub mod naming;
+pub mod party;
 pub mod pokedex;
 pub mod shop;
 pub mod title;

@@ -25,6 +25,7 @@ pub mod new_game;
 pub mod party;
 pub mod progress;
 pub mod save;
+pub mod scheduler;
 pub mod shop;
 pub mod stock;
 pub mod story;

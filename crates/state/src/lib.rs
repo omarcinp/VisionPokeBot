@@ -21,6 +21,7 @@ mod reduce_knowledge;
 mod reducer;
 mod screen;
 mod state;
+pub use observation::{PartyMenuObservation, SummaryObservation, SummaryPage};
 
 pub use belief::{Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
 pub use events::{EventExtractor, EventRecord, FrameArrival, FrameDropPolicy, GameEvent};

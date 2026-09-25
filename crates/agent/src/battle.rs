@@ -9,7 +9,7 @@ use pokebot_planner::Combatant;
 use pokebot_state::{BattleMenu, GameEvent, Observation, ScreenState, Status};
 
 use crate::catch::{self, CatchMemory};
-use crate::party::{display_name, Party};
+use crate::party::{display_name, plausible_hp_for, Party};
 use crate::{Action, Decision, Expectation};
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +98,11 @@ pub fn lead_status_text(page: &str, lead: &str) -> Option<Status> {
 /// Battle text read on two frames ([`crate::catch::observe`]): tracks
 /// DISABLE on our lead.
 pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: &GameData) {
+    if page.starts_with("Wild ") && page.contains("appeared") {
+        memory.trainer = false;
+    } else if page.contains("sent out") || page.contains("would like to battle") {
+        memory.trainer = true;
+    }
     let Some(lead) = party.lead() else { return };
     if let Some(disabled) = disable_text(page, &lead.display_name(), data) {
         memory.disabled = disabled;
@@ -210,21 +215,65 @@ pub fn decide(
     if !memory.trainer && !memory.catch.decided && matches!(menu, BattleMenu::Command { .. }) {
         return Some(Decision::Wait("identifying the wild opponent".into()));
     }
-    // Low HP: the HUD numbers first (exact; the bar isn't always read on
-    // the Switch's capture: a Bulbasaur fought on at 3/22 and whited out
-    // on Route 1), the bar otherwise. A wild battle is run from unless
-    // one more hit surely ends it first.
-    let low = battle
+    // Low HP: plausible HUD numbers first (the bar isn't always read on
+    // the Switch), then the bar. Flee wild encounters while the lead is
+    // at risk; a failed RUN is retried on the next turn.
+    let lead = party.lead();
+    let level = battle
+        .player_level
+        .or_else(|| lead.map(|m| m.level))
+        .unwrap_or(0);
+    let usable = party
+        .members
+        .iter()
+        .filter(|m| {
+            m.hp.is_some_and(|hp| plausible_hp_for(hp, m.level, Some(&m.species)) && hp.0 > 0)
+        })
+        .count();
+    let flee_below = if usable <= 1 {
+        policy.flee_below.max(500)
+    } else {
+        policy.flee_below
+    };
+    let numbers = battle
         .player_hp_numbers
-        .map(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * u32::from(policy.flee_below))
-        .or_else(|| battle.player_hp.map(|hp| hp < policy.flee_below))
-        .unwrap_or(false);
+        .filter(|hp| plausible_hp_for(*hp, level, lead.map(|m| m.species.as_str())))
+        .or_else(|| {
+            lead.and_then(|m| m.hp)
+                .filter(|hp| plausible_hp_for(*hp, level, lead.map(|m| m.species.as_str())))
+        });
+    let low = numbers
+        .map(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * u32::from(flee_below))
+        .or_else(|| battle.player_hp.map(|hp| hp < flee_below))
+        // If no trustworthy HP is available, a wild encounter must not
+        // gamble the only known battler on a fight.
+        .unwrap_or(usable <= 1);
     let no_attacks = choose_move(data, party, None, memory, policy).is_none();
     let opponent = identify_opponent(data, observation);
-    let safe_ko = low && !no_attacks && safe_ko(data, party, opponent.as_ref(), battle);
-    let flee = ((low && !safe_ko) || no_attacks || memory.catch.flee)
-        && !memory.trainer
-        && memory.run_attempts < policy.max_run_attempts;
+    // Allow for a failed escape followed by another attack. A full HP bar
+    // can still be unsafe against a much stronger wild opponent.
+    let high_risk = match (
+        lead,
+        numbers,
+        battle.opponent_name.as_deref(),
+        battle.opponent_level,
+    ) {
+        (Some(member), Some(hp), Some(name), Some(level)) => {
+            data.species_named(name).is_none_or(|species| {
+                let foe = catch::Foe {
+                    species: species.to_owned(),
+                    level,
+                    hp_per_mille: battle.opponent_hp.unwrap_or(1000),
+                    status: catch::FoeStatus::None,
+                    shiny: false,
+                    caught: battle.opponent_caught,
+                };
+                catch::risk(data, &catch::Lead { member, hp }, &foe, 2) > catch::RISK_LIMIT
+            })
+        }
+        _ => true,
+    };
+    let flee = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
     Some(match menu {
         BattleMenu::Command { column, row } if flee => step_toward(
             (column, row),
@@ -396,11 +445,9 @@ mod tests {
     }
 
     /// Switch goal run: a Lv6 Bulbasaur fought two wild Pidgeys on Route
-    /// 1 at 7/22 then 3/22 HP (the bar unread) and whited out. The HUD
-    /// numbers decide: below the threshold a wild battle is run from,
-    /// unless one hit surely ends it; a trainer battle fights on.
+    /// 1 at 7/22 then 3/22 HP (the bar unread) and whited out.
     #[test]
-    fn a_wild_battle_at_low_hp_is_run_from_unless_a_hit_surely_ends_it() {
+    fn a_wild_battle_at_low_or_unreadable_hp_is_run_from() {
         use pokebot_state::{BattleMenu, BattleObservation, Observation, Observed};
         let Some(data) = data() else { return };
         let policy = BattlePolicy::default();
@@ -453,8 +500,7 @@ mod tests {
             &mut events,
         ));
         assert!(d.contains("RUN"), "{d}");
-        // The same against a Pidgey at 1 % of its HP: one Tackle ends it
-        // first (Bulbasaur is faster): FIGHT.
+        // Even a nearly defeated foe is not worth a possible faint.
         let d = label(decide(
             &hud((3, 22), "PIDGEY", 4, 10),
             &policy,
@@ -463,7 +509,19 @@ mod tests {
             &data,
             &mut events,
         ));
-        assert!(d.contains("FIGHT"), "{d}");
+        assert!(d.contains("RUN"), "{d}");
+        // The Switch misread 22 as 2; the impossible number must not make
+        // this single-member party appear healthy. Retry RUN after failures.
+        wild.run_attempts = policy.max_run_attempts;
+        let d = label(decide(
+            &hud((3, 2), "PIDGEY", 4, 1000),
+            &policy,
+            &mut wild,
+            &party,
+            &data,
+            &mut events,
+        ));
+        assert!(d.contains("RUN"), "{d}");
         // Healthy: FIGHT.
         let d = label(decide(
             &hud((20, 22), "PIDGEY", 4, 1000),

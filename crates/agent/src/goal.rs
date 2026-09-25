@@ -219,10 +219,23 @@ impl Run<'_, '_> {
                 self.report.outcome = "goal satisfied".into();
                 return Ok(());
             }
+            if knowledge.party.value.is_none() {
+                self.report.outcome =
+                    "party unknown at start: a party-menu audit is required before planning".into();
+                return Ok(());
+            }
             self.status.plan_no = plan_no;
             self.status.reason = reason.clone();
-            self.set_status("planning", reason.clone(), 0, None, ctx);
-            let plan = match self.planner.plan(self.goal, &knowledge, pose.clone()) {
+            let urgent = urgent_health(&knowledge);
+            let recovery_goal = GoalPredicate::Healed { healed: true };
+            let goal = if urgent { &recovery_goal } else { self.goal };
+            let plan_reason = if urgent {
+                format!("urgent health: {reason}")
+            } else {
+                reason.clone()
+            };
+            self.set_status("planning", plan_reason.clone(), 0, None, ctx);
+            let plan = match self.planner.plan(goal, &knowledge, pose.clone()) {
                 Ok(plan) => plan,
                 Err(e) => {
                     self.report.outcome = format!("no plan: {e}");
@@ -230,7 +243,7 @@ impl Run<'_, '_> {
                     return Ok(());
                 }
             };
-            self.log_plan(ctx, plan_no, &reason, pose, plan.clone())?;
+            self.log_plan(ctx, plan_no, &plan_reason, pose, plan.clone())?;
             if plan.intents.is_empty() {
                 self.report.outcome =
                     "the planner has nothing to do but the goal is not known to hold".into();
@@ -254,7 +267,16 @@ impl Run<'_, '_> {
                         self.report.outcome = "goal satisfied".into();
                         return Ok(());
                     }
-                    reason = "the plan ran through but the goal does not hold".into();
+                    if urgent {
+                        if urgent_health(&knowledge) {
+                            self.report.outcome =
+                                "healed, but party health is still unsafe or unreadable".into();
+                            return Ok(());
+                        }
+                        reason = "urgent health recovered".into();
+                    } else {
+                        reason = "the plan ran through but the goal does not hold".into();
+                    }
                 }
             }
         }
@@ -327,7 +349,9 @@ impl Run<'_, '_> {
                     "assumes": step.assumes.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 }),
             );
+            ctx.scheduler.assumptions = step.assumes.clone();
             let outcome = ctx.invoke(&intent);
+            ctx.scheduler.assumptions.clear();
             self.report.learned.extend(outcome.learned.iter().cloned());
             self.report.saved_at_end = false;
             match outcome.result {
@@ -353,6 +377,7 @@ impl Run<'_, '_> {
                         return Ok(Executed::Satisfied);
                     }
                 }
+                Err(ToolError::Replan(why)) => return Ok(Executed::Replan(why)),
                 Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
                 Err(e) => {
                     let reason = e.to_string();
@@ -711,6 +736,36 @@ fn list(ps: &[GoalPredicate]) -> String {
         .join(", ")
 }
 
+/// A damaged or unreadable lead cannot safely be sent into a walking or
+/// training plan. A full party has more margin than its last battler.
+fn urgent_health(knowledge: &SavedKnowledge) -> bool {
+    let Some(party) = knowledge.party.value.as_ref() else {
+        return true;
+    };
+    let usable = party
+        .iter()
+        .filter(|mon| {
+            mon.hp.value.is_some_and(|hp| {
+                mon.level.value.is_some_and(|level| {
+                    crate::party::plausible_hp_for(hp, level, mon.species.value.as_deref())
+                }) && hp.0 > 0
+            })
+        })
+        .count();
+    let Some(lead) = party.first() else {
+        return true;
+    };
+    let Some((hp, max)) = lead.hp.value.filter(|hp| {
+        lead.level.value.is_some_and(|level| {
+            crate::party::plausible_hp_for(*hp, level, lead.species.value.as_deref())
+        })
+    }) else {
+        return true;
+    };
+    let threshold = if usable <= 1 { 50 } else { 35 };
+    u32::from(hp) * 100 < u32::from(max) * threshold
+}
+
 /// Events that change what the save file holds (flags, items, party,
 /// money, Pokédex): the step is followed by a `Save` with `--save-game`.
 pub fn changes_save(event: &GameEvent) -> bool {
@@ -722,6 +777,7 @@ pub fn changes_save(event: &GameEvent) -> bool {
             | GameEvent::VarTracked { .. }
             | GameEvent::ItemsChanged { .. }
             | GameEvent::PocketObserved { .. }
+            | GameEvent::PartyAudited { .. }
             | GameEvent::PartyObserved { .. }
             | GameEvent::PartyMonDerived { .. }
             | GameEvent::MovesObserved { .. }
@@ -770,5 +826,36 @@ pub fn provenance(knowledge: &SavedKnowledge, p: &GoalPredicate) -> KnowledgeSou
         GoalPredicate::PokedexCaught { .. } | GoalPredicate::PokedexSeen { .. } => {
             knowledge.pokedex.counts.source
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use pokebot_state::{Knowledge, PartyMon};
+
+    fn party(hps: &[Option<(u16, u16)>]) -> SavedKnowledge {
+        SavedKnowledge {
+            party: Knowledge::observed(
+                hps.iter()
+                    .map(|hp| PartyMon {
+                        level: Knowledge::observed(6, 1),
+                        hp: hp.map_or_else(Knowledge::unknown, |v| Knowledge::observed(v, 1)),
+                        ..PartyMon::default()
+                    })
+                    .collect(),
+                1,
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn urgency_rises_when_the_last_usable_member_is_wounded_or_unreadable() {
+        assert!(urgent_health(&party(&[Some((10, 22))])));
+        assert!(urgent_health(&party(&[Some((9, 2))])));
+        assert!(urgent_health(&party(&[None])));
+        assert!(!urgent_health(&party(&[Some((10, 22)), Some((22, 22))])));
+        assert!(urgent_health(&party(&[Some((7, 22)), Some((22, 22))])));
     }
 }

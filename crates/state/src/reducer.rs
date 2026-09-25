@@ -81,6 +81,7 @@ impl StateReducer for DefaultReducer {
                     state.synchronization = SynchronizationState::Synchronized;
                 }
                 GameEvent::PartyMonDerived { .. }
+                | GameEvent::PartyAudited { .. }
                 | GameEvent::PartyObserved { .. }
                 | GameEvent::MovesObserved { .. }
                 | GameEvent::MovePpObserved { .. }

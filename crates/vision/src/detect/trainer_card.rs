@@ -79,6 +79,10 @@ pub fn detect(image: &RgbImage, font: Option<&Font>) -> Option<TrainerCardObserv
     Some(TrainerCardObservation {
         badges,
         pokedex_count: font.and_then(|font| pokedex_count(image, font)),
+        money: font.and_then(|font| {
+            let text = font.read(image, Region::new(72, 60, 75, 16), &[]).join("");
+            text.trim().strip_prefix('¥')?.trim().parse().ok()
+        }),
     })
 }
 

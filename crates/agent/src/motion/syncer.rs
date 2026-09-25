@@ -219,12 +219,18 @@ impl Syncer {
     }
 
     /// How long to hold for `units` of `kind`: release inside the last
-    /// unit, which the game then finishes, plus a margin of two spreads.
+    /// unit, which the game then finishes. Capture jitter belongs in the
+    /// observation timeout, never in the distance travelled.
     /// Latency is not added: a press and its release travel the same path,
     /// so it moves the walk in time without changing how far it goes.
     pub fn hold_for(&self, kind: InputKind, units: usize) -> Duration {
         let e = self.estimate(kind);
-        let ms = e.unit_ms * units as f64 - e.unit_ms / 2.0 + 2.0 * e.spread_ms;
+        let unit = if kind == InputKind::WalkTile {
+            e.unit_ms.clamp(200.0, 350.0)
+        } else {
+            e.unit_ms
+        };
+        let ms = unit * units as f64 - unit / 2.0;
         Duration::from_millis(ms.round().max(0.0) as u64)
     }
 
@@ -288,6 +294,14 @@ impl Syncer {
         if units == 0 || !to_effect.is_finite() || !effect_to_done.is_finite() {
             return;
         }
+        // FireRed walking is 16 game frames per tile. Slow perception or
+        // waiting for controller idle must not train a slower game clock.
+        if kind == InputKind::WalkTile
+            && units >= 2
+            && !(200.0..=350.0).contains(&(effect_to_done / (units - 1) as f64))
+        {
+            return;
+        }
         let mut e = self.estimate(kind);
         // The first effect of `units` units is seen once the first unit
         // played out: the player is only located on the next tile.
@@ -322,6 +336,13 @@ impl Syncer {
         };
         if let Some(estimates) = file.profiles.get(profile) {
             syncer.estimates = estimates.clone();
+            if syncer
+                .estimates
+                .get(&InputKind::WalkTile)
+                .is_some_and(|e| !e.unit_ms.is_finite() || !(200.0..=350.0).contains(&e.unit_ms))
+            {
+                syncer.estimates.remove(&InputKind::WalkTile);
+            }
         }
         Ok(syncer)
     }
@@ -404,22 +425,13 @@ mod tests {
             s.expect_frames(Some(InputKind::WalkTile)),
             frames(e.latency_ms + 2.0 * e.spread_ms)
         );
-        // A device twice as slow as modelled: the timeouts follow it.
+        // Slow capture is not a slower game: reject contaminated samples.
         let mut slow = Syncer::new("switch");
         for _ in 0..40 {
-            slow.observe_ms(InputKind::WalkTile, 200.0 + 600.0, 3.0 * 600.0, 4);
+            slow.observe_ms(InputKind::WalkTile, 800.0, 3.0 * 1089.0, 4);
         }
-        let e = slow.estimate(InputKind::WalkTile);
-        assert_eq!(
-            slow.timeout_frames(InputKind::WalkTile, 1),
-            frames(e.latency_ms + e.unit_ms + 2.0 * e.spread_ms)
-        );
-        assert!(slow.timeout_frames(InputKind::WalkTile, 1) > 30);
-        assert_eq!(
-            slow.timeout_frames(InputKind::WalkTile, 4),
-            frames(e.latency_ms + e.unit_ms / 2.0 + 2.0 * e.spread_ms).max(30 + 16 + 8)
-        );
-        assert!(slow.expect_frames(Some(InputKind::WalkTile)) >= 30);
+        assert_eq!(slow.estimate(InputKind::WalkTile).samples, 0);
+        assert_eq!(slow.hold_for(InputKind::WalkTile, 4).as_millis(), 938);
     }
 
     #[test]
@@ -433,11 +445,11 @@ mod tests {
         let e = s.estimate(InputKind::WalkTile);
         assert!((e.spread_ms - 20.0).abs() < 0.01, "{e:?}");
         assert!((e.unit_ms - 270.0).abs() < 5.0, "{e:?}");
-        // The margin is two spreads on top of the plain hold.
+        // Jitter extends observation waits, not directional input.
         let plain = e.unit_ms * 3.0 - e.unit_ms / 2.0;
         assert_eq!(
             s.hold_for(InputKind::WalkTile, 3).as_millis(),
-            (plain + 40.0).round() as u128
+            plain.round() as u128
         );
         // Kinds without units learn their latency and its spread.
         for i in 0..16 {
@@ -462,6 +474,23 @@ mod tests {
         assert!((e.latency_ms - 8.0).abs() < 0.01, "{e:?}");
         assert_eq!(e.spread_ms, 0.0);
         assert_eq!(e.samples, 1);
+    }
+
+    #[test]
+    fn switch_run_6_contaminated_timing_is_discarded_on_load() {
+        let path =
+            std::env::temp_dir().join(format!("pokebot-bad-walk-{}.json", std::process::id()));
+        let mut s = Syncer::new("switch");
+        let mut e = Estimate::default_for(InputKind::WalkTile);
+        e.unit_ms = 1089.0;
+        e.spread_ms = 356.0;
+        e.samples = 547;
+        s.estimates.insert(InputKind::WalkTile, e);
+        s.save(&path).unwrap();
+        let fixed = Syncer::load(&path, "switch").unwrap();
+        assert_eq!(fixed.estimate(InputKind::WalkTile).unit_ms, 268.0);
+        assert_eq!(fixed.hold_for(InputKind::WalkTile, 4).as_millis(), 938);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

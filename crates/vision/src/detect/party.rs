@@ -1,0 +1,196 @@
+//! Field party menu and the three summary pages. Regions follow the
+//! game's window templates; numeric fields reject partial OCR.
+use super::share;
+use crate::text::Font;
+use pokebot_core::RgbImage;
+use pokebot_state::{PartyMenuObservation, Region, Status, SummaryObservation, SummaryPage};
+
+fn read(image: &RgbImage, font: &Font, x: u32, y: u32, w: u32, h: u32) -> String {
+    font.read(image, Region::new(x, y, w, h), &[])
+        .join(" ")
+        .trim()
+        .to_owned()
+}
+
+fn pair(text: &str) -> Option<(u16, u16)> {
+    let compact = text.replace(' ', "");
+    let (a, b) = compact.split_once('/')?;
+    let (a, b): (u16, u16) = (a.parse().ok()?, b.parse().ok()?);
+    (b > 0 && a <= b).then_some((a, b))
+}
+
+pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
+    // Do not classify a dark fade as an ailment palette.
+    if share(image, Region::new(40, 18, 64, 14), [255, 251, 255], 1) < 60 {
+        return None;
+    }
+    let title = read(image, font, 0, 0, 108, 15);
+    let page = if title.starts_with("POKéMON INFO") {
+        SummaryPage::Info
+    } else if title.starts_with("POKéMON SKILLS") {
+        SummaryPage::Skills
+    } else if title.starts_with("KNOWN MOVES") {
+        SummaryPage::Moves
+    } else {
+        return None;
+    };
+    let nickname = read(image, font, 40, 18, 64, 14);
+    let level_text = read(image, font, 4, 18, 32, 14);
+    let level = level_text
+        .strip_prefix("Lv")
+        .and_then(|s| s.parse().ok())
+        .filter(|n| (1..=100).contains(n));
+    let species = (page == SummaryPage::Info).then(|| read(image, font, 166, 35, 73, 14));
+    let held_item = (page == SummaryPage::Info).then(|| read(image, font, 166, 95, 73, 14));
+    let hp = (page == SummaryPage::Skills)
+        .then(|| pair(&font.read_dark(image, Region::new(172, 18, 66, 14)).join("")))
+        .flatten();
+    let mut moves = Vec::new();
+    if page == SummaryPage::Moves {
+        for i in 0..4 {
+            let name = read(image, font, 160, 19 + 28 * i, 78, 14);
+            if !name.is_empty() && name.chars().all(|c| c == '-') {
+                continue;
+            }
+            let pp = pair(
+                &font
+                    .read_dark(image, Region::new(205, 32 + 28 * i, 31, 13))
+                    .join(""),
+            )
+            .and_then(|(a, b)| Some((a.try_into().ok()?, b.try_into().ok()?)));
+            moves.push((name, pp));
+        }
+    }
+    // The status sprite is 32x8, centred at (16,38). Its background
+    // palette distinguishes ailments without trying to read tiny letters.
+    let status = [
+        ([197, 98, 197], Status::Poisoned),
+        ([189, 189, 24], Status::Paralyzed),
+        ([164, 164, 139], Status::Asleep),
+        ([139, 180, 230], Status::Frozen),
+        ([230, 115, 82], Status::Burned),
+        ([180, 32, 32], Status::Fainted),
+    ]
+    .into_iter()
+    .find_map(|(color, status)| {
+        (share(image, Region::new(0, 34, 32, 8), color, 1) > 300).then_some(status)
+    });
+    // Healthy summary background is pale lavender with horizontal lines.
+    let status = status.or_else(|| {
+        (share(image, Region::new(0, 34, 32, 8), [239, 227, 247], 1) > 650)
+            .then_some(Status::Healthy)
+    });
+    Some(SummaryObservation {
+        page,
+        nickname,
+        level,
+        species,
+        held_item,
+        hp,
+        status,
+        moves,
+    })
+}
+
+pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
+    // Dialogue can also say "POKéMON". Require the party menu's striped
+    // teal background, outside all six panels and the bottom message.
+    if super::share_any(
+        image,
+        Region::new(16, 80, 70, 40),
+        &[[74, 170, 165], [57, 138, 140]],
+        2,
+    ) < 850
+    {
+        return None;
+    }
+    let prompt = read(image, font, 6, 136, 173, 19);
+    let actions = read(image, font, 156, 104, 79, 18).contains("SUMMARY");
+    if !prompt.contains("POKéMON") && !actions {
+        return None;
+    }
+    // Empty slots are striped teal; occupied panels have a pale cyan fill
+    // (red for fainted members). Do not derive size from cached roster.
+    let occupied = |r| share(image, r, [74, 170, 165], 1) < 500;
+    let mut count = 1;
+    for i in 0..5 {
+        if occupied(Region::new(164, 12 + 24 * i, 16, 12)) {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    let selected = (0..count).find(|&i| {
+        let r = if i == 0 {
+            Region::new(8, 26, 77, 2)
+        } else {
+            Region::new(96, 8 + 24 * (i - 1) as u32, 142, 2)
+        };
+        share(image, r, [255, 131, 49], 1) > 200
+    });
+    Some(PartyMenuObservation {
+        count,
+        selected,
+        actions,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reads_real_summary_pages_and_rejects_bad_numbers() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let load = |name: &str| pokebot_video::png::load(root.join("captures/fixtures").join(name));
+        let Ok(info) = load("emu-summary-info.png") else {
+            return;
+        };
+        let s = summary(&info, &font).unwrap();
+        assert_eq!(s.species.as_deref(), Some("IVYSAUR"));
+        assert_eq!(s.level, Some(18));
+        assert_eq!(s.status, Some(Status::Healthy));
+        let s = summary(&load("emu-summary-skills.png").unwrap(), &font).unwrap();
+        assert_eq!(s.hp, Some((54, 54)));
+        let s = summary(&load("emu-summary-moves.png").unwrap(), &font).unwrap();
+        assert_eq!(
+            s.moves,
+            vec![
+                ("TACKLE".into(), Some((35, 35))),
+                ("SLEEP POWDER".into(), Some((15, 15))),
+                ("LEECH SEED".into(), Some((10, 10))),
+                ("VINE WHIP".into(), Some((10, 10)))
+            ]
+        );
+        assert_eq!(
+            menu(&load("emu-party-menu.png").unwrap(), &font)
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(
+            menu(&load("emu-party-menu.png").unwrap(), &font)
+                .unwrap()
+                .selected,
+            Some(0)
+        );
+        assert!(
+            menu(&load("emu-party-actions.png").unwrap(), &font)
+                .unwrap()
+                .actions
+        );
+        if let Ok(image) = load("switch-summary-skills-27.png") {
+            assert_eq!(summary(&image, &font).unwrap().hp, Some((27, 27)));
+        }
+        if let Ok(image) = load("emu-summary-fade.png") {
+            assert!(summary(&image, &font).is_none());
+        }
+        if let Ok(image) = load("emu-nurse-question.png") {
+            assert!(menu(&image, &font).is_none());
+        }
+        assert_eq!(pair("9/2?"), None);
+        assert_eq!(pair("9/2"), None);
+    }
+}
