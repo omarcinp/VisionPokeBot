@@ -200,6 +200,46 @@ pub struct Navigator {
 /// Map objects known to be gone, as (map, local id).
 pub type Gone = BTreeSet<(String, u32)>;
 
+/// The objects the belief knows are no longer on their map: their hide
+/// flag is set (`FLAG_HIDE_*`; `removeobject` sets it for good), or a
+/// script path run to completion removed them. This is in `state.json`,
+/// so a restart remembers what a session's [`Gone`] set forgot (Switch,
+/// Mt. Moon B2F: after a restart both taken fossils blocked the only
+/// corridor between the ladders, and every replan walked into a part of
+/// B1F without the exit).
+pub fn belief_gone(world: &World, state: &pokebot_state::GameState) -> Gone {
+    let mut gone = Gone::new();
+    for map in world.maps() {
+        for o in &map.objects {
+            let hidden = o
+                .flag
+                .as_deref()
+                .is_some_and(|f| state.world.flag(f).value == Some(true));
+            if hidden {
+                gone.insert((map.name.clone(), o.local_id));
+            }
+        }
+    }
+    let Some(events) = world.events() else {
+        return gone;
+    };
+    for (script, path) in &state.world.paths_run {
+        let Some(s) = events.script(script) else {
+            continue;
+        };
+        for effect in s.paths.get(*path).map_or(&[][..], |p| &p.does[..]) {
+            if let pokebot_world::events::Effect::RemoveObject { remove_object, map } = effect {
+                let map = map.clone().or_else(|| s.map.clone());
+                let id = remove_object.as_int().and_then(|i| u32::try_from(i).ok());
+                if let (Some(map), Some(id)) = (map, id) {
+                    gone.insert((map, id));
+                }
+            }
+        }
+    }
+    gone
+}
+
 impl Navigator {
     pub fn new(world: Arc<World>, destination: Destination) -> Self {
         Self {
@@ -810,7 +850,45 @@ pub fn plan_hop_with(
     if pose.map == dest.map() {
         return None;
     }
-    route_from(world, pose, dest.map()).or_else(|| route_exit(world, &pose.map, dest.map()))
+    // No walkable route (a gate, or an object the belief doesn't know is
+    // gone): head for the destination's map anyway, but only through an
+    // exit the player can walk to from here. A map-level guess through an
+    // exit in a walled-off part of the map fails every time.
+    route_from(world, pose, dest.map()).or_else(|| {
+        route_exit(world, &pose.map, dest.map())
+            .filter(|hop| reachable_hop(world, pose, *hop, gone, gates))
+    })
+}
+
+/// Whether the player can walk from `pose` to where `hop` leaves the map.
+fn reachable_hop(
+    world: &World,
+    pose: &PlayerPose,
+    hop: Hop,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> bool {
+    match hop {
+        Hop::Warp(warp) => {
+            let dest = Destination::Warp {
+                map: pose.map.clone(),
+                warp,
+            };
+            let goals = goal_tiles(world, &dest);
+            route_search_with(world, pose, &pose.map, |p| goals.contains(&p), gone, gates).is_some()
+        }
+        Hop::Edge(dir) => {
+            let Some(map) = world.map(&pose.map) else {
+                return false;
+            };
+            let sides: HashSet<(i32, i32)> = world
+                .crossings(map, dir)
+                .into_iter()
+                .map(|(here, _)| here)
+                .collect();
+            route_search_with(world, pose, &pose.map, |p| sides.contains(&p), gone, gates).is_some()
+        }
+    }
 }
 
 fn warp_is_marked(map: &MapData, warp: &pokebot_world::Warp) -> bool {
@@ -1249,6 +1327,69 @@ mod tests {
             },
         ];
         assert_eq!(straight_run((0, 0), &jump_first), 1);
+    }
+
+    /// Switch goal run, after a restart: on MtMoon_B1F (22, 18) (the part
+    /// between the B2F ladder and the 1F one) every plan's first hop was
+    /// the exit to Route 4, in another part of the floor, and failed with
+    /// "no path to warp (45, 4)" eight replans in a row. The two fossils
+    /// were taken (the Dome Fossil's script removes both), but only the
+    /// lost session remembered it, so they closed B2F's corridor to the
+    /// ladder up to the exit. The belief keeps the script's run.
+    #[test]
+    fn taken_fossils_known_to_the_belief_open_the_way_out_of_mt_moon() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "MtMoon_B1F".into(),
+            x: 22,
+            y: 18,
+        };
+        let gym = Destination::Tile {
+            map: "CeruleanCity".into(),
+            x: 22,
+            y: 20,
+        };
+        // Without the belief: no walkable route, and the fallback no longer
+        // guesses the exit this part of the floor can't reach.
+        let blind = plan_hop(&world, &pose, &gym, &Gone::new());
+        assert_ne!(blind, Some(Hop::Warp(7)), "{blind:?}");
+        let mut state = pokebot_state::GameState::default();
+        state
+            .world
+            .record_path("MtMoon_B2F_EventScript_DomeFossil", 1);
+        let gone = belief_gone(&world, &state);
+        assert!(gone.contains(&("MtMoon_B2F".to_owned(), 1)));
+        assert!(gone.contains(&("MtMoon_B2F".to_owned(), 2)));
+        // Back down to B2F, along its corridor, up to the exit's part.
+        assert_eq!(plan_hop(&world, &pose, &gym, &gone), Some(Hop::Warp(3)));
+        // Emulator goal run: Route 4's west part, in front of its Center,
+        // took the right edge (the east part's) for the way to Cerulean.
+        let west = PlayerPose {
+            map: "Route4".into(),
+            x: 12,
+            y: 6,
+        };
+        let blind = plan_hop(&world, &west, &gym, &Gone::new());
+        assert_ne!(blind, Some(Hop::Edge(Direction::Right)), "{blind:?}");
+        assert!(
+            matches!(plan_hop(&world, &west, &gym, &gone), Some(Hop::Warp(_))),
+            "into Mt. Moon"
+        );
+        // A hide flag set in the belief does the same.
+        let mut state = pokebot_state::GameState::default();
+        for flag in ["FLAG_HIDE_DOME_FOSSIL", "FLAG_HIDE_HELIX_FOSSIL"] {
+            state
+                .world
+                .flags
+                .insert(flag.into(), pokebot_state::Knowledge::tracked(true, None));
+        }
+        assert_eq!(
+            plan_hop(&world, &pose, &gym, &belief_gone(&world, &state)),
+            Some(Hop::Warp(3))
+        );
     }
 
     /// Live: in MtMoon_B2F's featureless bottom corridor two Right taps

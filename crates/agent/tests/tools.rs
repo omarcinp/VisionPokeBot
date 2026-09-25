@@ -638,6 +638,26 @@ fn script_effects_become_tracked_events() {
     // The battle, the gift and the text lines are skipped, and said so.
     assert!(log.iter().any(|l| l.contains("battle")), "{log:?}");
     assert!(log.iter().any(|l| l.contains("ITEM_TM39")), "{log:?}");
+    // `removeobject` sets the object's hide flag for good: both fossils'
+    // flags are tracked, so the belief (and `state.json`) keep them gone.
+    let (events, _) = path_events(
+        d.world.events().unwrap(),
+        "MtMoon_B2F_EventScript_DomeFossil",
+        1,
+        &state,
+        &d.data,
+        d.world.places(),
+        &map_name,
+    );
+    for flag in ["FLAG_HIDE_DOME_FOSSIL", "FLAG_HIDE_HELIX_FOSSIL"] {
+        assert!(
+            events.contains(&GameEvent::FlagTracked {
+                flag: flag.into(),
+                value: true
+            }),
+            "{flag}: {events:?}"
+        );
+    }
 }
 
 /// `Go` one tile and `Heal` at the nearest Center on the virtual console
