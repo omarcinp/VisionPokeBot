@@ -374,8 +374,21 @@ impl Run<'_, '_> {
         self.report.failures.push(why.clone());
         ctx.emit(progress(GOAL, why.clone()))?;
         // The same failure twice in a row: don't plan this intent again.
+        // Not for a `Go`: a leg fails at one tile (an NPC in the way, a
+        // block the world model lacks), which the navigator learns and
+        // routes around; marking the whole destination infeasible cut the
+        // only way to Mt. Moon B2F for the session (flash-6).
         let again = self.last_failure.as_ref() == Some(&(key.clone(), reason.to_owned()));
-        if again {
+        if again && step.intent.name() == "Go" {
+            let blocked = ctx.blocked.lock().unwrap_or_else(|e| e.into_inner()).all();
+            ctx.emit(progress(
+                GOAL,
+                format!(
+                    "{key} failed twice; keeping it plannable, blocked tiles learnt: {blocked:?}"
+                ),
+            ))?;
+            self.last_failure = None;
+        } else if again {
             ctx.emit(GameEvent::IntentInfeasible {
                 intent: key.clone(),
             })?;

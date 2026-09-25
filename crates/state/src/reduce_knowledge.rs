@@ -335,6 +335,8 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         GameEvent::IntentInfeasible { intent } => {
             state.world.infeasible.insert(intent.clone());
         }
+        // Session-scoped and kept by the agent's navigator, not the belief.
+        GameEvent::TileBlocked { .. } => {}
         _ => return false,
     }
     true

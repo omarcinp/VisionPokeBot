@@ -446,6 +446,7 @@ fn summarize(event: &GameEvent) -> String {
         GameEvent::NpcAbsent { map, local_id } => format!("NPC {map}#{local_id} absent"),
         GameEvent::ScriptPathRun { script, path } => format!("Ran {script} path {path}"),
         GameEvent::IntentInfeasible { intent } => format!("Intent {intent} infeasible"),
+        GameEvent::TileBlocked { map, x, y } => format!("Tile {map} ({x}, {y}) blocked (learnt)"),
     }
 }
 

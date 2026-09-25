@@ -2,27 +2,29 @@
 //! holds and taps within one), settling after any cutscene first. A
 //! `Dest::Map` leg ends on arrival on the map, whichever tile.
 //!
-//! Motion loops (spec §8): a leg that visits the same tile four times
+//! Motion loops (spec §8): a leg that arrives on the same tile four times
 //! without getting closer to its goal fails, so the goal loop replans
-//! instead of bouncing off an NPC forever.
+//! instead of bouncing off an NPC forever. Acts from one tile (a turn, a
+//! tap that learns a blocker, the replanned step around it) are not visits:
+//! the walker gets its chance to route around before the leg fails.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pokebot_state::PlayerPose;
+use pokebot_state::{GameEvent, PlayerPose};
 use pokebot_world::World;
 
 use super::{
     Dest, Expects, Intent, StepContext, Tool, ToolContext, ToolOutcome, ToolStep, SETTLE_FRAMES,
 };
-use crate::motion::SyncerHandle;
-use crate::nav::{goal_tiles, Destination, Gone, NavStatus, Navigator};
+use crate::motion::{InputKind, SyncerHandle};
+use crate::nav::{goal_tiles, Blocked, Destination, Gone, NavStatus, Navigator};
 use crate::{Action, Decision, Outcome};
 
 /// Taps in a row that failed to move the player before the leg fails.
 const MAX_STALLED: u32 = 6;
-/// Acts issued from the same tile, without the leg getting closer to its
-/// goal, before it counts as a loop.
+/// Arrivals on the same tile, without the leg getting closer to its goal,
+/// before it counts as a loop.
 pub const MAX_TILE_VISITS: u32 = 4;
 
 pub struct GoTool;
@@ -34,11 +36,13 @@ pub struct GoStep {
     world: Arc<World>,
     /// Done as soon as the player stands on the destination's map.
     any_tile: bool,
-    /// Acts issued per tile since the leg last got closer to its goal.
+    /// Arrivals per tile since the leg last got closer to its goal.
     visits: HashMap<(String, i32, i32), u32>,
     /// Closest the leg has been to its goal tiles on the destination map.
     best: Option<i32>,
     last_map: Option<String>,
+    /// The tile the last act was issued from.
+    last_tile: Option<(String, i32, i32)>,
 }
 
 /// What a navigator is built from: the world, the objects known to be
@@ -48,6 +52,8 @@ pub struct NavParts {
     pub world: Arc<World>,
     pub gone: Gone,
     pub syncer: Option<SyncerHandle>,
+    /// The session's tiles learnt to be blocked.
+    pub blocked: Blocked,
 }
 
 impl NavParts {
@@ -56,6 +62,7 @@ impl NavParts {
             world: Arc::clone(&ctx.world),
             gone: ctx.gone.clone(),
             syncer: ctx.syncer.clone(),
+            blocked: Arc::clone(&ctx.blocked),
         }
     }
 }
@@ -66,8 +73,9 @@ impl GoStep {
     }
 
     pub fn with(parts: &NavParts, dest: Destination) -> Self {
-        let nav =
-            Navigator::new(Arc::clone(&parts.world), dest.clone()).with_gone(parts.gone.clone());
+        let nav = Navigator::new(Arc::clone(&parts.world), dest.clone())
+            .with_gone(parts.gone.clone())
+            .with_blocked(Arc::clone(&parts.blocked));
         let nav = match &parts.syncer {
             Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
             None => nav,
@@ -80,6 +88,7 @@ impl GoStep {
             visits: HashMap::new(),
             best: None,
             last_map: None,
+            last_tile: None,
         }
     }
 
@@ -104,13 +113,21 @@ impl GoStep {
         &self.dest
     }
 
-    /// Records an act issued from `pose`; `true` when the leg loops.
+    /// Records an act issued from `pose`; `true` when the leg loops. Only
+    /// the first act from a tile counts as a visit: the rest (a turn, a
+    /// tap that learns a blocker, the step around it) are the walker's
+    /// way around.
     fn note_visit(&mut self, pose: &PlayerPose) -> bool {
         if self.last_map.as_deref() != Some(pose.map.as_str()) {
             self.last_map = Some(pose.map.clone());
             self.visits.clear();
             self.best = None;
         }
+        let tile = (pose.map.clone(), pose.x, pose.y);
+        if self.last_tile.as_ref() == Some(&tile) {
+            return false;
+        }
+        self.last_tile = Some(tile.clone());
         let dist = if pose.map == self.dest.map() {
             goal_tiles(&self.world, &self.dest)
                 .into_iter()
@@ -123,13 +140,9 @@ impl GoStep {
             if self.best.is_none_or(|b| d < b) {
                 self.best = Some(d);
                 self.visits.clear();
-                return false;
             }
         }
-        let n = self
-            .visits
-            .entry((pose.map.clone(), pose.x, pose.y))
-            .or_insert(0);
+        let n = self.visits.entry(tile).or_insert(0);
         *n += 1;
         *n >= MAX_TILE_VISITS
     }
@@ -168,8 +181,11 @@ impl ToolStep for GoStep {
         match self.nav.next(ctx.observation) {
             NavStatus::Arrived => Decision::Done(format!("arrived at {:?}", self.dest)),
             NavStatus::Act(action) => {
-                if let Some(pose) = &pose {
-                    if self.note_visit(pose) {
+                let turn = action
+                    .timing
+                    .is_some_and(|(kind, _)| kind == InputKind::Turn);
+                if let Some(pose) = pose.filter(|_| !turn) {
+                    if self.note_visit(&pose) {
                         return Decision::Fail(format!(
                             "looping at {pose}: {MAX_TILE_VISITS} acts from the same tile without progress toward {:?}",
                             self.dest
@@ -183,8 +199,10 @@ impl ToolStep for GoStep {
         }
     }
 
-    fn on_outcome(&mut self, action: &Action, outcome: Outcome, _ctx: &mut StepContext<'_>) {
-        self.nav.on_outcome(action, outcome);
+    fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
+        if let Some((map, (x, y))) = self.nav.on_outcome(action, outcome) {
+            ctx.events.push(GameEvent::TileBlocked { map, x, y });
+        }
     }
 
     fn expects(&self) -> Expects {
@@ -259,12 +277,13 @@ mod tests {
     }
 
     #[test]
-    fn four_acts_from_one_tile_without_progress_fail_the_leg() {
+    fn four_arrivals_on_one_tile_without_progress_fail_the_leg() {
         let Some(world) = world() else { return };
         let parts = NavParts {
             world,
             gone: Gone::new(),
             syncer: None,
+            blocked: Blocked::default(),
         };
         let mut step = GoStep::with(
             &parts,
@@ -282,26 +301,36 @@ mod tests {
         // Getting closer resets the count.
         assert!(!step.note_visit(&at(5, 5)));
         assert!(!step.note_visit(&at(6, 5)));
-        for _ in 0..MAX_TILE_VISITS - 1 {
+        // Flash-6: several acts from one tile (a turn, a tap that learns
+        // the blocker, the step around it) are one visit, not four.
+        for _ in 0..8 {
             assert!(!step.note_visit(&at(6, 5)));
         }
+        // Bouncing back to it (from a tile no closer to the goal): the
+        // fourth arrival without progress loops.
+        for _ in 0..MAX_TILE_VISITS - 2 {
+            assert!(!step.note_visit(&at(5, 5)));
+            assert!(!step.note_visit(&at(6, 5)));
+        }
+        assert!(!step.note_visit(&at(5, 5)));
         assert!(
             step.note_visit(&at(6, 5)),
-            "the fourth act without progress loops"
+            "the fourth arrival without progress loops"
         );
         // Progress from a new tile clears it again.
         assert!(!step.note_visit(&at(7, 5)));
         assert!(!step.note_visit(&at(7, 5)));
         // On another map every tile counts, and a map change resets.
-        let other = PlayerPose {
+        let other = |x| PlayerPose {
             map: "Route1".into(),
-            x: 1,
+            x,
             y: 1,
         };
         for _ in 0..MAX_TILE_VISITS - 1 {
-            assert!(!step.note_visit(&other));
+            assert!(!step.note_visit(&other(1)));
+            assert!(!step.note_visit(&other(2)));
         }
-        assert!(step.note_visit(&other));
+        assert!(step.note_visit(&other(1)));
     }
 
     #[test]

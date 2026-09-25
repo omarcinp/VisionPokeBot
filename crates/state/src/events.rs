@@ -239,6 +239,13 @@ pub enum GameEvent {
     IntentInfeasible {
         intent: String,
     },
+    /// A tile the walker found blocked (an NPC met by bumping): the
+    /// session's legs route around it (log only; the agent keeps the set).
+    TileBlocked {
+        map: String,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// An event and the frame it was derived at.

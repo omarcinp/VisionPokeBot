@@ -424,6 +424,7 @@ mod tests {
             world: Arc::new(world),
             gone: Gone::new(),
             syncer: None,
+            blocked: Default::default(),
         };
         let at = |map: &str, x, y| PlayerPose {
             map: map.into(),

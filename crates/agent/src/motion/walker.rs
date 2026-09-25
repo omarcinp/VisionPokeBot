@@ -25,10 +25,16 @@ pub enum WalkStep {
         duration: Duration,
         timeout_frames: u64,
     },
-    /// Tap `dir` once to step onto `to`.
+    /// Tap `dir` once to step onto `to` (the player already faces `dir`).
     Tap {
         dir: Direction,
         to: (i32, i32),
+        timeout_frames: u64,
+    },
+    /// Turn to face `dir` before stepping: a short press in a new
+    /// direction only turns the player, so the step needs its own press.
+    Turn {
+        dir: Direction,
         timeout_frames: u64,
     },
     /// The active hold is stalling: release the buttons and replan.
@@ -133,6 +139,17 @@ pub struct StepDone {
     pub blocked: Option<(String, (i32, i32))>,
 }
 
+/// The step in flight.
+#[derive(Debug, Clone)]
+struct Pending {
+    from: PlayerPose,
+    dir: Direction,
+    to: (i32, i32),
+    /// The player was believed to face `dir` when the step was issued, so
+    /// a tap that doesn't move him is a block, not a turn.
+    facing: bool,
+}
+
 /// Holds and taps along a path, with the bookkeeping of the step in
 /// flight: which tile it aims at, how many taps failed in a row, and
 /// whether to walk with taps for a while (after a hold fell short).
@@ -142,8 +159,8 @@ pub struct Walker {
     single_steps: u32,
     /// Taps in a row that did not move the player.
     stalled: u32,
-    /// The step in flight: from, direction, target tile.
-    pending: Option<(PlayerPose, Direction, (i32, i32))>,
+    /// The step in flight.
+    pending: Option<Pending>,
     /// The hold in flight, and when it was issued.
     hold: Option<(HoldTracker, Instant)>,
 }
@@ -159,11 +176,14 @@ impl Walker {
     }
 
     /// The next step along `path` from the located pose, or, while a hold
-    /// runs, how it is going.
+    /// runs, how it is going. `facing` is the direction the player is
+    /// believed to face: a tap in another direction is preceded by a turn
+    /// (a hold turns and walks by itself).
     pub fn next(
         &mut self,
         observation: &Observation,
         path: &[Step],
+        facing: Option<Direction>,
         sync: &Syncer,
         now: Instant,
     ) -> WalkStep {
@@ -202,7 +222,12 @@ impl Walker {
                 x: end.0,
                 y: end.1,
             };
-            self.pending = Some((pose.clone(), step.dir, step.to));
+            self.pending = Some(Pending {
+                from: pose.clone(),
+                dir: step.dir,
+                to: step.to,
+                facing: facing == Some(step.dir),
+            });
             self.hold = Some((HoldTracker::new(pose.clone(), run, sync), now));
             return WalkStep::Hold {
                 dir: step.dir,
@@ -212,8 +237,20 @@ impl Walker {
                 timeout_frames: sync.timeout_frames(InputKind::WalkTile, run),
             };
         }
+        if facing != Some(step.dir) {
+            self.pending = None;
+            return WalkStep::Turn {
+                dir: step.dir,
+                timeout_frames: sync.timeout_frames(InputKind::Turn, 1),
+            };
+        }
         self.single_steps = self.single_steps.saturating_sub(1);
-        self.pending = Some((pose.clone(), step.dir, step.to));
+        self.pending = Some(Pending {
+            from: pose.clone(),
+            dir: step.dir,
+            to: step.to,
+            facing: true,
+        });
         WalkStep::Tap {
             dir: step.dir,
             to: step.to,
@@ -223,9 +260,14 @@ impl Walker {
 
     /// A single press toward `to` issued by the navigator itself (warps,
     /// map edges): tracked like a tap.
-    pub fn note_tap(&mut self, from: PlayerPose, dir: Direction, to: (i32, i32)) {
+    pub fn note_tap(&mut self, from: PlayerPose, dir: Direction, to: (i32, i32), facing: bool) {
         self.hold = None;
-        self.pending = Some((from, dir, to));
+        self.pending = Some(Pending {
+            from,
+            dir,
+            to,
+            facing,
+        });
     }
 
     /// Nothing in flight (a turn in place, a warp push).
@@ -237,7 +279,12 @@ impl Walker {
     /// The executor's verdict on the step in flight.
     pub fn on_outcome(&mut self, action: &Action, outcome: Outcome) -> Option<StepDone> {
         self.hold = None;
-        let (from, dir, target) = self.pending.take()?;
+        let Pending {
+            from,
+            dir,
+            to: target,
+            facing,
+        } = self.pending.take()?;
         let mut faced = false;
         let mut blocked = None;
         match (outcome, &action.expect) {
@@ -255,11 +302,12 @@ impl Walker {
                 }
             }
             (Outcome::TimedOut, Expectation::PlayerMovedFrom(_)) => {
-                // First miss: the tap probably just turned the player.
-                // Second miss: something is in the way; avoid that tile.
+                // A tap the player already faced along: something is in
+                // the way; avoid that tile. Otherwise the first miss
+                // probably just turned him and the second is the block.
                 faced = true;
                 self.stalled += 1;
-                if self.stalled >= 2 {
+                if facing || self.stalled >= 2 {
                     blocked = Some((from.map, target));
                     self.stalled = 0;
                 }
@@ -321,6 +369,7 @@ mod tests {
         let step = w.next(
             &observation(1, Some((3, 7))),
             &path_right((3, 7), 5),
+            None,
             &sync,
             t0,
         );
@@ -346,6 +395,7 @@ mod tests {
             w.next(
                 &observation(1, Some((3, 7))),
                 &path_right((3, 7), 6),
+                None,
                 &sync,
                 t0
             ),
@@ -354,7 +404,7 @@ mod tests {
         // Tile 1 done at 268 ms, tile 2 at 536 ms: the player is seen on
         // tile 1 at 300 ms, fine.
         assert_eq!(
-            w.next(&observation(2, Some((4, 7))), &[], &sync, ms(300)),
+            w.next(&observation(2, Some((4, 7))), &[], None, &sync, ms(300)),
             WalkStep::Walking {
                 predicted: 1,
                 observed: Some(1)
@@ -362,7 +412,7 @@ mod tests {
         );
         // Not located for a while: no verdict.
         assert_eq!(
-            w.next(&observation(3, None), &[], &sync, ms(600)),
+            w.next(&observation(3, None), &[], None, &sync, ms(600)),
             WalkStep::Walking {
                 predicted: 2,
                 observed: None
@@ -371,7 +421,7 @@ mod tests {
         // Still on tile 1 at 820 ms (prediction: 3): lagging by 2, but
         // not yet for 100 ms.
         assert_eq!(
-            w.next(&observation(4, Some((4, 7))), &[], &sync, ms(820)),
+            w.next(&observation(4, Some((4, 7))), &[], None, &sync, ms(820)),
             WalkStep::Walking {
                 predicted: 3,
                 observed: Some(1)
@@ -379,7 +429,7 @@ mod tests {
         );
         // Still there 100 ms later: cancel, then taps for two moves.
         assert_eq!(
-            w.next(&observation(5, Some((4, 7))), &[], &sync, ms(925)),
+            w.next(&observation(5, Some((4, 7))), &[], None, &sync, ms(925)),
             WalkStep::Cancel
         );
         let action = Action::new("walk", vec![], Expectation::PlayerAt(pose(8, 7)), 30);
@@ -389,6 +439,7 @@ mod tests {
             w.next(
                 &observation(6, Some((4, 7))),
                 &path_right((4, 7), 4),
+                Some(Direction::Right),
                 &sync,
                 ms(1000)
             ),
@@ -437,31 +488,81 @@ mod tests {
     }
 
     #[test]
-    fn two_missed_taps_learn_the_blocker() {
+    fn a_tap_in_a_new_direction_turns_first() {
+        // Flash-6: from MtMoon_1F (16, 17), facing Down after a walk, a
+        // 160 ms press Left only turned the player and timed out (71
+        // frames) before a second press could try the step.
         let sync = Syncer::new("emulator");
         let mut w = Walker::new();
         let t0 = Instant::now();
-        let tap = |w: &mut Walker| {
-            assert!(matches!(
-                w.next(
-                    &observation(1, Some((3, 7))),
-                    &path_right((3, 7), 1),
-                    &sync,
-                    t0
-                ),
-                WalkStep::Tap { to: (4, 7), .. }
-            ));
-        };
+        let step = w.next(
+            &observation(1, Some((3, 7))),
+            &path_right((3, 7), 1),
+            Some(Direction::Down),
+            &sync,
+            t0,
+        );
+        assert_eq!(
+            step,
+            WalkStep::Turn {
+                dir: Direction::Right,
+                timeout_frames: 6
+            }
+        );
+        // A turn has no step in flight.
+        let action = Action::new("turn", vec![], Expectation::InputsDone, 6);
+        assert!(w.on_outcome(&action, Outcome::Confirmed).is_none());
+        // Facing Right now: a tap.
+        assert!(matches!(
+            w.next(
+                &observation(2, Some((3, 7))),
+                &path_right((3, 7), 1),
+                Some(Direction::Right),
+                &sync,
+                t0
+            ),
+            WalkStep::Tap { to: (4, 7), .. }
+        ));
+    }
+
+    #[test]
+    fn a_missed_tap_while_facing_the_way_learns_the_blocker() {
+        let sync = Syncer::new("emulator");
+        let mut w = Walker::new();
+        let t0 = Instant::now();
+        assert!(matches!(
+            w.next(
+                &observation(1, Some((3, 7))),
+                &path_right((3, 7), 1),
+                Some(Direction::Right),
+                &sync,
+                t0
+            ),
+            WalkStep::Tap { to: (4, 7), .. }
+        ));
         let action = Action::new("walk", vec![], Expectation::PlayerMovedFrom(pose(3, 7)), 30);
-        tap(&mut w);
-        let first = w.on_outcome(&action, Outcome::TimedOut).unwrap();
-        assert!(first.faced && first.blocked.is_none());
-        assert_eq!(w.stalled(), 1);
-        tap(&mut w);
-        let second = w.on_outcome(&action, Outcome::TimedOut).unwrap();
-        assert_eq!(second.blocked, Some(("Route1".to_owned(), (4, 7))));
+        let done = w.on_outcome(&action, Outcome::TimedOut).unwrap();
+        assert!(done.faced);
+        assert_eq!(done.blocked, Some(("Route1".to_owned(), (4, 7))));
         assert_eq!(w.stalled(), 0);
         // Nothing in flight: no verdict.
         assert!(w.on_outcome(&action, Outcome::Confirmed).is_none());
+    }
+
+    #[test]
+    fn two_missed_taps_learn_the_blocker_when_the_facing_is_unknown() {
+        // Taps the navigator issues itself (toward warps) without a turn.
+        let sync = Syncer::new("emulator");
+        let _ = &sync;
+        let mut w = Walker::new();
+        let action = Action::new("walk", vec![], Expectation::PlayerMovedFrom(pose(3, 7)), 30);
+        w.note_tap(pose(3, 7), Direction::Right, (4, 7), false);
+        let first = w.on_outcome(&action, Outcome::TimedOut).unwrap();
+        assert!(first.faced && first.blocked.is_none());
+        assert_eq!(w.stalled(), 1);
+        w.note_tap(pose(3, 7), Direction::Right, (4, 7), false);
+        let second = w.on_outcome(&action, Outcome::TimedOut).unwrap();
+        assert_eq!(second.blocked, Some(("Route1".to_owned(), (4, 7))));
+        assert_eq!(w.stalled(), 0);
     }
 }

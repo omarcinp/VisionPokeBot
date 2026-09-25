@@ -17,7 +17,7 @@ use pokebot_world::World;
 use super::{BattlePlan, Intent, ToolError, ToolOutcome, Toolbox};
 use crate::executor::OutsideRecovery;
 use crate::motion::SyncerHandle;
-use crate::nav::Gone;
+use crate::nav::{Blocked, Gone};
 use crate::{checkpoint, Action, Decision, Executor, Outcome, Task, TaskContext};
 
 /// Quiet frames (no dialogue, menu, battle or transition) after a
@@ -136,6 +136,8 @@ pub struct ToolContext<'a> {
     pub syncer: Option<SyncerHandle>,
     /// Map objects known to be gone (taken items): they don't block.
     pub gone: Gone,
+    /// Tiles learnt to be blocked this session, shared by every leg.
+    pub blocked: Blocked,
     /// `state.json` and the identity to write it with after a save.
     pub checkpoint: Option<(PathBuf, checkpoint::Identity)>,
     /// Where unrecognised dialogue is saved (frame and text).
@@ -167,6 +169,7 @@ impl<'a> ToolContext<'a> {
             stop,
             syncer,
             gone: Gone::new(),
+            blocked: Blocked::default(),
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
             toolbox: Toolbox::default(),
@@ -279,6 +282,11 @@ impl<'a> ToolContext<'a> {
             let map = &p.pose.map;
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
+                // NPCs are back at their data positions on re-entry.
+                self.blocked
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .forget(map);
                 self.emit(GameEvent::MapVisited { map: map.clone() })?;
             }
         }

@@ -775,3 +775,30 @@ fn the_planner_leaves_infeasible_intents_to_other_branches() {
         .iter()
         .any(|s| matches!(s.intent, Planned::Catch { .. })));
 }
+
+/// Flash-6: `Go(MtMoon_B2F)` failed twice with the same "looping" reason
+/// (Youngster Josh had walked up to the player), was marked infeasible,
+/// and no plan could reach HM05 any more. A leg's failure is about one
+/// tile the navigator learns; the destination stays plannable.
+#[test]
+fn a_go_failing_twice_stays_plannable() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut planner = FakePlanner::new(vec![plan(vec![step(go("Route4")), step(catch())])]);
+    planner.alternative = Some(plan(vec![step(catch())]));
+    let looping = "looping at MtMoon_1F (16, 17): 4 acts from the same tile";
+    let h = Harness::new(vec![
+        (
+            "Go",
+            vec![Err(looping.into()), Err(looping.into()), Ok(vec![])],
+        ),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, infeasible) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert!(report.infeasible.is_empty(), "{:?}", report.infeasible);
+    assert!(infeasible.is_empty(), "{infeasible:?}");
+    assert_eq!(h.seen_names(), vec!["Go", "Go", "Go", "Catch"]);
+    assert_eq!(planner.calls(), 3);
+}
