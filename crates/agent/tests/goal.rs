@@ -83,6 +83,7 @@ impl VideoSource for StillVideo {
         self.next += 1;
         Ok(CapturedFrame {
             frame_id: self.next,
+            delivered: self.next,
             captured_at: Instant::now(),
             image: self.frame.clone(),
         })

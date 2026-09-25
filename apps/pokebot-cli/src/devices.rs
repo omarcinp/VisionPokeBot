@@ -94,6 +94,20 @@ impl FromStr for ViewportArg {
     }
 }
 
+/// Capture size as `WIDTHxHEIGHT`.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureSizeArg(pub u32, pub u32);
+
+impl FromStr for CaptureSizeArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        s.split_once('x')
+            .and_then(|(w, h)| Some(Self(w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .ok_or_else(|| format!("bad capture size {s:?}, expected WIDTHxHEIGHT"))
+    }
+}
+
 /// Capture card picture controls: `switch`, or `name=value,...`.
 #[derive(Debug, Clone, Default)]
 pub struct CardControlsArg(pub Vec<(String, i64)>);
@@ -157,6 +171,11 @@ pub struct DeviceArgs {
     /// Game viewport inside captured frames as x,y,w,h (default: whole frame)
     #[arg(long)]
     pub viewport: Option<ViewportArg>,
+    /// Capture card frame size as WIDTHxHEIGHT (default: keep the device's).
+    /// An MS2109 delivers only 30 of its 60 fps at 1920x1080 but all 60 at
+    /// 1280x720; scale --viewport to match.
+    #[arg(long)]
+    pub capture_size: Option<CaptureSizeArg>,
     /// Capture card picture controls: `switch` (calibrated for a Switch into
     /// an MS2109 card) or `name=value,...` (see `v4l2-ctl --list-ctrls`)
     #[arg(long)]
@@ -269,7 +288,7 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
         VideoSpec::CaptureCard(device) => {
             let source = CaptureCardVideoSource::open(CaptureCardConfig {
                 device: device.clone(),
-                size: None,
+                size: args.capture_size.map(|CaptureSizeArg(w, h)| (w, h)),
                 controls: args.card_controls.clone().unwrap_or_default().0,
             })?;
             let name = format!("capture-card:{}", source.description());

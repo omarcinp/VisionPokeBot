@@ -23,7 +23,7 @@ mod screen;
 mod state;
 
 pub use belief::{Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
-pub use events::{EventExtractor, EventRecord, GameEvent};
+pub use events::{EventExtractor, EventRecord, FrameArrival, FrameDropPolicy, GameEvent};
 pub use inference::{Condition, InferenceRule, InferenceRules};
 pub use inventory::{
     Bag, BoxMon, ItemList, PcStorage, Pocket, Pokedex, PokedexCounts, SavedKnowledge, BOXES,

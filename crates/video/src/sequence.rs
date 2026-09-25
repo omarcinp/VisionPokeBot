@@ -42,6 +42,7 @@ impl VideoSource for ImageSequenceSource {
         self.next += 1;
         Ok(CapturedFrame {
             frame_id,
+            delivered: frame_id,
             captured_at: Instant::now(),
             image,
         })

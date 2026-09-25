@@ -15,6 +15,10 @@ pub struct SessionMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRecord {
     pub frame_id: u64,
+    /// [`pokebot_core::CapturedFrame::delivered`]; absent in older
+    /// recordings, where it equals `frame_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<u64>,
     /// Microseconds since the recorder was created.
     pub elapsed_us: u64,
     /// [`pokebot_core::RgbImage::fingerprint`] of the normalized frame.
