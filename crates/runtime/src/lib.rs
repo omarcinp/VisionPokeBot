@@ -88,14 +88,23 @@ impl Runtime {
         }
     }
 
-    pub fn record_to(&mut self, dir: &Path, record_raw: bool) -> Result<()> {
+    pub fn record_to(&mut self, dir: &Path, record_raw: bool, stride: u64) -> Result<()> {
         let recorder = SessionRecorder::create(
             dir,
             &self.devices.video_name,
             &self.devices.controller_name,
             record_raw,
-        )?;
-        self.info(format!("recording session to {}", dir.display()));
+        )?
+        .with_stride(stride);
+        self.info(format!(
+            "recording session to {}{}",
+            dir.display(),
+            if stride > 1 {
+                format!(" (every {stride}th frame)")
+            } else {
+                String::new()
+            }
+        ));
         self.recorder = Some(recorder);
         Ok(())
     }

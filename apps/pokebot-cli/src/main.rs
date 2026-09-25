@@ -57,6 +57,10 @@ pub(crate) struct OutputArgs {
     /// Also record full-resolution captured frames
     #[arg(long)]
     record_raw: bool,
+    /// Record only every Kth frame (events and inputs in full): for the
+    /// stepped emulator, which runs many times real time
+    #[arg(long, default_value_t = 1)]
+    record_stride: u64,
 }
 
 #[derive(Subcommand)]
@@ -371,7 +375,7 @@ fn attach_outputs(
     }
     if let Some(dir) = &output.record {
         let dir = fresh_record_dir(dir);
-        runtime.record_to(&dir, output.record_raw)?;
+        runtime.record_to(&dir, output.record_raw, output.record_stride)?;
         session = Some(dir);
     }
     Ok((hub, session))
