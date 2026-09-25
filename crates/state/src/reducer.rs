@@ -109,7 +109,8 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::NpcAbsent { .. }
                 | GameEvent::ScriptPathRun { .. }
                 | GameEvent::IntentInfeasible { .. }
-                | GameEvent::TileBlocked { .. } => {
+                | GameEvent::TileBlocked { .. }
+                | GameEvent::TileUnblocked { .. } => {
                     unreachable!("handled by reduce_knowledge")
                 }
             }

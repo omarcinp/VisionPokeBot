@@ -246,6 +246,12 @@ pub enum GameEvent {
         x: i32,
         y: i32,
     },
+    /// A `TileBlocked` taken back: something else stopped the step.
+    TileUnblocked {
+        map: String,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// An event and the frame it was derived at.

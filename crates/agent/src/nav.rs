@@ -71,6 +71,13 @@ impl BlockedTiles {
         self.tiles.remove(map);
     }
 
+    /// Drops one tile (learnt by mistake).
+    pub fn remove(&mut self, map: &str, tile: (i32, i32)) {
+        if let Some(tiles) = self.tiles.get_mut(map) {
+            tiles.remove(&tile);
+        }
+    }
+
     /// Every learnt tile, by map (for reports).
     pub fn all(&self) -> BTreeMap<String, Vec<(i32, i32)>> {
         self.tiles
@@ -173,7 +180,7 @@ pub struct Navigator {
     /// The map the player was last located on.
     last_map: Option<String>,
     /// Holds and taps along the current path.
-    walker: Walker,
+    pub(crate) walker: Walker,
     /// The device's timing model (shared with the executor, which feeds it).
     syncer: SyncerHandle,
     /// First hop out of the current map toward the destination, or None to
@@ -368,6 +375,11 @@ impl Navigator {
             self.learned().insert(map, *tile);
         }
         done.blocked
+    }
+
+    /// Takes back a tile learnt as blocked (the miss had another cause).
+    pub fn unlearn(&mut self, map: &str, tile: (i32, i32)) {
+        self.learned().remove(map, tile);
     }
 
     /// Drops the obstacles learned on `map`, at most [`MAX_FORGETS`] times

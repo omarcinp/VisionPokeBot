@@ -43,6 +43,10 @@ pub struct GoStep {
     last_map: Option<String>,
     /// The tile the last act was issued from.
     last_tile: Option<(String, i32, i32)>,
+    /// A tile learnt as blocked by the last act, and the frame: taken
+    /// back if something (a wild battle's fade, a trainer's "!") came up
+    /// right after, since that is what stopped the step.
+    last_block: Option<(String, (i32, i32), u64)>,
 }
 
 /// What a navigator is built from: the world, the objects known to be
@@ -89,6 +93,7 @@ impl GoStep {
             best: None,
             last_map: None,
             last_tile: None,
+            last_block: None,
         }
     }
 
@@ -171,6 +176,20 @@ impl ToolStep for GoStep {
         if ctx.quiet_frames < SETTLE_FRAMES {
             return Decision::Wait("letting the scene settle".into());
         }
+        if let Some((map, tile, at)) = self.last_block.take() {
+            // Flash-7: a tap onto MtMoon_B2F (43, 22) timed out because a
+            // wild encounter froze the player, and its fade came only
+            // after the timeout; the tile was learnt as blocked.
+            let since = ctx.observation.frame_id.saturating_sub(at);
+            if u64::from(ctx.quiet_frames) < since {
+                self.nav.unlearn(&map, tile);
+                ctx.events.push(GameEvent::TileUnblocked {
+                    map,
+                    x: tile.0,
+                    y: tile.1,
+                });
+            }
+        }
         let pose = ctx.observation.player.as_ref().map(|p| p.pose.clone());
         if self.any_tile && pose.as_ref().is_some_and(|p| p.map == self.dest.map()) {
             return Decision::Done(format!("arrived on {}", self.dest.map()));
@@ -201,6 +220,7 @@ impl ToolStep for GoStep {
 
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
         if let Some((map, (x, y))) = self.nav.on_outcome(action, outcome, ctx.observation) {
+            self.last_block = Some((map.clone(), (x, y), ctx.observation.frame_id));
             ctx.events.push(GameEvent::TileBlocked { map, x, y });
         }
     }
@@ -331,6 +351,118 @@ mod tests {
             assert!(!step.note_visit(&other(2)));
         }
         assert!(step.note_visit(&other(1)));
+    }
+
+    /// Flash-7: a tap onto MtMoon_B2F (43, 22) timed out because a wild
+    /// encounter froze the player; the fade came after the timeout and
+    /// the tile was learnt as blocked. A block learnt right before
+    /// something came up is taken back.
+    #[test]
+    fn a_block_learnt_right_before_an_interruption_is_taken_back() {
+        use crate::Expectation;
+        use pokebot_state::{
+            Direction, GameState, Observation, Observed, PoseObservation, ScreenState,
+        };
+        let Some(world) = world() else { return };
+        let parts = NavParts {
+            world,
+            gone: Gone::new(),
+            syncer: None,
+            blocked: Blocked::default(),
+        };
+        let mut step = GoStep::with(
+            &parts,
+            Destination::Facing {
+                map: "MtMoon_B2F".into(),
+                x: 13,
+                y: 11,
+            },
+        );
+        let pose = PlayerPose {
+            map: "MtMoon_B2F".into(),
+            x: 42,
+            y: 22,
+        };
+        let observation = |frame: u64| {
+            let mut o = Observation::bare(
+                frame,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation {
+                pose: pose.clone(),
+                score: 1000,
+            });
+            o
+        };
+        let state = GameState::default();
+        let mut events = Vec::new();
+        macro_rules! ctx {
+            ($o:expr, $events:expr, $quiet:expr) => {
+                StepContext {
+                    observation: $o,
+                    state: &state,
+                    events: $events,
+                    quiet_frames: $quiet,
+                    frame: None,
+                    learned: &[],
+                }
+            };
+        }
+        // The tap Right, facing Right, timed out on a quiet frame.
+        step.nav
+            .walker
+            .note_tap(pose.clone(), Direction::Right, (43, 22), true);
+        let tap = Action::new(
+            "walk next to (13, 11): Right",
+            vec![],
+            Expectation::PlayerMovedFrom(pose.clone()),
+            30,
+        )
+        .timed(InputKind::WalkTile, 1);
+        let o = observation(100);
+        step.on_outcome(&tap, Outcome::TimedOut, &mut ctx!(&o, &mut events, 500));
+        assert!(matches!(
+            events.last(),
+            Some(GameEvent::TileBlocked { x: 43, y: 22, .. })
+        ));
+        assert!(parts
+            .blocked
+            .lock()
+            .unwrap()
+            .on_map("MtMoon_B2F")
+            .contains(&(43, 22)));
+        // 300 frames later, quiet for only the last 100 (a battle ran):
+        // the block is taken back.
+        let o = observation(400);
+        let _ = step.next(&mut ctx!(&o, &mut events, 100));
+        assert!(matches!(
+            events.last(),
+            Some(GameEvent::TileUnblocked { x: 43, y: 22, .. })
+        ));
+        assert!(!parts
+            .blocked
+            .lock()
+            .unwrap()
+            .on_map("MtMoon_B2F")
+            .contains(&(43, 22)));
+        // A block followed by quiet frames only stays.
+        step.nav
+            .walker
+            .note_tap(pose.clone(), Direction::Right, (43, 22), true);
+        let o = observation(500);
+        step.on_outcome(&tap, Outcome::TimedOut, &mut ctx!(&o, &mut events, 160));
+        let o = observation(600);
+        let _ = step.next(&mut ctx!(&o, &mut events, 260));
+        assert!(parts
+            .blocked
+            .lock()
+            .unwrap()
+            .on_map("MtMoon_B2F")
+            .contains(&(43, 22)));
     }
 
     #[test]
