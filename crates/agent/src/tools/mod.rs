@@ -6,6 +6,7 @@
 //! Every tool is deterministic given the same observations; none sleeps.
 
 mod battle;
+mod beat;
 mod buy;
 mod catch;
 mod context;
@@ -146,6 +147,13 @@ pub enum Intent {
         #[serde(default)]
         center: Option<String>,
     },
+    /// Fight `trainer` (map object `object` of `map`), healing at the
+    /// nearest Center first when the lead isn't ready for it.
+    Beat {
+        trainer: String,
+        map: String,
+        object: u32,
+    },
     /// Play the battle on screen.
     Battle {
         #[serde(default)]
@@ -188,6 +196,7 @@ impl Intent {
             Intent::Talk { .. } => "Talk",
             Intent::RunScript { .. } => "RunScript",
             Intent::Heal { .. } => "Heal",
+            Intent::Beat { .. } => "Beat",
             Intent::Battle { .. } => "Battle",
             Intent::Catch { .. } => "Catch",
             Intent::Train { .. } => "Train",
@@ -247,10 +256,10 @@ impl Intent {
                     .ok_or_else(|| {
                         ToolError::Unsupported(format!("no object on {map} fights {trainer}"))
                     })?;
-                Intent::Talk {
+                Intent::Beat {
+                    trainer: trainer.clone(),
                     map: map.clone(),
                     object,
-                    answers: Vec::new(),
                 }
             }
             P::Train {
@@ -352,6 +361,11 @@ impl std::fmt::Display for Intent {
                 None => write!(f, "RunScript {script}"),
             },
             Intent::Heal { center } => write!(f, "Heal {}", center.as_deref().unwrap_or("nearest")),
+            Intent::Beat {
+                trainer,
+                map,
+                object,
+            } => write!(f, "Beat {trainer} ({map}#{object})"),
             Intent::Battle { policy } => write!(f, "Battle {policy:?}"),
             Intent::Catch { species, map } => match map {
                 Some(map) => write!(f, "Catch {species} on {map}"),
@@ -469,6 +483,7 @@ impl Default for Toolbox {
             Box::new(talk::TalkTool),
             Box::new(DialogueTool),
             Box::new(heal::HealTool),
+            Box::new(beat::BeatTool),
             Box::new(battle::BattleTool),
             Box::new(catch::CatchTool),
             Box::new(catch::TrainTool),

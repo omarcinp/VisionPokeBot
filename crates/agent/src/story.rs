@@ -639,7 +639,12 @@ impl StoryTask {
 /// The lead's P(win) alone against `trainer` (the planner's model, with
 /// [`OUR_IV`]): at its current HP with only moves that have PP left, or
 /// `healed` (full HP, every move).
-fn lead_p_win(data: &GameData, lead: &party::Member, trainer: &str, healed: bool) -> f64 {
+pub(crate) fn lead_p_win(
+    data: &GameData,
+    lead: &party::Member,
+    trainer: &str,
+    healed: bool,
+) -> f64 {
     let moves: Vec<String> = if healed {
         lead.moves.clone()
     } else {

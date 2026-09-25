@@ -714,10 +714,10 @@ fn planner_intents_convert_to_tool_intents() {
     };
     assert_eq!(
         conv(&beat).unwrap(),
-        Intent::Talk {
+        Intent::Beat {
+            trainer: trainer.clone(),
             map: "Route3".into(),
             object,
-            answers: vec![]
         }
     );
     assert!(matches!(
