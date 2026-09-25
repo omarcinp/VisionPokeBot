@@ -157,7 +157,7 @@ tools/live-run.sh --hub /tmp/pokebot-hub.log --max-emulators 16
 # Open http://<host>:8080/emulators/
 ```
 
-In the **Emulators** tab, choose an instance count and **Start a new game**,
+In the **Emulators** tab, choose an instance count and **Autonomous campaign**, **Start a new game**,
 **Play the story**, or **Observe only**. Start more batches while others run;
 stop individual workers or all managed workers. Each tile shows a live preview,
 observed fps, speed relative to console time, task outcome, and latest report.
@@ -165,6 +165,12 @@ observed fps, speed relative to console time, task outcome, and latest report.
 live event log. **Log** shows the last 16 KiB of stdout/stderr, including startup
 failures and stopped runs. Legacy `/emu/` runs also appear, but are managed by
 `live-run.sh`, not the fleet's Stop buttons.
+
+**Autonomous campaign** (`"task":"autonomy"` in the API) starts a private new
+game, plays the opening, audits menu facts and runs the goal planner toward
+game clear. It saves progress and restarts from its last save after a failed
+cycle, with a 240-second planning budget. Campaign tooling is still incomplete;
+the task exposes its current progress and failures in the worker report.
 
 Every worker is a separate process containing one bot and one in-process
 libretro emulator. It uses deterministic stepped mode with no real-time sleep,
