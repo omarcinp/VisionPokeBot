@@ -191,6 +191,9 @@ impl<'a> ToolContext<'a> {
         stop: &'a AtomicBool,
     ) -> Self {
         let syncer = executor.syncer.clone();
+        // What the belief knows is gone (taken items, removed objects):
+        // the session's own discoveries are added as it runs.
+        let gone = crate::nav::belief_gone(&world, runtime.state());
         let perceived = runtime.subscribe(|n| {
             matches!(n, Notice::Event { record, origin: Origin::Perception } if sensed(&record.event))
         });
@@ -202,7 +205,7 @@ impl<'a> ToolContext<'a> {
             data,
             stop,
             syncer,
-            gone: Gone::new(),
+            gone,
             blocked: Blocked::default(),
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
@@ -294,6 +297,16 @@ impl<'a> ToolContext<'a> {
 
     /// An event into the scheduler's needs and the running tool's outcome.
     fn learn(&mut self, event: GameEvent) {
+        if matches!(
+            event,
+            GameEvent::FlagTracked { .. }
+                | GameEvent::FlagObserved { .. }
+                | GameEvent::ScriptPathRun { .. }
+                | GameEvent::CheckpointRestored { .. }
+        ) {
+            let known = crate::nav::belief_gone(&self.world, self.runtime.state());
+            self.gone.extend(known);
+        }
         if self
             .scheduler
             .event(&event, self.runtime.state(), &self.data)

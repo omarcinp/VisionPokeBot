@@ -310,7 +310,27 @@ pub fn path_events(
         log.push(format!("{script}[{path}]: no such path"));
         return (out, log);
     };
+    let script_map = events.script(script).and_then(|s| s.map.clone());
     for effect in &p.does {
+        // `removeobject` sets the object's hide flag for good: the belief
+        // keeps it, so navigation stops routing around a taken fossil after
+        // a restart (see `nav::belief_gone`).
+        if let Effect::RemoveObject { remove_object, map } = effect {
+            let map = map.clone().or_else(|| script_map.clone());
+            let id = remove_object.as_int().and_then(|i| u32::try_from(i).ok());
+            let flag = events
+                .objects
+                .iter()
+                .find(|o| Some(&o.map) == map.as_ref() && Some(o.local_id) == id)
+                .and_then(|o| o.hidden_by.clone());
+            match flag {
+                Some(flag) => out.push(GameEvent::FlagTracked { flag, value: true }),
+                None => log.push(format!(
+                    "{script}[{path}]: skipped remove_object (no hide flag)"
+                )),
+            }
+            continue;
+        }
         match translate(effect, state, data, places, map_name) {
             Ok(events) => out.extend(events),
             Err(Skipped(why)) => log.push(format!("{script}[{path}]: skipped {why}")),
