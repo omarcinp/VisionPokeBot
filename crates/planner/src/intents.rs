@@ -271,6 +271,19 @@ pub enum ProbeFact {
 }
 
 impl ProbeFact {
+    /// The screen's kind, as [`crate::PlanOptions::supported_probes`]
+    /// names it (`bag_pocket` for every pocket).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ProbeFact::TrainerCard => "trainer_card",
+            ProbeFact::BagPocket(_) => "bag_pocket",
+            ProbeFact::FlyMap => "fly_map",
+            ProbeFact::Pokedex => "pokedex",
+            ProbeFact::Party => "party",
+            ProbeFact::PcBoxes => "pc_boxes",
+        }
+    }
+
     pub fn cost_s(&self) -> f64 {
         match self {
             ProbeFact::TrainerCard => 8.0,

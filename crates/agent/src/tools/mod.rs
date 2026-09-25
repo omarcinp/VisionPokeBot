@@ -502,6 +502,16 @@ impl Toolbox {
         }
     }
 
+    /// The probe screens the built-in [`probe::ProbeTool`] opens, as the
+    /// planner names them (`pokebot_planner::ProbeFact::kind`): the party
+    /// and the PC boxes have no tool yet.
+    pub fn supported_probes() -> std::collections::BTreeSet<String> {
+        ["trainer_card", "bag_pocket", "fly_map", "pokedex"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub fn empty() -> Self {
         Self { tools: Vec::new() }
     }

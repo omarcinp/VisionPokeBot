@@ -764,6 +764,70 @@ fn readiness_that_falls_short_trains_as_far_as_it_can_and_is_judged_again() {
     assert!(heal < train);
 }
 
+/// The first Switch run under §4.6: the heal at Mom's failed twice (a
+/// tool bug) and the PC probe twice (no tool), and the planner then found
+/// no plan at all, its only heal spot being the nearest. An infeasible
+/// instance never takes the predicate's other establishers with it: the
+/// heal moves to Viridian's Center (whose own trip, through Route 1's
+/// grass, does not wait for a fit lead), and probes the toolbox can't
+/// open are not planned.
+#[test]
+fn an_infeasible_heal_moves_to_the_next_heal_spot_and_unsupported_probes_stay_out() {
+    let Some(f) = fixture() else { return };
+    let (mut knowledge, pose) = fresh_game();
+    knowledge
+        .world
+        .infeasible
+        .insert("Heal(PalletTown_PlayersHouse_1F)".into());
+    knowledge.world.infeasible.insert("Probe(pc boxes)".into());
+    let planner = f.planner(PlanOptions::default());
+    let plan = planner
+        .plan(&GoalPredicate::badge(1), &knowledge, pose.clone())
+        .unwrap();
+    print(&plan, 20);
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    let heal = position(
+        &plan,
+        |i| matches!(i, Intent::Heal { center } if center == "ViridianCity_PokemonCenter_1F"),
+    );
+    let train = position(&plan, |i| matches!(i, Intent::Train { .. }));
+    assert!(heal < train, "heal at {heal}, train at {train}");
+    assert!(!plan.intents.iter().any(
+        |s| matches!(&s.intent, Intent::Heal { center } if center == "PalletTown_PlayersHouse_1F")
+    ));
+    assert!(!plan.intents.iter().any(|s| matches!(
+        s.intent,
+        Intent::Probe {
+            fact: ProbeFact::PcBoxes
+        }
+    )));
+    // The same with the toolbox's word instead of two failures.
+    let (knowledge, pose) = fresh_game();
+    let options = PlanOptions {
+        supported_probes: Some(
+            ["trainer_card", "bag_pocket", "fly_map", "pokedex"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let plan = planner
+        .plan(&GoalPredicate::badge(1), &knowledge, pose)
+        .unwrap();
+    print(&plan, 20);
+    assert!(!plan.intents.iter().any(|s| matches!(
+        s.intent,
+        Intent::Probe {
+            fact: ProbeFact::PcBoxes
+        }
+    )));
+    assert!(plan.intents.iter().any(
+        |s| matches!(&s.intent, Intent::Heal { center } if center == "PalletTown_PlayersHouse_1F")
+    ));
+}
+
 #[test]
 fn a_budget_of_nothing_returns_the_partial_plan() {
     let Some(f) = fixture() else { return };
