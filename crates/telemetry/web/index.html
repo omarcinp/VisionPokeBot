@@ -374,7 +374,8 @@
         <dt>verified at</dt><dd id="screen-frame">–</dd>
         <dt>in control</dt><dd id="control">–</dd>
         <dt>inputs</dt><dd id="inputs">–</dd>
-        <dt>dropped frames</dt><dd id="dropped">–</dd>
+        <dt>dropped by card</dt><dd id="dropped-card">–</dd>
+        <dt>dropped by bot</dt><dd id="dropped-processing">–</dd>
         <dt>mean luma</dt><dd id="obs-luma">–</dd>
         <dt>changed px</dt><dd id="obs-changed">–</dd>
         <dt>dialogue</dt><dd id="obs-text">–</dd>
@@ -835,7 +836,8 @@ function setStatus(status) {
     setText('screen-state', `${screen} (${st.screen.source})`);
     setText('screen-frame', String(st.screen.last_verified_frame ?? '–'));
     setText('inputs', String(st.input.commands_issued));
-    setText('dropped', String(st.dropped_frames));
+    setText('dropped-card', String(st.frames_dropped_by_card));
+    setText('dropped-processing', String(st.frames_dropped_by_processing));
     const ctl = st.progression && st.progression.in_control;
     setText('control', ctl ? `${ctl.value ?? '?'} (${ctl.source})` : '–');
   }
