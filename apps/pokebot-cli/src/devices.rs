@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use pokebot_agent::{Syncer, SyncerHandle};
-use pokebot_capture_card::{CaptureCardConfig, CaptureCardVideoSource};
+use pokebot_capture_card::CaptureCardConfig;
 use pokebot_controller::NullController;
 use pokebot_core::{Controller, GbaOnSwitch, PressProfile, VideoSource};
 use pokebot_emulator_libretro::{launch, ClockMode, EmulatorConfig};
@@ -286,14 +286,14 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
             (Box::new(video), name)
         }
         VideoSpec::CaptureCard(device) => {
-            let source = CaptureCardVideoSource::open(CaptureCardConfig {
+            let source = pokebot_capture_card::broker::open_shared(CaptureCardConfig {
                 device: device.clone(),
                 size: args.capture_size.map(|CaptureSizeArg(w, h)| (w, h)),
                 controls: args.card_controls.clone().unwrap_or_default().0,
             })?;
-            let name = format!("capture-card:{}", source.description());
+            let name = format!("capture-card:{}", device.display());
             eprintln!("{name}");
-            (Box::new(source), name)
+            (source, name)
         }
         VideoSpec::Replay(dir) => {
             let session =

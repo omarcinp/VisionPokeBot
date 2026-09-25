@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>PokéBot</title>
+<title>Game instance · PokéBot</title>
+<link rel="stylesheet" href="controls.css">
+<script src="controls.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -28,7 +30,7 @@
   header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 1px; font-weight: 800; }
   .stat { color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
   .stat b { color: var(--text); font-weight: 600; }
-  /* The hub has one Switch tab and one fleet tab. */
+  /* Shared game-instance navigation. */
   #tabs { display: flex; gap: 4px; flex-wrap: wrap; }
   #tabs:empty { display: none; }
   #tabs a { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 10px;
@@ -247,6 +249,13 @@
   @media (max-width: 600px) and (orientation: landscape) {
     #video-card { position: static; }
   }
+  header {padding:14px 24px;background:var(--panel);gap:12px 20px;}
+  main {max-width:1800px;padding:24px;gap:18px;}
+  .card {padding:16px;border-color:#2b3440;}
+  #tabs a {padding:5px 14px;border-radius:20px;font-size:13px;}
+  h2 {font-size:12px;letter-spacing:.8px;}
+  #left,#side {gap:18px;}
+  @media(max-width:600px){header,main{padding:14px}.card{padding:12px}}
 </style>
 </head>
 <body>
@@ -263,7 +272,7 @@
 <main>
   <div id="left">
   <section class="card" id="video-card">
-    <h2>What the bot sees <span class="right" id="screen-title">–</span></h2>
+    <h2>Game screen <span class="right" id="screen-title">–</span></h2>
     <div class="screen-wrap" id="screen-wrap">
       <canvas id="screen" width="240" height="160"></canvas>
       <div id="stale">reconnecting…</div>
@@ -285,6 +294,7 @@
         <div id="last-cmd"></div>
       </div>
     </div>
+    <div id="game-controls"></div>
     <div class="toolbar">
       <label><input type="checkbox" id="show-pad" checked> gamepad</label>
       <label><input type="checkbox" id="pause"> pause</label>
@@ -972,7 +982,8 @@ $('pause').addEventListener('change', () => frames.pump());
 
 // Standalone pages hide hub navigation. Worker detail pages keep two tabs.
 const instances = {
-  setLabel() {},
+  label: "",
+  setLabel(label) { this.label = label; this.refresh(); },
   async refresh() {
     try {
       const r = await fetch('../api/instances', { cache: 'no-store' });
@@ -981,9 +992,9 @@ const instances = {
       if (!Array.isArray(list)) return;
       const onSwitch = location.pathname.startsWith('/switch/');
       setHtml($('tabs'), [
-        ['Switch', '/switch/', onSwitch, list.some(e => e.name === 'switch' && e.alive)],
-        ['Emulators', '/emulators/', !onSwitch, list.some(e => e.name !== 'switch' && e.alive)],
-      ].map(([label, path, current, alive]) => `<a class="${current ? 'cur' : ''} ${alive ? 'alive' : ''}" href="${path}"><i></i>${label}</a>`).join(''));
+        ['← Game instances', '/games/', false, list.some(e => e.alive)],
+        [this.label || (onSwitch ? 'Switch' : 'Emulator'), location.pathname, true, true],
+      ].map(([label, path, current, alive]) => `<a class="${current ? 'cur' : ''} ${alive ? 'alive' : ''}" href="${path}"><i></i>${esc(label)}</a>`).join(''));
     } catch (_) { /* standalone */ }
   },
 };
@@ -1036,6 +1047,9 @@ const link = {
 $('conn').querySelector('b').id = 'conn-text';
 new ResizeObserver(() => document.documentElement.style.setProperty('--hdr', `${document.querySelector('header').offsetHeight}px`))
   .observe(document.querySelector('header'));
+new GameControls($('game-controls'), './');
+// Keep the device preview live even while the bot is planning or stopped.
+setInterval(() => { if (!document.hidden && !$('pause').checked && !frames.busy) frames.want(Date.now()); }, 100);
 link.connect();
 setInterval(() => link.check(), 1000);
 // Phones suspend background tabs; come back with a fresh connection.

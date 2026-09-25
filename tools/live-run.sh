@@ -14,7 +14,7 @@
 # emu      | pokebot-emu         | 18081        | Emulator
 #
 # The hub (`pokebot hub`, process pokebot-hub) is started if it isn't
-# running; it serves / -> /switch/, /switch/, /emu/ and /api/instances.
+# running; it serves / -> /games/, /switch/, /emu/ and /api/instances.
 # Each instance is described in /tmp/pokebot-instances/<instance>.json.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -87,6 +87,35 @@ stop_process() {
   echo "warning: ${name} is still running" >&2
 }
 
+# Persist the physical device configuration separately from any bot run. The
+# hub owns capture even when no bot is enabled. On a hub-only upgrade, recover
+# the existing configuration from the last launch manifest.
+mkdir -p "${INSTANCES_DIR}"
+python3 - "${INSTANCES_DIR}" "${INSTANCE}" "${HUB_ONLY}" "$@" <<'PYCONFIG'
+import json, os, shlex, sys
+root, instance, hub_only, *args = sys.argv[1:]
+if hub_only == '1':
+    try:
+        with open(os.path.join(root, 'switch.json')) as f:
+            args = shlex.split(json.load(f)['command'])[1:]
+        instance = 'switch'
+    except (OSError, KeyError, ValueError):
+        instance = ''
+if instance == 'switch':
+    keys = {'--video':'device', '--controller':'controller', '--capture-size':'capture_size',
+            '--viewport':'viewport', '--card-controls':'card_controls'}
+    config = {}
+    for i, arg in enumerate(args):
+        key, sep, value = arg.partition('=')
+        if key in keys and (sep or i+1 < len(args)):
+            config[keys[key]] = value if sep else args[i+1]
+    if config.get('device', '').startswith('capture-card:'):
+        config['device'] = config['device'].split(':', 1)[1]
+        path = os.path.join(root, 'switch-config.json')
+        with open(path + '.tmp', 'w') as f: json.dump(config, f)
+        os.replace(path + '.tmp', path)
+PYCONFIG
+
 # Start or upgrade just the supervisor; the physical Switch keeps running.
 if [[ "${HUB_ONLY}" == 1 ]]; then
   stop_process pokebot-hub
@@ -94,7 +123,7 @@ if [[ "${HUB_ONLY}" == 1 ]]; then
   start_unit pokebot-hub "$(realpath -m "${LOG}")" /tmp/pokebot-hub hub \
     --instances-dir "${INSTANCES_DIR}" "$@"
   unit_pid pokebot-hub >/dev/null || { echo "hub failed; see ${LOG}" >&2; exit 1; }
-  echo "hub started (log ${LOG}); open /emulators/ to launch workers"
+  echo "hub started (log ${LOG}); open /games/ to manage game instances"
   exit 0
 fi
 

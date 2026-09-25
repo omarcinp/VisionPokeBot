@@ -5,6 +5,7 @@ mod hub;
 mod plan;
 mod script;
 mod serve;
+mod switch_device;
 #[cfg(feature = "viewer")]
 mod viewer;
 
@@ -234,11 +235,18 @@ enum EmulatorCommand {
     Serve(serve::ServeArgs),
 }
 
+static PROCESS_STOP: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+static WEB_BOT_STOP: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let managed = matches!(&cli.command,
-        Command::Run { output, .. } | Command::NewGame { output, .. } | Command::Story { output, .. }
-        if output.instance_file.is_some());
+    let managed = match &cli.command {
+        Command::Run { output, .. }
+        | Command::NewGame { output, .. }
+        | Command::Story { output, .. } => output.instance_file.is_some(),
+        Command::Goal(args) => args.output.instance_file.is_some(),
+        _ => false,
+    };
     if managed {
         // A hub launched from /tmp/pokebot-hub execs itself as each worker.
         // Keep legacy pgrep-based scripts from mistaking workers for the hub.
@@ -248,9 +256,13 @@ fn main() -> Result<()> {
         }
     }
     let stop = Arc::new(AtomicBool::new(false));
+    let _ = PROCESS_STOP.set(stop.clone());
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || {
+            if let Some(bot_stop) = WEB_BOT_STOP.get() {
+                bot_stop.store(true, Ordering::Relaxed);
+            }
             // systemd can signal the whole unit while the hub also asks its
             // children to stop. Managed workers leave escalation to the hub.
             if stop.swap(true, Ordering::Relaxed) && !managed {
@@ -259,7 +271,7 @@ fn main() -> Result<()> {
         })
         .context("installing Ctrl-C handler")?;
     }
-    match cli.command {
+    let result = match cli.command {
         Command::Run {
             devices,
             output,
@@ -361,6 +373,19 @@ fn main() -> Result<()> {
             session,
             from_frame,
         } => replay(session, from_frame),
+    };
+    // An intentional stop must not trigger systemd's Restart=on-failure,
+    // including the web UI's shutdown of a legacy emulator instance.
+    if PROCESS_STOP
+        .get()
+        .is_some_and(|stop| stop.load(Ordering::Relaxed))
+    {
+        if let Err(error) = &result {
+            eprintln!("stopped: {error:#}");
+        }
+        Ok(())
+    } else {
+        result
     }
 }
 
@@ -391,9 +416,25 @@ fn attach_outputs(
         if output.instance_file.is_some() && !addr.ip().is_loopback() {
             bail!("instance-file requires a loopback web address");
         }
-        let telemetry = Telemetry::new(video_name, controller_name).with_publish_interval(
-            Duration::from_secs_f64(1.0 / f64::from(output.telemetry_hz)),
-        );
+        let control = runtime.enable_web_control();
+        let identity: String = output
+            .instance_label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        control.persist_stopped_state(
+            PathBuf::from("saves/web-control").join(format!("{identity}.paused")),
+        )?;
+        if video_name.starts_with("emulator:") {
+            if let Some(stop) = PROCESS_STOP.get() {
+                control.set_shutdown(stop.clone());
+            }
+        }
+        let telemetry = Telemetry::new(video_name, controller_name)
+            .with_control(control)
+            .with_publish_interval(Duration::from_secs_f64(
+                1.0 / f64::from(output.telemetry_hz),
+            ));
         let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
         if let Some(path) = &output.instance_file {
             pokebot_telemetry::hub_proxy::register_worker(
@@ -1039,6 +1080,9 @@ fn run(
         bail!("nothing to do: pass --script, --frames and/or --hold");
     }
     let (mut runtime, _) = start_runtime(args, output)?;
+    if steps.is_empty() {
+        runtime.stop_web_bot()?;
+    }
     let result = run_steps(&mut runtime, steps, frames, hold, stop);
     if let Err(e) = &result {
         runtime.error(format!("{e:#}"));
@@ -1058,7 +1102,11 @@ fn run(
     if output.web.is_some() && hold && !stop.load(Ordering::Relaxed) {
         eprintln!("run finished; web UI stays up until Ctrl-C");
         while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(100));
+            match runtime.observe() {
+                Ok(_) => {}
+                Err(Error::EndOfStream) => break,
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     runtime.finish()?;

@@ -230,7 +230,7 @@ pub fn run(args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
     if args.dry_run {
         dry_run(&args, &goal, &pd)
     } else {
-        execute(&args, &goal, &pd, &stop)
+        execute(&args, &goal, &mut pd, &stop)
     }
 }
 
@@ -313,8 +313,8 @@ impl Tool for ProgressSave {
 fn execute(
     args: &GoalArgs,
     goal: &GoalPredicate,
-    pd: &PlannerData,
-    stop: &AtomicBool,
+    pd: &mut PlannerData,
+    stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     let progress_path = args.progress_path();
     let start = if args.new_game {
@@ -384,6 +384,11 @@ fn execute(
         frame_clock: args.devices.frame_clock(),
         ..Executor::default()
     };
+    let task_stop = runtime
+        .bot_stop_signal()
+        .unwrap_or_else(|| Arc::clone(stop));
+    let _ = crate::WEB_BOT_STOP.set(task_stop.clone());
+    pd.options.stop = Some(task_stop.clone());
     let mut runner = CliRunner {
         args,
         goal,
@@ -395,13 +400,32 @@ fn execute(
         state_path: args.state_path(),
         progress_path,
         new_game,
-        stop,
+        stop: &task_stop,
     };
     let session = Session {
         start,
         restart: args.restart.then(|| Duration::from_secs(args.restart_wait)),
     };
-    let report = goal_session::run(session, &mut runner);
+    let mut session = session;
+    let report = loop {
+        let report = goal_session::run(session, &mut runner);
+        if !runner.runtime.bot_stopped() || stop.load(Ordering::Relaxed) {
+            break report;
+        }
+        runner.runtime.allow_web_resume(true);
+        runner
+            .runtime
+            .info("Bot stopped; viewing and manual control remain available");
+        while runner.runtime.bot_stopped() && !stop.load(Ordering::Relaxed) {
+            runner.runtime.observe()?;
+        }
+        runner.runtime.allow_web_resume(false);
+        if stop.load(Ordering::Relaxed) {
+            break report;
+        }
+        runner.runtime.clear_pose_hint();
+        session.start = Start::AsIs;
+    };
     let CliRunner { mut runtime, .. } = runner;
     if args.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
@@ -474,6 +498,10 @@ impl CliRunner<'_> {
                 Ok(Some(previous))
             }
             Start::AsIs => {
+                if self.runtime.frames_seen() > 0 {
+                    self.runtime.clear_pose_hint();
+                    return Ok(Progress::load(&self.progress_path).ok());
+                }
                 match checkpoint::load(&self.state_path) {
                     Ok(Some(c)) => {
                         if let Some(pose) = c.identity.as_ref().and_then(|i| i.saved_at.clone()) {
@@ -608,7 +636,7 @@ impl Runner for CliRunner<'_> {
                 CycleEnd::Unsatisfied(report.outcome)
             }
             Err(e) => {
-                if was_stopped(&e) || self.stop.load(Ordering::Relaxed) {
+                if was_stopped(&e) || self.stop.load(Ordering::Relaxed) || runtime.bot_stopped() {
                     runtime.info("Goal: stopped by user");
                     return CycleEnd::Stopped;
                 }
@@ -626,7 +654,7 @@ impl Runner for CliRunner<'_> {
     }
 
     fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+        self.stop.load(Ordering::Relaxed) || self.runtime.bot_stopped()
     }
 
     fn has_checkpoint(&self) -> bool {

@@ -58,6 +58,7 @@ pub struct Runtime {
     profile: Option<Profile>,
     telemetry: Option<Telemetry>,
     echo_events: bool,
+    control: Option<pokebot_telemetry::GameControl>,
 }
 
 impl Runtime {
@@ -90,6 +91,7 @@ impl Runtime {
             profile: std::env::var_os("VPB_PROFILE").map(|_| Profile::default()),
             telemetry: None,
             echo_events: false,
+            control: None,
         }
     }
 
@@ -127,8 +129,49 @@ impl Runtime {
         self.telemetry = Some(telemetry);
     }
 
+    pub fn enable_web_control(&mut self) -> pokebot_telemetry::GameControl {
+        let controller = std::mem::replace(
+            &mut self.devices.controller,
+            Box::new(pokebot_controller::NullController::new(
+                pokebot_core::PressProfile::default(),
+            )),
+        );
+        let control = pokebot_telemetry::GameControl::new(controller, true);
+        self.devices.controller = control.bot_controller();
+        self.control = Some(control.clone());
+        control
+    }
+
+    pub fn stop_web_bot(&self) -> Result<()> {
+        if let Some(control) = &self.control {
+            control
+                .request(serde_json::json!({"action":"stop"}))
+                .map_err(pokebot_core::Error::Device)?;
+        }
+        Ok(())
+    }
+
+    pub fn bot_stop_signal(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.control.as_ref().map(|c| c.stop_signal())
+    }
+
+    pub fn bot_stopped(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| !c.bot_enabled())
+    }
+
+    pub fn allow_web_resume(&self, allow: bool) {
+        if let Some(control) = &self.control {
+            control.allow_resume(allow);
+        }
+    }
+
     /// Reads, normalizes and interprets the next frame.
     pub fn observe(&mut self) -> Result<&NormalizedFrame> {
+        // Human input uses wall-clock durations. Keep a stepped emulator near
+        // console speed while stopped or under manual control.
+        if self.bot_stopped() && self.devices.video_name.starts_with("emulator:") {
+            std::thread::sleep(std::time::Duration::from_micros(16_743));
+        }
         let mut lap = self.profile.as_mut().map(|p| p.lap());
         let captured = self.devices.video.next_frame()?;
         if let Some(l) = lap.as_mut() {
@@ -320,6 +363,9 @@ impl Runtime {
     }
 
     pub fn finish(mut self) -> Result<()> {
+        // The web controller retains an emulator handle until process exit.
+        // Flush explicitly instead of relying on the last handle's destructor.
+        self.persist_save()?;
         if let Some(recorder) = &mut self.recorder {
             recorder.flush()?;
         }
@@ -561,6 +607,31 @@ mod tests {
                 image,
             })
         }
+    }
+
+    #[test]
+    fn shutdown_flushes_save_even_when_web_control_retains_the_device() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let saved = Arc::new(AtomicBool::new(false));
+        let written = saved.clone();
+        let mut runtime = Runtime::new(Devices {
+            video: Box::new(Frames(Vec::new().into_iter(), 0)),
+            controller: Box::new(NullController::default()),
+            normalizer: Normalizer::new(ViewportLocator::FullFrame),
+            video_name: "test".into(),
+            controller_name: "null".into(),
+            persist_save: Some(Box::new(move || {
+                written.store(true, Ordering::Relaxed);
+                Ok(())
+            })),
+        });
+        let control = runtime.enable_web_control();
+        runtime.finish().unwrap();
+        assert!(saved.load(Ordering::Relaxed));
+        assert!(control.bot_enabled());
     }
 
     #[test]

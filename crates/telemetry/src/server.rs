@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -63,10 +63,29 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Re
         .map_err(|e| Error::Device(e.to_string()))?;
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
+        .route(
+            "/controls.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../web/controls.js"),
+                )
+            }),
+        )
+        .route(
+            "/controls.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css")],
+                    include_str!("../web/controls.css"),
+                )
+            }),
+        )
         .route("/frame.png", get(frame_png))
         .route("/stream.mjpg", get(mjpeg))
         .route("/sprite/{species}", get(sprite))
         .route("/world/{file}", get(world_file))
+        .route("/api/control", get(control_status).post(control_request))
         .route("/api/snapshot", get(snapshot))
         .route("/api/summary", get(summary))
         .route("/api/stream", get(sse))
@@ -190,6 +209,51 @@ async fn mjpeg(State(app): State<AppState>, Query(query): Query<MjpegQuery>) -> 
         .into_response()
 }
 
+async fn control_status(State(app): State<AppState>) -> Response {
+    match &app.telemetry.control {
+        Some(control) => Json(control.status()).into_response(),
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"error":"Controls unavailable for this run"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn control_request(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if headers
+        .get("x-pokebot-control")
+        .and_then(|v| v.to_str().ok())
+        != Some("1")
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"X-Pokebot-Control: 1 required"})),
+        )
+            .into_response();
+    }
+    let Some(control) = app.telemetry.control else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"error":"Controls unavailable for this run"})),
+        )
+            .into_response();
+    };
+    match tokio::task::spawn_blocking(move || control.request(body)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => (StatusCode::CONFLICT, Json(json!({"error":error}))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn snapshot(State(app): State<AppState>) -> Json<serde_json::Value> {
     let status = app.telemetry.inner.status.borrow().clone();
     Json(json!({
@@ -207,6 +271,7 @@ async fn summary(State(app): State<AppState>) -> Json<serde_json::Value> {
         "screen": status.state.get("screen"),
         "player": status.state.get("player"),
         "latest": app.telemetry.latest_log(),
+        "control": app.telemetry.control.as_ref().map(|c| c.status()),
     }))
 }
 

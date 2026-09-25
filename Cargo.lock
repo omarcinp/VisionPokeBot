@@ -1014,6 +1014,7 @@ name = "pokebot-capture-card"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "pokebot-core",
  "v4l",
 ]
