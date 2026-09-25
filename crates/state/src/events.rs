@@ -112,6 +112,20 @@ pub enum GameEvent {
         status: Option<Status>,
         held_item: Option<Option<String>>,
     },
+    /// Stable details read on a member's Info / Skills summary pages.
+    PartyDetailsObserved {
+        slot: u8,
+        details: crate::SummaryDetails,
+    },
+    /// The SAVE panel gives a total, not individual badge identities.
+    BadgeCountObserved {
+        count: u8,
+    },
+    /// A complete visible roster uniquely matched the old members in a
+    /// different order. Entries are previous slot indices, in new order.
+    PartyReordered {
+        order: Vec<u8>,
+    },
     /// A member's complete move list, in menu order.
     MovesObserved {
         slot: u8,

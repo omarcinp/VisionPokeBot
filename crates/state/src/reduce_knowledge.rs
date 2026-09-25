@@ -11,7 +11,42 @@ use crate::{
 pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> bool {
     match event {
         GameEvent::PartyAudited { members } => {
-            state.party = Knowledge::observed(members.clone(), frame);
+            let old = state.party.value.as_deref().unwrap_or_default();
+            let roster = members
+                .iter()
+                .map(|mon| {
+                    let mut mon = mon.clone();
+                    let matches: Vec<_> = old.iter().filter(|m| m.matches_member(&mon)).collect();
+                    if matches.len() == 1
+                        && members.iter().filter(|m| m.matches_member(&mon)).count() == 1
+                    {
+                        let reading = mon.details.reading();
+                        mon.details = matches[0].details.clone();
+                        mon.history = matches[0].history.clone();
+                        mon.observe_details(&reading, frame);
+                    }
+                    mon
+                })
+                .collect();
+            state.party = Knowledge::observed(roster, frame);
+        }
+        GameEvent::PartyDetailsObserved { slot, details } => {
+            member(state, *slot, KnowledgeSource::Observed, frame).observe_details(details, frame);
+        }
+        GameEvent::BadgeCountObserved { count } => {
+            crate::badges::observe_count(state, *count, frame);
+        }
+        GameEvent::PartyReordered { order } => {
+            if let Some(old) = &state.party.value {
+                let mut sorted = order.clone();
+                sorted.sort_unstable();
+                if sorted == (0..old.len() as u8).collect::<Vec<_>>() {
+                    state.party = Knowledge::observed(
+                        order.iter().map(|i| old[usize::from(*i)].clone()).collect(),
+                        frame,
+                    );
+                }
+            }
         }
         GameEvent::PartyMonDerived { slot, mon } => {
             *member(state, *slot, KnowledgeSource::Derived, frame) = (**mon).clone();
@@ -297,12 +332,18 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         }
         GameEvent::CheckpointRestored { knowledge } => {
             let k = (**knowledge).clone();
+            let in_control = state.progression.in_control.clone();
+            state.progression = k.progression;
+            state.progression.in_control = in_control;
             state.party = k.party;
             state.bag = k.bag;
             state.money = k.money;
             state.pc = k.pc;
             state.pokedex = k.pokedex;
             state.world = k.world;
+            if state.progression.badges.value.is_none() {
+                crate::badges::sync(state, frame);
+            }
             // Session-scoped: what was infeasible before the restore may
             // not be any more.
             state.world.infeasible.clear();
@@ -312,10 +353,16 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 .world
                 .flags
                 .insert(flag.clone(), Knowledge::observed(*value, frame));
+            if crate::badges::BADGES.iter().any(|(f, _)| f == flag) {
+                crate::badges::sync(state, frame);
+            }
         }
         GameEvent::FlagTracked { flag, value } => {
             if let Some(k) = track(state.world.flags.get(flag), *value) {
                 state.world.flags.insert(flag.clone(), k);
+                if crate::badges::BADGES.iter().any(|(f, _)| f == flag) {
+                    crate::badges::sync(state, frame);
+                }
             }
         }
         GameEvent::VarObserved { var, value } => {

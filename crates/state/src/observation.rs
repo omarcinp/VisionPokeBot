@@ -201,6 +201,8 @@ pub enum SummaryPage {
 /// Only values actually read on the currently visible summary page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryObservation {
+    #[serde(default)]
+    pub details: crate::SummaryDetails,
     pub page: SummaryPage,
     pub nickname: String,
     pub level: Option<u8>,
@@ -355,6 +357,9 @@ pub struct Observation {
     /// The Trainer Card's front (Start → the trainer's name).
     #[serde(default)]
     pub trainer_card: Option<TrainerCardObservation>,
+    /// BADGES total in the in-game SAVE panel.
+    #[serde(default)]
+    pub save_badge_count: Option<u8>,
     /// The region map: Fly's destination map or the Town Map.
     #[serde(default)]
     pub fly_map: Option<FlyMapObservation>,
@@ -422,6 +427,7 @@ impl Observation {
             shop: None,
             pokedex_page: false,
             trainer_card: None,
+            save_badge_count: None,
             fly_map: None,
             pokedex_list: None,
             party_menu: None,

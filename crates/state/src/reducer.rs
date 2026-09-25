@@ -87,6 +87,15 @@ impl StateReducer for DefaultReducer {
                         badges.push(badge.clone());
                     }
                     state.progression.badges = Knowledge::observed(badges, record.frame_id);
+                    if let Some((flag, _)) =
+                        crate::badges::BADGES.iter().find(|(_, name)| name == badge)
+                    {
+                        state
+                            .world
+                            .flags
+                            .insert((*flag).into(), Knowledge::observed(true, record.frame_id));
+                        crate::badges::sync(&mut state, record.frame_id);
+                    }
                 }
                 GameEvent::GameSaved => {}
                 GameEvent::ViewObserved { view } => state.view = (**view).clone(),
@@ -99,6 +108,9 @@ impl StateReducer for DefaultReducer {
                 GameEvent::PartyMonDerived { .. }
                 | GameEvent::PartyAudited { .. }
                 | GameEvent::PartyObserved { .. }
+                | GameEvent::PartyDetailsObserved { .. }
+                | GameEvent::PartyReordered { .. }
+                | GameEvent::BadgeCountObserved { .. }
                 | GameEvent::MovesObserved { .. }
                 | GameEvent::MovePpObserved { .. }
                 | GameEvent::MoveUsed { .. }

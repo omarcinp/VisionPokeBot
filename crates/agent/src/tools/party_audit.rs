@@ -110,6 +110,7 @@ impl PartyAudit {
                 }
             }
         }
+        self.mon.observe_details(&s.details, frame);
         Ok(())
     }
 }

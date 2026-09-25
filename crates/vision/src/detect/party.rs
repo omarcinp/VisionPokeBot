@@ -47,6 +47,41 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
     let hp = (page == SummaryPage::Skills)
         .then(|| pair(&font.read_dark(image, Region::new(172, 18, 66, 14)).join("")))
         .flatten();
+    let mut details = pokebot_state::SummaryDetails::default();
+    if page == SummaryPage::Info {
+        let ot = read(image, font, 167, 65, 72, 14);
+        details.original_trainer = (!ot.is_empty() && !ot.contains('?')).then_some(ot);
+        let id = font.read_dark(image, Region::new(167, 80, 36, 14)).join("");
+        details.trainer_id =
+            (id.len() == 5 && id.bytes().all(|c| c.is_ascii_digit()) && id.parse::<u16>().is_ok())
+                .then_some(id);
+    } else if page == SummaryPage::Skills {
+        let number = |x: u32, y: u32, w: u32| -> Option<u32> {
+            let text = font
+                .read_dark_excluding(
+                    image,
+                    Region::new(x, y, w, 13),
+                    &[Region::new(172, 32, 66, 7), Region::new(172, 128, 66, 7)],
+                )
+                .join("");
+            (!text.is_empty() && text.bytes().all(|c| c.is_ascii_digit())).then_some(())?;
+            text.parse().ok()
+        };
+        let stat = |y| {
+            number(210, y, 28)
+                .filter(|n| (1..=999).contains(n))
+                .map(|n| n as u16)
+        };
+        details.attack = stat(38);
+        details.defense = stat(51);
+        details.sp_attack = stat(64);
+        details.sp_defense = stat(77);
+        details.speed = stat(90);
+        details.exp_points = number(175, 103, 63).filter(|n| *n <= 1_640_000);
+        details.next_level = number(175, 116, 63).filter(|n| *n <= 1_640_000);
+        let ability = read(image, font, 74, 129, 158, 14);
+        details.ability = (!ability.is_empty() && !ability.contains('?')).then_some(ability);
+    }
     let mut moves = Vec::new();
     if page == SummaryPage::Moves {
         for i in 0..4 {
@@ -71,6 +106,7 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
             .then_some(Status::Healthy)
     });
     Some(SummaryObservation {
+        details,
         page,
         nickname,
         level,
@@ -315,6 +351,32 @@ fn action_window(image: &RgbImage, font: &Font) -> (Vec<String>, Option<u8>) {
 mod tests {
     use super::*;
     #[test]
+    fn id_leading_zeroes_survive_and_missing_stats_stay_unknown() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let mut info =
+            pokebot_video::png::load(root.join("captures/fixtures/emu-summary-info.png")).unwrap();
+        super::super::testing::fill(&mut info, 167, 80, 36, 14, [255, 251, 255]);
+        font.render(&mut info, 167, 80, "00042", [82, 82, 82], [181, 181, 181]);
+        assert_eq!(
+            summary(&info, &font).unwrap().details.trainer_id.as_deref(),
+            Some("00042")
+        );
+        super::super::testing::fill(&mut info, 167, 80, 36, 14, [255, 251, 255]);
+        font.render(&mut info, 167, 80, "42", [82, 82, 82], [181, 181, 181]);
+        assert!(summary(&info, &font).unwrap().details.trainer_id.is_none());
+        let mut skills =
+            pokebot_video::png::load(root.join("captures/fixtures/emu-summary-skills.png"))
+                .unwrap();
+        super::super::testing::fill(&mut skills, 210, 51, 28, 13, [255, 251, 255]);
+        let s = summary(&skills, &font).unwrap();
+        assert!(s.details.defense.is_none());
+        assert_eq!(s.details.attack, Some(33));
+    }
+
+    #[test]
     fn reads_real_summary_pages_and_rejects_bad_numbers() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
@@ -327,9 +389,25 @@ mod tests {
         let s = summary(&info, &font).unwrap();
         assert_eq!(s.species.as_deref(), Some("IVYSAUR"));
         assert_eq!(s.level, Some(18));
+        assert_eq!(s.details.trainer_id.as_deref(), Some("62540"));
+        assert_eq!(s.details.original_trainer.as_deref(), Some("RED"));
         assert_eq!(s.status, Some(Status::Healthy));
         let s = summary(&load("emu-summary-skills.png").unwrap(), &font).unwrap();
         assert_eq!(s.hp, Some((54, 54)));
+        assert_eq!(
+            s.details,
+            pokebot_state::SummaryDetails {
+                attack: Some(33),
+                defense: Some(30),
+                sp_attack: Some(37),
+                sp_defense: Some(32),
+                speed: Some(34),
+                exp_points: Some(3878),
+                next_level: Some(697),
+                ability: Some("OVERGROW".into()),
+                ..Default::default()
+            }
+        );
         let s = summary(&load("emu-summary-moves.png").unwrap(), &font).unwrap();
         assert_eq!(
             s.moves,
@@ -367,7 +445,22 @@ mod tests {
             }
         }
         if let Ok(image) = load("switch-summary-skills-27.png") {
-            assert_eq!(summary(&image, &font).unwrap().hp, Some((27, 27)));
+            let s = summary(&image, &font).unwrap();
+            assert_eq!(s.hp, Some((27, 27)));
+            assert_eq!(
+                s.details,
+                pokebot_state::SummaryDetails {
+                    attack: Some(12),
+                    defense: Some(14),
+                    sp_attack: Some(17),
+                    sp_defense: Some(18),
+                    speed: Some(13),
+                    exp_points: Some(489),
+                    next_level: Some(71),
+                    ability: Some("OVERGROW".into()),
+                    ..Default::default()
+                }
+            );
         }
         if let Ok(image) = load("emu-summary-fade.png") {
             assert!(summary(&image, &font).is_none());

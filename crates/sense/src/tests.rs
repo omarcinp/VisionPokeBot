@@ -196,6 +196,7 @@ fn the_hud_shows_an_evolution_before_the_text_does() {
 fn summary(frame: u64, page: SummaryPage) -> Observation {
     let mut o = bare(frame, ScreenState::PartyMenu);
     o.summary = Some(SummaryObservation {
+        details: Default::default(),
         page,
         nickname: "BIRDY".into(),
         level: Some(5),
@@ -936,4 +937,111 @@ fn lookalike_maps_nothing_points_at_are_announced_once() {
         c,
         StateChange::LocationConfirmed { pose: Some(p) } if p.map == "PewterCity"
     )));
+}
+
+#[test]
+fn summary_details_are_confirmed_and_become_state_changes_and_history() {
+    let Some(data) = data() else { return };
+    let mut sensor = Sensor::new(data);
+    let frames = (0..20).map(|f| party_menu(f, 1)).chain((20..70).map(|f| {
+        let mut o = summary(f, SummaryPage::Skills);
+        o.summary.as_mut().unwrap().details = pokebot_state::SummaryDetails {
+            attack: Some(if f < 45 { 10 } else { 12 }),
+            ability: Some("KEEN EYE".into()),
+            exp_points: Some(100),
+            next_level: Some(25),
+            ..Default::default()
+        };
+        o
+    }));
+    let (state, changes) = run(&mut sensor, with_party(), frames);
+    let m = &state.party.value.as_ref().unwrap()[1];
+    assert_eq!(m.details.attack.value, Some(12));
+    assert_eq!(
+        m.history.len(),
+        5,
+        "repeated frames must not duplicate history"
+    );
+    assert_eq!(m.history.last().unwrap().from.as_deref(), Some("10"));
+    assert_eq!(
+        changes
+            .iter()
+            .filter(
+                |c| matches!(c, StateChange::PartyDetailChanged { field, .. } if field == "attack")
+            )
+            .count(),
+        2
+    );
+    assert!(state.party.value.as_ref().unwrap()[0].history.is_empty());
+}
+
+#[test]
+fn save_badge_count_requires_stable_frames_and_card_overrides_assumptions() {
+    let Some(data) = data() else { return };
+    let mut sensor = Sensor::new(data);
+    let frames = (0..20).map(|f| {
+        let mut o = bare(f, ScreenState::Dialogue);
+        o.save_badge_count = Some(if f == 0 { 8 } else { 7 });
+        o
+    });
+    let (state, _) = run(&mut sensor, GameState::default(), frames);
+    assert_eq!(state.progression.badge_count.value, Some(7));
+    assert_eq!(
+        state.progression.badge_inference.source,
+        pokebot_state::KnowledgeSource::Assumed
+    );
+    assert!(state.world.flags.is_empty());
+    let frames = (20..40).map(|f| {
+        let mut o = bare(f, ScreenState::Unknown);
+        o.trainer_card = Some(TrainerCardObservation {
+            badges: vec![1, 3],
+            pokedex_count: None,
+            money: None,
+        });
+        o
+    });
+    let (state, _) = run(&mut sensor, state, frames);
+    assert_eq!(
+        state.progression.badges.value.unwrap(),
+        vec!["BOULDERBADGE", "THUNDERBADGE"]
+    );
+    assert_eq!(state.progression.badge_count.value, Some(2));
+    assert!(state.progression.badge_inference.value.is_none());
+}
+
+#[test]
+fn visible_party_reordering_keeps_the_history_with_the_named_member() {
+    let Some(data) = data() else { return };
+    let mut sensor = Sensor::new(data);
+    let mut state = with_party();
+    let party = state.party.value.as_mut().unwrap();
+    party[0].observe_details(
+        &pokebot_state::SummaryDetails {
+            attack: Some(20),
+            ..Default::default()
+        },
+        1,
+    );
+    party[1].observe_details(
+        &pokebot_state::SummaryDetails {
+            attack: Some(10),
+            ..Default::default()
+        },
+        1,
+    );
+    let frames = (10..35).map(|f| {
+        let mut o = party_menu(f, 0);
+        o.party_menu.as_mut().unwrap().members = vec![
+            row("BIRDY", 5, (19, 19), Status::Healthy),
+            row("BULBASAUR", 11, (30, 30), Status::Healthy),
+        ];
+        o
+    });
+    let (state, _) = run(&mut sensor, state, frames);
+    let party = state.party.value.unwrap();
+    assert_eq!(party[0].nickname.value.as_deref(), Some("BIRDY"));
+    assert_eq!(party[0].details.attack.value, Some(10));
+    assert_eq!(party[0].history[0].to, "10");
+    assert_eq!(party[1].nickname.value.as_deref(), Some("BULBASAUR"));
+    assert_eq!(party[1].details.attack.value, Some(20));
 }

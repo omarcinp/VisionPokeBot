@@ -140,6 +140,7 @@ pub struct Sensor {
     bag: Confirm<BagObservation>,
     shop: Confirm<u32>,
     card: Confirm<TrainerCardObservation>,
+    save_badges: Confirm<u8>,
     dex: Confirm<PokedexListObservation>,
     fly: Confirm<FlyMapObservation>,
     move_list: Confirm<Vec<String>>,
@@ -187,6 +188,7 @@ impl Sensor {
             bag: Confirm::default(),
             shop: Confirm::default(),
             card: Confirm::default(),
+            save_badges: Confirm::default(),
             dex: Confirm::default(),
             fly: Confirm::default(),
             move_list: Confirm::default(),
@@ -236,6 +238,9 @@ impl Sensor {
                 .update(f, o.shop.as_ref().and_then(|s| s.money), SHOP_FRAMES)
         {
             events.push(GameEvent::MoneyObserved { amount });
+        }
+        if let Some(count) = self.save_badges.update(f, o.save_badge_count, CARD_FRAMES) {
+            events.push(GameEvent::BadgeCountObserved { count });
         }
         if let Some(card) = self.card.update(f, o.trainer_card.clone(), CARD_FRAMES) {
             events.extend(trainer_card_events(&card));
@@ -522,6 +527,30 @@ impl Sensor {
             events.push(GameEvent::PartySizeObserved { size: menu.count });
         }
         if let Some(rows) = self.party_rows.update(f, rows, PARTY_MENU_FRAMES) {
+            // Preserve each member's details/history when the user swaps
+            // party slots. Only a complete, unique permutation is evidence.
+            if let Some(party) = state.party.value.as_ref().filter(|p| p.len() == rows.len()) {
+                let order: Option<Vec<u8>> = rows
+                    .iter()
+                    .map(|row| {
+                        let name = row.nickname.as_ref()?;
+                        let matches: Vec<_> = party
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, m)| m.nickname.value.as_ref() == Some(name))
+                            .collect();
+                        (matches.len() == 1).then(|| matches[0].0 as u8)
+                    })
+                    .collect();
+                if let Some(order) = order {
+                    let mut sorted = order.clone();
+                    sorted.sort_unstable();
+                    let original: Vec<u8> = (0..rows.len() as u8).collect();
+                    if sorted == original && order != original {
+                        events.push(GameEvent::PartyReordered { order });
+                    }
+                }
+            }
             events.extend(
                 rows.iter()
                     .enumerate()
@@ -620,6 +649,12 @@ impl Sensor {
                     }
                 }
             }
+        }
+        if s.details != Default::default() {
+            events.push(GameEvent::PartyDetailsObserved {
+                slot,
+                details: s.details.clone(),
+            });
         }
         events
     }

@@ -152,10 +152,23 @@ impl Font {
     /// capture-noise clusters splitting one glyph between several inks.
     /// Callers must limit this to a field with no dark decorative pixels.
     pub fn read_dark(&self, image: &RgbImage, region: Region) -> Vec<String> {
+        self.read_dark_excluding(image, region, &[])
+    }
+
+    /// Numeric ink while masking known decorations without moving the
+    /// glyph-cell origin (HP / EXP bar borders touch summary number cells).
+    pub fn read_dark_excluding(
+        &self,
+        image: &RgbImage,
+        region: Region,
+        exclude: &[Region],
+    ) -> Vec<String> {
         let bits = (region.y..region.y + region.height)
             .flat_map(|y| {
-                (region.x..region.x + region.width)
-                    .map(move |x| image.pixel(x, y).iter().all(|c| *c < 128))
+                (region.x..region.x + region.width).map(move |x| {
+                    !exclude.iter().any(|r| r.contains(x, y))
+                        && image.pixel(x, y).iter().all(|c| *c < 128)
+                })
             })
             .collect();
         self.read_mask(&Mask {

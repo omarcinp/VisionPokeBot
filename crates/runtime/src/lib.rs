@@ -563,6 +563,14 @@ fn describe_change(change: &StateChange) -> String {
         C::PartyHpChanged { slot, from, to } => {
             format!("Party {slot} HP {} → {}", hp(from), hp(to))
         }
+        C::PartyDetailChanged {
+            slot,
+            field,
+            from,
+            to,
+        } => {
+            format!("Party {slot} {field}: {} → {}", opt(from), opt(to))
+        }
         C::PartyLevelChanged { slot, from, to } => format!(
             "Party {slot} level {} → {}",
             num(from.map(u32::from)),
@@ -724,6 +732,17 @@ fn summarize(event: &GameEvent) -> String {
         } => {
             format!("Party {slot} seen: {species:?} Lv{level:?} HP {hp:?}")
         }
+        GameEvent::PartyReordered { order } => format!("Party reordered: {order:?}"),
+        GameEvent::BadgeCountObserved { count } => format!("Save menu: {count}/8 badges"),
+        GameEvent::PartyDetailsObserved { slot, details } => format!(
+            "Party {slot} details: {}",
+            details
+                .values()
+                .into_iter()
+                .filter_map(|(field, value)| value.map(|value| format!("{field}={value}")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         GameEvent::PartyAudited { members } => format!(
             "Party audited: {} members, HP {:?}",
             members.len(),
