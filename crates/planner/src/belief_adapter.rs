@@ -135,7 +135,8 @@ impl<'a> StateBelief<'a> {
         )
     }
 
-    fn item_count(&self, item: &str) -> Option<u32> {
+    /// Items held, when the pocket the item lives in was read.
+    pub fn item_count(&self, item: &str) -> Option<u32> {
         match pocket_of(self.data, item) {
             Some(pocket) => self.pocket_count(pocket, item),
             None => {
@@ -213,6 +214,21 @@ impl<'a> StateBelief<'a> {
                 .max()
                 .unwrap_or(0);
             if has >= *money {
+                return Some(Truth::True);
+            }
+        }
+        if let GoalPredicate::LeadHp { lead_hp } = p {
+            let healed = self
+                .established
+                .iter()
+                .filter_map(|q| match q {
+                    GoalPredicate::LeadHp { lead_hp } => Some(*lead_hp),
+                    GoalPredicate::Healed { healed: true } => Some(100),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            if healed >= *lead_hp {
                 return Some(Truth::True);
             }
         }
@@ -370,6 +386,17 @@ impl GoalBelief for StateBelief<'_> {
                     }
                 }
                 known(Some(full == *healed))
+            }
+            GoalPredicate::LeadHp { lead_hp } => {
+                let Some(party) = self.knowledge.party.value.as_ref() else {
+                    return Truth::Unknown;
+                };
+                let Some((cur, max)) = party.first().and_then(|m| m.hp.value) else {
+                    return Truth::Unknown;
+                };
+                known(Some(
+                    u32::from(cur) * 100 >= u32::from(max.max(1)) * u32::from(*lead_hp),
+                ))
             }
         }
     }

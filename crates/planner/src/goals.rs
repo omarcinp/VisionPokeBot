@@ -15,7 +15,17 @@
 //! the way, Cut for a tree). A route's unknown requirements are settled
 //! like any other unknown; an object hidden by a flag nothing has observed
 //! is assumed still there, so the work that removes it is planned.
+//!
+//! Steps are placed with the least commitment (§4.6.1): what establishes a
+//! predicate goes just before the step that needs it (before the `Go` that
+//! positions that step), not at the front of the plan. The walking legs of
+//! the plan are priced for what they yield on their own (§4.6.2): the new
+//! species the catch policy is expected to take on the way, and the
+//! experience of the trainers beaten, so explicit `Catch` and `Train` steps
+//! cover only the remainder. Audits whose screen is where the plan already
+//! goes are added at their screen cost (§4.6.3).
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
@@ -25,7 +35,9 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pokebot_gamedata::mechanics::ball_multiplier;
+use pokebot_gamedata::mechanics::{
+    ball_multiplier, catch_probability, exp_for_level, exp_gain, Stats,
+};
 use pokebot_gamedata::GameData;
 use pokebot_state::priors::NO_EVIDENCE;
 use pokebot_state::{Fact, PlayerPose, Priors, SavedKnowledge, WorldBelief};
@@ -40,8 +52,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::belief_adapter::{snapshot_id, StateBelief};
 use crate::intents::{
-    best_ball, expected_throws, hm_of_move, path_answers, path_effects_in, CostParams, Effect,
-    GoalBelief, GoalPredicate, Intent, Obtain, PlanContext, ProbeFact,
+    best_ball, expected_throws, first_battle, hm_of_move, path_answers, path_effects_in,
+    CostParams, Effect, GoalBelief, GoalPredicate, Intent, Obtain, PlanContext, ProbeFact,
+    LEAD_HP_MIN,
 };
 use crate::methods::Methods;
 use crate::prepare::{plan_preparation, Area, PlanStep, Request};
@@ -69,6 +82,18 @@ const NEAREST_SHOPS: usize = 3;
 /// Encounter areas priced for new Pokédex entries: the nearest by maps
 /// crossed among those with a species still uncaught.
 const NEAREST_AREAS: usize = 12;
+/// A species the walk is expected to catch with at least this probability
+/// is not hunted explicitly (§4.6.2).
+const PASSIVE_LIKELY: f64 = 0.5;
+/// Expectations below this are not recorded on a step.
+const EXPECTED_MIN: f64 = 0.02;
+/// Throws the catch policy makes at most for one wild Pokémon.
+const MAX_THROWS: u32 = 20;
+/// Wild Pokémon average IV, for the catch odds of what the walk meets.
+const WILD_IV: u32 = 15;
+/// Balls beyond any need, to price what a walk would catch with a full
+/// stock.
+const PLENTY_OF_BALLS: f64 = 60.0;
 
 #[derive(Debug, Clone)]
 pub struct PlanOptions {
@@ -144,6 +169,11 @@ pub struct PlannedIntent {
     /// The legs of the route a `Go` was priced by (§5.3), printed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub route: Vec<String>,
+    /// What the step is expected to establish on its own, with the
+    /// probability (§4.6.2): the new species the catch policy takes on a
+    /// `Go`'s walking legs, as `Caught(species)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected: Vec<(GoalPredicate, f64)>,
 }
 
 impl PlannedIntent {
@@ -155,7 +185,17 @@ impl PlannedIntent {
             unless: Vec::new(),
             note: None,
             route: Vec::new(),
+            expected: Vec::new(),
         }
+    }
+
+    /// New Pokédex catches the step is expected to make on its own.
+    pub fn expected_new_species(&self) -> f64 {
+        self.expected
+            .iter()
+            .filter(|(p, _)| matches!(p, GoalPredicate::Caught { .. }))
+            .map(|(_, p)| *p)
+            .sum()
     }
 
     fn with_route(mut self, route: &RouteResult) -> PlannedIntent {
@@ -177,6 +217,14 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// New Pokédex catches the plan's walking legs are expected to make.
+    pub fn expected_new_species(&self) -> f64 {
+        self.intents
+            .iter()
+            .map(PlannedIntent::expected_new_species)
+            .sum()
+    }
+
     /// Why the plan can't be carried out as is: the reasons of its
     /// `Unsupported` intents.
     pub fn blocked(&self) -> Vec<String> {
@@ -488,6 +536,7 @@ impl<'a> Planner<'a> {
             nesting: Cell::new(0),
             active: RefCell::new(Vec::new()),
             partial: RefCell::new(None),
+            prefix: RefCell::new(Vec::new()),
             routes: RefCell::new(HashMap::new()),
             reaches: RefCell::new(HashMap::new()),
             hops: pose
@@ -541,15 +590,40 @@ impl<'a> Planner<'a> {
         let mut assumes = sub.assumes;
         assumes.sort();
         assumes.dedup();
+        if session.trace {
+            for (i, s) in sub.steps.iter().enumerate() {
+                eprintln!("[plan] raw {:>3} {}", i + 1, s.planned.intent);
+            }
+        }
         let (steps, repeated) = dedupe_steps(sub.steps);
-        let steps = session.fill_routes(steps);
+        let mut steps = session.fill_routes(steps);
+        session.passive_walk(&mut steps);
         let steps: Vec<PlannedIntent> = steps.into_iter().map(|s| s.planned).collect();
-        let (intents, saved) = dedupe_probes(steps, self.data);
+        let (mut intents, saved) = dedupe_probes(steps, self.data);
+        let audits = session.audits(goal, &mut intents, knowledge);
         Ok(Plan {
             intents,
             assumes,
-            cost_s: sub.cost - saved - repeated,
+            cost_s: sub.cost - saved - repeated + audits,
             belief_snapshot: snapshot_id(knowledge),
+        })
+    }
+
+    /// Whether planning `goal` turns on the party: what it is made of
+    /// (battles, an HM carrier) or the Pokédex counts.
+    fn depends_on_party(goal: &GoalPredicate, intents: &[PlannedIntent]) -> bool {
+        matches!(
+            goal,
+            GoalPredicate::CanBeat { .. }
+                | GoalPredicate::Healed { .. }
+                | GoalPredicate::PokedexCaught { .. }
+                | GoalPredicate::PokedexSeen { .. }
+                | GoalPredicate::World(Predicate::PartyHasMove { .. })
+        ) || intents.iter().any(|s| {
+            matches!(
+                s.intent,
+                Intent::Beat { .. } | Intent::Train { .. } | Intent::Teach { .. }
+            )
         })
     }
 
@@ -607,19 +681,56 @@ fn world_prior(
     }
 }
 
+/// Whether a step onto `(x, y)` of `map` rolls for a wild encounter: tall
+/// grass, or cave floor with land encounters.
+fn is_encounter_tile(map: &MapData, x: i32, y: i32) -> bool {
+    const CAVE: u16 = 0x08;
+    const SAND_CAVE: u16 = 0x2B;
+    map.tile(x, y).is_some_and(|t| {
+        t.collision == 0
+            && (t.behavior == TALL_GRASS
+                || (t.encounter == 1 && matches!(t.behavior, 0x00 | CAVE | SAND_CAVE)))
+    })
+}
+
+/// P(one throw catches `species` at `level`, weakened to half HP, with a
+/// ball of `mult`) and the throws expected.
+fn catch_odds(data: &GameData, species: &str, level: u8, mult: u32) -> Option<(f64, u32)> {
+    let sp = data.species(species)?;
+    let max_hp = Stats::compute(&sp.base, level, WILD_IV).hp();
+    let p = catch_probability(sp.catch_rate, max_hp, (max_hp / 2).max(1), mult);
+    if p <= 0.0 {
+        return None;
+    }
+    Some((p, (1.0 / p).ceil() as u32))
+}
+
+/// Experience one participant gains for beating `trainer`'s whole party.
+fn trainer_exp(data: &GameData, trainer: &str) -> f64 {
+    data.trainers
+        .get(trainer)
+        .map(|t| {
+            t.party
+                .iter()
+                .map(|m| exp_gain(data, &m.species, m.level, true) as f64)
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
+/// The level `exp` total experience reaches on `growth`.
+fn level_for_exp(growth: &str, exp: u64) -> u8 {
+    (1..=100u8)
+        .rev()
+        .find(|l| exp_for_level(growth, *l) <= exp)
+        .unwrap_or(1)
+}
+
 /// Tiles wild Pokémon appear on when walked: tall grass, or cave floor
 /// with land encounters. Two per connected cluster (first and last in
 /// row-major order), the largest [`GRASS_CLUSTERS`] clusters.
 fn encounter_tiles(map: &MapData) -> Vec<(i32, i32)> {
-    const CAVE: u16 = 0x08;
-    const SAND_CAVE: u16 = 0x2B;
-    let is_encounter = |x: i32, y: i32| {
-        map.tile(x, y).is_some_and(|t| {
-            t.collision == 0
-                && (t.behavior == TALL_GRASS
-                    || (t.encounter == 1 && matches!(t.behavior, 0x00 | CAVE | SAND_CAVE)))
-        })
-    };
+    let is_encounter = |x: i32, y: i32| is_encounter_tile(map, x, y);
     let mut seen: BTreeSet<(i32, i32)> = BTreeSet::new();
     let mut clusters: Vec<Vec<(i32, i32)>> = Vec::new();
     for y in 0..map.height {
@@ -651,6 +762,18 @@ fn encounter_tiles(map: &MapData) -> Vec<(i32, i32)> {
 struct Step {
     planned: PlannedIntent,
     effects: Vec<GoalPredicate>,
+    /// The route a `Go` was priced by, for what its legs yield (§4.6.2).
+    route: Option<Rc<RouteResult>>,
+}
+
+impl Step {
+    fn new(planned: PlannedIntent, effects: Vec<GoalPredicate>) -> Step {
+        Step {
+            planned,
+            effects,
+            route: None,
+        }
+    }
 }
 
 /// A primitive way to establish a predicate: one or more steps with what
@@ -658,6 +781,9 @@ struct Step {
 #[derive(Debug, Clone)]
 struct Candidate {
     steps: Vec<Step>,
+    /// Steps that go at the plan's start, ahead of the walk they equip
+    /// (balls for what the way yields, §4.6.2).
+    lead: Vec<Step>,
     preconditions: Vec<GoalPredicate>,
     assumes: Vec<GoalPredicate>,
     cost: f64,
@@ -675,10 +801,8 @@ impl Candidate {
             })
             .collect();
         Candidate {
-            steps: vec![Step {
-                planned: PlannedIntent::new(intent, cost),
-                effects,
-            }],
+            steps: vec![Step::new(PlannedIntent::new(intent, cost), effects)],
+            lead: Vec::new(),
             preconditions,
             assumes: Vec::new(),
             cost,
@@ -704,8 +828,9 @@ impl Candidate {
 
     fn sort_key(&self) -> (OrdF64, String) {
         let names: Vec<String> = self
-            .steps
+            .lead
             .iter()
+            .chain(self.steps.iter())
             .map(|s| s.planned.intent.to_string())
             .collect();
         (OrdF64(self.cost), names.join(";"))
@@ -778,6 +903,14 @@ struct Node {
     /// Facts assumed about the starting state.
     assumed: BTreeSet<GoalPredicate>,
     assumes: Vec<GoalPredicate>,
+    /// Step id → the id of the first step of the group last planned for
+    /// it: the next thing it needs goes ahead of that group, so everything
+    /// planned for a step sits together just ahead of it, its trip last
+    /// (§4.6.1).
+    anchors: BTreeMap<u64, u64>,
+    /// Facts the plan's own way is expected to establish without a step
+    /// (the trainers beaten on the way level the lead enough, §4.6.2).
+    expected: BTreeSet<GoalPredicate>,
 }
 
 impl Node {
@@ -785,19 +918,34 @@ impl Node {
         Reverse((OrdF64(self.f), self.seq))
     }
 
-    /// What holds when the step `before` runs: the base facts, the
+    fn position(&self, id: u64) -> Option<usize> {
+        self.ids.iter().position(|i| *i == id)
+    }
+
+    /// Where steps establishing something for the step `before` go: ahead
+    /// of what was last planned for it, else straight ahead of it; the
+    /// plan's end for the goal itself.
+    fn insert_pos(&self, before: Option<u64>) -> usize {
+        let Some(id) = before else {
+            return self.plan.len();
+        };
+        let at = self.anchors.get(&id).copied().unwrap_or(id);
+        self.position(at)
+            .or_else(|| self.position(id))
+            .unwrap_or(self.plan.len())
+    }
+
+    /// What holds when the step at `pos` runs: the base facts, the
     /// assumptions and the effects of the steps ahead of it.
-    fn established_at(
+    fn established_before(
         &self,
         base: &BTreeSet<GoalPredicate>,
-        before: Option<u64>,
+        pos: usize,
     ) -> BTreeSet<GoalPredicate> {
         let mut out = base.clone();
         out.extend(self.assumed.iter().cloned());
-        let end = before
-            .and_then(|id| self.ids.iter().position(|i| *i == id))
-            .unwrap_or(self.plan.len());
-        for step in &self.plan[..end] {
+        out.extend(self.expected.iter().cloned());
+        for step in &self.plan[..pos.min(self.plan.len())] {
             out.extend(step.effects.iter().cloned());
         }
         out
@@ -806,7 +954,7 @@ impl Node {
     /// Records that `p` is relied on by the step that needed it.
     fn assume(&mut self, p: GoalPredicate, before: Option<u64>) {
         let at = before
-            .and_then(|id| self.ids.iter().position(|i| *i == id))
+            .and_then(|id| self.position(id))
             .or_else(|| self.plan.len().checked_sub(1));
         if let Some(i) = at {
             let step = &mut self.plan[i].planned;
@@ -820,14 +968,65 @@ impl Node {
         self.assumed.insert(p);
     }
 
-    /// Prepends `steps` (they run before everything planned so far).
-    fn prepend(&mut self, steps: Vec<Step>, ids: Vec<u64>) {
-        let mut plan = steps;
-        plan.append(&mut self.plan);
-        self.plan = plan;
-        let mut all = ids;
-        all.append(&mut self.ids);
-        self.ids = all;
+    /// Inserts `steps` so they run just ahead of the step at `at` (§4.6.1:
+    /// as late as what needs them allows).
+    fn insert(&mut self, at: usize, steps: Vec<Step>, ids: Vec<u64>) {
+        let at = at.min(self.plan.len());
+        let tail = self.plan.split_off(at);
+        let tail_ids = self.ids.split_off(at);
+        self.plan.extend(steps);
+        self.ids.extend(ids);
+        self.plan.extend(tail);
+        self.ids.extend(tail_ids);
+    }
+}
+
+/// What surrounds an open goal in the plan being built: the maps the plan
+/// passes anyway (§4.5 locality) and what its walking legs and battles
+/// ahead of the goal's place are expected to yield (§4.6.2).
+#[derive(Debug, Clone, Default)]
+struct Surround {
+    waypoints: BTreeSet<String>,
+    passive: Passive,
+    /// The steps ahead, for pricing the walk again with other means.
+    ahead: Vec<Step>,
+}
+
+/// What a run of steps yields on its own: per species not yet caught, the
+/// probability the catch policy takes one on the way and the probability
+/// one is met at all; the species explicit `Catch`es take; the experience
+/// the lead gains from the trainers beaten.
+#[derive(Debug, Clone, Default)]
+struct Passive {
+    caught: BTreeMap<String, f64>,
+    seen: BTreeMap<String, f64>,
+    explicit: BTreeSet<String>,
+    exp: f64,
+    /// Balls left at the end.
+    balls: f64,
+    /// The level the lead was trained to on the way, when a `Train` did.
+    lead_level: Option<u8>,
+}
+
+impl Passive {
+    fn map(&self, which: DexCount) -> &BTreeMap<String, f64> {
+        match which {
+            DexCount::Caught => &self.caught,
+            DexCount::Seen => &self.seen,
+        }
+    }
+
+    /// Expected new entries beyond the explicit catches and `skip`.
+    fn expected(&self, which: DexCount, skip: &BTreeSet<String>) -> f64 {
+        self.map(which)
+            .iter()
+            .filter(|(s, _)| !self.explicit.contains(*s) && !skip.contains(*s))
+            .map(|(_, p)| *p)
+            .sum()
+    }
+
+    fn probability(&self, which: DexCount, species: &str) -> f64 {
+        self.map(which).get(species).copied().unwrap_or(0.0)
     }
 }
 
@@ -857,6 +1056,10 @@ struct Session<'p, 'a> {
     active: RefCell<Vec<GoalPredicate>>,
     /// The outermost search's last expanded node, for the budget error.
     partial: RefCell<Option<Node>>,
+    /// The steps that run ahead of the plan a nested search builds (a
+    /// method's earlier subgoals and what surrounds the method), for what
+    /// their legs yield.
+    prefix: RefCell<Vec<Step>>,
     routes: RefCell<HashMap<RouteKey, Rc<RouteResult>>>,
     /// Floods from a tile of a map over its static obstacles (trigger
     /// checks): the map as the navigator sees it, no belief involved.
@@ -867,8 +1070,9 @@ struct Session<'p, 'a> {
     grass_routes: RefCell<HashMap<RouteKey, GrassRoute>>,
     /// Cheapest primitive cost per predicate (the heuristic).
     min_costs: RefCell<BTreeMap<GoalPredicate, f64>>,
-    /// Readiness plans per trainer.
-    readiness: RefCell<BTreeMap<String, Option<Candidate>>>,
+    /// Readiness plans per (trainer, experience the lead gains first, the
+    /// level it is trained to first).
+    readiness: RefCell<BTreeMap<(String, u64, u8), Option<Candidate>>>,
     /// Method decompositions per (method, facts held, condition).
     methods: RefCell<BTreeMap<MethodKey, Option<Rc<SubPlan>>>>,
     seq: Cell<u64>,
@@ -946,16 +1150,313 @@ impl<'p, 'a> Session<'p, 'a> {
         let mut established: BTreeSet<GoalPredicate> = BTreeSet::new();
         for step in &mut steps {
             if let Intent::Go { dest } = &step.planned.intent {
-                if step.planned.route.is_empty() {
+                if step.route.is_none() {
                     let belief = self.belief(&established);
                     if let Some(r) = self.route_to(dest, &belief).filter(|r| r.found()) {
                         step.planned = step.planned.clone().with_route(&r);
+                        step.route = Some(r);
                     }
                 }
             }
             established.extend(step.effects.iter().cloned());
         }
         steps
+    }
+
+    /// The steps that run ahead of position `pos` of `node`'s plan: the
+    /// nested prefix, then the plan so far.
+    fn steps_before(&self, node: &Node, pos: usize) -> Vec<Step> {
+        let mut out = self.prefix.borrow().clone();
+        out.extend(node.plan[..pos.min(node.plan.len())].iter().cloned());
+        out
+    }
+
+    /// What surrounds a goal placed at `pos`: the waypoints and what the
+    /// steps ahead of it yield on their own.
+    fn surround(&self, node: &Node, pos: usize, belief: &StateBelief<'a>) -> Surround {
+        let mut steps = self.steps_before(node, pos);
+        let passive = self.passive_walk(&mut steps);
+        Surround {
+            waypoints: self.waypoints(node, belief),
+            passive,
+            ahead: steps,
+        }
+    }
+
+    /// Whether a route's walking legs step on wild encounter tiles.
+    fn crosses_encounters(&self, route: &RouteResult) -> bool {
+        route.legs.iter().any(|leg| {
+            matches!(leg.kind, EdgeKind::Walk { .. })
+                && leg.from.map == leg.to.map
+                && self
+                    .planner
+                    .data
+                    .wild
+                    .get(&leg.from.map)
+                    .is_some_and(|t| t.contains_key("land"))
+                && self.planner.world.map(&leg.from.map).is_some_and(|m| {
+                    self.encounter_tiles_on(m, (leg.from.x, leg.from.y), (leg.to.x, leg.to.y)) > 0
+                })
+        })
+    }
+
+    /// Tiles with wild encounters stepped on walking from `from` to `to`
+    /// on `map` (the flood's path, around the stationary objects). Either
+    /// end may be a tile the flood can't use: its neighbours stand in.
+    fn encounter_tiles_on(&self, map: &MapData, from: (i32, i32), to: (i32, i32)) -> u32 {
+        if from == to {
+            return 0;
+        }
+        let around = |t: (i32, i32)| {
+            [
+                t,
+                (t.0, t.1 + 1),
+                (t.0, t.1 - 1),
+                (t.0 - 1, t.1),
+                (t.0 + 1, t.1),
+            ]
+        };
+        for f in around(from) {
+            if !map.in_bounds(f.0, f.1) {
+                continue;
+            }
+            let reach = self.reach_from(map, f);
+            let path = around(to)
+                .into_iter()
+                .filter_map(|t| reach.path(t))
+                .min_by_key(Vec::len);
+            if let Some(path) = path {
+                return path
+                    .iter()
+                    .filter(|s| is_encounter_tile(map, s.to.0, s.to.1))
+                    .count() as u32;
+            }
+        }
+        0
+    }
+
+    /// What `steps` yield on their own, in order (§4.6.2): on every `Go`,
+    /// for each species of the areas its legs walk that is not caught yet,
+    /// P(one is met on the legs' encounter tiles) × P(the catch policy
+    /// takes it with the balls held), recorded on the step and summed per
+    /// species over the run; the balls those catches use; the experience
+    /// of the trainers beaten. Explicit catches and buys move the counts
+    /// along the way.
+    fn passive_walk(&self, steps: &mut [Step]) -> Passive {
+        self.passive_walk_with(steps, None)
+    }
+
+    /// [`Session::passive_walk`] starting with `balls` in the bag (the
+    /// known stock when `None`).
+    fn passive_walk_with(&self, steps: &mut [Step], balls: Option<f64>) -> Passive {
+        let data = self.planner.data;
+        let mut out = Passive::default();
+        let base_ctx = self.context(&self.base);
+        let ball = best_ball(&base_ctx);
+        let mult = ball_multiplier(&ball).unwrap_or(10);
+        let reserve = f64::from(self.planner.params.ball_reserve);
+        let mut balls = balls.unwrap_or_else(|| self.base.item_count(&ball).map_or(0.0, f64::from));
+        let caught_already =
+            |species: &str| self.base.eval_goal(&GoalPredicate::caught(species)) == Truth::True;
+        let seen_already = |species: &str| {
+            caught_already(species)
+                || self
+                    .base
+                    .knowledge
+                    .pokedex
+                    .seen
+                    .get(species)
+                    .and_then(|k| k.value)
+                    == Some(true)
+        };
+        let mut established: BTreeSet<GoalPredicate> = BTreeSet::new();
+        for step in steps.iter_mut() {
+            // The catches are priced afresh; other expectations (a
+            // readiness judged again after training) stay.
+            step.planned
+                .expected
+                .retain(|(p, _)| !matches!(p, GoalPredicate::Caught { .. }));
+            match &step.planned.intent {
+                Intent::Buy { item, count, .. } if *item == ball => {
+                    balls += f64::from(*count);
+                }
+                Intent::Catch {
+                    species, balls: b, ..
+                } => {
+                    out.explicit.insert(species.clone());
+                    out.caught.insert(species.clone(), 1.0);
+                    out.seen.insert(species.clone(), 1.0);
+                    let throws = b.saturating_sub(self.planner.params.ball_reserve);
+                    balls = (balls - f64::from(throws)).max(0.0);
+                }
+                Intent::Beat { trainer, .. } => out.exp += trainer_exp(data, trainer),
+                Intent::Train { species, level, .. } => {
+                    let lead = self
+                        .base
+                        .party_members()
+                        .and_then(|m| m.first().map(|m| m.species.clone()));
+                    if lead.as_deref() == Some(species.as_str()) {
+                        out.lead_level = Some(out.lead_level.map_or(*level, |l| l.max(*level)));
+                    }
+                }
+                Intent::RunScript { script, path, .. } => {
+                    let trainer = self
+                        .planner
+                        .world
+                        .events()
+                        .and_then(|e| e.script(script))
+                        .and_then(|s| s.paths.get(*path))
+                        .and_then(first_battle);
+                    if let Some(trainer) = trainer {
+                        out.exp += trainer_exp(data, trainer);
+                    }
+                }
+                Intent::Go { dest } => {
+                    let route = match &step.route {
+                        Some(r) => Some(Rc::clone(r)),
+                        None => {
+                            let belief = self.belief(&established);
+                            self.route_to(dest, &belief).filter(|r| r.found())
+                        }
+                    };
+                    let mut expected: BTreeMap<String, f64> = BTreeMap::new();
+                    for leg in route.iter().flat_map(|r| r.legs.iter()) {
+                        if !matches!(leg.kind, EdgeKind::Walk { .. }) || leg.from.map != leg.to.map
+                        {
+                            continue;
+                        }
+                        let Some(table) = data.wild.get(&leg.from.map).and_then(|t| t.get("land"))
+                        else {
+                            continue;
+                        };
+                        let Some(map) = self.planner.world.map(&leg.from.map) else {
+                            continue;
+                        };
+                        let tiles = self.encounter_tiles_on(
+                            map,
+                            (leg.from.x, leg.from.y),
+                            (leg.to.x, leg.to.y),
+                        );
+                        if tiles == 0 {
+                            continue;
+                        }
+                        // Encounters expected on the leg: the game rolls
+                        // rate×16 of 2880 on every encounter tile stepped on.
+                        let lambda = f64::from(tiles) * f64::from(table.rate.max(1))
+                            / self.planner.params.encounter_steps_at_rate_1;
+                        let mut shares: BTreeMap<&str, (f64, u8)> = BTreeMap::new();
+                        for slot in &table.slots {
+                            let e = shares.entry(slot.species.as_str()).or_insert((0.0, 0));
+                            e.0 += f64::from(slot.chance) / 100.0;
+                            e.1 = e.1.max(slot.max_level);
+                        }
+                        for (species, (share, level)) in shares {
+                            let meet = 1.0 - (-lambda * share).exp();
+                            if !seen_already(species) {
+                                let p = out.seen.entry(species.to_string()).or_insert(0.0);
+                                *p += (1.0 - *p) * meet;
+                            }
+                            if caught_already(species) || out.explicit.contains(species) {
+                                continue;
+                            }
+                            // The policy catches a new species only with the
+                            // reserve to spare beyond the expected throws,
+                            // then throws until it is caught.
+                            let spare = (balls - reserve).floor().max(0.0);
+                            let Some((p1, throws)) = catch_odds(data, species, level, mult) else {
+                                continue;
+                            };
+                            if spare < f64::from(throws) {
+                                continue;
+                            }
+                            let tries = spare.min(f64::from(MAX_THROWS));
+                            let catch = 1.0 - (1.0 - p1).powf(tries);
+                            let before = out.caught.get(species).copied().unwrap_or(0.0);
+                            let gain = (1.0 - before) * meet * catch;
+                            if gain < EXPECTED_MIN {
+                                continue;
+                            }
+                            out.caught.insert(species.to_string(), before + gain);
+                            *expected.entry(species.to_string()).or_insert(0.0) += gain;
+                            balls = (balls - gain * f64::from(throws)).max(0.0);
+                        }
+                    }
+                    step.planned.expected.extend(
+                        expected
+                            .into_iter()
+                            .map(|(s, p)| (GoalPredicate::caught(&s), p)),
+                    );
+                }
+                _ => {}
+            }
+            established.extend(step.effects.iter().cloned());
+        }
+        out.balls = balls;
+        out
+    }
+
+    /// Audits at the plan's own screens (§4.6.3). At bootstrap, with the
+    /// PC boxes unknown and the party mattering to the goal, the Center
+    /// the player is in or next to is visited first for a box audit; else
+    /// the audit rides on the first `Heal` the plan makes. Returns the
+    /// seconds added.
+    fn audits(
+        &self,
+        goal: &GoalPredicate,
+        intents: &mut Vec<PlannedIntent>,
+        knowledge: &SavedKnowledge,
+    ) -> f64 {
+        if intents.is_empty() || !Planner::depends_on_party(goal, intents) {
+            return 0.0;
+        }
+        if knowledge.pc.boxes.iter().any(|b| b.value.is_some()) {
+            return 0.0;
+        }
+        let probe = Intent::Probe {
+            fact: ProbeFact::PcBoxes,
+        };
+        if knowledge.world.infeasible.contains(&probe.to_string())
+            || intents.iter().any(|s| s.intent == probe)
+        {
+            return 0.0;
+        }
+        let mut audit = PlannedIntent::new(probe, ProbeFact::PcBoxes.cost_s());
+        let mut added = audit.cost_s;
+        // In or next to a Center: the audit comes first.
+        let near = self
+            .planner
+            .centers
+            .iter()
+            .filter_map(|c| Some((*self.hops.get(c)?, c)))
+            .filter(|(d, _)| *d <= 1)
+            .min();
+        if let Some((hops, center)) = near {
+            let mut first = Vec::new();
+            if hops > 0 {
+                let Some(route) = self.route_to(center, &self.base).filter(|r| r.found()) else {
+                    return 0.0;
+                };
+                let go = Intent::Go {
+                    dest: center.clone(),
+                };
+                first.push(PlannedIntent::new(go, route.cost_s).with_route(&route));
+                added += route.cost_s;
+            }
+            audit.note = Some("bootstrap: the boxes are unknown and the Center is here".into());
+            first.push(audit);
+            intents.splice(0..0, first);
+            return added;
+        }
+        // Else at the first Center the plan heals at.
+        let Some(heal) = intents
+            .iter()
+            .position(|s| matches!(s.intent, Intent::Heal { .. }))
+        else {
+            return 0.0;
+        };
+        audit.note = Some("the boxes are unknown; the plan heals here anyway".into());
+        intents.insert(heal + 1, audit);
+        added
     }
 
     /// The outermost search's best partial plan as a `Plan`: its steps,
@@ -1008,6 +1509,8 @@ impl<'p, 'a> Session<'p, 'a> {
             open,
             assumed: BTreeSet::new(),
             assumes: Vec::new(),
+            anchors: BTreeMap::new(),
+            expected: BTreeSet::new(),
         };
         heap.push((root.key(), root.seq));
         nodes.insert(root.seq, root);
@@ -1027,7 +1530,14 @@ impl<'p, 'a> Session<'p, 'a> {
                 return Err(Failure::Budget);
             }
             self.expanded.set(self.expanded.get() + 1);
-            let established = node.established_at(base, goal.before);
+            // Whether the goal holds is judged where the step that needs
+            // it runs (everything planned for that step so far counts);
+            // what establishes it goes ahead of all that (§4.6.1).
+            let at = goal
+                .before
+                .and_then(|id| node.position(id))
+                .unwrap_or(node.plan.len());
+            let established = node.established_before(base, at);
             let belief = self.belief(&established);
             let mut truth = belief.eval_goal(&goal.p);
             if goal.establish && truth == Truth::Unknown {
@@ -1097,10 +1607,27 @@ impl<'p, 'a> Session<'p, 'a> {
         let opts = &self.planner.options;
         let p = goal.p.clone();
         let prior = self.planner.prior(&self.base.knowledge.world, &p);
-        let probe = ProbeFact::for_predicate(&p, self.planner.data);
-        let waypoints = self.waypoints(&node, belief);
+        let probe = ProbeFact::for_predicate(&p, self.planner.data).filter(|fact| {
+            // A probe that failed twice this session (no tool for it) is
+            // no way to settle anything.
+            let intent = Intent::Probe { fact: fact.clone() };
+            !self
+                .base
+                .knowledge
+                .world
+                .infeasible
+                .contains(&intent.to_string())
+        });
+        let pos = node.insert_pos(goal.before);
+        // What a wrong guess costs is the explicit work: nothing the walk
+        // was expected to yield can be counted on then.
+        let surround = Surround {
+            waypoints: self.waypoints(&node, belief),
+            passive: Passive::default(),
+            ahead: Vec::new(),
+        };
         let best = if goal.depth < opts.max_depth {
-            self.candidates(&p, belief, false, &waypoints)
+            self.candidates(&p, belief, false, &surround)
                 .into_iter()
                 .next()
         } else {
@@ -1141,11 +1668,12 @@ impl<'p, 'a> Session<'p, 'a> {
             return vec![node];
         };
         let probe_id = self.next_seq();
-        node.prepend(
-            vec![Step {
-                planned: PlannedIntent::new(Intent::Probe { fact }, probe_cost),
-                effects: Vec::new(),
-            }],
+        node.insert(
+            pos,
+            vec![Step::new(
+                PlannedIntent::new(Intent::Probe { fact }, probe_cost),
+                Vec::new(),
+            )],
             vec![probe_id],
         );
         node.g += probe_cost;
@@ -1163,11 +1691,12 @@ impl<'p, 'a> Session<'p, 'a> {
             establishes: p.clone(),
         };
         fallback.g += FALLBACK_S;
-        fallback.prepend(
-            vec![Step {
-                planned: PlannedIntent::new(unsupported, FALLBACK_S),
-                effects: vec![p.clone()],
-            }],
+        fallback.insert(
+            pos,
+            vec![Step::new(
+                PlannedIntent::new(unsupported, FALLBACK_S),
+                vec![p.clone()],
+            )],
             vec![self.next_seq()],
         );
         fallback.assume(p.clone(), goal.before);
@@ -1211,13 +1740,24 @@ impl<'p, 'a> Session<'p, 'a> {
         no_method: Option<&GoalPredicate>,
     ) -> Result<Vec<Node>, Failure> {
         let p = &goal.p;
+        let pos = node.insert_pos(goal.before);
         if no_method != Some(p) {
             if let Some(method) = self.planner.methods.for_goal(p) {
-                match self.plan_method(method, goal, &belief.established) {
+                // The method's nested searches see what runs ahead of it.
+                let mark = self.prefix.borrow().len();
+                let ahead: Vec<Step> = node.plan[..pos.min(node.plan.len())].to_vec();
+                self.prefix.borrow_mut().extend(ahead);
+                let planned = self.plan_method(method, goal, &belief.established);
+                self.prefix.borrow_mut().truncate(mark);
+                match planned {
                     Ok(sub) => {
                         let mut n = node.clone();
                         let ids: Vec<u64> = sub.steps.iter().map(|_| self.next_seq()).collect();
-                        n.prepend(sub.steps.clone(), ids);
+                        let first = ids[0];
+                        n.insert(pos, sub.steps.clone(), ids);
+                        if let Some(c) = goal.before {
+                            n.anchors.insert(c, first);
+                        }
                         for a in &sub.assumes {
                             if !n.assumes.contains(a) {
                                 n.assumes.push(a.clone());
@@ -1231,19 +1771,41 @@ impl<'p, 'a> Session<'p, 'a> {
                 }
             }
         }
-        let waypoints = self.waypoints(node, belief);
-        let candidates = self.candidates(p, belief, true, &waypoints);
+        let surround = self.surround(node, pos, belief);
+        let candidates = self.candidates(p, belief, true, &surround);
         let mut out = Vec::new();
         for mut c in candidates {
             let mut n = node.clone();
+            if c.steps.is_empty() {
+                // Nothing to do: the way there yields it. The step that
+                // needs it says so.
+                n.expected.insert(p.clone());
+                if let Some(i) = goal.before.and_then(|id| n.position(id)) {
+                    n.plan[i].planned.expected.push((p.clone(), 1.0));
+                }
+                n.g += c.cost;
+                out.push(n);
+                continue;
+            }
             c.add_effect(p.clone());
-            for s in &mut c.steps {
+            for s in c.lead.iter_mut().chain(c.steps.iter_mut()) {
                 s.planned.assumes.extend(c.assumes.iter().cloned());
                 s.planned.unless.extend(goal.unless.iter().cloned());
             }
+            let mut pos = pos;
+            if !c.lead.is_empty() {
+                let lead_ids: Vec<u64> = c.lead.iter().map(|_| self.next_seq()).collect();
+                pos += c.lead.len();
+                n.insert(0, c.lead, lead_ids);
+            }
             let ids: Vec<u64> = c.steps.iter().map(|_| self.next_seq()).collect();
             let first = ids[0];
-            n.prepend(c.steps, ids);
+            n.insert(pos, c.steps, ids);
+            // What the step needs next goes ahead of this group (its trip,
+            // planned first, stays last).
+            if let Some(c_id) = goal.before {
+                n.anchors.insert(c_id, first);
+            }
             for a in c.assumes {
                 if !n.assumes.contains(&a) {
                     n.assumes.push(a);
@@ -1292,7 +1854,16 @@ impl<'p, 'a> Session<'p, 'a> {
                 method.name,
                 goal.p,
                 match &result {
-                    Ok(s) => format!("{} steps, {:.1} s", s.steps.len(), s.cost),
+                    Ok(s) => format!(
+                        "{} steps, {:.1} s: {}",
+                        s.steps.len(),
+                        s.cost,
+                        s.steps
+                            .iter()
+                            .map(|st| st.planned.intent.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ),
                     Err(Failure::NoPlan) => "no plan".to_string(),
                     Err(Failure::Budget) => "budget".to_string(),
                 }
@@ -1336,7 +1907,11 @@ impl<'p, 'a> Session<'p, 'a> {
         self.active.borrow_mut().push(goal.p.clone());
         let subgoals = (|| {
             for sub in &method.subgoals {
-                let r = self.search(vec![open(sub, false)], &est, None)?;
+                let mark = self.prefix.borrow().len();
+                self.prefix.borrow_mut().extend(steps.iter().cloned());
+                let r = self.search(vec![open(sub, false)], &est, None);
+                self.prefix.borrow_mut().truncate(mark);
+                let r = r?;
                 est.extend(r.effects().cloned());
                 est.extend(r.assumes.iter().cloned());
                 est.insert(sub.clone());
@@ -1349,7 +1924,11 @@ impl<'p, 'a> Session<'p, 'a> {
         self.active.borrow_mut().pop();
         let result = subgoals.and_then(|()| {
             if !method.complete {
-                let r = self.search(vec![open(&goal.p, true)], &est, Some(&goal.p))?;
+                let mark = self.prefix.borrow().len();
+                self.prefix.borrow_mut().extend(steps.iter().cloned());
+                let r = self.search(vec![open(&goal.p, true)], &est, Some(&goal.p));
+                self.prefix.borrow_mut().truncate(mark);
+                let r = r?;
                 steps.extend(r.steps);
                 assumes.extend(r.assumes);
                 cost += r.cost;
@@ -1613,7 +2192,7 @@ impl<'p, 'a> Session<'p, 'a> {
             return 0.0;
         }
         let Some(c) = self
-            .candidates(p, belief, false, &BTreeSet::new())
+            .candidates(p, belief, false, &Surround::default())
             .into_iter()
             .next()
         else {
@@ -1645,7 +2224,7 @@ impl<'p, 'a> Session<'p, 'a> {
         p: &GoalPredicate,
         belief: &StateBelief<'a>,
         full: bool,
-        waypoints: &BTreeSet<String>,
+        surround: &Surround,
     ) -> Vec<Candidate> {
         let ctx = self.context(belief);
         let mut out: Vec<Candidate> = match p {
@@ -1688,19 +2267,19 @@ impl<'p, 'a> Session<'p, 'a> {
             GoalPredicate::World(_) => self.script_candidates(p, belief, &ctx),
             GoalPredicate::Caught { caught } => self.catch_candidates(caught, p, belief, &ctx),
             GoalPredicate::PokedexCaught { ge } => {
-                self.catch_new_candidates(*ge, DexCount::Caught, p, belief, &ctx, waypoints)
+                self.catch_new_candidates(*ge, DexCount::Caught, p, belief, &ctx, surround)
             }
             GoalPredicate::PokedexSeen { ge } => {
-                self.catch_new_candidates(*ge, DexCount::Seen, p, belief, &ctx, waypoints)
+                self.catch_new_candidates(*ge, DexCount::Seen, p, belief, &ctx, surround)
             }
             GoalPredicate::CanBeat { can_beat } => self
-                .readiness_candidate(can_beat, p, belief, &ctx)
+                .readiness_candidate(can_beat, p, belief, &ctx, &surround.passive)
                 .into_iter()
                 .collect(),
             GoalPredicate::Money { money } => {
                 vec![self.unsupported(format!("earning ₽{money} is not planned"), p, &ctx)]
             }
-            GoalPredicate::Healed { .. } => self
+            GoalPredicate::Healed { .. } | GoalPredicate::LeadHp { .. } => self
                 .nearest(self.planner.centers.iter().collect())
                 .into_iter()
                 .map(|center| {
@@ -1776,6 +2355,7 @@ impl<'p, 'a> Session<'p, 'a> {
         if route.found() {
             let mut c = Candidate::single(intent.clone(), ctx, route.cost_s);
             c.steps[0].planned = c.steps[0].planned.clone().with_route(&route);
+            c.steps[0].route = Some(Rc::clone(&route));
             c.preconditions = route
                 .assumes
                 .iter()
@@ -1783,6 +2363,9 @@ impl<'p, 'a> Session<'p, 'a> {
                 .map(GoalPredicate::World)
                 .collect();
             self.route_needs(&route, &mut c.preconditions);
+            if self.crosses_encounters(&route) {
+                c.preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
+            }
             for leg in &route.legs {
                 if !matches!(leg.kind, EdgeKind::Walk { .. }) || leg.from.map != leg.to.map {
                     continue;
@@ -1821,6 +2404,9 @@ impl<'p, 'a> Session<'p, 'a> {
             }
             let mut c = Candidate::single(intent.clone(), ctx, *cost);
             c.preconditions = req.iter().cloned().map(GoalPredicate::World).collect();
+            // Its legs are not known yet; a trip that needs opening is long
+            // enough to cross grass somewhere.
+            c.preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
             out.push(c);
         }
         if out.is_empty() {
@@ -2000,18 +2586,17 @@ impl<'p, 'a> Session<'p, 'a> {
             };
             let mut planned = PlannedIntent::new(go, route.cost_s).with_route(&route);
             planned.note = Some(format!("to the grass at ({x}, {y})"));
-            c.steps.insert(
-                0,
-                Step {
-                    planned,
-                    effects: vec![
-                        GoalPredicate::at(map),
-                        GoalPredicate::World(Predicate::Visited {
-                            map: map.to_string(),
-                        }),
-                    ],
-                },
+            let mut go = Step::new(
+                planned,
+                vec![
+                    GoalPredicate::at(map),
+                    GoalPredicate::World(Predicate::Visited {
+                        map: map.to_string(),
+                    }),
+                ],
             );
+            go.route = Some(Rc::clone(&route));
+            c.steps.insert(0, go);
             for p in &route.assumes {
                 let p = GoalPredicate::World(p.clone());
                 if !c.preconditions.contains(&p) {
@@ -2135,11 +2720,15 @@ impl<'p, 'a> Session<'p, 'a> {
     }
 
     /// New species for the Pokédex (`PokedexCaught(≥n)`): the cheapest
-    /// `n − known` species not yet caught, from the wild land tables, each
-    /// priced as the route to its grass, the expected encounters and the
-    /// catch; areas on the way to where the plan goes get a small bonus.
-    /// One candidate: a `Go` per area then its `Catch`es, with the balls
-    /// for all of them as the precondition.
+    /// species not yet caught, from the wild land tables, each priced as
+    /// the route to its grass, the expected encounters and the catch;
+    /// areas on the way to where the plan goes get a small bonus. What the
+    /// walk ahead is expected to catch on its own (§4.6.2) counts toward
+    /// `n`: species it likely takes are not hunted, and explicit catches
+    /// cover only the remainder. One candidate: a `Go` per area then its
+    /// `Catch`es, with the balls for all of them as the precondition; when
+    /// the walk alone is expected to reach `n`, a look at the Trainer Card
+    /// before the step that needs the count.
     fn catch_new_candidates(
         &self,
         ge: u16,
@@ -2147,15 +2736,192 @@ impl<'p, 'a> Session<'p, 'a> {
         p: &GoalPredicate,
         belief: &StateBelief<'a>,
         ctx: &PlanContext<'_>,
-        waypoints: &BTreeSet<String>,
+        surround: &Surround,
     ) -> Vec<Candidate> {
-        let Some(obtain) = self.planner.obtain else {
-            return vec![self.unsupported("no obtain.json".into(), p, ctx)];
-        };
         let (known, _) = belief.pokedex_count(which);
         let need = usize::from(ge).saturating_sub(known as usize);
         if need == 0 {
             return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Some(c) = self.catch_new_plan(need, which, p, belief, ctx, surround, None) {
+            out.push(c);
+        }
+        // With balls bought first, the walk ahead catches on its own.
+        if which == DexCount::Caught && !surround.ahead.is_empty() {
+            if let Some(stock) = self.stock_for_walk(need, which, p, belief, ctx, surround) {
+                if let Some(c) =
+                    self.catch_new_plan(need, which, p, belief, ctx, surround, Some(stock))
+                {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// Balls to buy at the plan's start so the walk ahead catches what it
+    /// meets (§4.6.2): what the walk would use with a full stock plus the
+    /// explicit remainder's throws and the reserve, beyond what is held;
+    /// bounded by the money known. Returns the mart, the count, the stock
+    /// held before and the walk priced with the purchase.
+    fn stock_for_walk(
+        &self,
+        need: usize,
+        which: DexCount,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        ctx: &PlanContext<'_>,
+        surround: &Surround,
+    ) -> Option<(String, u32, u32, Passive)> {
+        let ball = best_ball(ctx);
+        let price = self.planner.data.items.get(&ball)?.price.max(1);
+        let held = self.base.item_count(&ball).unwrap_or(0);
+        let reserve = self.planner.params.ball_reserve;
+        let marts: Vec<&String> = self
+            .planner
+            .marts
+            .iter()
+            .filter(|(_, items)| items.contains(&ball))
+            .map(|(map, _)| map)
+            .collect();
+        // The cheapest of the nearest marts to reach.
+        let mart = self
+            .nearest(marts)
+            .into_iter()
+            .filter_map(|m| Some((OrdF64(self.go_cost(m, belief)?), m)))
+            .min()?
+            .1
+            .clone();
+        let mut ahead = surround.ahead.clone();
+        let plenty = self.passive_walk_with(&mut ahead, Some(f64::from(held) + PLENTY_OF_BALLS));
+        let used = (f64::from(held) + PLENTY_OF_BALLS - plenty.balls).ceil() as u32;
+        if used == 0 {
+            return None;
+        }
+        // The remainder's throws under that walk.
+        let remainder = self
+            .catch_new_plan(
+                need,
+                which,
+                p,
+                belief,
+                ctx,
+                &Surround {
+                    waypoints: surround.waypoints.clone(),
+                    passive: plenty,
+                    ahead: Vec::new(),
+                },
+                None,
+            )
+            .map_or(0, |c| {
+                c.steps
+                    .iter()
+                    .filter_map(|s| match &s.planned.intent {
+                        Intent::Catch { balls, .. } => Some(balls.saturating_sub(reserve)),
+                        _ => None,
+                    })
+                    .sum()
+            });
+        let wanted = (used + remainder + reserve).saturating_sub(held).max(1);
+        let affordable = belief.knowledge.money.value.map_or(u32::MAX, |m| m / price);
+        let count = wanted.min(affordable);
+        if count == 0 {
+            return None;
+        }
+        let passive = self.passive_walk_with(&mut ahead, Some(f64::from(held + count)));
+        Some((mart, count, held, passive))
+    }
+
+    /// One way to reach the count: `stock` bought at the plan's start (a
+    /// `Go` to the mart and the `Buy`), then the walk's expected catches,
+    /// then explicit catches for the remainder just before the step that
+    /// needs the count; a look at the Trainer Card there when the walk
+    /// alone is expected to reach it.
+    #[allow(clippy::too_many_arguments)]
+    fn catch_new_plan(
+        &self,
+        need: usize,
+        which: DexCount,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        ctx: &PlanContext<'_>,
+        surround: &Surround,
+        stock: Option<(String, u32, u32, Passive)>,
+    ) -> Option<Candidate> {
+        let Some(obtain) = self.planner.obtain else {
+            return Some(self.unsupported("no obtain.json".into(), p, ctx));
+        };
+        let waypoints = &surround.waypoints;
+        let ball = best_ball(ctx);
+        let (lead, lead_cost, passive): (Vec<Step>, f64, Cow<'_, Passive>) = match stock {
+            Some((mart, count, held, passive)) => {
+                let go = Intent::Go { dest: mart.clone() };
+                let route = self.route_to(&mart, belief).filter(|r| r.found())?;
+                let mut go_step = Step::new(
+                    PlannedIntent::new(go, route.cost_s).with_route(&route),
+                    vec![
+                        GoalPredicate::at(&mart),
+                        GoalPredicate::World(Predicate::Visited { map: mart.clone() }),
+                    ],
+                );
+                go_step.route = Some(Rc::clone(&route));
+                let buy = Intent::Buy {
+                    item: ball.clone(),
+                    count,
+                    map: mart.clone(),
+                };
+                let buy_cost = buy.cost_s(ctx);
+                let mut buy_planned = PlannedIntent::new(buy, buy_cost);
+                buy_planned.note = Some("for what the way there catches".into());
+                // Buying `count` on top of what is held.
+                let buy_step = Step::new(
+                    buy_planned,
+                    vec![GoalPredicate::has_item(&ball, held + count)],
+                );
+                (
+                    vec![go_step, buy_step],
+                    route.cost_s + buy_cost,
+                    Cow::Owned(passive),
+                )
+            }
+            None => (Vec::new(), 0.0, Cow::Borrowed(&surround.passive)),
+        };
+        let expected_alone = passive.expected(which, &BTreeSet::new());
+        let expected_note = |c: &mut Candidate| {
+            if expected_alone >= EXPECTED_MIN {
+                if let Some(s) = c.steps.first_mut() {
+                    let text = format!(
+                        "the way here is expected to catch {expected_alone:.1} new species"
+                    );
+                    s.planned.note = Some(match s.planned.note.take() {
+                        Some(n) => format!("{n}; {text}"),
+                        None => text,
+                    });
+                }
+            }
+        };
+        if expected_alone.floor() as usize >= need {
+            let probe = Intent::Probe {
+                fact: ProbeFact::TrainerCard,
+            };
+            let cost = probe.cost_s(ctx);
+            let mut c = Candidate::single(probe, ctx, cost);
+            c.steps[0].planned.note = Some(format!(
+                "the walk is expected to catch {expected_alone:.1} new species; the card confirms"
+            ));
+            c.add_effect(p.clone());
+            c.lead = lead;
+            c.cost += lead_cost;
+            if let Some(buy) = c.lead.get(1) {
+                if let Intent::Buy { item, count, .. } = &buy.planned.intent {
+                    let price = self.planner.data.items.get(item).map_or(0, |i| i.price);
+                    c.preconditions.push(GoalPredicate::Money {
+                        money: price * count,
+                    });
+                }
+            }
+            return Some(c);
         }
         let ball = best_ball(ctx);
         let mult = ball_multiplier(&ball).unwrap_or(10);
@@ -2232,17 +2998,37 @@ impl<'p, 'a> Session<'p, 'a> {
             }
         }
         options.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        if options.len() < need {
-            return vec![self.unsupported(
-                format!(
-                    "only {} new species can be caught in the wild; {need} are needed",
-                    options.len()
-                ),
-                p,
-                ctx,
-            )];
+        // Cheapest first, leaving out what the walk likely catches anyway,
+        // until the explicit catches plus what the walk is still expected
+        // to add reach the shortfall.
+        let mut chosen: BTreeSet<String> = BTreeSet::new();
+        let mut order: Vec<usize> = Vec::new();
+        loop {
+            let expected = passive.expected(which, &chosen);
+            if order.len() + expected.floor() as usize >= need {
+                break;
+            }
+            let next = options
+                .iter()
+                .position(|o| {
+                    !chosen.contains(&o.1) && passive.probability(which, &o.1) < PASSIVE_LIKELY
+                })
+                .or_else(|| options.iter().position(|o| !chosen.contains(&o.1)));
+            let Some(i) = next else {
+                return Some(self.unsupported(
+                    format!(
+                        "only {} new species can be caught in the wild; {need} are needed",
+                        options.len()
+                    ),
+                    p,
+                    ctx,
+                ));
+            };
+            chosen.insert(options[i].1.clone());
+            order.push(i);
         }
-        options.truncate(need);
+        order.sort_unstable();
+        let options: Vec<_> = order.into_iter().map(|i| options[i].clone()).collect();
         // One `Go` per area, nearest area first.
         let mut areas: Vec<(OrdF64, String)> = Vec::new();
         for (_, _, map, _, c) in &options {
@@ -2292,38 +3078,56 @@ impl<'p, 'a> Session<'p, 'a> {
             GoalPredicate::has_item(&ball, throws_total + self.planner.params.ball_reserve);
         let mut c = Candidate {
             steps,
+            lead,
             preconditions,
             assumes,
-            cost,
+            cost: cost + lead_cost,
         };
+        if let Some(buy) = c.lead.get(1) {
+            if let Intent::Buy { item, count, .. } = &buy.planned.intent {
+                let price = self.planner.data.items.get(item).map_or(0, |i| i.price);
+                c.preconditions.push(GoalPredicate::Money {
+                    money: price * count,
+                });
+            }
+        }
+        expected_note(&mut c);
         c.add_effect(p.clone());
-        vec![c]
+        Some(c)
     }
 
     /// The readiness planner's cheapest preparation for `trainer`, as
-    /// `Go`/`Train`/`Catch` steps.
+    /// `Go`/`Train`/`Catch` steps, with the lead as the way there leaves
+    /// it (§4.6.2): trained to the level an earlier `Train` reached and
+    /// the experience of the trainers beaten on top.
     fn readiness_candidate(
         &self,
         trainer: &str,
         p: &GoalPredicate,
         belief: &StateBelief<'a>,
         ctx: &PlanContext<'_>,
+        passive: &Passive,
     ) -> Option<Candidate> {
-        if let Some(c) = self.readiness.borrow().get(trainer) {
+        let key = (
+            trainer.to_string(),
+            passive.exp as u64,
+            passive.lead_level.unwrap_or(0),
+        );
+        if let Some(c) = self.readiness.borrow().get(&key) {
             return c.clone();
         }
         let t = Instant::now();
-        let built = self.build_readiness(trainer, p, belief, ctx);
+        let built = self.build_readiness(trainer, p, belief, ctx, key.1, passive.lead_level);
         self.spent.borrow_mut()[3] += t.elapsed().as_secs_f64();
         if self.trace {
             eprintln!(
-                "[plan]        readiness for {trainer}: {:.2} s",
+                "[plan]        readiness for {trainer} (+{} exp, trained to {:?}): {:.2} s",
+                key.1,
+                passive.lead_level,
                 t.elapsed().as_secs_f64()
             );
         }
-        self.readiness
-            .borrow_mut()
-            .insert(trainer.to_string(), built.clone());
+        self.readiness.borrow_mut().insert(key, built.clone());
         built
     }
 
@@ -2333,8 +3137,10 @@ impl<'p, 'a> Session<'p, 'a> {
         p: &GoalPredicate,
         belief: &StateBelief<'a>,
         ctx: &PlanContext<'_>,
+        exp: u64,
+        trained: Option<u8>,
     ) -> Option<Candidate> {
-        let Some(party) = belief.party_members() else {
+        let Some(mut party) = belief.party_members() else {
             return Some(self.unsupported(
                 format!("the party is unknown, so readiness for {trainer} can't be planned"),
                 p,
@@ -2343,6 +3149,28 @@ impl<'p, 'a> Session<'p, 'a> {
         };
         if !self.planner.data.trainers.contains_key(trainer) {
             return None;
+        }
+        // The lead trains and fights the trainers on the way: it starts
+        // the preparation that much further on (from the floor of its
+        // level, its exact total being unknown).
+        if let Some(lead) = party.first_mut() {
+            let was = lead.level;
+            if let Some(level) = trained {
+                lead.level = lead.level.max(level);
+                lead.exp = None;
+            }
+            if exp > 0 {
+                if let Some(sp) = self.planner.data.species(&lead.species) {
+                    let total = exp_for_level(&sp.growth_rate, lead.level) + exp;
+                    lead.exp = Some(total);
+                    lead.level = level_for_exp(&sp.growth_rate, total).max(lead.level);
+                }
+            }
+            if lead.level > was {
+                // Levelled on the way, it learnt its moves on the way too
+                // (every new move is accepted): the species' level-up set.
+                lead.moves.clear();
+            }
         }
         let areas = self.training_areas(belief);
         let request = Request {
@@ -2408,45 +3236,58 @@ impl<'p, 'a> Session<'p, 'a> {
                     ));
                 };
                 let planned = PlannedIntent::new(go, go_cost);
-                steps.push(Step {
+                steps.push(Step::new(
                     planned,
-                    effects: vec![
+                    vec![
                         GoalPredicate::at(&map),
                         GoalPredicate::World(Predicate::Visited { map: map.clone() }),
                     ],
-                });
+                ));
                 cost += go_cost;
                 here = Some(map.clone());
             }
             let step_cost = minutes * 60.0;
-            steps.push(Step {
-                planned: PlannedIntent::new(intent, step_cost),
-                effects: Vec::new(),
-            });
+            steps.push(Step::new(PlannedIntent::new(intent, step_cost), Vec::new()));
             cost += step_cost;
         }
-        if plan.min_confidence() < self.planner.options.confidence {
-            let reason = format!(
-                "training reaches only {:.0}% against {trainer}",
-                plan.min_confidence() * 100.0
-            );
-            let u = Intent::Unsupported {
-                reason,
-                establishes: p.clone(),
+        let confidence = self.planner.options.confidence;
+        if plan.min_confidence() < confidence {
+            // The best the window reaches falls short: the party trains
+            // that far anyway and readiness is judged again after (the
+            // goal loop replans after every `Train`); the shortfall is
+            // priced so a way that gets there wins when there is one.
+            let Some(last) = steps.last_mut() else {
+                return Some(self.unsupported(
+                    format!("no training or catching readies the party for {trainer}"),
+                    p,
+                    ctx,
+                ));
             };
-            let u_cost = u.cost_s(ctx);
-            steps.push(Step {
-                planned: PlannedIntent::new(u, u_cost),
-                effects: Vec::new(),
-            });
-            cost += u_cost;
+            let shortfall = (confidence - plan.min_confidence()) / confidence;
+            last.planned.note = Some(format!(
+                "reaches only {:.0}% against {trainer}: readiness is judged again after",
+                plan.min_confidence() * 100.0
+            ));
+            last.planned
+                .expected
+                .push((p.clone(), plan.min_confidence()));
+            cost += shortfall * self.planner.params.unsupported_s;
         }
-        if steps.is_empty() {
-            return None;
+        let mut preconditions = Vec::new();
+        if steps.iter().any(|s| {
+            matches!(
+                s.planned.intent,
+                Intent::Train { .. } | Intent::Catch { .. }
+            )
+        }) {
+            preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
         }
+        // No steps and the confidence met: the way there readies the
+        // lead by itself.
         let mut c = Candidate {
             steps,
-            preconditions: Vec::new(),
+            lead: Vec::new(),
+            preconditions,
             assumes: Vec::new(),
             cost,
         };
@@ -2524,7 +3365,7 @@ fn dedupe_steps(steps: Vec<Step>) -> (Vec<Step>, f64) {
     for step in steps {
         let intent = &step.planned.intent;
         let repeat = !step.effects.is_empty()
-            && !matches!(intent, Intent::Go { .. })
+            && !matches!(intent, Intent::Go { .. } | Intent::Heal { .. })
             && step.effects.iter().all(|e| done.contains(e));
         if repeat {
             dropped += step.planned.cost_s;
@@ -2566,20 +3407,35 @@ fn dedupe_steps(steps: Vec<Step>) -> (Vec<Step>, f64) {
 
 /// Keeps the first probe of each fact (the screen stays read) and moves it
 /// before the first step that relies on what it shows; returns the steps
-/// and the cost of the probes dropped.
+/// and the cost of the probes dropped. A probe with a note is deliberate
+/// (a look at the card where the walk should have reached a count): it
+/// stays where it is and stands for the fact's other probes.
 fn dedupe_probes(steps: Vec<PlannedIntent>, data: &GameData) -> (Vec<PlannedIntent>, f64) {
+    let deliberate: BTreeSet<ProbeFact> = steps
+        .iter()
+        .filter_map(|s| match &s.intent {
+            Intent::Probe { fact } if s.note.is_some() => Some(fact.clone()),
+            _ => None,
+        })
+        .collect();
     let mut seen: BTreeSet<ProbeFact> = BTreeSet::new();
     let mut saved = 0.0;
     let mut out: Vec<PlannedIntent> = Vec::with_capacity(steps.len());
     let mut probes: Vec<PlannedIntent> = Vec::new();
     for s in steps {
         if let Intent::Probe { fact } = &s.intent {
-            if !seen.insert(fact.clone()) {
+            if s.note.is_some() {
+                if !seen.insert(fact.clone()) {
+                    saved += s.cost_s;
+                    continue;
+                }
+            } else if deliberate.contains(fact) || !seen.insert(fact.clone()) {
                 saved += s.cost_s;
+                continue;
             } else {
                 probes.push(s);
+                continue;
             }
-            continue;
         }
         out.push(s);
     }
@@ -2659,5 +3515,101 @@ mod tests {
         );
         assert!(parse_goal("badge 9").is_err());
         assert!(parse_goal("win").is_err());
+    }
+
+    #[test]
+    fn experience_maps_back_to_a_level() {
+        let growth = "GROWTH_MEDIUM_SLOW";
+        assert_eq!(level_for_exp(growth, 0), 1);
+        let at_20 = exp_for_level(growth, 20);
+        assert_eq!(level_for_exp(growth, at_20), 20);
+        assert_eq!(level_for_exp(growth, at_20 + 1), 20);
+        assert_eq!(level_for_exp(growth, exp_for_level(growth, 21)), 21);
+    }
+
+    #[test]
+    fn a_noted_probe_stands_for_the_facts_other_probes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let card = |note: Option<&str>| {
+            let mut p = PlannedIntent::new(
+                Intent::Probe {
+                    fact: ProbeFact::TrainerCard,
+                },
+                8.0,
+            );
+            p.note = note.map(str::to_owned);
+            p
+        };
+        let go = PlannedIntent::new(
+            Intent::Go {
+                dest: "Route3".into(),
+            },
+            10.0,
+        );
+        let steps = vec![card(None), go.clone(), card(Some("confirms"))];
+        let (out, saved) = dedupe_probes(steps, &data);
+        assert_eq!(saved, 8.0);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], go);
+        assert_eq!(out[1].note.as_deref(), Some("confirms"));
+        // Without a note the first probe is kept and the later one dropped.
+        let steps = vec![card(None), go.clone(), card(None)];
+        let (out, saved) = dedupe_probes(steps, &data);
+        assert_eq!(saved, 8.0);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0].intent, Intent::Probe { .. }));
+    }
+
+    #[test]
+    fn steps_go_ahead_of_what_needs_them() {
+        let step = |name: &str| {
+            Step::new(
+                PlannedIntent::new(
+                    Intent::Go {
+                        dest: name.to_string(),
+                    },
+                    1.0,
+                ),
+                Vec::new(),
+            )
+        };
+        let mut node = Node {
+            g: 0.0,
+            f: 0.0,
+            seq: 0,
+            plan: vec![step("goal")],
+            ids: vec![1],
+            open: Vec::new(),
+            assumed: BTreeSet::new(),
+            assumes: Vec::new(),
+            anchors: BTreeMap::new(),
+            expected: BTreeSet::new(),
+        };
+        // The goal's trip goes just ahead of it and anchors it.
+        let pos = node.insert_pos(Some(1));
+        assert_eq!(pos, 0);
+        node.insert(pos, vec![step("trip")], vec![2]);
+        node.anchors.insert(1, 2);
+        // The next thing the goal needs goes ahead of the trip, and
+        // becomes the anchor in turn.
+        let pos = node.insert_pos(Some(1));
+        assert_eq!(pos, 0);
+        node.insert(pos, vec![step("need")], vec![3]);
+        node.anchors.insert(1, 3);
+        // What the trip needs goes ahead of the trip, after the need.
+        let pos = node.insert_pos(Some(2));
+        assert_eq!(pos, 1);
+        node.insert(pos, vec![step("trip-need")], vec![4]);
+        let names: Vec<String> = node
+            .plan
+            .iter()
+            .map(|s| s.planned.intent.to_string())
+            .collect();
+        assert_eq!(names, ["Go(need)", "Go(trip-need)", "Go(trip)", "Go(goal)"]);
+        assert_eq!(node.ids, [3, 4, 2, 1]);
+        assert_eq!(node.insert_pos(None), 4);
     }
 }

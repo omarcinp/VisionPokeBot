@@ -225,6 +225,7 @@ fn step(intent: Planned) -> PlannedIntent {
         unless: Vec::new(),
         note: None,
         route: Vec::new(),
+        expected: Vec::new(),
     }
 }
 

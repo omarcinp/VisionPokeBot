@@ -669,6 +669,27 @@ impl Runner for CliRunner<'_> {
     }
 }
 
+/// What a step is expected to yield on its own (spec §4.6.2), e.g.
+/// "expects +1.3 new species (ZUBAT 0.9, PARAS 0.4)".
+fn expected_note(step: &pokebot_planner::PlannedIntent) -> String {
+    let species: Vec<String> = step
+        .expected
+        .iter()
+        .filter_map(|(p, prob)| match p {
+            GoalPredicate::Caught { caught } => Some(format!(
+                "{} {prob:.2}",
+                caught.trim_start_matches("SPECIES_")
+            )),
+            _ => None,
+        })
+        .collect();
+    format!(
+        "expects +{:.2} new species ({})",
+        step.expected_new_species(),
+        species.join(", ")
+    )
+}
+
 /// The plan as a table: step, intent, cost, what it assumes or is
 /// conditional on.
 pub fn print_plan(plan: &Plan) {
@@ -693,6 +714,20 @@ pub fn print_plan(plan: &Plan) {
             notes.push(format!("unless {u}"));
         }
         notes.extend(step.note.iter().cloned());
+        if step
+            .expected
+            .iter()
+            .any(|(p, _)| matches!(p, GoalPredicate::Caught { .. }))
+        {
+            notes.push(expected_note(step));
+        }
+        for (p, prob) in step
+            .expected
+            .iter()
+            .filter(|(p, _)| !matches!(p, GoalPredicate::Caught { .. }))
+        {
+            notes.push(format!("expects {p} ({:.0}%)", prob * 100.0));
+        }
         let mut name = step.intent.to_string();
         if name.chars().count() > width {
             name = name.chars().take(width - 1).collect::<String>() + "…";
@@ -715,6 +750,10 @@ pub fn print_plan(plan: &Plan) {
         plan.intents.len(),
         plan.belief_snapshot
     );
+    let expected = plan.expected_new_species();
+    if expected > 0.0 {
+        println!("expects +{expected:.1} new species on the way");
+    }
     if !plan.assumes.is_empty() {
         let a: Vec<String> = plan.assumes.iter().map(|p| p.to_string()).collect();
         println!("assumes: {}", a.join(", "));

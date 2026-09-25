@@ -286,6 +286,9 @@ impl Intent {
                     pokebot_planner::ProbeFact::Party => {
                         return Err(ToolError::Unsupported("party probe: no tool yet".into()))
                     }
+                    pokebot_planner::ProbeFact::PcBoxes => {
+                        return Err(ToolError::Unsupported("PC box probe: no tool yet".into()))
+                    }
                 },
             },
             P::Save => Intent::Save,

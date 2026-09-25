@@ -115,6 +115,14 @@ fn print(plan: &Plan, limit: usize) {
         let mut assumes: Vec<String> = step.assumes.iter().map(|p| p.to_string()).collect();
         assumes.extend(step.unless.iter().map(|p| format!("unless {p}")));
         assumes.extend(step.note.iter().cloned());
+        if !step.expected.is_empty() {
+            let e: Vec<String> = step
+                .expected
+                .iter()
+                .map(|(p, prob)| format!("{p} {prob:.2}"))
+                .collect();
+            assumes.push(format!("expects {}", e.join(", ")));
+        }
         println!(
             "{:>3}  {:<70} {:>7.1}s  {}",
             i + 1,
@@ -298,6 +306,11 @@ fn a_goal_that_already_holds_is_an_empty_plan() {
     assert_eq!(plan.cost_s, 0.0);
 }
 
+/// Spec §4.6: the story (Mt. Moon, Bill, the S.S. Anne, Misty, Cut) comes
+/// first; the walk through its encounter areas is expected to catch new
+/// species on its own, with balls stocked ahead of it; explicit catches
+/// cover only the remainder and come after Cut, just before the aide;
+/// the PC boxes are audited first, the Center being next door.
 #[test]
 fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
     let Some(f) = fixture() else { return };
@@ -419,10 +432,15 @@ fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
         |i| matches!(i, Intent::Teach { hm, .. } if hm == "ITEM_HM01"),
     );
     assert!(bill < captain && captain < teach && misty < teach && teach < n - 2);
+    // The story is not held up by the Pokédex: it starts at Mt. Moon.
+    assert!(miguel < bill);
 
     // The Pokédex count is unknown (three species observed caught): the
-    // Trainer Card is read first and, unless it shows ten, seven new
-    // species are caught, each after a Go to its grass.
+    // Trainer Card is read before anything conditional on it. Ten are
+    // needed: the walk through Mt. Moon, the Nugget Bridge, Route 25 and
+    // the Underground Path is expected to catch some (§4.6.2), and only
+    // the remainder is hunted explicitly, after Cut and just before the
+    // aide, each after a Go to its grass.
     let probe = position(&plan, |i| {
         matches!(
             i,
@@ -431,29 +449,83 @@ fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
             }
         )
     });
-    let catches: Vec<&pokebot_planner::PlannedIntent> = plan
+    let catches: Vec<(usize, &pokebot_planner::PlannedIntent)> = plan
         .intents
         .iter()
-        .filter(|s| {
+        .enumerate()
+        .filter(|(_, s)| {
             matches!(s.intent, Intent::Catch { .. })
                 && s.unless.contains(&GoalPredicate::pokedex_caught(10))
         })
         .collect();
-    assert_eq!(catches.len(), 10 - 3, "{:?}", catches);
-    assert!(probe < position(&plan, |i| matches!(i, Intent::Catch { .. })));
+    let expected = plan.expected_new_species();
+    println!(
+        "expected on the way {expected:.2}, explicit catches {}",
+        catches.len()
+    );
+    assert!(expected > 0.0, "the walk yields nothing?");
+    assert!(
+        expected + catches.len() as f64 >= 7.0,
+        "expected {expected:.2} + {} explicit < 7",
+        catches.len()
+    );
+    assert!(catches.len() < 7, "the walk should spare some catches");
+    assert!(probe < catches.first().map_or(n, |(i, _)| *i));
+    for (i, s) in &catches {
+        assert!(
+            *i > teach && *i < n - 2,
+            "step {} {} is not between Cut and the aide",
+            i + 1,
+            s.intent
+        );
+    }
     let mut species: Vec<&str> = catches
         .iter()
-        .filter_map(|s| match &s.intent {
+        .filter_map(|(_, s)| match &s.intent {
             Intent::Catch { species, .. } => Some(species.as_str()),
             _ => None,
         })
         .collect();
     species.sort();
     species.dedup();
-    assert_eq!(species.len(), 7, "seven different species");
+    assert_eq!(species.len(), catches.len(), "different species each");
     assert!(!species
         .iter()
         .any(|s| ["SPECIES_RATTATA", "SPECIES_PIDGEY", "SPECIES_CATERPIE"].contains(s)));
+    // The story's own walks carry the expectations (Mt. Moon is the
+    // first), and the balls for them are bought ahead of the story.
+    let mt_moon = position(
+        &plan,
+        |i| matches!(i, Intent::Go { dest } if dest == "MtMoon_B2F"),
+    );
+    assert!(plan.intents[mt_moon].expected_new_species() > 0.5);
+    let buy = position(
+        &plan,
+        |i| matches!(i, Intent::Buy { item, .. } if item == "ITEM_POKE_BALL"),
+    );
+    assert!(buy < mt_moon, "balls at {buy}, Mt. Moon at {mt_moon}");
+    // Every explicit catch's area lies after the story; no catch before
+    // Cut is taught.
+    assert!(
+        !plan.intents[..teach]
+            .iter()
+            .any(|s| matches!(s.intent, Intent::Catch { .. })),
+        "a catch before Cut"
+    );
+    // Bootstrap audit (§4.6.3): the Route 4 Center is next door and the
+    // boxes unknown, so the plan opens with the PC.
+    let pc = position(&plan, |i| {
+        matches!(
+            i,
+            Intent::Probe {
+                fact: ProbeFact::PcBoxes
+            }
+        )
+    });
+    assert!(pc <= 1, "PC audit at {pc}");
+    assert!(
+        matches!(&plan.intents[0].intent, Intent::Go { dest } if dest == "Route4_PokemonCenter_1F")
+    );
     for (i, s) in plan.intents.iter().enumerate() {
         if let Intent::Catch { map, .. } = &s.intent {
             let go = plan.intents[..i]
@@ -569,6 +641,127 @@ fn cerulean_from_route2_returns_within_the_budget_with_the_fossil() {
     );
     let again = planner.plan(&goal, &knowledge, pose).unwrap();
     assert_eq!(plan, again);
+}
+
+/// The first Switch goal run: a Lv6 Bulbasaur at 10/22 HP in Oak's lab
+/// after DeliverParcel, boxes unknown, nothing else observed.
+fn fresh_game() -> (SavedKnowledge, Option<PlayerPose>) {
+    checkpoint("fresh_game_state.json")
+}
+
+/// The first Switch goal run sent the 10/22 HP starter onto Route 1 and it
+/// whited out: a walk through wild encounters, a hunt or a training session
+/// needs the lead at half its HP or more, so the plan heals first, at Mom's
+/// (the respawn heal spot two doors away), by least commitment right ahead
+/// of the walk; with the boxes unknown the PC audit rides on that heal.
+#[test]
+fn a_low_lead_heals_before_the_first_walk_through_grass() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, pose) = fresh_game();
+    let plan = planner
+        .plan(&GoalPredicate::badge(1), &knowledge, pose.clone())
+        .unwrap();
+    print(&plan, 20);
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    let heal = position(
+        &plan,
+        |i| matches!(i, Intent::Heal { center } if center == "PalletTown_PlayersHouse_1F"),
+    );
+    let first_grass = plan
+        .intents
+        .iter()
+        .position(
+            |s| matches!(&s.intent, Intent::Go { dest } if dest == "Route22" || dest == "Route1"),
+        )
+        .expect("a walk onto a route");
+    let train = position(&plan, |i| matches!(i, Intent::Train { .. }));
+    assert!(heal < first_grass && heal < train, "heal at {heal}");
+    assert!(
+        matches!(&plan.intents[heal - 1].intent, Intent::Go { dest } if dest == "PalletTown_PlayersHouse_1F"),
+        "the trip home precedes the heal"
+    );
+    let pc = position(&plan, |i| {
+        matches!(
+            i,
+            Intent::Probe {
+                fact: ProbeFact::PcBoxes
+            }
+        )
+    });
+    assert_eq!(pc, heal + 1, "the box audit rides on the heal");
+    let brock = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script.contains("Brock")),
+    );
+    assert_eq!(brock, plan.intents.len() - 1);
+    let again = planner
+        .plan(&GoalPredicate::badge(1), &knowledge, pose)
+        .unwrap();
+    assert_eq!(plan, again);
+}
+
+/// The League from a fresh game: readiness that falls short of the
+/// confidence target is a `Train` to the best level the window finds,
+/// marked for re-evaluation, never an `Unsupported` placeholder that fails
+/// on execution; the lead's level carries over from one training to the
+/// next, so the levels climb instead of restarting from Lv6 at every gym.
+#[test]
+fn readiness_that_falls_short_trains_as_far_as_it_can_and_is_judged_again() {
+    let Some(f) = fixture() else { return };
+    let options = PlanOptions {
+        budget_s: 180.0,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = fresh_game();
+    let goal = parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap();
+    let started = Instant::now();
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    println!("planned in {:.1} s", started.elapsed().as_secs_f64());
+    print(&plan, 90);
+    for reason in plan.blocked() {
+        assert!(
+            !reason.contains("training") && !reason.contains("readies"),
+            "readiness placeholder: {reason}"
+        );
+    }
+    let trains: Vec<(u8, &pokebot_planner::PlannedIntent)> = plan
+        .intents
+        .iter()
+        .filter_map(|s| match &s.intent {
+            Intent::Train { level, .. } => Some((*level, s)),
+            _ => None,
+        })
+        .collect();
+    assert!(trains.len() >= 3, "{} Train steps", trains.len());
+    for w in trains.windows(2) {
+        assert!(w[0].0 <= w[1].0, "levels fall: {} then {}", w[0].0, w[1].0);
+    }
+    // A shortfall is marked on the training that leaves it, with the
+    // confidence it reaches, and never priced as a placeholder.
+    let short: Vec<_> = trains
+        .iter()
+        .filter(|(_, s)| {
+            s.note
+                .as_deref()
+                .is_some_and(|n| n.contains("reaches only"))
+        })
+        .collect();
+    assert!(!short.is_empty(), "no shortfall marked from a Lv6 starter");
+    for (_, s) in &short {
+        assert!(s
+            .expected
+            .iter()
+            .any(|(p, prob)| matches!(p, GoalPredicate::CanBeat { .. }) && *prob < 0.9));
+    }
+    assert!(!plan.intents.iter().any(
+        |s| matches!(&s.intent, Intent::Unsupported { reason, .. } if reason.contains("training"))
+    ),);
+    // The heal comes first here too.
+    let heal = position(&plan, |i| matches!(i, Intent::Heal { .. }));
+    let train = position(&plan, |i| matches!(i, Intent::Train { .. }));
+    assert!(heal < train);
 }
 
 #[test]

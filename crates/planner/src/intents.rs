@@ -49,7 +49,18 @@ pub enum GoalPredicate {
     Healed {
         healed: bool,
     },
+    /// The lead's HP is at least this share of its maximum (percent): what
+    /// a walk through encounter tiles, a hunt or a training session needs
+    /// (the story runner's threshold), else a heal first.
+    LeadHp {
+        lead_hp: u8,
+    },
 }
+
+/// The lead's HP share (percent) a walk through wild encounters, a `Train`
+/// or a `Catch` needs (the first Switch goal run sent a 10/22 HP Bulbasaur
+/// onto Route 1 and whited out).
+pub const LEAD_HP_MIN: u8 = 50;
 
 impl GoalPredicate {
     pub fn flag(name: &str, is: bool) -> GoalPredicate {
@@ -95,6 +106,10 @@ impl GoalPredicate {
 
     pub fn pokedex_seen(ge: u16) -> GoalPredicate {
         GoalPredicate::PokedexSeen { ge }
+    }
+
+    pub fn lead_hp(lead_hp: u8) -> GoalPredicate {
+        GoalPredicate::LeadHp { lead_hp }
     }
 
     /// The predicate that rules this one out, when one exists: a flag with
@@ -224,6 +239,7 @@ impl fmt::Display for GoalPredicate {
             GoalPredicate::Money { money } => write!(f, "Money(≥{money})"),
             GoalPredicate::Healed { healed: true } => write!(f, "Healed"),
             GoalPredicate::Healed { healed: false } => write!(f, "!Healed"),
+            GoalPredicate::LeadHp { lead_hp } => write!(f, "LeadHp(≥{lead_hp}%)"),
         }
     }
 }
@@ -248,6 +264,10 @@ pub enum ProbeFact {
     Pokedex,
     /// Species, levels, HP and moves.
     Party,
+    /// The PC boxes (spec §4.6.3): audited where the plan already is at a
+    /// Pokémon Center. No tool serves it yet; the goal loop marks it
+    /// infeasible after two failures and the planner leaves it out.
+    PcBoxes,
 }
 
 impl ProbeFact {
@@ -258,6 +278,7 @@ impl ProbeFact {
             ProbeFact::FlyMap => 8.0,
             ProbeFact::Pokedex => 15.0,
             ProbeFact::Party => 8.0,
+            ProbeFact::PcBoxes => 40.0,
         }
     }
 
@@ -280,7 +301,9 @@ impl ProbeFact {
             GoalPredicate::PokedexCaught { .. } | GoalPredicate::PokedexSeen { .. } => {
                 Some(ProbeFact::TrainerCard)
             }
-            GoalPredicate::CanBeat { .. } | GoalPredicate::Healed { .. } => Some(ProbeFact::Party),
+            GoalPredicate::CanBeat { .. }
+            | GoalPredicate::Healed { .. }
+            | GoalPredicate::LeadHp { .. } => Some(ProbeFact::Party),
             GoalPredicate::Money { .. } => Some(ProbeFact::TrainerCard),
             GoalPredicate::World(_) => None,
         }
@@ -295,6 +318,7 @@ impl fmt::Display for ProbeFact {
             ProbeFact::FlyMap => write!(f, "fly map"),
             ProbeFact::Pokedex => write!(f, "pokedex"),
             ProbeFact::Party => write!(f, "party"),
+            ProbeFact::PcBoxes => write!(f, "pc boxes"),
         }
     }
 }
@@ -534,7 +558,9 @@ impl Intent {
             Intent::Beat { trainer, map } => {
                 vec![GoalPredicate::at(map), GoalPredicate::can_beat(trainer)]
             }
-            Intent::Train { map, .. } => vec![GoalPredicate::at(map)],
+            Intent::Train { map, .. } => {
+                vec![GoalPredicate::at(map), GoalPredicate::lead_hp(LEAD_HP_MIN)]
+            }
             Intent::Catch {
                 map, slot, balls, ..
             } => {
@@ -543,6 +569,7 @@ impl Intent {
                     pre.push(GoalPredicate::party_has_move("MOVE_SURF"));
                 }
                 pre.push(GoalPredicate::has_item(&best_ball(ctx), *balls));
+                pre.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
                 pre
             }
             Intent::Buy { item, count, map } => {
@@ -585,9 +612,10 @@ impl Intent {
                 .into_iter()
                 .map(Effect::Establishes)
                 .collect(),
-            Intent::Heal { .. } => {
-                vec![Effect::Establishes(GoalPredicate::Healed { healed: true })]
-            }
+            Intent::Heal { .. } => vec![
+                Effect::Establishes(GoalPredicate::Healed { healed: true }),
+                Effect::Establishes(GoalPredicate::lead_hp(100)),
+            ],
             Intent::Beat { trainer, .. } => {
                 vec![Effect::Establishes(GoalPredicate::flag(trainer, true))]
             }

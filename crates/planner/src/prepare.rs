@@ -210,6 +210,17 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
+/// Levels the plan's training adds up to.
+fn levels_gained(plan: &PreparationPlan) -> u32 {
+    plan.steps
+        .iter()
+        .map(|s| match s {
+            PlanStep::Train { from, to, .. } => u32::from(to.saturating_sub(*from)),
+            PlanStep::Catch { .. } => 0,
+        })
+        .sum()
+}
+
 fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(String, f64)> {
     targets
         .iter()
@@ -306,8 +317,12 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 .total_cmp(&b.minutes)
                 .then_with(|| b.min_confidence().total_cmp(&a.min_confidence()))
         } else {
+            // Nothing reaches the target: the most confident best effort,
+            // and at equal confidence the one that trains furthest (the
+            // party is judged again after it), not the one that does least.
             b.min_confidence()
                 .total_cmp(&a.min_confidence())
+                .then_with(|| levels_gained(b).cmp(&levels_gained(a)))
                 .then_with(|| a.minutes.total_cmp(&b.minutes))
         }
         .then_with(|| format!("{:?}", a.steps).cmp(&format!("{:?}", b.steps)))

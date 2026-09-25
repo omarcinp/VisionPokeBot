@@ -759,7 +759,8 @@ pub fn provenance(knowledge: &SavedKnowledge, p: &GoalPredicate) -> KnowledgeSou
         GoalPredicate::World(Predicate::At { .. }) => KnowledgeSource::Observed,
         GoalPredicate::World(Predicate::PartyHasMove { .. })
         | GoalPredicate::CanBeat { .. }
-        | GoalPredicate::Healed { .. } => knowledge.party.source,
+        | GoalPredicate::Healed { .. }
+        | GoalPredicate::LeadHp { .. } => knowledge.party.source,
         GoalPredicate::Caught { caught } => knowledge
             .pokedex
             .caught
