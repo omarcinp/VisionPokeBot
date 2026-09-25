@@ -90,6 +90,7 @@ impl SessionRecorder {
         }
         let record = FrameRecord {
             frame_id: normalized.frame_id,
+            delivered: Some(captured.delivered),
             elapsed_us: self.elapsed_us(normalized.captured_at),
             fingerprint: format!("{:016x}", normalized.image().fingerprint()),
             file,

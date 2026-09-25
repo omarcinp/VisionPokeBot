@@ -31,7 +31,12 @@ impl StateReducer for DefaultReducer {
                     state.input.last_command = Some(command.clone());
                     state.input.last_command_frame = Some(record.frame_id);
                 }
-                GameEvent::FramesDropped { missing } => state.dropped_frames += missing,
+                GameEvent::FramesDroppedByCard { missing, .. } => {
+                    state.frames_dropped_by_card += missing;
+                }
+                GameEvent::FramesDroppedByProcessing { missing, .. } => {
+                    state.frames_dropped_by_processing += missing;
+                }
                 GameEvent::GoalProgress {
                     goal,
                     phase,
@@ -147,7 +152,11 @@ mod tests {
             },
             EventRecord {
                 frame_id: 9,
-                event: GameEvent::FramesDropped { missing: 3 },
+                event: GameEvent::FramesDroppedByProcessing {
+                    missing: 3,
+                    seen: 1,
+                    window_ms: 1000,
+                },
             },
         ];
         let reducer = DefaultReducer;
@@ -160,7 +169,7 @@ mod tests {
         assert_eq!(all_at_once.screen.source, KnowledgeSource::Observed);
         assert_eq!(all_at_once.screen.last_verified_frame, Some(5));
         assert_eq!(all_at_once.input.commands_issued, 1);
-        assert_eq!(all_at_once.dropped_frames, 3);
+        assert_eq!(all_at_once.frames_dropped_by_processing, 3);
 
         let back_to_unknown = reducer.reduce(
             &all_at_once,

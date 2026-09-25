@@ -1135,6 +1135,7 @@ fn inspect(
         let (width, height) = (image.width(), image.height());
         let captured = CapturedFrame {
             frame_id: 0,
+            delivered: 0,
             captured_at: std::time::Instant::now(),
             image,
         };

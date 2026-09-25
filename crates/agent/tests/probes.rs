@@ -58,6 +58,7 @@ impl VideoSource for BlankVideo {
     fn next_frame(&mut self) -> pokebot_core::Result<CapturedFrame> {
         let frame = CapturedFrame {
             frame_id: self.next,
+            delivered: self.next,
             captured_at: Instant::now(),
             image: RgbImage::filled(240, 160, [0, 0, 0]),
         };

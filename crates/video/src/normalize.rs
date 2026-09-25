@@ -256,6 +256,7 @@ mod tests {
     fn captured(image: RgbImage) -> CapturedFrame {
         CapturedFrame {
             frame_id: 7,
+            delivered: 7,
             captured_at: Instant::now(),
             image,
         }

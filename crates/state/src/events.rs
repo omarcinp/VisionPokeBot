@@ -1,4 +1,6 @@
-use pokebot_core::ControllerCommand;
+use std::time::{Duration, Instant};
+
+use pokebot_core::{CapturedFrame, ControllerCommand};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -59,10 +61,21 @@ pub enum GameEvent {
         from: PlayerPose,
         to: PlayerPose,
     },
-    /// The video source skipped frame ids (the bot read too slowly or the
-    /// device dropped frames).
-    FramesDropped {
+    /// Over a window of `window_ms`, the video device delivered `delivered`
+    /// frames and never delivered `missing` (driver drops, empty buffers),
+    /// too few for the [`FrameDropPolicy`]. Faster windows are not reported.
+    FramesDroppedByCard {
         missing: u64,
+        delivered: u64,
+        window_ms: u64,
+    },
+    /// Over a window of `window_ms`, the bot processed `seen` of the frames
+    /// the device delivered and `missing` were replaced before it read them,
+    /// too many for the [`FrameDropPolicy`].
+    FramesDroppedByProcessing {
+        missing: u64,
+        seen: u64,
+        window_ms: u64,
     },
     /// A party member known without seeing it (story, legacy data).
     PartyMonDerived {
@@ -266,8 +279,83 @@ pub struct EventRecord {
     pub event: GameEvent,
 }
 
+/// When skipped frames are worth an event. Frames are summed over a window
+/// and reported only when the window is slow, per cause: a card that
+/// delivers half its frames or a loop that reads every other one is harmless
+/// and would otherwise log on every frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameDropPolicy {
+    /// Report a window where more than this share of the frames were
+    /// dropped: of the frame ids by the card, of the delivered frames by
+    /// processing.
+    pub max_drop_percent: u32,
+    /// Report a window where fewer frames per second than this were
+    /// delivered (card) or, with frames dropped, processed (processing).
+    pub min_fps: f64,
+    pub window: Duration,
+}
+
+impl FrameDropPolicy {
+    fn exceeds_percent(&self, missing: u64, kept: u64) -> bool {
+        missing * 100 > u64::from(self.max_drop_percent) * (missing + kept)
+    }
+
+    fn below_min_fps(&self, frames: u64, span: Duration) -> bool {
+        (frames as f64) / span.as_secs_f64() < self.min_fps
+    }
+}
+
+impl Default for FrameDropPolicy {
+    fn default() -> Self {
+        Self {
+            max_drop_percent: 60,
+            min_fps: 10.0,
+            window: Duration::from_secs(1),
+        }
+    }
+}
+
+/// How a frame arrived: when, and its place in the source's frame ids and
+/// in the frames it delivered (see [`CapturedFrame::delivered`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FrameArrival {
+    pub frame_id: u64,
+    pub delivered: u64,
+    pub captured_at: Instant,
+}
+
+impl From<&CapturedFrame> for FrameArrival {
+    fn from(frame: &CapturedFrame) -> Self {
+        Self {
+            frame_id: frame.frame_id,
+            delivered: frame.delivered,
+            captured_at: frame.captured_at,
+        }
+    }
+}
+
+/// Frames processed and dropped, by cause, since `start`.
+#[derive(Debug, Clone)]
+struct DropWindow {
+    start: Instant,
+    seen: u64,
+    dropped_by_card: u64,
+    dropped_by_processing: u64,
+}
+
+impl DropWindow {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            seen: 0,
+            dropped_by_card: 0,
+            dropped_by_processing: 0,
+        }
+    }
+}
+
 /// Turns the observation stream into events. Deterministic: the same
-/// observations always produce the same events.
+/// observations and capture times always produce the same events.
 ///
 /// A new screen classification must persist for `confirm_frames` consecutive
 /// frames before `ScreenChanged` is emitted, so single-frame flicker during
@@ -278,6 +366,9 @@ pub struct EventExtractor {
     confirmed: ScreenState,
     candidate: Option<(ScreenState, u32)>,
     last_frame_id: Option<u64>,
+    last_arrival: Option<FrameArrival>,
+    drop_policy: FrameDropPolicy,
+    drop_window: Option<DropWindow>,
     pose: Option<PlayerPose>,
     pose_candidate: Option<(PlayerPose, u32)>,
 }
@@ -289,21 +380,29 @@ impl EventExtractor {
             confirmed: ScreenState::Unknown,
             candidate: None,
             last_frame_id: None,
+            last_arrival: None,
+            drop_policy: FrameDropPolicy::default(),
+            drop_window: None,
             pose: None,
             pose_candidate: None,
         }
     }
 
-    pub fn observe(&mut self, observation: &Observation) -> Vec<EventRecord> {
+    pub fn with_drop_policy(mut self, policy: FrameDropPolicy) -> Self {
+        self.drop_policy = policy;
+        self
+    }
+
+    /// `arrival` is how the observed frame came from the video source; it
+    /// feeds the dropped-frame windows.
+    pub fn observe(
+        &mut self,
+        observation: &Observation,
+        arrival: FrameArrival,
+    ) -> Vec<EventRecord> {
         let frame_id = observation.frame_id;
-        let mut events = Vec::new();
-        if let Some(last) = self.last_frame_id {
-            let missing = frame_id.saturating_sub(last + 1);
-            if missing > 0 {
-                events.push(GameEvent::FramesDropped { missing });
-            }
-        }
         self.last_frame_id = Some(frame_id);
+        let mut events = self.count_frame(arrival);
 
         let seen = observation.screen.value;
         if seen == self.confirmed {
@@ -360,6 +459,52 @@ impl EventExtractor {
             .collect()
     }
 
+    /// Adds a frame to the dropped-frame window; closes the window once it
+    /// spans the policy's duration, returning events for the causes that
+    /// made it slow.
+    fn count_frame(&mut self, arrival: FrameArrival) -> Vec<GameEvent> {
+        let (Some(last), Some(window)) =
+            (self.last_arrival.replace(arrival), &mut self.drop_window)
+        else {
+            self.drop_window = Some(DropWindow::new(arrival.captured_at));
+            return Vec::new();
+        };
+        let ids = arrival.frame_id.saturating_sub(last.frame_id);
+        let delivered = arrival.delivered.saturating_sub(last.delivered);
+        window.seen += 1;
+        window.dropped_by_card += ids.saturating_sub(delivered);
+        window.dropped_by_processing += delivered.saturating_sub(1);
+        let span = arrival.captured_at.saturating_duration_since(window.start);
+        if span < self.drop_policy.window {
+            return Vec::new();
+        }
+        let closed = std::mem::replace(window, DropWindow::new(arrival.captured_at));
+        let policy = &self.drop_policy;
+        let window_ms = span.as_millis() as u64;
+        let delivered = closed.seen + closed.dropped_by_processing;
+        let mut events = Vec::new();
+        if policy.exceeds_percent(closed.dropped_by_card, delivered)
+            || policy.below_min_fps(delivered, span)
+        {
+            events.push(GameEvent::FramesDroppedByCard {
+                missing: closed.dropped_by_card,
+                delivered,
+                window_ms,
+            });
+        }
+        if closed.dropped_by_processing > 0
+            && (policy.exceeds_percent(closed.dropped_by_processing, closed.seen)
+                || policy.below_min_fps(closed.seen, span))
+        {
+            events.push(GameEvent::FramesDroppedByProcessing {
+                missing: closed.dropped_by_processing,
+                seen: closed.seen,
+                window_ms,
+            });
+        }
+        events
+    }
+
     pub fn input(&self, command_id: u64, command: &ControllerCommand) -> EventRecord {
         EventRecord {
             frame_id: self.last_frame_id.unwrap_or(0),
@@ -395,16 +540,25 @@ mod tests {
 
     #[test]
     fn screen_change_needs_confirmation() {
+        let at = |id| FrameArrival {
+            frame_id: id,
+            delivered: id,
+            captured_at: Instant::now(),
+        };
         let mut extractor = EventExtractor::new(2);
-        assert!(extractor.observe(&obs(0, ScreenState::Unknown)).is_empty());
         assert!(extractor
-            .observe(&obs(1, ScreenState::Transition))
+            .observe(&obs(0, ScreenState::Unknown), at(0))
             .is_empty());
-        assert!(extractor.observe(&obs(2, ScreenState::Unknown)).is_empty());
         assert!(extractor
-            .observe(&obs(3, ScreenState::Transition))
+            .observe(&obs(1, ScreenState::Transition), at(1))
             .is_empty());
-        let events = extractor.observe(&obs(4, ScreenState::Transition));
+        assert!(extractor
+            .observe(&obs(2, ScreenState::Unknown), at(2))
+            .is_empty());
+        assert!(extractor
+            .observe(&obs(3, ScreenState::Transition), at(3))
+            .is_empty());
+        let events = extractor.observe(&obs(4, ScreenState::Transition), at(4));
         assert_eq!(
             events,
             vec![EventRecord {
@@ -418,11 +572,110 @@ mod tests {
         );
     }
 
+    /// Feeds `seconds` of a 60 fps source whose card delivers every
+    /// `card_step`-th frame id to a loop that reads every `bot_step`-th
+    /// delivered frame; returns the dropped-frame events.
+    fn run_source(
+        extractor: &mut EventExtractor,
+        card_step: u64,
+        bot_step: u64,
+        seconds: u64,
+    ) -> Vec<GameEvent> {
+        let start = Instant::now();
+        (0..seconds * 60)
+            .step_by((card_step * bot_step) as usize)
+            .flat_map(|id| {
+                let arrival = FrameArrival {
+                    frame_id: id,
+                    delivered: id / card_step,
+                    captured_at: start + Duration::from_micros(id * 1_000_000 / 60),
+                };
+                extractor.observe(&obs(id, ScreenState::Unknown), arrival)
+            })
+            .map(|record| record.event)
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::FramesDroppedByCard { .. }
+                        | GameEvent::FramesDroppedByProcessing { .. }
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn reports_dropped_frames() {
+    fn dropping_half_the_frames_is_not_reported() {
+        assert!(run_source(&mut EventExtractor::new(1), 2, 1, 10).is_empty());
+        assert!(run_source(&mut EventExtractor::new(1), 1, 2, 10).is_empty());
+    }
+
+    #[test]
+    fn card_drops_are_told_apart_from_processing_drops() {
+        let events = run_source(&mut EventExtractor::new(1), 3, 1, 3);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            GameEvent::FramesDroppedByCard {
+                missing: 40,
+                delivered: 20,
+                window_ms: 1000
+            }
+        );
+        let events = run_source(&mut EventExtractor::new(1), 1, 3, 3);
+        assert_eq!(
+            events[0],
+            GameEvent::FramesDroppedByProcessing {
+                missing: 40,
+                seen: 20,
+                window_ms: 1000
+            }
+        );
+    }
+
+    #[test]
+    fn reports_windows_below_the_minimum_fps() {
+        let policy = FrameDropPolicy {
+            max_drop_percent: 100,
+            ..FrameDropPolicy::default()
+        };
+        let quiet = |card_step, bot_step| {
+            let mut extractor = EventExtractor::new(1).with_drop_policy(policy);
+            run_source(&mut extractor, card_step, bot_step, 3)
+        };
+        assert!(quiet(6, 1).is_empty()); // the card delivers 10 fps
+        assert!(matches!(
+            quiet(12, 1)[..],
+            [GameEvent::FramesDroppedByCard { delivered: 5, .. }, _]
+        ));
+        assert!(matches!(
+            quiet(1, 12)[..],
+            [GameEvent::FramesDroppedByProcessing { seen: 5, .. }, _]
+        ));
+        // A card at 5 fps read in full is the card's fault only.
+        assert!(quiet(12, 1)
+            .iter()
+            .all(|e| matches!(e, GameEvent::FramesDroppedByCard { .. })));
+    }
+
+    #[test]
+    fn a_stall_is_reported_once() {
+        let start = Instant::now();
+        let at = |id, ms| FrameArrival {
+            frame_id: id,
+            delivered: id,
+            captured_at: start + Duration::from_millis(ms),
+        };
         let mut extractor = EventExtractor::new(1);
-        extractor.observe(&obs(10, ScreenState::Unknown));
-        let events = extractor.observe(&obs(13, ScreenState::Unknown));
-        assert_eq!(events[0].event, GameEvent::FramesDropped { missing: 2 });
+        extractor.observe(&obs(0, ScreenState::Unknown), at(0, 0));
+        extractor.observe(&obs(1, ScreenState::Unknown), at(1, 17));
+        let events = extractor.observe(&obs(180, ScreenState::Unknown), at(180, 3000));
+        assert_eq!(
+            events[0].event,
+            GameEvent::FramesDroppedByProcessing {
+                missing: 178,
+                seen: 2,
+                window_ms: 3000
+            }
+        );
     }
 }

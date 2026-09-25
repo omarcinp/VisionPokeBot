@@ -83,6 +83,7 @@ impl VideoSource for ScriptedVideo {
         let i = self.next.min(self.frames.len() - 1);
         let frame = CapturedFrame {
             frame_id: self.next as u64,
+            delivered: self.next as u64,
             captured_at: Instant::now(),
             image: self.frames[i].clone(),
         };
