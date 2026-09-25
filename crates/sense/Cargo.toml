@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 pokebot-gamedata.workspace = true
 pokebot-state.workspace = true
+pokebot-world.workspace = true
 
 [dev-dependencies]
 serde_json = "1.0.151"

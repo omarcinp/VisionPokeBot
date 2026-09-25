@@ -49,8 +49,13 @@ pub struct GoalStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlayerState {
-    /// Last confirmed position (Observed when matched on screen).
+    /// Last confirmed position (Observed when matched on screen, Derived
+    /// when inferred among lookalike maps).
     pub pose: Knowledge<PlayerPose>,
+    /// While the location is unconfirmed: the maps (with the tile) the
+    /// player may be on. Empty once a frame names the map.
+    #[serde(default)]
+    pub candidates: Vec<PlayerPose>,
 }
 
 /// Everything the bot believes about the game. Grows phase by phase (world

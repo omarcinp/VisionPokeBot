@@ -262,9 +262,16 @@ impl Runtime {
             .observe(&observation, FrameArrival::from(&captured));
         if let Some(sensor) = &mut self.sensor {
             let frame_id = observation.frame_id;
+            let sensed = sensor.observe(&observation, &self.state);
+            // A pose the sensor inferred among lookalike maps: perception
+            // tracks from it, reporting what it tracks as inferred too.
+            for event in &sensed {
+                if let GameEvent::PlayerInferred { pose, .. } = event {
+                    self.perception.set_pose_hint_inferred(pose.clone());
+                }
+            }
             events.extend(
-                sensor
-                    .observe(&observation, &self.state)
+                sensed
                     .into_iter()
                     .map(|event| EventRecord { frame_id, event }),
             );
@@ -359,6 +366,12 @@ impl Runtime {
             .persist_save
             .as_ref()
             .map_or(Ok(()), |persist| persist())
+    }
+
+    /// A working hypothesis among lookalike maps: perception tracks from
+    /// it and reports what it tracks as inferred.
+    pub fn set_pose_hint_inferred(&mut self, pose: pokebot_state::PlayerPose) {
+        self.perception.set_pose_hint_inferred(pose);
     }
 
     /// Tells perception where the player is believed to be.
@@ -586,6 +599,13 @@ fn describe_change(change: &StateChange) -> String {
             format!("Player ({}, {}) → ({}, {})", from.x, from.y, to.x, to.y)
         }
         C::MapChanged { from, to } => format!("Map {} → {to}", from.map),
+        C::LocationAmbiguous { candidates } => {
+            format!("Location ambiguous: {} lookalike maps", candidates.len())
+        }
+        C::LocationConfirmed { pose } => format!(
+            "Location confirmed: {}",
+            pose.as_ref().map_or("?".into(), |p| p.to_string())
+        ),
         C::NpcMoved {
             map,
             local_id,
@@ -648,6 +668,21 @@ fn summarize(event: &GameEvent) -> String {
             from.x, from.y, to.x, to.y
         ),
         GameEvent::MapChanged { from, to } => format!("MapChanged {} → {to}", from.map),
+        GameEvent::PlayerInferred { pose, candidates } if candidates.is_empty() => {
+            format!("PlayerInferred {pose} (lookalike maps; from the state)")
+        }
+        GameEvent::PlayerInferred { pose, candidates } => format!(
+            "PlayerInferred {pose} (working hypothesis among {} lookalikes)",
+            candidates.len()
+        ),
+        GameEvent::LocationAmbiguous { candidates } => format!(
+            "LocationAmbiguous: one of {}",
+            candidates
+                .iter()
+                .map(|p| p.map.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         GameEvent::ScreenChanged { from, to, detector } => {
             format!("ScreenChanged {from:?} → {to:?} ({detector})")
         }

@@ -333,6 +333,15 @@ pub struct Observation {
     pub naming: Option<NamingObservation>,
     /// Player position, when the overworld could be matched to the map.
     pub player: Option<PoseObservation>,
+    /// Maps that match the frame equally well, each with the player's
+    /// tile (maps that share a layout: every Pokémon Center); `player` is
+    /// `None` then. Only on frames that searched every map.
+    #[serde(default)]
+    pub pose_candidates: Vec<PoseObservation>,
+    /// `player` was tracked from a pose the frames alone never confirmed
+    /// (an inferred one, on a map that has lookalikes).
+    #[serde(default)]
+    pub pose_inferred: bool,
     pub battle: Option<BattleObservation>,
     #[serde(default)]
     pub move_list: Option<MoveListObservation>,
@@ -405,6 +414,8 @@ impl Observation {
             menu_lines: Vec::new(),
             naming: None,
             player: None,
+            pose_candidates: Vec::new(),
+            pose_inferred: false,
             battle: None,
             move_list: None,
             bag: None,

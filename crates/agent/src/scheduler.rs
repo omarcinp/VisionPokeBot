@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Need {
+    /// The player is on one of several lookalike maps
+    /// (`state.player.candidates`): walk out to see which.
+    ConfirmLocation,
     AuditParty,
     HealUrgent,
     HealSoon,
@@ -34,7 +37,9 @@ pub fn layer(event: &GameEvent) -> Option<Layer> {
         | GameEvent::MovesObserved { .. }
         | GameEvent::Healed
         | GameEvent::BattleEnded
-        | GameEvent::Evolved { .. } => Some(Layer::Goals),
+        | GameEvent::Evolved { .. }
+        | GameEvent::LocationAmbiguous { .. }
+        | GameEvent::PlayerInferred { .. } => Some(Layer::Goals),
         GameEvent::FlagObserved { .. }
         | GameEvent::FlagTracked { .. }
         | GameEvent::VarObserved { .. }
@@ -176,6 +181,12 @@ impl Scheduler {
         }
         if need == Some(Need::HealSoon) {
             self.queue.push_back(Need::HealSoon);
+        }
+        // Every need starts from where the player is: an unconfirmed
+        // location goes first (a heal's route from the wrong Center would
+        // lead nowhere).
+        if !state.player.candidates.is_empty() {
+            self.queue.push_front(Need::ConfirmLocation);
         }
         old != self.queue
     }
@@ -431,6 +442,39 @@ mod tests {
             &d,
         );
         assert!(s.queue.is_empty());
+    }
+
+    #[test]
+    fn an_unconfirmed_location_goes_first_and_clears_with_the_candidates() {
+        let d = data();
+        let center = |map: &str| PlayerPose {
+            map: map.into(),
+            x: 7,
+            y: 4,
+        };
+        let mut state = GameState {
+            party: Knowledge::observed(vec![mon(45)], 1),
+            ..Default::default()
+        };
+        state.player.candidates = vec![
+            center("PewterCity_PokemonCenter_1F"),
+            center("ViridianCity_PokemonCenter_1F"),
+        ];
+        let mut s = Scheduler {
+            enabled: true,
+            ..Default::default()
+        };
+        let ambiguous = GameEvent::LocationAmbiguous {
+            candidates: state.player.candidates.clone(),
+        };
+        assert!(s.event(&ambiguous, &state, &d));
+        assert_eq!(
+            s.queue,
+            VecDeque::from([Need::ConfirmLocation, Need::HealUrgent])
+        );
+        state.player.candidates.clear();
+        s.event(&GameEvent::BattleEnded, &state, &d);
+        assert_eq!(s.queue, VecDeque::from([Need::HealUrgent]));
     }
 
     #[test]

@@ -818,3 +818,122 @@ fn an_npc_turns_when_its_facing_holds() {
     assert_eq!(turns, [Some(Direction::Left), Some(Direction::Down)]);
     assert_eq!(state.view.npcs[0].facing, Some(Direction::Down));
 }
+
+fn world() -> Option<Arc<pokebot_world::World>> {
+    pokebot_world::World::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world"))
+        .ok()
+        .map(Arc::new)
+}
+
+fn pose(map: &str, x: i32, y: i32) -> pokebot_state::PlayerPose {
+    pokebot_state::PlayerPose {
+        map: map.into(),
+        x,
+        y,
+    }
+}
+
+/// A frame every Center matches: Pewter's and Viridian's, tile (7, 4).
+fn lookalike(frame: u64) -> Observation {
+    let mut o = bare(frame, ScreenState::Unknown);
+    o.pose_candidates = [
+        "PewterCity_PokemonCenter_1F",
+        "ViridianCity_PokemonCenter_1F",
+    ]
+    .map(|map| pokebot_state::PoseObservation {
+        pose: pose(map, 7, 4),
+        score: 990,
+    })
+    .to_vec();
+    o
+}
+
+fn committed(at: Option<pokebot_state::PlayerPose>) -> GameState {
+    let mut state = with_party();
+    state.player.pose = at.map_or(Knowledge::unknown(), |p| Knowledge::observed(p, 1));
+    state
+}
+
+#[test]
+fn lookalike_maps_are_told_apart_by_the_committed_pose() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    // Still in the same Center (after a fade or a battle).
+    let mut s = Sensor::new(Arc::clone(&d)).with_world(Arc::clone(&w));
+    let state = committed(Some(pose("PewterCity_PokemonCenter_1F", 7, 6)));
+    let (state, _) = run(&mut s, state, [lookalike(10)]);
+    assert_eq!(
+        state.player.pose.value,
+        Some(pose("PewterCity_PokemonCenter_1F", 7, 4))
+    );
+    assert_eq!(
+        state.player.pose.source,
+        pokebot_state::KnowledgeSource::Derived
+    );
+    assert!(state.player.candidates.is_empty());
+    // Walked in from the town: its warps lead to its own Center only.
+    let mut s = Sensor::new(Arc::clone(&d)).with_world(Arc::clone(&w));
+    let state = committed(Some(pose("ViridianCity", 26, 27)));
+    let (state, _) = run(&mut s, state, [lookalike(10)]);
+    assert_eq!(
+        state.player.pose.value,
+        Some(pose("ViridianCity_PokemonCenter_1F", 7, 4))
+    );
+    // Nothing committed: the respawn point (a white-out).
+    let mut s = Sensor::new(Arc::clone(&d)).with_world(Arc::clone(&w));
+    let mut state = committed(None);
+    // As the nurse's script records it: the spot outside the Center.
+    state.world.respawn = Knowledge::observed(
+        pokebot_state::HealSpot {
+            map: "PewterCity".into(),
+            x: 13,
+            y: 26,
+        },
+        1,
+    );
+    let (state, _) = run(&mut s, state, [lookalike(10)]);
+    assert_eq!(
+        state.player.pose.value,
+        Some(pose("PewterCity_PokemonCenter_1F", 7, 4))
+    );
+}
+
+#[test]
+fn lookalike_maps_nothing_points_at_are_announced_once() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    let mut s = Sensor::new(d).with_world(w);
+    let state = committed(Some(pose("Route22", 5, 5)));
+    let (state, changes) = run(&mut s, state, [lookalike(10), lookalike(40), lookalike(70)]);
+    assert_eq!(state.player.candidates.len(), 2);
+    assert_eq!(
+        state.player.pose.source,
+        pokebot_state::KnowledgeSource::Assumed
+    );
+    let announced = changes
+        .iter()
+        .filter(|c| matches!(c, StateChange::LocationAmbiguous { .. }))
+        .count();
+    assert_eq!(announced, 1, "{changes:?}");
+    // Walking out names the map: confirmed.
+    let mut outside = bare(100, ScreenState::Unknown);
+    outside.player = Some(pokebot_state::PoseObservation {
+        pose: pose("PewterCity", 13, 26),
+        score: 995,
+    });
+    let mut extractor = pokebot_state::EventExtractor::new(1);
+    let at = pokebot_state::FrameArrival {
+        frame_id: 100,
+        delivered: 100,
+        captured_at: std::time::Instant::now(),
+    };
+    let events: Vec<EventRecord> = extractor.observe(&outside, at);
+    let after = DefaultReducer.reduce(&state, &events);
+    assert!(after.player.candidates.is_empty());
+    assert!(diff(&state, &after).iter().any(|c| matches!(
+        c,
+        StateChange::LocationConfirmed { pose: Some(p) } if p.map == "PewterCity"
+    )));
+}

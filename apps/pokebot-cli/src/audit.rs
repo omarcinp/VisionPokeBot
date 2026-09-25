@@ -77,7 +77,13 @@ impl Pipeline {
         }
         Ok(Self {
             extractor: pokebot_state::EventExtractor::default(),
-            sensor: pokebot_sense::Sensor::new(Arc::new(data)),
+            sensor: {
+                let sensor = pokebot_sense::Sensor::new(Arc::new(data));
+                match args.locate {
+                    true => sensor.with_world(Arc::new(pokebot_world::World::load(&args.world)?)),
+                    false => sensor,
+                }
+            },
             state,
             out: std::io::BufWriter::new(std::fs::File::create(args.out.join("changes.jsonl"))?),
             counts: BTreeMap::new(),
@@ -85,7 +91,13 @@ impl Pipeline {
         })
     }
 
-    fn observe(&mut self, o: &Observation, record: &FrameRecord) -> Result<()> {
+    /// Returns the poses the sensor inferred, for perception to track from
+    /// (as the runtime does).
+    fn observe(
+        &mut self,
+        o: &Observation,
+        record: &FrameRecord,
+    ) -> Result<Vec<pokebot_state::PlayerPose>> {
         use std::io::Write;
         let arrival = pokebot_state::FrameArrival {
             frame_id: record.frame_id,
@@ -93,17 +105,20 @@ impl Pipeline {
             captured_at: self.epoch + std::time::Duration::from_micros(record.elapsed_us),
         };
         let mut events = self.extractor.observe(o, arrival);
-        events.extend(
-            self.sensor
-                .observe(o, &self.state)
-                .into_iter()
-                .map(|event| pokebot_state::EventRecord {
-                    frame_id: o.frame_id,
-                    event,
-                }),
-        );
+        let sensed = self.sensor.observe(o, &self.state);
+        let inferred = sensed
+            .iter()
+            .filter_map(|e| match e {
+                pokebot_state::GameEvent::PlayerInferred { pose, .. } => Some(pose.clone()),
+                _ => None,
+            })
+            .collect();
+        events.extend(sensed.into_iter().map(|event| pokebot_state::EventRecord {
+            frame_id: o.frame_id,
+            event,
+        }));
         if events.is_empty() {
-            return Ok(());
+            return Ok(inferred);
         }
         let next = pokebot_state::DefaultReducer.reduce(&self.state, &events);
         for change in pokebot_state::diff(&self.state, &next) {
@@ -121,7 +136,7 @@ impl Pipeline {
             )?;
         }
         self.state = next;
-        Ok(())
+        Ok(inferred)
     }
 }
 
@@ -306,7 +321,9 @@ pub fn run(args: AuditArgs) -> Result<()> {
                 writeln!(out, "{line}")?;
             }
             if let Some(pipeline) = &mut pipeline {
-                pipeline.observe(&o, record)?;
+                for pose in pipeline.observe(&o, record)? {
+                    p.set_pose_hint_inferred(pose);
+                }
             }
             total += 1;
             let k = kind(&o);
