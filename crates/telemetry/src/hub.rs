@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pokebot_core::{NormalizedFrame, RgbImage};
 use serde::Serialize;
@@ -43,6 +43,8 @@ pub struct Stats {
     /// Frames observed per second over the last second.
     pub fps: f64,
     pub uptime_ms: u64,
+    /// A held run keeps observing after its bot task completes or fails.
+    pub task_status: Option<&'static str>,
 }
 
 /// Everything the UI shows besides the picture.
@@ -76,6 +78,13 @@ pub(crate) struct Inner {
     pub(crate) log_tx: broadcast::Sender<LogEntry>,
     log: Mutex<Log>,
     fps_window: Mutex<VecDeque<Instant>>,
+    publish_clock: Mutex<PublishClock>,
+    publish_interval: Duration,
+}
+
+struct PublishClock {
+    last: Option<Instant>,
+    frames_seen: u64,
 }
 
 struct Log {
@@ -107,8 +116,22 @@ impl Telemetry {
                     next_seq: 0,
                 }),
                 fps_window: Mutex::new(VecDeque::new()),
+                publish_clock: Mutex::new(PublishClock {
+                    last: None,
+                    frames_seen: 0,
+                }),
+                publish_interval: Duration::ZERO,
             }),
         }
+    }
+
+    /// Sample previews/state before cloning or serializing them. Every bot
+    /// observation still contributes to throughput and frame counters.
+    pub fn with_publish_interval(mut self, interval: Duration) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure before cloning")
+            .publish_interval = interval;
+        self
     }
 
     /// Publishes the frame the bot just observed, with the state and
@@ -131,6 +154,18 @@ impl Telemetry {
             }
             window.len() as f64
         };
+        let frames_seen = {
+            let mut clock = lock(&self.inner.publish_clock);
+            clock.frames_seen += 1;
+            if clock
+                .last
+                .is_some_and(|last| now.duration_since(last) < self.inner.publish_interval)
+            {
+                return;
+            }
+            clock.last = Some(now);
+            clock.frames_seen
+        };
         self.inner.frame.send_replace(Some(FrameSnapshot {
             frame_id: frame.frame_id,
             image: Arc::new(frame.image().clone()),
@@ -140,7 +175,7 @@ impl Telemetry {
         let uptime_ms = self.elapsed_ms();
         self.inner.status.send_modify(|status| {
             status.stats.frame_id = Some(frame.frame_id);
-            status.stats.frames_seen += 1;
+            status.stats.frames_seen = frames_seen;
             status.stats.fps = fps;
             status.stats.uptime_ms = uptime_ms;
             status.state = state;
@@ -198,8 +233,18 @@ impl Telemetry {
         self.log(LogKind::Error, None, summary, &Value::Null);
     }
 
+    pub fn task_finished(&self, success: bool) {
+        self.inner.status.send_modify(|status| {
+            status.stats.task_status = Some(if success { "completed" } else { "failed" });
+        });
+    }
+
     pub(crate) fn recent_log(&self) -> Vec<LogEntry> {
         lock(&self.inner.log).entries.iter().cloned().collect()
+    }
+
+    pub(crate) fn latest_log(&self) -> Option<LogEntry> {
+        lock(&self.inner.log).entries.back().cloned()
     }
 
     fn elapsed_ms(&self) -> u64 {
@@ -209,4 +254,44 @@ impl Telemetry {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountSerializations<'a>(&'a AtomicUsize);
+    impl Serialize for CountSerializations<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            serializer.serialize_unit()
+        }
+    }
+
+    #[test]
+    fn sampling_skips_serialization_but_counts_every_observation() {
+        let telemetry =
+            Telemetry::new("test", "test").with_publish_interval(Duration::from_secs(60));
+        let count = AtomicUsize::new(0);
+        let state = CountSerializations(&count);
+        let mut frame =
+            NormalizedFrame::new(0, Instant::now(), RgbImage::filled(240, 160, [0, 0, 0])).unwrap();
+        for id in 0..100 {
+            frame.frame_id = id;
+            telemetry.publish_frame(&frame, &state, &state);
+        }
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            2,
+            "only first frame serialized"
+        );
+        telemetry.inner.publish_clock.lock().unwrap().last = None;
+        frame.frame_id = 100;
+        telemetry.publish_frame(&frame, &state, &state);
+        let status = telemetry.inner.status.borrow();
+        assert_eq!(status.stats.frames_seen, 101);
+        assert_eq!(status.stats.fps, 101.0);
+        assert_eq!(status.stats.frame_id, Some(100));
+    }
 }

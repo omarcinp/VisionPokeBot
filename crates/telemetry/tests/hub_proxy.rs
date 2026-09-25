@@ -183,3 +183,128 @@ async fn hub_redirects_lists_and_rejects() {
     let reply = get(hub, "/nope/x").await;
     assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
 }
+
+#[tokio::test]
+async fn discovers_new_worker_after_start_and_checks_process_identity() {
+    let dir = std::env::temp_dir().join(format!("hub-discovery-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(hub_proxy::run(
+        listener,
+        hub_proxy::default_routes(),
+        dir.clone(),
+    ));
+    assert!(get(addr, "/emu-test/anything")
+        .await
+        .starts_with("HTTP/1.1 404"));
+    let (backend, mut heads, release) = streaming_backend().await;
+    hub_proxy::register_worker(&dir.join("emu-test.json"), "Worker test", backend.port()).unwrap();
+    let listing = get(addr, "/api/instances").await;
+    let list: serde_json::Value =
+        serde_json::from_str(listing.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let worker = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "emu-test")
+        .unwrap();
+    assert_eq!(worker["alive"], true);
+    let pending = tokio::spawn(get(addr, "/emu-test/api/stream"));
+    assert!(heads
+        .recv()
+        .await
+        .unwrap()
+        .starts_with("GET /api/stream HTTP/1.1"));
+    release.send(()).unwrap();
+    assert!(pending.await.unwrap().contains("second"));
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("emu-test.json")).unwrap()).unwrap();
+    manifest["process_start"] = serde_json::json!("not-this-process");
+    // A different service now owns a port recorded in a stale manifest.
+    let unrelated = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    manifest["port"] = serde_json::json!(unrelated.local_addr().unwrap().port());
+    std::fs::write(dir.join("emu-test.json"), manifest.to_string()).unwrap();
+    assert_eq!(
+        hub_proxy::list_instances(&dir).last().unwrap()["alive"],
+        false
+    );
+    assert!(get(addr, "/emu-test/api/snapshot")
+        .await
+        .starts_with("HTTP/1.1 503"));
+    assert!(hub_proxy::register_worker(&dir.join("switch.json"), "bad", 1234).is_err());
+    assert!(get(addr, "/emulators/").await.contains("Start emulators"));
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+struct EchoControl;
+impl hub_proxy::FleetControl for EchoControl {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        (
+            200,
+            serde_json::json!({"method":method,"path":path,"body":body}),
+        )
+    }
+}
+
+#[tokio::test]
+async fn control_api_requires_json_header_and_reads_fragmented_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(hub_proxy::run_with_fleet(
+        listener,
+        vec![],
+        PathBuf::from("/nonexistent"),
+        Some(std::sync::Arc::new(EchoControl)),
+    ));
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(b"POST /api/emulators HTTP/1.1\r\nHost: hub\r\nContent-Length: 2\r\n\r\n{}")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    sock.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 403"));
+    let body = r#"{"count":2,"task":"new-game"}"#;
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(format!("POST /api/emulators HTTP/1.1\r\nHost: hub\r\nX-Pokebot-Control: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+    sock.write_all(&body.as_bytes()[..8]).await.unwrap();
+    tokio::task::yield_now().await;
+    sock.write_all(&body.as_bytes()[8..]).await.unwrap();
+    let mut out = String::new();
+    timeout(WAIT, sock.read_to_string(&mut out))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"));
+    let reply: serde_json::Value =
+        serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(reply["body"]["count"], 2);
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(b"POST /api/emulators HTTP/1.1\r\nHost: hub\r\nX-Pokebot-Control: 1\r\nContent-Type: application/json\r\nContent-Length: 4097\r\n\r\n").await.unwrap();
+    let mut out = String::new();
+    sock.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 400"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn hub_owns_dashboard_navigation_while_old_switch_keeps_running() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub = start_hub(vec![route(
+        "switch",
+        "Switch",
+        backend.local_addr().unwrap(),
+    )])
+    .await;
+    // Backend is reachable but needn't serve a new page (or restart its bot).
+    let reply = get(hub, "/switch/").await;
+    assert!(reply.starts_with("HTTP/1.1 200"));
+    assert!(reply.contains("['Emulators', '/emulators/'"));
+    assert!(!reply.contains("id=\"thumbs\""));
+}

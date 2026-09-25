@@ -1,4 +1,5 @@
 mod devices;
+mod fleet;
 mod goal;
 mod hub;
 mod plan;
@@ -51,6 +52,12 @@ pub(crate) struct OutputArgs {
     /// highlight the page's own instance by it
     #[arg(long, default_value = "Local")]
     instance_label: String,
+    /// Publish a loopback worker's actual port to this hub manifest
+    #[arg(long, requires = "web")]
+    instance_file: Option<PathBuf>,
+    /// Maximum telemetry updates per second (simulation remains uncapped)
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=60))]
+    telemetry_hz: u32,
     /// Record a replayable session to this directory
     #[arg(long)]
     record: Option<PathBuf>,
@@ -228,17 +235,31 @@ enum EmulatorCommand {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let managed = matches!(&cli.command,
+        Command::Run { output, .. } | Command::NewGame { output, .. } | Command::Story { output, .. }
+        if output.instance_file.is_some());
+    if managed {
+        // A hub launched from /tmp/pokebot-hub execs itself as each worker.
+        // Keep legacy pgrep-based scripts from mistaking workers for the hub.
+        // SAFETY: a static NUL-terminated name, copied by the kernel.
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, c"pokebot-worker".as_ptr(), 0, 0, 0);
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
         ctrlc::set_handler(move || {
-            if stop.swap(true, Ordering::Relaxed) {
+            // systemd can signal the whole unit while the hub also asks its
+            // children to stop. Managed workers leave escalation to the hub.
+            if stop.swap(true, Ordering::Relaxed) && !managed {
                 std::process::exit(130); // second Ctrl-C: give up on a clean exit
             }
         })
         .context("installing Ctrl-C handler")?;
     }
-    match Cli::parse().command {
+    match cli.command {
         Command::Run {
             devices,
             output,
@@ -367,8 +388,20 @@ fn attach_outputs(
     let mut hub = None;
     let mut session = None;
     if let Some(addr) = output.web {
-        let telemetry = Telemetry::new(video_name, controller_name);
+        if output.instance_file.is_some() && !addr.ip().is_loopback() {
+            bail!("instance-file requires a loopback web address");
+        }
+        let telemetry = Telemetry::new(video_name, controller_name).with_publish_interval(
+            Duration::from_secs_f64(1.0 / f64::from(output.telemetry_hz)),
+        );
         let server = pokebot_telemetry::serve(telemetry.clone(), addr, &output.instance_label)?;
+        if let Some(path) = &output.instance_file {
+            pokebot_telemetry::hub_proxy::register_worker(
+                path,
+                &output.instance_label,
+                server.addr.port(),
+            )?;
+        }
         eprintln!("web UI: http://{}", server.addr);
         runtime.attach_telemetry(telemetry.clone());
         hub = Some(telemetry);
@@ -503,6 +536,7 @@ fn new_game(
         ..Executor::default()
     };
     let result = executor.run(&mut runtime, &mut task, stop);
+    runtime.task_finished(result.is_ok());
     match &result {
         Ok(summary) => runtime.info(format!(
             "NewGame finished in {:.1} s ({} frames): {summary}",
@@ -929,6 +963,7 @@ fn story(
             }
         }
     };
+    runtime.task_finished(result.is_ok());
     if options.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
         while !stop.load(Ordering::Relaxed) {

@@ -1025,6 +1025,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "libc",
  "minifb",
  "pokebot-agent",
  "pokebot-capture-card",
