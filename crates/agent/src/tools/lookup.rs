@@ -34,6 +34,29 @@ pub fn object_script(world: &World, map: &str, object: u32) -> Option<String> {
         .and_then(|o| o.script.clone())
 }
 
+/// The object of `map` that heals the party when talked to: the one whose
+/// compiled script has a path with a `heal` effect (a Center's nurse, Mom
+/// at home). The nurse first when several qualify, then the lowest id.
+pub fn healer_on(world: &World, map: &str) -> Option<u32> {
+    let events = world.events()?;
+    let heals = |label: &str| {
+        events.script(label).is_some_and(|s| {
+            s.paths.iter().any(|p| {
+                p.does
+                    .iter()
+                    .any(|e| matches!(e, pokebot_world::events::Effect::Heal { heal: true }))
+            })
+        })
+    };
+    let nurse = object_with_graphics(world, map, NURSE_GFX);
+    events
+        .objects
+        .iter()
+        .filter(|o| o.map == map && o.script.as_deref().is_some_and(heals))
+        .map(|o| o.local_id)
+        .min_by_key(|id| (Some(*id) != nurse, *id))
+}
+
 /// The local id of the first object of `map` drawn with `graphics`.
 pub fn object_with_graphics(world: &World, map: &str, graphics: &str) -> Option<u32> {
     world
@@ -105,4 +128,29 @@ pub fn vanishes_when_taken(world: &World, map: &str, object: u32) -> bool {
         .and_then(|m| m.objects.iter().find(|o| o.local_id == object))
         .and_then(|o| o.graphics.as_deref())
         .is_some_and(|g| matches!(g, "OBJ_EVENT_GFX_ITEM_BALL" | "OBJ_EVENT_GFX_FOSSIL"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Switch goal run: `Heal(PalletTown_PlayersHouse_1F)` (Mom heals for
+    /// free) failed twice with "has no nurse" and went infeasible.
+    #[test]
+    fn the_healer_is_the_object_whose_script_heals() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        if world.events().is_none() {
+            return;
+        }
+        assert_eq!(healer_on(&world, "PalletTown_PlayersHouse_1F"), Some(1));
+        let center = "PewterCity_PokemonCenter_1F";
+        assert_eq!(
+            healer_on(&world, center),
+            object_with_graphics(&world, center, NURSE_GFX)
+        );
+        assert_eq!(healer_on(&world, "Route1"), None);
+    }
 }

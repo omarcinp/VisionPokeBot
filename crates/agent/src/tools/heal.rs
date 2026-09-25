@@ -1,21 +1,24 @@
-//! `Heal`: talk to the nurse of a Pokémon Center (the given one or the
-//! nearest), answer YES, and make sure the heal is on record: the nurse
-//! always heals, so a missed line is inferred, and the Center becomes the
-//! respawn point.
+//! `Heal`: talk to the healer of a heal spot (the nurse of the given
+//! Pokémon Center, Mom at home: whichever object on that map has a heal
+//! effect in its script; or the nearest Center), answer YES, and make sure
+//! the heal is on record: the healer always heals, so a missed line is
+//! inferred, and the spot becomes the respawn point.
 
 use pokebot_state::GameEvent;
 
-use super::lookup::{nearest_nurse, object_with_graphics, NURSE_GFX};
+use super::lookup::{healer_on, nearest_nurse};
 use super::{progress, Answer, Intent, Tool, ToolContext, ToolError, ToolOutcome};
 
 pub struct HealTool;
 
-/// The nurse to talk to for `center` (a map), or the nearest one.
+/// The healer to talk to for `center` (a map), or the nearest nurse.
 pub fn nurse_for(ctx: &ToolContext<'_>, center: Option<&str>) -> Result<(String, u32), ToolError> {
     match center {
-        Some(map) => object_with_graphics(&ctx.world, map, NURSE_GFX)
+        Some(map) => healer_on(&ctx.world, map)
             .map(|id| (map.to_owned(), id))
-            .ok_or_else(|| ToolError::Failed(format!("{map} has no nurse"))),
+            .ok_or_else(|| {
+                ToolError::Failed(format!("{map} has no healer (nurse or heal script)"))
+            }),
         None => {
             let pose = ctx
                 .pose()
@@ -52,11 +55,11 @@ pub fn heal(ctx: &mut ToolContext<'_>, center: Option<&str>) -> Result<(), ToolE
         ))?;
     }
     let _ = before;
-    if let Some(spot) = ctx
-        .world
-        .places()
-        .and_then(|p| p.heal_spots.iter().find(|h| h.map == map))
-    {
+    if let Some(spot) = ctx.world.places().and_then(|p| {
+        p.heal_spots
+            .iter()
+            .find(|h| h.respawn_map == map || h.map == map)
+    }) {
         ctx.emit(GameEvent::RespawnSet {
             map: spot.map.clone(),
             x: spot.x,
