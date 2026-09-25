@@ -70,9 +70,20 @@ pub fn load(path: &Path) -> Result<Option<Checkpoint>> {
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|e| Error::InvalidData(format!("{}: {e}", path.display())))
+    let mut checkpoint: Checkpoint = serde_json::from_str(&text)
+        .map_err(|e| Error::InvalidData(format!("{}: {e}", path.display())))?;
+    // Old Switch captures could OCR `22` as `2`. A checkpoint must not
+    // preserve that impossible value as an observed fact on every restart.
+    if let Some(party) = checkpoint.knowledge.party.value.as_mut() {
+        for mon in party {
+            if let (Some(level), Some(hp)) = (mon.level.value, mon.hp.value) {
+                if !crate::party::plausible_hp_for(hp, level, mon.species.value.as_deref()) {
+                    mon.hp = Knowledge::unknown();
+                }
+            }
+        }
+    }
+    Ok(Some(checkpoint))
 }
 
 /// Knowledge from an older `progress.json` that only had a party: kept, but
@@ -91,6 +102,7 @@ pub fn legacy_knowledge(data: &GameData, party: &Party) -> SavedKnowledge {
                 level: Knowledge::tracked(m.level, None),
                 hp: m
                     .hp
+                    .filter(|hp| crate::party::plausible_hp_for(*hp, m.level, Some(&m.species)))
                     .map_or_else(Knowledge::unknown, |hp| Knowledge::tracked(hp, None)),
                 ..PartyMon::default()
             };
@@ -231,6 +243,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn impossible_switch_hp_is_unknown_after_checkpoint_load() {
+        let dir = temp_dir("bad-hp");
+        let path = dir.join("state.json");
+        let mut knowledge = SavedKnowledge::default();
+        knowledge.party = Knowledge::observed(
+            vec![PartyMon {
+                level: Knowledge::observed(6, 10),
+                hp: Knowledge::observed((3, 2), 10),
+                ..PartyMon::default()
+            }],
+            10,
+        );
+        store(&path, &Identity::of(&progress(&["A"], 7)), &knowledge).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.knowledge.party.value.unwrap()[0].hp,
+            Knowledge::unknown()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn progress(milestones: &[&str], x: i32) -> Progress {
         Progress {
             player_name: "RED".into(),
@@ -298,6 +332,28 @@ mod tests {
         let Some(d) = data() else { return };
         let k = legacy_knowledge(&d, &Party::default());
         assert_eq!(k.party, Knowledge::unknown());
+    }
+
+    #[test]
+    fn world_belief_round_trips_through_state_json() {
+        let dir = temp_dir("belief");
+        let path = dir.join("state.json");
+        let mut k = SavedKnowledge::default();
+        k.world
+            .flags
+            .insert("FLAG_BADGE01_GET".into(), Knowledge::observed(true, 7));
+        k.world
+            .visited
+            .insert("PewterCity".into(), Knowledge::observed(true, 7));
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        let back = load(&path).unwrap().unwrap();
+        assert_eq!(back.knowledge.world, k.world);
+        assert_eq!(
+            back.knowledge.world.flag("FLAG_BADGE01_GET"),
+            Knowledge::observed(true, 7)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -50,7 +50,7 @@ const PROMPT_ROW_PITCH: u32 = 16;
 
 pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<BagObservation> {
     if !is_bag_frame(image) {
-        return None;
+        return container(image, font, small_font);
     }
     let pocket = font.read(image, TITLE_REGION, &[]).join(" ");
     let mut rows = Vec::new();
@@ -66,32 +66,110 @@ pub fn detect(image: &RgbImage, font: &Font, small_font: &Font) -> Option<BagObs
     }
     let found = super::menu::find_cursor(image);
     let cursor = cursor_row(found, LIST_CURSOR_X, LIST_CURSOR_Y0, ROW_PITCH, rows.len());
-    let prompt = if crate::color::near(
-        super::px(image, PROMPT_MESSAGE_PROBE.0, PROMPT_MESSAGE_PROBE.1),
-        crate::color::WHITE,
-        crate::color::TOLERANCE,
-    ) {
-        let opts: Vec<String> = font
-            .read(image, PROMPT_OPTIONS, &[])
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
-        let row = cursor_row(
-            found,
-            PROMPT_CURSOR_X,
-            PROMPT_CURSOR_Y0,
-            PROMPT_ROW_PITCH,
-            opts.len(),
-        );
-        row.map(|row| (opts, row))
-    } else {
-        None
-    };
+    let prompt = field_prompt(image, font).or_else(|| {
+        if crate::color::near(
+            super::px(image, PROMPT_MESSAGE_PROBE.0, PROMPT_MESSAGE_PROBE.1),
+            crate::color::WHITE,
+            crate::color::TOLERANCE,
+        ) {
+            let opts: Vec<String> = font
+                .read(image, PROMPT_OPTIONS, &[])
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect();
+            let row = cursor_row(
+                found,
+                PROMPT_CURSOR_X,
+                PROMPT_CURSOR_Y0,
+                PROMPT_ROW_PITCH,
+                opts.len(),
+            );
+            row.map(|row| (opts, row))
+        } else {
+            None
+        }
+    });
     Some(BagObservation {
         pocket,
         rows,
         cursor,
         prompt,
+    })
+}
+
+fn field_prompt(image: &RgbImage, font: &Font) -> Option<(Vec<String>, u8)> {
+    let menu = super::menu::detect(image)?;
+    if menu.window.x < 150 || menu.window.y < 70 {
+        return None;
+    }
+    let exclude = super::menu::cursor_region(image, &menu);
+    let lines = font.read(image, menu.window, &[exclude]);
+    if !lines.iter().any(|s| s == "OPEN" || s == "USE") {
+        return None;
+    }
+    Some((lines, menu.cursor_row))
+}
+
+/// TM CASE and BERRY POUCH are nested bags, opened from KEY ITEMS.
+fn container(image: &RgbImage, font: &Font, small: &Font) -> Option<BagObservation> {
+    let title = font.read(image, Region::new(8, 8, 70, 16), &[]).join("");
+    let tm = title.replace(' ', "") == "TMCASE";
+    if !tm && title.replace(' ', "") != "BERRYPOUCH" {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for i in 0..if tm { 5 } else { 7 } {
+        let y = 8 + 16 * i;
+        let close = font
+            .read(image, Region::new(if tm { 88 } else { 97 }, y, 45, 16), &[])
+            .join("");
+        if close == "CLOSE" {
+            rows.push(("CANCEL".into(), None));
+            break;
+        }
+        let digits = |x, w| {
+            small
+                .read(image, Region::new(x, y, w, 16), &[])
+                .join("")
+                .replace('O', "0")
+                .trim()
+                .parse::<u8>()
+                .ok()
+        };
+        let (name, count) = if tm {
+            if let Some(n) = digits(96, 16).filter(|n| (1..=50).contains(n)) {
+                (
+                    format!("TM{n:02}"),
+                    parse_count(&small.read(image, Region::new(206, y, 26, 16), &[]).join("")),
+                )
+            } else if let Some(n) = digits(114, 7).filter(|n| (1..=8).contains(n)) {
+                (format!("HM{n:02}"), Some(1))
+            } else {
+                break;
+            }
+        } else {
+            (
+                font.read(image, Region::new(121, y, 77, 16), &[]).join(" "),
+                parse_count(&small.read(image, Region::new(198, y, 34, 16), &[]).join("")),
+            )
+        };
+        if name.is_empty() {
+            break;
+        }
+        rows.push((name, count));
+    }
+    let cursor = cursor_row(
+        super::menu::find_cursor(image),
+        if tm { 78..88 } else { 88..97 },
+        12,
+        16,
+        rows.len(),
+    );
+    Some(BagObservation {
+        pocket: if tm { "TM CASE" } else { "BERRY POUCH" }.into(),
+        rows,
+        cursor,
+        prompt: None,
     })
 }
 
@@ -159,6 +237,25 @@ mod tests {
     /// physical Switch's (`captures/fixtures/switch/`), taken of the same
     /// screens. Each test runs its assertions on every source it finds.
     const SOURCES: [&str; 2] = ["", "switch/"];
+
+    #[test]
+    fn nested_tm_case_and_field_open_prompt() {
+        let Some((image, font, small)) = fixture("emu-tm-case.png") else {
+            return;
+        };
+        let bag = detect(&image, &font, &small).unwrap();
+        assert_eq!(bag.pocket, "TM CASE");
+        assert_eq!(
+            bag.rows,
+            vec![("TM39".into(), Some(1)), ("CANCEL".into(), None)]
+        );
+        assert_eq!(bag.cursor, Some(0));
+        let (image, font, small) = fixture("emu-case-prompt.png").unwrap();
+        assert_eq!(
+            detect(&image, &font, &small).unwrap().prompt,
+            Some((vec!["OPEN".into(), "REGISTER".into(), "CANCEL".into()], 0))
+        );
+    }
 
     fn poke_balls_pocket(dir: &str) {
         let Some((image, font, small_font)) = fixture(&format!("{dir}bag-pokeballs.png")) else {

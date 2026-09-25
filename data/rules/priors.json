@@ -1,0 +1,288 @@
+[
+  {
+    "fact": {
+      "visited": "PalletTown"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE01_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 1"
+  },
+  {
+    "fact": {
+      "visited": "ViridianCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE01_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 1"
+  },
+  {
+    "fact": {
+      "visited": "PewterCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE01_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 1"
+  },
+  {
+    "fact": {
+      "visited": "PalletTown"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE02_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 2"
+  },
+  {
+    "fact": {
+      "visited": "ViridianCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE02_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 2"
+  },
+  {
+    "fact": {
+      "visited": "PewterCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE02_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 2"
+  },
+  {
+    "fact": {
+      "visited": "Route4"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE02_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 2"
+  },
+  {
+    "fact": {
+      "visited": "CeruleanCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE02_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 2"
+  },
+  {
+    "fact": {
+      "visited": "PalletTown"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "ViridianCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "PewterCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "Route4"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "CeruleanCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "VermilionCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE03_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 3"
+  },
+  {
+    "fact": {
+      "visited": "PalletTown"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "ViridianCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "PewterCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "Route4"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "CeruleanCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "VermilionCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "LavenderTown"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  },
+  {
+    "fact": {
+      "visited": "CeladonCity"
+    },
+    "given": [
+      {
+        "flag": "FLAG_BADGE04_GET",
+        "is": true
+      }
+    ],
+    "p": 1.0,
+    "note": "on the only route to badge 4"
+  }
+]

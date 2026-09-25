@@ -104,6 +104,14 @@
   #goal-card { border-left: 4px solid var(--goal); }
   #goal { font-size: 18px; font-weight: 700; color: var(--goal); }
   #goal-phase { color: var(--text); margin-top: 2px; }
+  #plan-card { margin-top: 6px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 6px; font-size: 12px; }
+  .plan-head { display: flex; justify-content: space-between; color: var(--muted); }
+  ol.plan { margin: 4px 0 0 0; padding-left: 20px; font-family: var(--mono); font-size: 11px; }
+  ol.plan li.done { color: var(--muted); text-decoration: line-through; }
+  ol.plan li.now { color: var(--goal); font-weight: 600; }
+  .plan-assumes { margin-top: 4px; color: var(--muted); }
+  .plan-assumes span { margin-right: 8px; white-space: nowrap; }
+  .plan-assumes .True { color: var(--event); } .plan-assumes .False { color: var(--error); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .chip { font: 11px var(--mono); padding: 2px 8px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line);
           color: var(--muted); white-space: nowrap; }
@@ -191,6 +199,11 @@
   /* Details */
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; font-family: var(--mono); font-size: 12px; }
   .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  table.timing { border-collapse: collapse; font-family: var(--mono); font-size: 12px; margin-top: 6px; }
+  table.timing th, table.timing td { text-align: right; padding: 1px 8px 1px 0; }
+  table.timing th:first-child, table.timing td:first-child { text-align: left; }
+  table.timing th { color: var(--muted); font-weight: normal; }
+  table.timing tr.learned td { color: var(--fg, inherit); font-weight: 600; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); font: 11px/1.4 var(--mono); }
   details { margin-top: 10px; } summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
 
@@ -300,6 +313,11 @@
     <section class="card" id="goal-card">
       <div id="goal">idle</div>
       <div id="goal-phase">–</div>
+      <div id="plan-card" hidden>
+        <div class="plan-head"><span id="plan-step">–</span><span class="right" id="plan-no"></span></div>
+        <ol class="plan" id="plan-steps"></ol>
+        <div class="plan-assumes" id="plan-assumes"></div>
+      </div>
       <div class="chips">
         <span class="chip" id="chip-screen">screen <b>–</b></span>
         <span class="chip" id="chip-sync">sync <b>–</b></span>
@@ -372,6 +390,9 @@
         <dt>changed px</dt><dd id="obs-changed">–</dd>
         <dt>dialogue</dt><dd id="obs-text">–</dd>
       </dl>
+      <details id="timing-details"><summary>Timing model <span id="timing-profile"></span></summary>
+        <table class="timing"><thead><tr><th>input</th><th>latency</th><th>unit</th><th>spread</th><th>n</th></tr></thead><tbody id="timing-rows"></tbody></table>
+      </details>
       <details id="state-details"><summary>GameState (raw)</summary><pre id="state-json"></pre></details>
       <details id="obs-details"><summary>Observation (raw)</summary><pre id="obs-json"></pre></details>
     </section>
@@ -855,9 +876,37 @@ function setStatus(status) {
     chip('chip-ui', ui.join(' · ') || '–');
     setText('obs-text', ob.dialogue && ob.dialogue.lines && ob.dialogue.lines.length ? ob.dialogue.lines.join(' / ') : '–');
   }
+  renderTiming(status.timing);
+  renderPlan(status.plan);
   // Serializing the whole state is costly on phones: only when looked at.
   if ($('state-details').open) setText('state-json', JSON.stringify(st, null, 2));
   if ($('obs-details').open) setText('obs-json', JSON.stringify(ob, null, 2));
+}
+
+/// The goal loop's plan: steps done, the current one, and what it assumes.
+function renderPlan(plan) {
+  const card = $('plan-card');
+  if (!plan || !plan.goal) { card.hidden = true; return; }
+  card.hidden = false;
+  const step = plan.step || 0;
+  setText('plan-step', step ? `step ${step}/${plan.steps}: ${plan.phase} — ${plan.detail}` : `${plan.phase} — ${plan.detail}`);
+  setText('plan-no', `plan ${plan.plan_no} (${plan.reason})`);
+  $('plan-steps').innerHTML = (plan.plan || []).map((s, i) => {
+    const cls = i + 1 < step ? 'done' : i + 1 === step ? 'now' : '';
+    return `<li class="${cls}">${esc(s.replace(/^\d+\. /, ''))}</li>`;
+  }).join('');
+  $('plan-assumes').innerHTML = (plan.assumes || []).length
+    ? 'assumes ' + plan.assumes.map(a => `<span class="${a.truth}" title="${esc(a.source)}">${esc(a.predicate)} <i class="dot ${esc(a.source)}"></i></span>`).join('')
+    : '';
+}
+
+/// The timing model: one row per input kind, learned values in bold.
+function renderTiming(timing) {
+  if (!timing || !timing.estimates) { setText('timing-profile', ''); return; }
+  setText('timing-profile', `(${timing.profile})`);
+  const ms = (v) => `${Number(v).toFixed(0)} ms`;
+  $('timing-rows').innerHTML = timing.estimates.map(([kind, e]) => `
+    <tr class="${e.samples ? 'learned' : ''}"><td>${esc(kind)}</td><td>${ms(e.latency_ms)}</td><td>${ms(e.unit_ms)}</td><td>${ms(e.spread_ms)}</td><td>${e.samples}</td></tr>`).join('');
 }
 
 // ---------------------------------------------------------------- frames

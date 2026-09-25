@@ -44,6 +44,9 @@ pub struct ServeArgs {
     pub wifi_http_port: u16,
 }
 
+/// How often the cartridge save is written to disk while serving.
+const SAVE_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
+
 pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let mut config = emulator_config(&args.emulator)?;
     config.clock = ClockMode::RealTime;
@@ -101,7 +104,7 @@ pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
     };
     let _esp32 = spawn_virtual_esp32(
         port,
-        EmulatorButtons(controller),
+        EmulatorButtons(controller.clone()),
         "PokeBot virtual ESP32 (emulator)",
         log_tx,
     )?;
@@ -110,7 +113,19 @@ pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let mut frames = 0u64;
     let mut commands = 0u64;
     let mut last_report = Instant::now();
+    // The cartridge save is written on exit, which a crash skips: on
+    // 2026-09-25 the console died ("no new frame for 2s") after seven
+    // hours of play and the .sav on disk was the one it had loaded, so
+    // every in-game save of the day was lost. Write it every minute too
+    // (only when it changed).
+    let mut last_flush = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if last_flush.elapsed() >= SAVE_FLUSH_INTERVAL {
+            last_flush = Instant::now();
+            if let Err(e) = controller.flush_battery_save() {
+                eprintln!("cartridge save: {e}");
+            }
+        }
         let frame = video.next_frame()?;
         sink.write(&frame.image)?;
         frames += 1;

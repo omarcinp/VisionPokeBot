@@ -4,8 +4,10 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
+use pokebot_agent::{Syncer, SyncerHandle};
 use pokebot_capture_card::{CaptureCardConfig, CaptureCardVideoSource};
 use pokebot_controller::NullController;
 use pokebot_core::{Controller, GbaOnSwitch, PressProfile, VideoSource};
@@ -185,6 +187,14 @@ pub struct DeviceArgs {
     /// Serial baud rate for pabotbase (default: try 921600, then 115200)
     #[arg(long)]
     pub baud: Option<u32>,
+    /// Timing model (latency and duration per input kind, learned per
+    /// device profile): loaded at start, saved every minute and at the end
+    #[arg(long, default_value = "saves/timing.json")]
+    pub timing: PathBuf,
+    /// Profile in the timing model (default: `emulator` for the emulator or
+    /// the virtual console, `switch` for real hardware)
+    #[arg(long)]
+    pub timing_profile: Option<String>,
     #[command(flatten)]
     pub emulator: EmulatorArgs,
     /// Run the in-process emulator at console speed instead of one frame per read
@@ -199,6 +209,56 @@ impl DeviceArgs {
             ControllerSpec::Emulator | ControllerSpec::Null => 0,
             _ => 30,
         })
+    }
+
+    /// Which timing profile these devices belong to: real hardware is a
+    /// controller on a real port; the virtual console's PABotBase port
+    /// lives outside /dev.
+    pub fn timing_profile(&self) -> String {
+        if let Some(profile) = &self.timing_profile {
+            return profile.clone();
+        }
+        match &self.controller {
+            ControllerSpec::Emulator | ControllerSpec::Null => "emulator",
+            ControllerSpec::Pabotbase(port) if !port.starts_with("/dev/") => "emulator",
+            ControllerSpec::Pabotbase(_) | ControllerSpec::Esp32Wifi(_) => "switch",
+        }
+        .to_owned()
+    }
+
+    /// The timing model for these devices, loaded from `--timing`.
+    pub fn syncer(&self) -> Result<SyncerHandle> {
+        let profile = self.timing_profile();
+        let mut syncer = Syncer::load(&self.timing, &profile)
+            .with_context(|| format!("loading the timing model {}", self.timing.display()))?;
+        syncer.set_base_latency_frames(self.latency_frames());
+        let learned = syncer
+            .estimates()
+            .iter()
+            .filter(|(_, e)| e.samples > 0)
+            .map(|(kind, e)| {
+                format!(
+                    "{kind:?} {:.0}+{:.0}±{:.0} ms (n={})",
+                    e.latency_ms, e.unit_ms, e.spread_ms, e.samples
+                )
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "timing model {} profile {profile}: {}",
+            self.timing.display(),
+            if learned.is_empty() {
+                "defaults".to_owned()
+            } else {
+                learned.join(", ")
+            }
+        );
+        Ok(Arc::new(Mutex::new(syncer)))
+    }
+
+    /// Whether time is best measured in frames: the in-process emulator
+    /// stepped by the bot runs as fast as the bot reads.
+    pub fn frame_clock(&self) -> bool {
+        matches!(self.video, VideoSpec::Emulator) && !self.realtime
     }
 }
 

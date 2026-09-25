@@ -9,25 +9,35 @@
 mod action;
 pub mod bag;
 pub mod battle;
+pub mod belief_view;
 pub mod catch;
 pub mod checkpoint;
 pub mod console;
 mod executor;
+pub mod goal;
+pub mod goal_session;
 pub mod keyboard;
 pub mod learn;
+pub mod motion;
 pub mod moves;
 pub mod nav;
 pub mod new_game;
 pub mod party;
 pub mod progress;
 pub mod save;
+pub mod scheduler;
 pub mod shop;
 pub mod stock;
 pub mod story;
+pub mod tools;
 pub mod track;
 
 pub use action::{Action, Expectation};
-pub use executor::{Decision, Executor, ExecutorError, Outcome, Task, TaskContext};
+pub use belief_view::StateBelief;
+pub use executor::{
+    Decision, Executor, ExecutorError, Outcome, OutsideRecovery, Task, TaskContext,
+};
+pub use motion::{InputKind, Syncer, SyncerHandle};
 pub use new_game::{NewGameConfig, NewGameTask, RIVAL_PRESETS};
 pub use progress::Progress;
 pub use save::{ContinueTask, SaveGameTask};
@@ -35,3 +45,4 @@ pub use story::{
     all_milestones, opening, to_brock, to_cerulean, to_mt_moon, Milestone, Starter, StoryStep,
     StoryTask,
 };
+pub use tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};

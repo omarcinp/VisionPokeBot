@@ -224,6 +224,8 @@ pub struct StoryTask {
     milestone: usize,
     step: usize,
     nav: Option<Navigator>,
+    /// The device's timing model, handed to every navigator.
+    syncer: Option<crate::motion::SyncerHandle>,
     talk: TalkPhase,
     saw_dialogue: bool,
     answers_used: usize,
@@ -352,6 +354,7 @@ impl StoryTask {
             milestone: 0,
             step: 0,
             nav: None,
+            syncer: None,
             talk: TalkPhase::Approach,
             saw_dialogue: false,
             answers_used: 0,
@@ -391,6 +394,21 @@ impl StoryTask {
     pub fn with_data(mut self, data: Arc<GameData>) -> Self {
         self.data = Some(data);
         self
+    }
+
+    /// Walk with this timing model's hold lengths and timeouts.
+    pub fn with_syncer(mut self, syncer: crate::motion::SyncerHandle) -> Self {
+        self.syncer = Some(syncer);
+        self
+    }
+
+    fn navigator(&self, dest: &Destination) -> Navigator {
+        let nav =
+            Navigator::new(Arc::clone(&self.world), dest.clone()).with_gone(self.taken.clone());
+        match &self.syncer {
+            Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
+            None => nav,
+        }
     }
 
     /// The party as last read from the game state.
@@ -477,14 +495,10 @@ impl StoryTask {
                 "letting the scene settle".into(),
             ));
         }
-        let world = Arc::clone(&self.world);
-        let nav = self.nav.get_or_insert_with(|| {
-            Navigator::new(world, dest.clone()).with_gone(self.taken.clone())
-        });
-        if nav.destination != *dest {
-            *nav =
-                Navigator::new(Arc::clone(&self.world), dest.clone()).with_gone(self.taken.clone());
+        if self.nav.as_ref().is_none_or(|nav| nav.destination != *dest) {
+            self.nav = Some(self.navigator(dest));
         }
+        let nav = self.nav.as_mut().expect("navigator set above");
         if nav.stalled() >= 6 {
             return NavStatusOrDecision::Decision(Decision::Fail(format!(
                 "cannot move toward {dest:?}"
@@ -625,7 +639,12 @@ impl StoryTask {
 /// The lead's P(win) alone against `trainer` (the planner's model, with
 /// [`OUR_IV`]): at its current HP with only moves that have PP left, or
 /// `healed` (full HP, every move).
-fn lead_p_win(data: &GameData, lead: &party::Member, trainer: &str, healed: bool) -> f64 {
+pub(crate) fn lead_p_win(
+    data: &GameData,
+    lead: &party::Member,
+    trainer: &str,
+    healed: bool,
+) -> f64 {
     let moves: Vec<String> = if healed {
         lead.moves.clone()
     } else {
@@ -889,6 +908,12 @@ impl Task for StoryTask {
                 }
             }
             if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+                // The box may belong to the page before (the nickname
+                // question's YES/NO stays while the next page prints):
+                // read the question once it is printed.
+                if !d.ready_for_a() && d.stable_frames < PAGE_PRINTED_FRAMES {
+                    return Decision::Wait("the question is printing".into());
+                }
                 // After a catch: "Give a nickname to the captured X?" → No
                 // (B answers No).
                 if catch::is_nickname_question(&d.lines.join(" ")) {
@@ -909,6 +934,11 @@ impl Task for StoryTask {
                         Expectation::MenuClosed,
                         90,
                     ));
+                }
+                // The PC transfer text after NO to the nickname, with the
+                // YES/NO box still drawn: plain text to advance.
+                if catch::is_pc_transfer_text(&d.lines.join(" ")) {
+                    return advance_or_wait(o.dialogue.as_ref(), "PC transfer text");
                 }
                 // A is YES: never answer a question we don't understand.
                 return Decision::Fail(format!("unexpected question in battle: {:?}", d.lines));
@@ -1214,7 +1244,7 @@ impl Task for StoryTask {
             }
             _ => {
                 if let Some(nav) = &mut self.nav {
-                    nav.on_outcome(action, outcome);
+                    nav.on_outcome(action, outcome, ctx.observation);
                 }
             }
         }
@@ -3501,6 +3531,49 @@ mod tests {
             state.party.value.as_ref().unwrap()[0].status.value,
             Some(Status::Paralyzed)
         );
+    }
+
+    /// flash-4, Viridian Forest with a full party: after NO to the nickname
+    /// the game prints "WEEDLE was transferred to Someone's PC." with the
+    /// YES/NO box still on screen (fixture
+    /// `captures/fixtures/emu-catch-transferred-to-pc.png`).
+    #[test]
+    fn the_pc_transfer_text_under_a_lingering_yes_no_box_is_advanced() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut page = wild_frame(1, None, &["WEEDLE was transferred to", "Someone’s PC."]);
+        page.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        let (label, _) = tick_events(&mut task, &page, &state);
+        assert!(
+            !label.starts_with("fail:"),
+            "the transfer text is not a question: {label}"
+        );
+    }
+
+    /// flash-5, Route 22 with a full party: "It was placed in BOX…" read
+    /// as "It" while printing under the lingering YES/NO box (fixture
+    /// `captures/fixtures/emu-catch-placed-in-box-printing.png`).
+    #[test]
+    fn a_page_printing_under_the_lingering_box_is_waited_for() {
+        let Some((mut task, state)) = battle_task() else {
+            return;
+        };
+        let mut page = wild_frame(1, None, &["It"]);
+        page.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(190, 70, 44, 36),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 76,
+        });
+        page.dialogue.as_mut().unwrap().stable_frames = 1;
+        let (label, _) = tick_events(&mut task, &page, &state);
+        assert!(label.starts_with("wait:"), "{label}");
     }
 
     #[test]

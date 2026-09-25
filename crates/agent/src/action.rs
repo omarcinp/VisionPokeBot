@@ -5,6 +5,8 @@ use pokebot_state::{
 use pokebot_vision::detect::dialogue::changed_cells;
 use serde::Serialize;
 
+use crate::motion::InputKind;
+
 /// Text cells that must change for text to count as advanced.
 const TEXT_CHANGE_CELLS: usize = 3;
 
@@ -20,6 +22,9 @@ pub struct Action {
     /// Cancel the inputs early if something interrupts (dialogue, battle,
     /// menu): for long holds such as walking a straight run.
     pub interruptible: bool,
+    /// What the timing model learns from this action once confirmed: the
+    /// kind of input and how many units of it (tiles, presses) it holds.
+    pub timing: Option<(InputKind, usize)>,
 }
 
 impl Action {
@@ -35,6 +40,7 @@ impl Action {
             expect,
             timeout_frames,
             interruptible: false,
+            timing: None,
         }
     }
 
@@ -42,11 +48,21 @@ impl Action {
         self.interruptible = true;
         self
     }
+
+    /// Feeds the timing model when confirmed: `units` units of `kind`.
+    pub fn timed(mut self, kind: InputKind, units: usize) -> Self {
+        self.timing = Some((kind, units));
+        self
+    }
 }
 
 /// What must be visible for an action to count as successful.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Expectation {
+    PartyList,
+    PartySelected(u8),
+    PartyActions,
+    SummaryPage(pokebot_state::SummaryPage),
     /// The dialogue's text changed (new page) or the dialogue closed.
     TextAdvanced {
         kind: DialogueKind,
@@ -111,6 +127,16 @@ pub enum Expectation {
 impl Expectation {
     pub fn met(&self, observation: &Observation) -> bool {
         match self {
+            Self::PartyList => observation.party_menu.as_ref().is_some_and(|m| !m.actions),
+            Self::PartySelected(slot) => observation
+                .party_menu
+                .as_ref()
+                .is_some_and(|m| !m.actions && m.selected == Some(*slot)),
+            Self::PartyActions => observation.party_menu.as_ref().is_some_and(|m| m.actions),
+            Self::SummaryPage(page) => observation
+                .summary
+                .as_ref()
+                .is_some_and(|s| s.page == *page),
             Expectation::TextAdvanced { kind, baseline } => match &observation.dialogue {
                 Some(d) if d.kind == *kind => {
                     changed_cells(baseline, &d.text_cells) >= TEXT_CHANGE_CELLS

@@ -83,10 +83,22 @@ impl Default for PcStorage {
     }
 }
 
+/// The totals the Pokédex's own header shows; the Trainer Card shows the
+/// caught total only (`seen` stays `None` until the Pokédex is read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PokedexCounts {
+    pub seen: Option<u16>,
+    pub caught: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Pokedex {
     pub caught: BTreeMap<String, Knowledge<bool>>,
     pub seen: BTreeMap<String, Knowledge<bool>>,
+    /// The totals as last read; the per-species maps are a lower bound
+    /// when this is unknown. Missing in files written before it existed.
+    #[serde(default)]
+    pub counts: Knowledge<PokedexCounts>,
 }
 
 /// The knowledge that belongs to a save file: stored beside it after every
@@ -100,6 +112,7 @@ pub struct SavedKnowledge {
     pub money: Knowledge<u32>,
     pub pc: PcStorage,
     pub pokedex: Pokedex,
+    pub world: crate::WorldBelief,
 }
 
 #[cfg(test)]

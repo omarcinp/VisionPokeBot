@@ -1,0 +1,776 @@
+{
+  "identity": {
+    "milestones": [
+      "LeaveBedroom",
+      "TalkToMom",
+      "LeaveHouse",
+      "MeetOak",
+      "ChooseStarter",
+      "RivalBattle",
+      "HealAtHome",
+      "GetParcel",
+      "DeliverParcel",
+      "PrepareForBrock",
+      "ReachPewter",
+      "BeatBrock",
+      "PrepareForRoute3",
+      "StockUpPewter",
+      "CrossRoute3"
+    ],
+    "saved_at": {
+      "map": "ViridianForest",
+      "x": 5,
+      "y": 14
+    }
+  },
+  "party": {
+    "value": [
+      {
+        "species": {
+          "value": "SPECIES_IVYSAUR",
+          "source": "Tracked",
+          "last_verified_frame": null
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 20,
+          "source": "Observed",
+          "last_verified_frame": 40134
+        },
+        "hp": {
+          "value": [
+            54,
+            60
+          ],
+          "source": "Observed",
+          "last_verified_frame": 12380
+        },
+        "status": {
+          "value": "Healthy",
+          "source": "Derived",
+          "last_verified_frame": 8289
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_TACKLE",
+              "source": "Tracked",
+              "last_verified_frame": null
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_SLEEP_POWDER",
+              "source": "Tracked",
+              "last_verified_frame": null
+            },
+            "pp": {
+              "value": [
+                14,
+                15
+              ],
+              "source": "Tracked",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_LEECH_SEED",
+              "source": "Tracked",
+              "last_verified_frame": null
+            },
+            "pp": {
+              "value": [
+                10,
+                10
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_VINE_WHIP",
+              "source": "Tracked",
+              "last_verified_frame": null
+            },
+            "pp": {
+              "value": [
+                10,
+                10
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          }
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      },
+      {
+        "species": {
+          "value": "SPECIES_PIDGEY",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 4,
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "hp": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "status": {
+          "value": "Healthy",
+          "source": "Derived",
+          "last_verified_frame": 8289
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_TACKLE",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          null,
+          null,
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      },
+      {
+        "species": {
+          "value": "SPECIES_CATERPIE",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 4,
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "hp": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "status": {
+          "value": "Healthy",
+          "source": "Derived",
+          "last_verified_frame": 8289
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_TACKLE",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_STRING_SHOT",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                40,
+                40
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          null,
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      },
+      {
+        "species": {
+          "value": "SPECIES_RATTATA",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 4,
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "hp": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "status": {
+          "value": "Healthy",
+          "source": "Derived",
+          "last_verified_frame": 8289
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_TACKLE",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_TAIL_WHIP",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                30,
+                30
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          null,
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      },
+      {
+        "species": {
+          "value": "SPECIES_SPEAROW",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 7,
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "hp": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "status": {
+          "value": "Healthy",
+          "source": "Derived",
+          "last_verified_frame": 8289
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_PECK",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_GROWL",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                40,
+                40
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_LEER",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                30,
+                30
+              ],
+              "source": "Derived",
+              "last_verified_frame": 8289
+            }
+          },
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      },
+      {
+        "species": {
+          "value": "SPECIES_WEEDLE",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 4,
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "hp": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "status": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_POISON_STING",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                35,
+                35
+              ],
+              "source": "Derived",
+              "last_verified_frame": 0
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_STRING_SHOT",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                40,
+                40
+              ],
+              "source": "Derived",
+              "last_verified_frame": 0
+            }
+          },
+          null,
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      }
+    ],
+    "source": "Tracked",
+    "last_verified_frame": null
+  },
+  "bag": {
+    "pockets": {
+      "Items": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "KeyItems": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "PokeBalls": {
+        "value": [
+          [
+            "ITEM_POKE_BALL",
+            14
+          ]
+        ],
+        "source": "Tracked",
+        "last_verified_frame": 12448
+      },
+      "TmCase": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "BerryPouch": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      }
+    }
+  },
+  "money": {
+    "value": 784,
+    "source": "Tracked",
+    "last_verified_frame": 6904
+  },
+  "pc": {
+    "boxes": [
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      }
+    ],
+    "items": {
+      "value": null,
+      "source": "Unknown",
+      "last_verified_frame": null
+    }
+  },
+  "pokedex": {
+    "caught": {
+      "SPECIES_CATERPIE": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 18611
+      },
+      "SPECIES_PIDGEY": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 16332
+      },
+      "SPECIES_RATTATA": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 21859
+      },
+      "SPECIES_SPEAROW": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 26218
+      },
+      "SPECIES_WEEDLE": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 14000
+      }
+    },
+    "seen": {
+      "SPECIES_CATERPIE": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 18611
+      },
+      "SPECIES_PIDGEY": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 16332
+      },
+      "SPECIES_RATTATA": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 21859
+      },
+      "SPECIES_SPEAROW": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 26218
+      },
+      "SPECIES_WEEDLE": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 14000
+      }
+    },
+    "counts": {
+      "value": {
+        "seen": null,
+        "caught": 7
+      },
+      "source": "Tracked",
+      "last_verified_frame": 2809
+    }
+  },
+  "world": {
+    "flags": {
+      "FLAG_BADGE01_GET": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE02_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE03_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE04_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE05_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE06_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE07_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      },
+      "FLAG_BADGE08_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 2809
+      }
+    },
+    "vars": {},
+    "visited": {
+      "PewterCity": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 8504
+      },
+      "PewterCity_Mart": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 2591
+      },
+      "PewterCity_PokemonCenter_1F": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 6718
+      },
+      "Route2": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 8933
+      },
+      "Route2_ViridianForest_NorthEntrance": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 9522
+      },
+      "Route3": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 2897
+      },
+      "Route4": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 2050
+      },
+      "Route4_PokemonCenter_1F": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 1516
+      },
+      "ViridianForest": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 9857
+      }
+    },
+    "respawn": {
+      "value": null,
+      "source": "Unknown",
+      "last_verified_frame": null
+    },
+    "npcs": {},
+    "infeasible": [],
+    "paths_run": [
+      [
+        "PewterCity_PokemonCenter_1F_EventScript_Nurse",
+        0
+      ]
+    ]
+  }
+}

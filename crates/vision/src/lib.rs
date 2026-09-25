@@ -25,6 +25,10 @@ pub trait PerceptionSystem {
     /// Where the player is believed to be (from story knowledge); narrows the
     /// localization search. Wrong hints only cost search time.
     fn set_pose_hint(&mut self, _pose: PlayerPose) {}
+
+    /// Forgets the hint so the next frame is located from scratch (the
+    /// goal loop's relocalisation: `locate_anywhere`).
+    fn clear_pose_hint(&mut self) {}
 }
 
 /// FireRed/LeafGreen perception.
@@ -79,6 +83,13 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
+        if detect::whiteout::is_whiteout(image) {
+            return Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Whiteout, "whiteout-text"),
+                metrics,
+            );
+        }
         if let Some(naming) = detect::naming::detect(image) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -104,6 +115,24 @@ impl PerceptionSystem for FireRedPerception {
             observation.menu = Some(menu);
             return observation;
         }
+        if let Some(font) = self.font.as_deref() {
+            let summary = detect::party::summary(image, font);
+            let party_menu = if summary.is_none() {
+                detect::party::menu(image, font)
+            } else {
+                None
+            };
+            if summary.is_some() || party_menu.is_some() {
+                let mut observation = Observation::bare(
+                    frame.frame_id,
+                    screen(ScreenState::PartyMenu, "party-summary"),
+                    metrics,
+                );
+                observation.summary = summary;
+                observation.party_menu = party_menu;
+                return observation;
+            }
+        }
         if detect::pokedex::is_page(image) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -111,6 +140,37 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
             observation.pokedex_page = true;
+            return observation;
+        }
+        if let Some(card) = detect::trainer_card::detect(image, self.font.as_deref()) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "trainer-card"),
+                metrics,
+            );
+            observation.trainer_card = Some(card);
+            return observation;
+        }
+        if let Some(map) = detect::fly_map::detect(image) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "region-map"),
+                metrics,
+            );
+            observation.fly_map = Some(map);
+            return observation;
+        }
+        if let Some(list) = self
+            .font
+            .as_deref()
+            .and_then(|font| detect::pokedex::list(image, font))
+        {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Unknown, "pokedex-list"),
+                metrics,
+            );
+            observation.pokedex_list = Some(list);
             return observation;
         }
         if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
@@ -225,6 +285,14 @@ impl PerceptionSystem for FireRedPerception {
 
     fn set_pose_hint(&mut self, pose: PlayerPose) {
         self.hint = Some(pose);
+    }
+
+    /// Drops the hint and searches every map on the next frame (global
+    /// search is switched on: without it nothing could be located again).
+    fn clear_pose_hint(&mut self) {
+        self.hint = None;
+        self.global_search = true;
+        self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
     }
 }
 
@@ -411,6 +479,29 @@ mod tests {
             p.observe(&frame(20, image)).dialogue.unwrap().stable_frames,
             10
         );
+    }
+
+    /// Switch goal run: after the white-out on Route 1 these screens read
+    /// `Unknown` for ~1200 frames until the stuck rule pressed B.
+    #[test]
+    fn the_white_out_screen_is_recognised() {
+        let Some(image) = fixture("switch-whiteout-scurried-home.png") else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(0, image));
+        assert_eq!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
+        // A black frame with a lone bright spot is not one.
+        let mut image = RgbImage::filled(240, 160, [0, 0, 0]);
+        image.put_pixel(120, 80, [255, 255, 255]);
+        let o = FireRedPerception::default().observe(&frame(1, image));
+        assert_ne!(o.screen.value, ScreenState::Whiteout);
+        // Flash-8: the Poké Ball wipe into a trainer battle (black with a
+        // piece of the ball) ended the run as a white-out on Route 3.
+        let Some(wipe) = fixture("emu-trainer-battle-wipe-black.png") else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(2, wipe));
+        assert_ne!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
     }
 
     #[test]
@@ -823,6 +914,39 @@ mod tests {
                     "{dir}{name}"
                 );
             }
+        }
+    }
+
+    /// The probe screens (Stream B2): trainer card, region map, Pokédex list.
+    #[test]
+    fn probe_screens_are_observed() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        if let Some(image) = fixture("emu-trainer-card.png") {
+            let o = p.observe(&frame(0, image));
+            assert_eq!(o.screen.detector, "trainer-card");
+            assert_eq!(o.trainer_card.unwrap().badges, vec![1]);
+            assert!(o.pokedex_list.is_none() && o.fly_map.is_none());
+        }
+        if let Some(image) = fixture("synthetic-fly-map.png") {
+            let o = p.observe(&frame(1, image));
+            assert_eq!(o.screen.detector, "region-map");
+            let map = o.fly_map.unwrap();
+            assert_eq!(map.lit, vec!["PewterCity", "ViridianCity", "PalletTown"]);
+            assert_eq!(map.lit.len() + map.dark.len(), 13);
+        }
+        if let Some(image) = fixture("emu-pokedex.png") {
+            let o = p.observe(&frame(2, image));
+            assert_eq!(o.screen.detector, "pokedex-list");
+            assert!(!o.pokedex_page);
+            let list = o.pokedex_list.unwrap();
+            assert_eq!(list.rows[0], ("BULBASAUR".to_owned(), true));
+            assert_eq!(list.cursor, Some(0));
+        }
+        if let Some(image) = fixture("emu-pokedex-contents.png") {
+            let o = p.observe(&frame(3, image));
+            assert!(o.pokedex_list.is_none() && o.trainer_card.is_none());
         }
     }
 

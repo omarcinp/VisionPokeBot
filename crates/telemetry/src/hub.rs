@@ -53,6 +53,10 @@ pub struct Status {
     pub stats: Stats,
     pub state: Value,
     pub observation: Value,
+    /// The device's timing model (latency and duration per input kind).
+    pub timing: Value,
+    /// The goal loop's current plan, step and assumptions (`goal` runs).
+    pub plan: Value,
 }
 
 #[derive(Clone)]
@@ -177,6 +181,20 @@ impl Telemetry {
             status.state = state;
             status.observation = observation;
         });
+    }
+
+    /// Publishes the timing model as the bot learns it.
+    pub fn publish_timing(&self, timing: &impl Serialize) {
+        let timing = serde_json::to_value(timing).unwrap_or(Value::Null);
+        self.inner
+            .status
+            .send_modify(|status| status.timing = timing);
+    }
+
+    /// Publishes the goal loop's status: plan, step and assumptions.
+    pub fn publish_plan(&self, plan: &impl Serialize) {
+        let plan = serde_json::to_value(plan).unwrap_or(Value::Null);
+        self.inner.status.send_modify(|status| status.plan = plan);
     }
 
     pub fn log(

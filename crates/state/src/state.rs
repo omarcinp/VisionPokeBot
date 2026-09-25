@@ -76,6 +76,9 @@ pub struct GameState {
     pub money: Knowledge<u32>,
     pub pc: crate::PcStorage,
     pub pokedex: crate::Pokedex,
+    /// Flags, vars, visited maps, respawn point and NPCs.
+    #[serde(default)]
+    pub world: crate::WorldBelief,
 }
 
 impl GameState {
@@ -87,6 +90,11 @@ impl GameState {
             money: self.money.clone(),
             pc: self.pc.clone(),
             pokedex: self.pokedex.clone(),
+            // Infeasible intents are about this session, not the save.
+            world: crate::WorldBelief {
+                infeasible: Default::default(),
+                ..self.world.clone()
+            },
         }
     }
 }

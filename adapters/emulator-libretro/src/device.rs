@@ -8,6 +8,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pokebot_controller::{FrameRate, InputSchedule};
+use std::collections::VecDeque;
+
 use pokebot_core::{
     ButtonSet, CapturedFrame, Controller, ControllerCommand, ControllerReceipt, Error,
     PressProfile, Result, RgbImage, VideoSource,
@@ -74,6 +76,8 @@ pub fn launch(
         state: Mutex::new(State {
             schedule: InputSchedule::new(FrameRate::GBA, config.press_profile),
             latest: None,
+            ready: VecDeque::new(),
+            emulated: 0,
             failure: None,
         }),
         frame_ready: Condvar::new(),
@@ -109,6 +113,7 @@ pub fn launch(
         EmulatorVideoSource {
             link: Arc::clone(&link),
             last_frame_id: None,
+            primed: false,
         },
         EmulatorController { link },
         info,
@@ -116,17 +121,68 @@ pub fn launch(
 }
 
 /// The emulator's rendered output, seen the way a capture card would.
+///
+/// Stepped: pipelined one frame deep. Each `next_frame` samples the
+/// buttons for the frame after the one it returns (in the caller's thread,
+/// so what the bot queued before the call decides it) and hands them to
+/// the emulator thread, which emulates that frame while the bot perceives
+/// the one returned. Input thus shows one frame later than unpipelined,
+/// deterministically; the core and perception overlap instead of
+/// alternating (1.36 + 1.74 ms per frame became about max of the two).
 pub struct EmulatorVideoSource {
     link: Arc<Link>,
     last_frame_id: Option<u64>,
+    /// The first frame has been requested (stepped).
+    primed: bool,
+}
+
+/// How long to wait for a frame before calling the emulator stalled.
+const STALL: Duration = Duration::from_secs(2);
+
+impl EmulatorVideoSource {
+    /// Samples the buttons for the next frame and queues its emulation.
+    fn request_step(&self) -> Result<()> {
+        let buttons = self.link.shared.lock().schedule.advance();
+        self.link
+            .requests
+            .send(Request::Step { buttons })
+            .map_err(|_| Error::Disconnected("emulator thread has stopped".into()))
+    }
+
+    fn next_stepped(&mut self) -> Result<CapturedFrame> {
+        if !self.primed {
+            self.primed = true;
+            self.request_step()?;
+        }
+        self.request_step()?;
+        let mut state = self.link.shared.lock();
+        loop {
+            if let Some(failure) = &state.failure {
+                return Err(Error::Disconnected(failure.clone()));
+            }
+            if let Some(frame) = state.ready.pop_front() {
+                self.last_frame_id = Some(frame.frame_id);
+                return Ok(frame);
+            }
+            let (guard, timeout) = self
+                .link
+                .shared
+                .frame_ready
+                .wait_timeout(state, STALL)
+                .unwrap_or_else(|e| e.into_inner());
+            state = guard;
+            if timeout.timed_out() {
+                return Err(Error::Device(format!("no new frame for {STALL:?}")));
+            }
+        }
+    }
 }
 
 impl VideoSource for EmulatorVideoSource {
     fn next_frame(&mut self) -> Result<CapturedFrame> {
         if self.link.clock == ClockMode::Stepped {
-            self.link.request(|reply| Request::Step { reply })?;
+            return self.next_stepped();
         }
-        const STALL: Duration = Duration::from_secs(2);
         let mut state = self.link.shared.lock();
         loop {
             if let Some(failure) = &state.failure {
@@ -204,13 +260,23 @@ impl Shared {
 
 struct State {
     schedule: InputSchedule,
+    /// Real time: the newest frame.
     latest: Option<CapturedFrame>,
+    /// Stepped: emulated frames not yet read, oldest first (at most two).
+    ready: VecDeque<CapturedFrame>,
+    /// Frames emulated so far (the next frame's id).
+    emulated: u64,
     failure: Option<String>,
 }
 
 enum Request {
-    Step { reply: Sender<Result<()>> },
-    FlushSave { reply: Sender<Result<()>> },
+    /// Emulate one frame with these buttons (stepped).
+    Step {
+        buttons: ButtonSet,
+    },
+    FlushSave {
+        reply: Sender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -275,13 +341,19 @@ fn run_worker(
 fn run_stepped(core: &mut Core, shared: &Shared, requests: &Receiver<Request>) -> Result<()> {
     for request in requests {
         match request {
-            Request::Step { reply } => {
-                let result = step(core, shared);
-                let failed = result.is_err();
-                let _ = reply.send(result);
-                if failed {
-                    break;
-                }
+            Request::Step { buttons } => {
+                let image = core.run_frame(buttons);
+                let mut state = shared.lock();
+                let frame_id = state.emulated;
+                state.emulated += 1;
+                state.ready.push_back(CapturedFrame {
+                    frame_id,
+                    delivered: frame_id,
+                    captured_at: Instant::now(),
+                    image,
+                });
+                drop(state);
+                shared.frame_ready.notify_all();
             }
             Request::FlushSave { reply } => {
                 let _ = reply.send(core.store_save());
@@ -308,12 +380,8 @@ fn run_realtime(
                 let _ = reply.send(core.store_save());
                 continue;
             }
-            Ok(Request::Step { reply }) => {
-                let _ = reply.send(Err(Error::Unsupported(
-                    "manual stepping in real-time clock mode".into(),
-                )));
-                continue;
-            }
+            // Only the stepped source sends steps.
+            Ok(Request::Step { .. }) => continue,
             Err(RecvTimeoutError::Timeout) => {}
         }
         step(core, shared)?;

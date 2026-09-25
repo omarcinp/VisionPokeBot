@@ -1,0 +1,293 @@
+{
+ "identity": {
+  "milestones": [
+   "LeaveBedroom",
+   "TalkToMom",
+   "LeaveHouse",
+   "MeetOak",
+   "ChooseStarter",
+   "RivalBattle",
+   "HealAtHome",
+   "GetParcel",
+   "DeliverParcel",
+   "PrepareForBrock",
+   "ReachPewter",
+   "BeatBrock"
+  ],
+  "saved_at": {
+   "map": "PewterCity_PokemonCenter_1F",
+   "x": 7,
+   "y": 4
+  }
+ },
+ "party": {
+  "value": [
+   {
+    "species": {
+     "value": "SPECIES_IVYSAUR",
+     "source": "Observed",
+     "last_verified_frame": 1000
+    },
+    "nickname": {
+     "value": null,
+     "source": "Unknown",
+     "last_verified_frame": null
+    },
+    "level": {
+     "value": 18,
+     "source": "Observed",
+     "last_verified_frame": 1000
+    },
+    "hp": {
+     "value": [
+      54,
+      54
+     ],
+     "source": "Derived",
+     "last_verified_frame": 1000
+    },
+    "status": {
+     "value": "Healthy",
+     "source": "Derived",
+     "last_verified_frame": 1000
+    },
+    "moves": [
+     {
+      "mv": {
+       "value": "MOVE_TACKLE",
+       "source": "Tracked",
+       "last_verified_frame": null
+      },
+      "pp": {
+       "value": [
+        35,
+        35
+       ],
+       "source": "Derived",
+       "last_verified_frame": 1000
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_GROWL",
+       "source": "Tracked",
+       "last_verified_frame": null
+      },
+      "pp": {
+       "value": [
+        40,
+        40
+       ],
+       "source": "Derived",
+       "last_verified_frame": 1000
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_LEECH_SEED",
+       "source": "Tracked",
+       "last_verified_frame": null
+      },
+      "pp": {
+       "value": [
+        10,
+        10
+       ],
+       "source": "Derived",
+       "last_verified_frame": 1000
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_VINE_WHIP",
+       "source": "Tracked",
+       "last_verified_frame": null
+      },
+      "pp": {
+       "value": [
+        10,
+        10
+       ],
+       "source": "Derived",
+       "last_verified_frame": 1000
+      }
+     }
+    ],
+    "held_item": {
+     "value": null,
+     "source": "Derived",
+     "last_verified_frame": 1000
+    },
+    "shiny": {
+     "value": false,
+     "source": "Derived",
+     "last_verified_frame": 1000
+    }
+   }
+  ],
+  "source": "Observed",
+  "last_verified_frame": 1000
+ },
+ "bag": {
+  "pockets": {
+   "Items": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   "KeyItems": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   "PokeBalls": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   "TmCase": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   "BerryPouch": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   }
+  }
+ },
+ "money": {
+  "value": 3000,
+  "source": "Observed",
+  "last_verified_frame": 1000
+ },
+ "pc": {
+  "boxes": [
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   }
+  ],
+  "items": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  }
+ },
+ "pokedex": {
+  "caught": {
+   "SPECIES_BULBASAUR": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 1000
+   }
+  },
+  "seen": {}
+ },
+ "world": {
+  "flags": {
+   "FLAG_BADGE01_GET": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 1000
+   }
+  },
+  "vars": {},
+  "visited": {
+   "PalletTown": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 1000
+   },
+   "ViridianCity": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 1000
+   },
+   "PewterCity": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 1000
+   }
+  },
+  "respawn": {
+   "value": {
+    "map": "PewterCity_PokemonCenter_1F",
+    "x": 7,
+    "y": 4
+   },
+   "source": "Observed",
+   "last_verified_frame": 1000
+  },
+  "npcs": {},
+  "infeasible": [],
+  "paths_run": []
+ }
+}

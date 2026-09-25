@@ -1,0 +1,291 @@
+{
+  "identity": {
+    "milestones": [
+      "LeaveBedroom",
+      "TalkToMom",
+      "LeaveHouse",
+      "MeetOak",
+      "ChooseStarter",
+      "RivalBattle",
+      "HealAtHome",
+      "GetParcel",
+      "DeliverParcel"
+    ],
+    "saved_at": {
+      "map": "PalletTown_ProfessorOaksLab",
+      "x": 6,
+      "y": 4
+    }
+  },
+  "party": {
+    "value": [
+      {
+        "species": {
+          "value": "SPECIES_BULBASAUR",
+          "source": "Derived",
+          "last_verified_frame": 0
+        },
+        "nickname": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "level": {
+          "value": 6,
+          "source": "Observed",
+          "last_verified_frame": 41714
+        },
+        "hp": {
+          "value": [
+            10,
+            22
+          ],
+          "source": "Observed",
+          "last_verified_frame": 41714
+        },
+        "status": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "moves": [
+          {
+            "mv": {
+              "value": "MOVE_TACKLE",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                30,
+                35
+              ],
+              "source": "Tracked",
+              "last_verified_frame": 35526
+            }
+          },
+          {
+            "mv": {
+              "value": "MOVE_GROWL",
+              "source": "Derived",
+              "last_verified_frame": 0
+            },
+            "pp": {
+              "value": [
+                40,
+                40
+              ],
+              "source": "Derived",
+              "last_verified_frame": 0
+            }
+          },
+          null,
+          null
+        ],
+        "held_item": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        },
+        "shiny": {
+          "value": null,
+          "source": "Unknown",
+          "last_verified_frame": null
+        }
+      }
+    ],
+    "source": "Derived",
+    "last_verified_frame": 6160
+  },
+  "bag": {
+    "pockets": {
+      "Items": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "KeyItems": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "PokeBalls": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "TmCase": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      "BerryPouch": {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      }
+    }
+  },
+  "money": {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+  },
+  "pc": {
+    "boxes": [
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      },
+      {
+        "value": null,
+        "source": "Unknown",
+        "last_verified_frame": null
+      }
+    ],
+    "items": {
+      "value": null,
+      "source": "Unknown",
+      "last_verified_frame": null
+    }
+  },
+  "pokedex": {
+    "caught": {},
+    "seen": {
+      "SPECIES_RATTATA": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 40200
+      }
+    },
+    "counts": {
+      "value": {
+        "seen": null,
+        "caught": 1
+      },
+      "source": "Observed",
+      "last_verified_frame": 63752
+    }
+  },
+  "world": {
+    "flags": {
+      "FLAG_BADGE01_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE02_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE03_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE04_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE05_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE06_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE07_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      },
+      "FLAG_BADGE08_GET": {
+        "value": false,
+        "source": "Observed",
+        "last_verified_frame": 63752
+      }
+    },
+    "vars": {},
+    "visited": {
+      "PalletTown_ProfessorOaksLab": {
+        "value": true,
+        "source": "Observed",
+        "last_verified_frame": 63434
+      }
+    },
+    "respawn": {
+      "value": null,
+      "source": "Unknown",
+      "last_verified_frame": null
+    },
+    "npcs": {},
+    "infeasible": [],
+    "paths_run": []
+  }
+}

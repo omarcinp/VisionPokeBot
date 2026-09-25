@@ -1,0 +1,123 @@
+[
+  {
+    "name": "GameClear",
+    "achieves": {"flag": {"name": "FLAG_SYS_GAME_CLEAR", "is": true}},
+    "subgoals": [
+      {"badge": {"n": 1}},
+      {"badge": {"n": 2}},
+      {"badge": {"n": 3}},
+      {"badge": {"n": 4}},
+      {"badge": {"n": 5}},
+      {"badge": {"n": 6}},
+      {"badge": {"n": 7}},
+      {"badge": {"n": 8}},
+      {"party_has_move": {"mv": "MOVE_STRENGTH"}},
+      {"flag": {"name": "FLAG_DEFEATED_LORELEI", "is": true}},
+      {"flag": {"name": "FLAG_DEFEATED_BRUNO", "is": true}},
+      {"flag": {"name": "FLAG_DEFEATED_AGATHA", "is": true}},
+      {"flag": {"name": "FLAG_DEFEATED_LANCE", "is": true}},
+      {"flag": {"name": "FLAG_DEFEATED_CHAMP", "is": true}}
+    ],
+    "complete": true,
+    "note": "the Hall of Fame sets the flag itself; Victory Road needs Strength"
+  },
+  {
+    "name": "GetBadge(3)",
+    "achieves": {"badge": {"n": 3}},
+    "subgoals": [{"party_has_move": {"mv": "MOVE_CUT"}}],
+    "note": "a tree blocks the Vermilion Gym"
+  },
+  {
+    "name": "GetBadge(4)",
+    "achieves": {"badge": {"n": 4}},
+    "subgoals": [{"party_has_move": {"mv": "MOVE_CUT"}}],
+    "note": "a tree blocks the Celadon Gym"
+  },
+  {
+    "name": "GetBadge(5)",
+    "achieves": {"badge": {"n": 5}},
+    "subgoals": [
+      {"party_has_move": {"mv": "MOVE_CUT"}},
+      {"flag": {"name": "FLAG_GOT_POKE_FLUTE", "is": true}}
+    ],
+    "note": "Snorlax sleeps on the ways to Fuchsia; the flute comes from Mr. Fuji"
+  },
+  {
+    "name": "GetBadge(6)",
+    "achieves": {"badge": {"n": 6}},
+    "subgoals": [{"flag": {"name": "FLAG_GOT_TEA", "is": true}}],
+    "note": "the Saffron guards want tea"
+  },
+  {
+    "name": "GetBadge(7)",
+    "achieves": {"badge": {"n": 7}},
+    "subgoals": [
+      {"party_has_move": {"mv": "MOVE_SURF"}},
+      {"has_item": {"item": "ITEM_SECRET_KEY", "n": 1}}
+    ],
+    "note": "Cinnabar is across the water; the gym is locked without the Mansion's key"
+  },
+  {
+    "name": "GetBadge(8)",
+    "achieves": {"badge": {"n": 8}},
+    "subgoals": [
+      {"badge": {"n": 1}},
+      {"badge": {"n": 2}},
+      {"badge": {"n": 3}},
+      {"badge": {"n": 4}},
+      {"badge": {"n": 5}},
+      {"badge": {"n": 6}},
+      {"badge": {"n": 7}}
+    ],
+    "note": "the Viridian Gym opens with seven badges"
+  },
+  {
+    "name": "GetHM(CUT)",
+    "achieves": {"has_item": {"item": "ITEM_HM01", "n": 0}},
+    "subgoals": [{"flag": {"name": "FLAG_GOT_SS_TICKET", "is": true}}],
+    "note": "the S.S. Anne captain gives HM01; Bill's ticket boards the ship"
+  },
+  {
+    "name": "GetHM(FLY)",
+    "achieves": {"has_item": {"item": "ITEM_HM02", "n": 0}},
+    "subgoals": [{"party_has_move": {"mv": "MOVE_CUT"}}],
+    "note": "the Route 16 house is behind a tree"
+  },
+  {
+    "name": "GetHM(STRENGTH)",
+    "achieves": {"has_item": {"item": "ITEM_HM04", "n": 0}},
+    "subgoals": [{"has_item": {"item": "ITEM_GOLD_TEETH", "n": 1}}],
+    "note": "the Fuchsia warden trades HM04 for his teeth from the Safari Zone"
+  },
+  {
+    "name": "TeachHM(CUT)",
+    "achieves": {"party_has_move": {"mv": "MOVE_CUT"}},
+    "subgoals": [{"has_item": {"item": "ITEM_HM01", "n": 1}}, {"badge": {"n": 2}}]
+  },
+  {
+    "name": "TeachHM(FLY)",
+    "achieves": {"party_has_move": {"mv": "MOVE_FLY"}},
+    "subgoals": [{"has_item": {"item": "ITEM_HM02", "n": 1}}, {"badge": {"n": 3}}]
+  },
+  {
+    "name": "TeachHM(SURF)",
+    "achieves": {"party_has_move": {"mv": "MOVE_SURF"}},
+    "subgoals": [{"has_item": {"item": "ITEM_HM03", "n": 1}}, {"badge": {"n": 5}}]
+  },
+  {
+    "name": "TeachHM(STRENGTH)",
+    "achieves": {"party_has_move": {"mv": "MOVE_STRENGTH"}},
+    "subgoals": [{"has_item": {"item": "ITEM_HM04", "n": 1}}, {"badge": {"n": 4}}]
+  },
+  {
+    "name": "TeachHM(FLASH)",
+    "achieves": {"party_has_move": {"mv": "MOVE_FLASH"}},
+    "subgoals": [{"has_item": {"item": "ITEM_HM05", "n": 1}}, {"badge": {"n": 1}}]
+  },
+  {
+    "name": "StockBalls",
+    "achieves": {"has_item": {"item": "ITEM_POKE_BALL", "n": 0}},
+    "subgoals": [{"money": 1000}],
+    "note": "five Poké Balls; then buy at the nearest mart"
+  }
+]

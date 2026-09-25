@@ -14,6 +14,8 @@ pub struct SessionRecorder {
     dir: PathBuf,
     started: Instant,
     record_raw: bool,
+    /// Every `stride`-th frame is written.
+    stride: u64,
     frames: BufWriter<File>,
     controller: BufWriter<File>,
     events: BufWriter<File>,
@@ -69,8 +71,17 @@ impl SessionRecorder {
             dir,
             started: Instant::now(),
             record_raw,
+            stride: 1,
             last_frame_id: None,
         })
+    }
+
+    /// Keeps only every `stride`-th frame (by frame id); commands and
+    /// events are recorded in full. For fast runs (the stepped emulator
+    /// writes a frame per read, many times real time).
+    pub fn with_stride(mut self, stride: u64) -> Self {
+        self.stride = stride.max(1);
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -82,6 +93,9 @@ impl SessionRecorder {
         captured: &CapturedFrame,
         normalized: &NormalizedFrame,
     ) -> Result<()> {
+        if normalized.frame_id % self.stride != 0 {
+            return Ok(());
+        }
         let file = format!("frames/{:08}.png", normalized.frame_id);
         pokebot_video::png::save(normalized.image(), self.dir.join(&file))?;
         if self.record_raw {

@@ -11,6 +11,4 @@ workspace = true
 [dependencies]
 pokebot-core.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1.0.151"

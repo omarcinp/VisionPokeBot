@@ -148,6 +148,24 @@ impl Font {
         best.map(|(_, lines)| lines).unwrap_or_default()
     }
 
+    /// Dark numeric ink on a known pale menu panel. Fixed contrast avoids
+    /// capture-noise clusters splitting one glyph between several inks.
+    /// Callers must limit this to a field with no dark decorative pixels.
+    pub fn read_dark(&self, image: &RgbImage, region: Region) -> Vec<String> {
+        let bits = (region.y..region.y + region.height)
+            .flat_map(|y| {
+                (region.x..region.x + region.width)
+                    .map(move |x| image.pixel(x, y).iter().all(|c| *c < 128))
+            })
+            .collect();
+        self.read_mask(&Mask {
+            width: region.width as usize,
+            height: region.height as usize,
+            bits,
+        })
+        .1
+    }
+
     fn read_mask(&self, mask: &Mask) -> (i64, Vec<String>) {
         let mut score = 0;
         let mut lines = Vec::new();

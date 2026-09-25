@@ -12,7 +12,8 @@
 //! that reaches the confidence target. Ties break on minutes, then on a
 //! stable description order, so the result is deterministic.
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use pokebot_gamedata::mechanics::{catch_probability, exp_for_level, exp_gain, Stats};
 use pokebot_gamedata::{EncounterTable, GameData};
@@ -32,6 +33,10 @@ pub const OUR_IV: u32 = 10;
 const WILD_IV: u32 = 15;
 /// Levels above the current one considered per member.
 const LEVEL_WINDOW: u8 = 14;
+/// Level combinations evaluated per party composition before the search
+/// settles for what it found (a four-member party has 15⁴ of them; the
+/// cheapest that meets the target usually comes within the first few).
+const MAX_LEVEL_COMBOS: usize = 96;
 const POKE_BALL: &str = "ITEM_POKE_BALL";
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +210,17 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
+/// Levels the plan's training adds up to.
+fn levels_gained(plan: &PreparationPlan) -> u32 {
+    plan.steps
+        .iter()
+        .map(|s| match s {
+            PlanStep::Train { from, to, .. } => u32::from(to.saturating_sub(*from)),
+            PlanStep::Catch { .. } => 0,
+        })
+        .sum()
+}
+
 fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(String, f64)> {
     targets
         .iter()
@@ -277,8 +293,17 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     }
 
     let mut plans: Vec<PreparationPlan> = Vec::new();
+    let mut options: LevelOptions = BTreeMap::new();
     for (party, steps, base_minutes) in compositions {
-        search_levels(request, &party, &steps, base_minutes, &mut plans);
+        search_levels(
+            request,
+            &party,
+            &steps,
+            base_minutes,
+            alternatives.max(1),
+            &mut options,
+            &mut plans,
+        );
     }
     let ok = |p: &PreparationPlan| p.min_confidence() >= request.confidence;
     // If anything reaches the target, only those count; otherwise the most
@@ -292,8 +317,12 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 .total_cmp(&b.minutes)
                 .then_with(|| b.min_confidence().total_cmp(&a.min_confidence()))
         } else {
+            // Nothing reaches the target: the most confident best effort,
+            // and at equal confidence the one that trains furthest (the
+            // party is judged again after it), not the one that does least.
             b.min_confidence()
                 .total_cmp(&a.min_confidence())
+                .then_with(|| levels_gained(b).cmp(&levels_gained(a)))
                 .then_with(|| a.minutes.total_cmp(&b.minutes))
         }
         .then_with(|| format!("{:?}", a.steps).cmp(&format!("{:?}", b.steps)))
@@ -320,14 +349,22 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
 
 /// A target level for one member: (level, minutes, where and how many battles).
 type LevelOption = (u8, f64, Option<(String, u32)>);
+/// Level options per member, keyed by species, level and experience: the
+/// party members recur in every composition, so they are priced once.
+type LevelOptions = BTreeMap<(String, u8, Option<u64>), Vec<LevelOption>>;
 
-/// Tries every combination of level targets (up to LEVEL_WINDOW above each
-/// member's level, only for members that can train somewhere).
+/// Level targets per member (up to LEVEL_WINDOW above its level, only
+/// where it can train), searched cheapest combination first: training time
+/// adds up and confidence only grows with levels, so the first combination
+/// that meets the target is the cheapest one. Stops after `wanted` meet it
+/// or [`MAX_LEVEL_COMBOS`] were tried.
 fn search_levels(
     request: &Request<'_>,
     party: &[PartyMember],
     base_steps: &[PlanStep],
     base_minutes: f64,
+    wanted: usize,
+    memo: &mut LevelOptions,
     plans: &mut Vec<PreparationPlan>,
 ) {
     let data = request.data;
@@ -335,31 +372,48 @@ fn search_levels(
     let options: Vec<Vec<LevelOption>> = party
         .iter()
         .map(|m| {
-            (m.level..=m.level.saturating_add(LEVEL_WINDOW).min(100))
-                .filter_map(|to| {
-                    if to == m.level {
-                        return Some((to, 0.0, None));
-                    }
-                    request
-                        .areas
-                        .iter()
-                        .filter_map(|a| {
-                            training_cost(data, m, to, a).map(|(min, b)| (min, b, a.map.clone()))
+            memo.entry((m.species.clone(), m.level, m.exp))
+                .or_insert_with(|| {
+                    (m.level..=m.level.saturating_add(LEVEL_WINDOW).min(100))
+                        .filter_map(|to| {
+                            if to == m.level {
+                                return Some((to, 0.0, None));
+                            }
+                            request
+                                .areas
+                                .iter()
+                                .filter_map(|a| {
+                                    training_cost(data, m, to, a)
+                                        .map(|(min, b)| (min, b, a.map.clone()))
+                                })
+                                .min_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.2.cmp(&y.2)))
+                                .map(|(min, battles, map)| (to, min, Some((map, battles))))
                         })
-                        .min_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.2.cmp(&y.2)))
-                        .map(|(min, battles, map)| (to, min, Some((map, battles))))
+                        .collect()
                 })
-                .collect()
+                .clone()
         })
         .collect();
-    let mut index = vec![0usize; party.len()];
-    loop {
-        let minutes: f64 = base_minutes
+    let minutes_of = |index: &[usize]| -> f64 {
+        base_minutes
             + index
                 .iter()
                 .zip(&options)
                 .map(|(i, o)| o[*i].1)
-                .sum::<f64>();
+                .sum::<f64>()
+    };
+    let start = vec![0usize; party.len()];
+    let mut heap: BinaryHeap<Reverse<(Minutes, Vec<usize>)>> = BinaryHeap::new();
+    let mut seen: BTreeSet<Vec<usize>> = BTreeSet::new();
+    heap.push(Reverse((Minutes(minutes_of(&start)), start.clone())));
+    seen.insert(start);
+    let mut found = 0;
+    let mut tried = 0;
+    while let Some(Reverse((Minutes(minutes), index))) = heap.pop() {
+        if tried >= MAX_LEVEL_COMBOS {
+            break;
+        }
+        tried += 1;
         let prepared: Vec<Combatant> = party
             .iter()
             .zip(&index)
@@ -380,7 +434,7 @@ fn search_levels(
                 });
             }
         }
-        plans.push(PreparationPlan {
+        let plan = PreparationPlan {
             steps,
             minutes,
             confidence: conf,
@@ -388,19 +442,39 @@ fn search_levels(
                 .iter()
                 .map(|c| (c.species.clone(), c.level, c.moves.clone()))
                 .collect(),
-        });
-        // Next combination (odometer).
-        let mut k = 0;
-        while k < index.len() {
-            index[k] += 1;
-            if index[k] < options[k].len() {
-                break;
-            }
-            index[k] = 0;
-            k += 1;
+        };
+        if plan.min_confidence() >= request.confidence {
+            found += 1;
         }
-        if k == index.len() {
+        plans.push(plan);
+        if found >= wanted {
             break;
         }
+        // One member a level target further, each way.
+        for k in 0..index.len() {
+            let mut next = index.clone();
+            next[k] += 1;
+            if next[k] < options[k].len() && seen.insert(next.clone()) {
+                heap.push(Reverse((Minutes(minutes_of(&next)), next)));
+            }
+        }
+    }
+}
+
+/// Minutes with a total order, for the open set.
+#[derive(Clone, Copy, PartialEq)]
+struct Minutes(f64);
+
+impl Eq for Minutes {}
+
+impl PartialOrd for Minutes {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Minutes {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
     }
 }

@@ -578,6 +578,15 @@ pub fn is_nickname_question(page: &str) -> bool {
     page.contains("Give a nickname to the")
 }
 
+/// The pages after the nickname question when the party is full: "X was
+/// transferred to Someone's PC." / "… to BOX “BOX2.”" / "BOX “BOX1” was
+/// full." / "It was placed in …". The game prints them while the YES/NO
+/// box of the nickname question is still drawn (flash-4: the battle step
+/// took the lingering box for a question it did not know and failed).
+pub fn is_pc_transfer_text(page: &str) -> bool {
+    page.contains("transferred to") || page.contains("placed in") || page.contains("was full")
+}
+
 /// "It was placed in BOX “BOX2.”" / "X was transferred to BOX “BOX2.”" →
 /// 1. The "BOX … was full." page names the full box, not the new one.
 pub fn box_from_text(page: &str) -> Option<u8> {
@@ -720,7 +729,15 @@ pub fn identify(
         events.push(log(format!("{species}: no catch, the lead is unknown")));
         return;
     };
-    let Some(hp) = battle.player_hp_numbers.or(member.hp) else {
+    let Some(hp) = battle
+        .player_hp_numbers
+        .filter(|hp| crate::party::plausible_hp_for(*hp, member.level, Some(&member.species)))
+        .or_else(|| {
+            member.hp.filter(|hp| {
+                crate::party::plausible_hp_for(*hp, member.level, Some(&member.species))
+            })
+        })
+    else {
         events.push(log(format!("{species}: no catch, our HP is unknown")));
         return;
     };
@@ -789,6 +806,7 @@ pub(crate) fn attempt_decision(
     let command = matches!(menu, BattleMenu::Command { .. });
     let reading = battle
         .player_hp_numbers
+        .filter(|hp| crate::party::plausible_hp_for(*hp, member.level, Some(&member.species)))
         .zip(battle.opponent_hp)
         .map(|(us, foe)| (command, us, foe));
     let confirmed = match (reading, memory.catch.hud) {

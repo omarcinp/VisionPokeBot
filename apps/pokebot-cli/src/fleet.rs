@@ -290,8 +290,8 @@ impl State {
             .context("count must be a positive integer")?;
         let task = body["task"]
             .as_str()
-            .context("task must be new-game, story or observe")?;
-        if !["new-game", "story", "observe"].contains(&task) {
+            .context("task must be autonomy, new-game, story or observe")?;
+        if !["autonomy", "new-game", "story", "observe"].contains(&task) {
             bail!("unknown task");
         }
         let running = self
@@ -318,7 +318,7 @@ impl State {
             .emulator_data
             .canonicalize()
             .context("emulator data directory")?;
-        if task == "story" && !data.join("world/index.json").is_file() {
+        if matches!(task, "story" | "autonomy") && !data.join("world/index.json").is_file() {
             bail!("build the world model with tools/world/build.sh first");
         }
         let mut created = Vec::new();
@@ -332,9 +332,22 @@ impl State {
                 std::os::unix::fs::symlink(&data, dir.join("data"))?;
                 let log = File::create(dir.join("worker.log"))?;
                 let mut command = Command::new(&self.executable);
+                command.current_dir(&dir).arg(match task {
+                    "observe" => "run",
+                    "autonomy" => "goal",
+                    _ => task,
+                });
+                if task == "autonomy" {
+                    command.args([
+                        "flag FLAG_SYS_GAME_CLEAR",
+                        "--plan-budget-secs",
+                        "240",
+                        "--max-replans",
+                        "8",
+                        "--restart",
+                    ]);
+                }
                 command
-                    .current_dir(&dir)
-                    .arg(if task == "observe" { "run" } else { task })
                     .args(["--core"])
                     .arg(&core)
                     .arg("--rom")
@@ -355,7 +368,7 @@ impl State {
                     .stdin(Stdio::null())
                     .stdout(log.try_clone()?)
                     .stderr(log);
-                if task == "story" {
+                if matches!(task, "story" | "autonomy") {
                     command
                         .args(["--new-game", "--save-game", "--progress"])
                         .arg(dir.join("progress.json"))
@@ -607,6 +620,37 @@ mod tests {
             root.join("runs").join(first).is_dir(),
             "stop retains artifacts"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn autonomy_workers_launch_the_goal_loop_with_private_saves() {
+        if available_memory() < WORKER_MEMORY {
+            return;
+        }
+        let (fleet, root) = fixture();
+        std::fs::create_dir(root.join("data/world")).unwrap();
+        std::fs::write(root.join("data/world/index.json"), "{}").unwrap();
+        let (code, started) = fleet.request(
+            "POST",
+            "/api/emulators",
+            json!({"count":1,"task":"autonomy"}),
+        );
+        assert_eq!(code, 201, "{started}");
+        let name = started["started"][0].as_str().unwrap();
+        let dir = root.join("runs").join(name);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !dir.join("args.txt").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+        assert!(args.starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
+        assert!(args.contains("--new-game\n--save-game\n"));
+        assert!(args.contains(dir.join("progress.json").to_str().unwrap()));
+        assert!(args.contains(dir.join("game.sav").to_str().unwrap()));
+        use clap::Parser;
+        crate::Cli::try_parse_from(std::iter::once("pokebot").chain(args.lines())).unwrap();
+        drop(fleet);
         std::fs::remove_dir_all(root).unwrap();
     }
 

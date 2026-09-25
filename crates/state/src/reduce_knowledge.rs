@@ -1,11 +1,18 @@
-//! Applying knowledge events (party, bag, money, PC, Pokédex) to the state.
-//! Pure: the same events always give the same state.
+//! Applying knowledge events (party, bag, money, PC, Pokédex, world belief)
+//! to the state. Pure: the same events always give the same state.
 
-use crate::{GameEvent, GameState, Knowledge, KnowledgeSource, MoveSlot, PartyMon, Status};
+use crate::belief::track;
+use crate::{
+    GameEvent, GameState, HealSpot, Knowledge, KnowledgeSource, MoveSlot, PartyMon, PokedexCounts,
+    Status,
+};
 
 /// Applies `event` if it is a knowledge event; returns whether it was one.
 pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> bool {
     match event {
+        GameEvent::PartyAudited { members } => {
+            state.party = Knowledge::observed(members.clone(), frame);
+        }
         GameEvent::PartyMonDerived { slot, mon } => {
             *member(state, *slot, KnowledgeSource::Derived, frame) = (**mon).clone();
         }
@@ -215,20 +222,52 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             }
         }
         GameEvent::SpeciesSeen { species } => {
-            state
+            let new = state
                 .pokedex
                 .seen
-                .insert(species.clone(), Knowledge::observed(true, frame));
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            if new {
+                if let Some(c) = state.pokedex.counts.value.as_mut() {
+                    c.seen = c.seen.map(|n| n + 1);
+                    state.pokedex.counts.source = KnowledgeSource::Tracked;
+                }
+            }
         }
         GameEvent::SpeciesCaught { species } => {
-            state
+            let newly_seen = state
                 .pokedex
                 .seen
-                .insert(species.clone(), Knowledge::observed(true, frame));
-            state
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            let newly_caught = state
                 .pokedex
                 .caught
-                .insert(species.clone(), Knowledge::observed(true, frame));
+                .insert(species.clone(), Knowledge::observed(true, frame))
+                .is_none_or(|k| k.value != Some(true));
+            // A read total moves with the catches after it (a species not
+            // in the per-species map may still be in the total: only a
+            // first mark for the species counts).
+            if let Some(c) = state.pokedex.counts.value.as_mut() {
+                if newly_seen {
+                    c.seen = c.seen.map(|n| n + 1);
+                }
+                if newly_caught {
+                    c.caught += 1;
+                }
+                if newly_seen || newly_caught {
+                    state.pokedex.counts.source = KnowledgeSource::Tracked;
+                }
+            }
+        }
+        GameEvent::PokedexCountObserved { seen, caught } => {
+            state.pokedex.counts = Knowledge::observed(
+                PokedexCounts {
+                    seen: *seen,
+                    caught: *caught,
+                },
+                frame,
+            );
         }
         GameEvent::CheckpointRestored { knowledge } => {
             let k = (**knowledge).clone();
@@ -237,6 +276,75 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             state.money = k.money;
             state.pc = k.pc;
             state.pokedex = k.pokedex;
+            state.world = k.world;
+            // Session-scoped: what was infeasible before the restore may
+            // not be any more.
+            state.world.infeasible.clear();
+        }
+        GameEvent::FlagObserved { flag, value } => {
+            state
+                .world
+                .flags
+                .insert(flag.clone(), Knowledge::observed(*value, frame));
+        }
+        GameEvent::FlagTracked { flag, value } => {
+            if let Some(k) = track(state.world.flags.get(flag), *value) {
+                state.world.flags.insert(flag.clone(), k);
+            }
+        }
+        GameEvent::VarObserved { var, value } => {
+            state
+                .world
+                .vars
+                .insert(var.clone(), Knowledge::observed(*value, frame));
+        }
+        GameEvent::VarTracked { var, value } => {
+            if let Some(k) = track(state.world.vars.get(var), *value) {
+                state.world.vars.insert(var.clone(), k);
+            }
+        }
+        GameEvent::MapVisited { map } => {
+            state
+                .world
+                .visited
+                .insert(map.clone(), Knowledge::observed(true, frame));
+        }
+        GameEvent::RespawnSet { map, x, y } => {
+            state.world.respawn = Knowledge::observed(
+                HealSpot {
+                    map: map.clone(),
+                    x: *x,
+                    y: *y,
+                },
+                frame,
+            );
+        }
+        GameEvent::NpcSeen {
+            map,
+            local_id,
+            x,
+            y,
+            facing,
+        } => {
+            let npc = state.world.npc_mut(map, *local_id);
+            npc.pos = Knowledge::observed((*x, *y), frame);
+            npc.facing = Knowledge::observed(*facing, frame);
+            npc.present = Knowledge::observed(true, frame);
+        }
+        GameEvent::NpcAbsent { map, local_id } => {
+            state.world.npc_mut(map, *local_id).present = Knowledge::observed(false, frame);
+        }
+        GameEvent::ScriptPathRun { script, path } => state.world.record_path(script, *path),
+        GameEvent::IntentInfeasible { intent } => {
+            state.world.infeasible.insert(intent.clone());
+        }
+        // Session-scoped and kept by the agent's navigator, not the belief.
+        GameEvent::TileBlocked { .. } | GameEvent::TileUnblocked { .. } => {}
+        GameEvent::WhitedOut => {
+            let m = member(state, 0, KnowledgeSource::Observed, frame);
+            let max = m.hp.value.map_or(0, |(_, max)| max);
+            m.hp = Knowledge::observed((0, max), frame);
+            m.status = Knowledge::observed(Status::Fainted, frame);
         }
         _ => return false,
     }
@@ -358,6 +466,13 @@ mod tests {
             .unwrap()
             .pp;
         assert_eq!(pp.value, Some((35, 35)));
+    }
+
+    #[test]
+    fn a_heal_does_not_invent_an_unknown_hp_total() {
+        let healed = run(vec![starter(), GameEvent::Healed]);
+        let hp = &healed.party.value.as_ref().unwrap()[0].hp;
+        assert_eq!(hp.value, None);
     }
 
     #[test]
@@ -507,6 +622,65 @@ mod tests {
         assert_eq!(s.pc.boxes[0].value.as_ref().unwrap().len(), 1);
         assert_eq!(s.pokedex.caught["SPECIES_RATTATA"].value, Some(true));
         assert_eq!(s.pokedex.seen["SPECIES_RATTATA"].value, Some(true));
+    }
+
+    #[test]
+    fn pokedex_counts_are_observed_from_the_trainer_card() {
+        let s = run(vec![starter()]);
+        assert_eq!(s.pokedex.counts, Knowledge::unknown());
+        let s = run(vec![
+            starter(),
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_RATTATA".into(),
+            },
+            GameEvent::PokedexCountObserved {
+                seen: Some(12),
+                caught: 7,
+            },
+        ]);
+        assert_eq!(
+            s.pokedex.counts.value,
+            Some(PokedexCounts {
+                seen: Some(12),
+                caught: 7
+            })
+        );
+        assert_eq!(s.pokedex.counts.source, KnowledgeSource::Observed);
+        // The per-species map is untouched: it is a lower bound, not the total.
+        assert_eq!(s.pokedex.caught.len(), 1);
+        // The card gives the caught total alone; catches after a read move
+        // the totals (a repeat of a known species doesn't).
+        let s = run(vec![
+            starter(),
+            GameEvent::PokedexCountObserved {
+                seen: None,
+                caught: 5,
+            },
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_SPEAROW".into(),
+            },
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_SPEAROW".into(),
+            },
+            GameEvent::SpeciesSeen {
+                species: "SPECIES_ZUBAT".into(),
+            },
+        ]);
+        assert_eq!(
+            s.pokedex.counts.value,
+            Some(PokedexCounts {
+                seen: None,
+                caught: 6
+            })
+        );
+        assert_eq!(s.pokedex.counts.source, KnowledgeSource::Tracked);
+        // Round trip through the saved knowledge; older files load as unknown.
+        let saved = s.saved_knowledge();
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: crate::SavedKnowledge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pokedex.counts, saved.pokedex.counts);
+        let old: crate::Pokedex = serde_json::from_str(r#"{"caught":{},"seen":{}}"#).unwrap();
+        assert_eq!(old.counts, Knowledge::unknown());
     }
 
     #[test]

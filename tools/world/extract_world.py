@@ -291,6 +291,9 @@ def main():
                     "x": e.get("x"),
                     "y": e.get("y"),
                     "movement": e.get("movement_type"),
+                    # Wanderers stay within ±range of their spawn tile.
+                    "range_x": int(e.get("movement_range_x") or 0),
+                    "range_y": int(e.get("movement_range_y") or 0),
                     "script": e.get("script"),
                     "flag": e.get("flag"),
                     "trainer_type": e.get("trainer_type"),

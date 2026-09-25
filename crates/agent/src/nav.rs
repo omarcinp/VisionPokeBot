@@ -1,9 +1,12 @@
 //! Closed-loop walking: plan with A* on the world model, hold a direction
 //! along straight runs (tap single tiles), and confirm by locating the player
 //! on screen. Holds are cancelled as soon as something interrupts the walk.
+//! Hold lengths and timeouts come from the device's timing model
+//! ([`Syncer`]); the steps themselves from the [`Walker`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_state::{Direction, Observation, PlayerPose};
@@ -12,14 +15,8 @@ use pokebot_world::path::{find_path, Obstacles, Step};
 use pokebot_world::{MapData, World};
 use serde::Serialize;
 
+use crate::motion::{InputKind, Syncer, SyncerHandle, WalkStep, Walker, TILE_MS};
 use crate::{Action, Expectation, Outcome};
-
-/// Frames to wait for a step to show up on screen.
-const STEP_TIMEOUT: u64 = 30;
-/// Frames to wait for a warp's fade and the new map to be located.
-const WARP_TIMEOUT: u64 = 180;
-/// One walking step: 16 GBA frames.
-const TILE_MS: u64 = 268;
 /// Times per map the learned obstacles may be forgotten to retry a path.
 /// In MtMoon_B2F's bottom corridor the view is the same for x = 21..28, so
 /// each unseen step right is learned as a block and forgotten again (about
@@ -28,6 +25,72 @@ const TILE_MS: u64 = 268;
 const MAX_FORGETS: u32 = 8;
 /// Longest straight run walked with one hold.
 const MAX_RUN: usize = 8;
+/// How long a tile learnt to be blocked is remembered when the map is not
+/// left in between (a wandering NPC moves on; a trainer who walked up to
+/// the player stays until the map is re-entered).
+const BLOCK_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Tiles learnt to be blocked while walking (an NPC met by bumping), kept
+/// for the session and shared by every leg: a replanned `Go` routes around
+/// them instead of discovering them again (flash-6: Youngster Josh, who
+/// had walked up to the player, was learnt twice and the leg failed both
+/// times). A map's tiles are dropped when the map is re-entered (NPCs are
+/// back at their data positions) and after [`BLOCK_TTL`].
+#[derive(Debug, Default)]
+pub struct BlockedTiles {
+    tiles: HashMap<String, HashMap<(i32, i32), Instant>>,
+}
+
+/// A session's [`BlockedTiles`], shared by the legs that learn and use them.
+pub type Blocked = Arc<Mutex<BlockedTiles>>;
+
+impl BlockedTiles {
+    pub fn insert(&mut self, map: &str, tile: (i32, i32)) {
+        self.tiles
+            .entry(map.to_owned())
+            .or_default()
+            .insert(tile, Instant::now());
+    }
+
+    /// The tiles still believed blocked on `map`.
+    pub fn on_map(&mut self, map: &str) -> Obstacles {
+        let Some(tiles) = self.tiles.get_mut(map) else {
+            return Obstacles::new();
+        };
+        tiles.retain(|_, since| since.elapsed() < BLOCK_TTL);
+        tiles.keys().copied().collect()
+    }
+
+    /// Whether anything is believed blocked on `map`.
+    pub fn any_on(&mut self, map: &str) -> bool {
+        !self.on_map(map).is_empty()
+    }
+
+    /// Drops what was learnt on `map` (stale, or the map was re-entered).
+    pub fn forget(&mut self, map: &str) {
+        self.tiles.remove(map);
+    }
+
+    /// Drops one tile (learnt by mistake).
+    pub fn remove(&mut self, map: &str, tile: (i32, i32)) {
+        if let Some(tiles) = self.tiles.get_mut(map) {
+            tiles.remove(&tile);
+        }
+    }
+
+    /// Every learnt tile, by map (for reports).
+    pub fn all(&self) -> BTreeMap<String, Vec<(i32, i32)>> {
+        self.tiles
+            .iter()
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(m, t)| {
+                let mut v: Vec<_> = t.keys().copied().collect();
+                v.sort_unstable();
+                (m.clone(), v)
+            })
+            .collect()
+    }
+}
 
 /// Tiles to walk with one hold from the start of `path`: the run of plain
 /// one-tile steps in the first direction, excluding the path's last step
@@ -50,8 +113,9 @@ pub fn straight_run(from: (i32, i32), path: &[Step]) -> usize {
     run.max(1)
 }
 
-/// How long to hold a direction to walk `tiles` tiles: release inside the
-/// last tile, which the game then finishes.
+/// How long to hold a direction to walk `tiles` tiles before the timing
+/// model has learned anything: release inside the last tile, which the
+/// game then finishes ([`Syncer::hold_for`] with the defaults).
 pub fn run_hold(tiles: usize) -> std::time::Duration {
     std::time::Duration::from_millis(TILE_MS * tiles as u64 - TILE_MS / 2)
 }
@@ -105,17 +169,20 @@ pub fn direction_button(dir: Direction) -> Button {
 pub struct Navigator {
     world: Arc<World>,
     pub destination: Destination,
-    /// Tiles learned to be blocked at runtime (NPCs, scripts), per map.
-    learned: HashMap<String, Obstacles>,
+    /// Tiles learned to be blocked at runtime (NPCs, scripts), per map;
+    /// the session's store when given ([`Navigator::with_blocked`]).
+    learned: Blocked,
     /// Times the learned tiles were forgotten, per map.
     forgets: HashMap<String, u32>,
-    /// Direction the player is believed to face (after a move or turn).
+    /// Direction the player is believed to face (after a move or turn);
+    /// unknown again after a map change (warps set it).
     facing: Option<Direction>,
-    /// Taps in a row that did not move the player.
-    stalled: u32,
-    /// Moves left to make with taps instead of holds (after a short hold).
-    single_steps: u32,
-    pending: Option<(PlayerPose, Direction, (i32, i32))>,
+    /// The map the player was last located on.
+    last_map: Option<String>,
+    /// Holds and taps along the current path.
+    pub(crate) walker: Walker,
+    /// The device's timing model (shared with the executor, which feeds it).
+    syncer: SyncerHandle,
     /// First hop out of the current map toward the destination, or None to
     /// walk on this map (planned on entering each map).
     hop: Option<(String, Option<Hop>)>,
@@ -132,15 +199,30 @@ impl Navigator {
         Self {
             world,
             destination,
-            learned: HashMap::new(),
+            learned: Blocked::default(),
             forgets: HashMap::new(),
             facing: None,
-            stalled: 0,
-            single_steps: 0,
-            pending: None,
+            last_map: None,
+            walker: Walker::new(),
+            syncer: Arc::new(Mutex::new(Syncer::new("emulator"))),
             hop: None,
             gone: Gone::new(),
         }
+    }
+
+    /// Hold lengths and timeouts from this timing model instead of the
+    /// defaults.
+    pub fn with_syncer(mut self, syncer: SyncerHandle) -> Self {
+        self.syncer = syncer;
+        self
+    }
+
+    /// A snapshot of the timing model.
+    fn sync(&self) -> Syncer {
+        self.syncer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Objects known to be gone (taken items, fossils) don't block the way.
@@ -149,10 +231,33 @@ impl Navigator {
         self
     }
 
+    /// Learns blocked tiles into (and routes around those in) the
+    /// session's store instead of a private one.
+    pub fn with_blocked(mut self, blocked: Blocked) -> Self {
+        self.learned = blocked;
+        self
+    }
+
+    /// The direction the player is believed to face.
+    pub fn facing(&self) -> Option<Direction> {
+        self.facing
+    }
+
+    fn learned(&self) -> std::sync::MutexGuard<'_, BlockedTiles> {
+        self.learned.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn next(&mut self, observation: &Observation) -> NavStatus {
         let Some(pose) = observation.player.as_ref().map(|p| p.pose.clone()) else {
             return NavStatus::Wait("locating the player".into());
         };
+        if self.last_map.as_deref() != Some(pose.map.as_str()) {
+            // A warp or an edge sets the facing; don't trust the old one.
+            if self.last_map.is_some() {
+                self.facing = None;
+            }
+            self.last_map = Some(pose.map.clone());
+        }
         let world = Arc::clone(&self.world);
         let Some(map) = world.map(&pose.map) else {
             return NavStatus::Fail(format!("unknown map {}", pose.map));
@@ -176,8 +281,8 @@ impl Navigator {
             }
         };
         match hop {
-            Some(Hop::Warp(warp)) => return self.use_warp(map, &pose, warp),
-            Some(Hop::Edge(dir)) => return self.cross_edge(&world, map, &pose, dir),
+            Some(Hop::Warp(warp)) => return self.use_warp(observation, map, &pose, warp),
+            Some(Hop::Edge(dir)) => return self.cross_edge(observation, &world, map, &pose, dir),
             None if pose.map != self.destination.map() => {
                 return NavStatus::Fail(format!(
                     "no known route from {} to {}",
@@ -193,8 +298,8 @@ impl Navigator {
                     return NavStatus::Arrived;
                 }
                 self.walk(
+                    observation,
                     map,
-                    &pose,
                     |p| p == (x, y),
                     (x, y),
                     &format!("to ({x}, {y})"),
@@ -208,94 +313,111 @@ impl Navigator {
                     if self.facing == Some(*dir) {
                         return NavStatus::Arrived;
                     }
-                    self.pending = None;
+                    self.walker.clear_pending();
                     self.facing = Some(*dir);
                     // Tapping toward an occupied tile only turns the player.
-                    return NavStatus::Act(Action::new(
-                        format!("face {dir:?}"),
-                        vec![ControllerCommand::Press(direction_button(*dir))],
-                        Expectation::InputsDone,
-                        6,
-                    ));
+                    return NavStatus::Act(
+                        Action::new(
+                            format!("face {dir:?}"),
+                            vec![ControllerCommand::Press(direction_button(*dir))],
+                            Expectation::InputsDone,
+                            self.sync().timeout_frames(InputKind::Turn, 1),
+                        )
+                        .timed(InputKind::Turn, 1),
+                    );
                 }
                 let goals: HashSet<(i32, i32)> = spots.iter().map(|(p, _)| *p).collect();
                 self.walk(
+                    observation,
                     map,
-                    &pose,
                     |p| goals.contains(&p),
                     (x, y),
                     &format!("next to ({x}, {y})"),
                 )
             }
-            Destination::Warp { warp, .. } => self.use_warp(map, &pose, warp),
+            Destination::Warp { warp, .. } => self.use_warp(observation, map, &pose, warp),
         }
     }
 
-    pub fn on_outcome(&mut self, action: &Action, outcome: Outcome) {
-        let Some((from, dir, target)) = self.pending.take() else {
-            return;
-        };
-        match (outcome, &action.expect) {
-            (Outcome::Confirmed, _) => {
-                self.facing = Some(dir);
-                self.stalled = 0;
-            }
-            // A hold that fell short or was cut off: replan from wherever
-            // we are, with taps for a bit (they learn what blocks the way).
-            (_, Expectation::PlayerAt(_)) => {
-                self.facing = Some(dir);
-                if outcome == Outcome::TimedOut {
-                    self.single_steps = 2;
-                }
-            }
-            (Outcome::TimedOut, Expectation::PlayerMovedFrom(_)) => {
-                // First miss: the tap probably just turned the player.
-                // Second miss: something is in the way; avoid that tile.
-                self.facing = Some(dir);
-                self.stalled += 1;
-                if self.stalled >= 2 {
-                    self.learned.entry(from.map).or_default().insert(target);
-                    self.stalled = 0;
-                }
-            }
-            _ => self.stalled += 1,
+    /// Books the executor's verdict, seen on `observation` (the frame the
+    /// action ended on); the tile learnt to be blocked, if any.
+    pub fn on_outcome(
+        &mut self,
+        action: &Action,
+        outcome: Outcome,
+        observation: &Observation,
+    ) -> Option<(String, (i32, i32))> {
+        if action
+            .timing
+            .is_some_and(|(kind, _)| kind == InputKind::Turn)
+        {
+            // A turn in place: the walker has nothing in flight.
+            return None;
         }
+        // A tap that timed out into a battle's fade, a dialogue or a menu
+        // was interrupted, not blocked (flash-7: a wild encounter on
+        // MtMoon_1F (20, 25) learnt the tile the player had just stepped
+        // onto).
+        let busy = observation.dialogue.is_some()
+            || observation.battle.is_some()
+            || observation.menu.is_some()
+            || observation.screen.value == pokebot_state::ScreenState::Transition;
+        let outcome = if outcome == Outcome::TimedOut && busy {
+            Outcome::Interrupted
+        } else {
+            outcome
+        };
+        let done = self.walker.on_outcome(action, outcome)?;
+        if done.faced {
+            self.facing = Some(done.dir);
+        }
+        if let Some((map, tile)) = &done.blocked {
+            self.learned().insert(map, *tile);
+        }
+        done.blocked
+    }
+
+    /// Takes back a tile learnt as blocked (the miss had another cause).
+    pub fn unlearn(&mut self, map: &str, tile: (i32, i32)) {
+        self.learned().remove(map, tile);
     }
 
     /// Drops the obstacles learned on `map`, at most [`MAX_FORGETS`] times
     /// per map (a real block the world model lacks would otherwise be
     /// learned and forgotten forever). Whether anything was forgotten.
     fn forget_learned(&mut self, map: &str) -> bool {
+        let any = self.learned().any_on(map);
         let count = self.forgets.entry(map.to_owned()).or_insert(0);
-        if *count >= MAX_FORGETS || !self.learned.contains_key(map) {
+        if *count >= MAX_FORGETS || !any {
             return false;
         }
         *count += 1;
-        self.learned.remove(map);
+        self.learned().forget(map);
         true
     }
 
     /// How many taps in a row failed to move the player.
     pub fn stalled(&self) -> u32 {
-        self.stalled
+        self.walker.stalled()
     }
 
     fn obstacles(&self, map: &MapData) -> Obstacles {
         let mut obstacles = object_obstacles(map, &self.gone);
-        if let Some(learned) = self.learned.get(&map.name) {
-            obstacles.extend(learned.iter().copied());
-        }
+        obstacles.extend(self.learned().on_map(&map.name));
         obstacles
     }
 
     fn walk(
         &mut self,
+        observation: &Observation,
         map: &MapData,
-        pose: &PlayerPose,
         goal: impl Fn((i32, i32)) -> bool,
         toward: (i32, i32),
         what: &str,
     ) -> NavStatus {
+        let Some(pose) = observation.player.as_ref().map(|p| p.pose.clone()) else {
+            return NavStatus::Wait("locating the player".into());
+        };
         let mut obstacles = self.obstacles(map);
         obstacles.remove(&(pose.x, pose.y));
         let heuristic = |p: (i32, i32)| (p.0 - toward.0).abs() + (p.1 - toward.1).abs();
@@ -306,52 +428,84 @@ impl Navigator {
             }
             return NavStatus::Fail(format!("no path {what} on {}", map.name));
         };
-        let run = straight_run((pose.x, pose.y), &path);
-        if run >= 2 && self.single_steps == 0 {
-            let step = path[0];
-            let end = path[run - 1].to;
-            let target = PlayerPose {
-                map: pose.map.clone(),
-                x: end.0,
-                y: end.1,
-            };
-            self.pending = Some((pose.clone(), step.dir, step.to));
-            return NavStatus::Act(
-                Action::new(
-                    format!("walk {what}: {:?} ×{run}", step.dir),
-                    vec![ControllerCommand::Hold {
-                        buttons: [direction_button(step.dir)].into_iter().collect(),
-                        duration: run_hold(run),
-                    }],
-                    Expectation::PlayerAt(target),
-                    // The last tile finishes after the release, and a moving
-                    // sprite is located a little late.
-                    STEP_TIMEOUT + 16 + 2 * run as u64,
-                )
-                .interruptible(),
-            );
-        }
-        self.single_steps = self.single_steps.saturating_sub(1);
-        match path.first() {
-            Some(step) => self.step(pose, *step, &format!("walk {what}: {:?}", step.dir)),
-            None => NavStatus::Arrived,
-        }
+        self.step_along(observation, &path, what)
     }
 
-    fn step(&mut self, pose: &PlayerPose, step: Step, label: &str) -> NavStatus {
-        self.pending = Some((pose.clone(), step.dir, step.to));
-        NavStatus::Act(Action::new(
-            label.to_owned(),
-            vec![ControllerCommand::Press(direction_button(step.dir))],
-            Expectation::PlayerMovedFrom(pose.clone()),
-            STEP_TIMEOUT,
-        ))
+    /// The next act along `path` (a hold, a tap, a turn first, or a wait
+    /// while a hold runs), tracked by the walker.
+    fn step_along(&mut self, observation: &Observation, path: &[Step], what: &str) -> NavStatus {
+        let Some(pose) = observation.player.as_ref().map(|p| p.pose.clone()) else {
+            return NavStatus::Wait("locating the player".into());
+        };
+        let sync = self.sync();
+        match self
+            .walker
+            .next(observation, path, self.facing, &sync, Instant::now())
+        {
+            WalkStep::Hold {
+                dir,
+                tiles,
+                target,
+                duration,
+                timeout_frames,
+            } => NavStatus::Act(
+                Action::new(
+                    format!("walk {what}: {dir:?} ×{tiles}"),
+                    vec![ControllerCommand::Hold {
+                        buttons: [direction_button(dir)].into_iter().collect(),
+                        duration,
+                    }],
+                    Expectation::PlayerAt(target),
+                    timeout_frames,
+                )
+                .interruptible()
+                .timed(InputKind::WalkTile, tiles),
+            ),
+            WalkStep::Tap {
+                dir,
+                timeout_frames,
+                ..
+            } => NavStatus::Act(
+                Action::new(
+                    format!("walk {what}: {dir:?}"),
+                    vec![ControllerCommand::Press(direction_button(dir))],
+                    Expectation::PlayerMovedFrom(pose),
+                    timeout_frames,
+                )
+                .timed(InputKind::WalkTile, 1),
+            ),
+            // A short press in a new direction only turns the player
+            // (flash-6: every direction change cost a timed-out tap); turn
+            // first, then step.
+            WalkStep::Turn {
+                dir,
+                timeout_frames,
+            } => {
+                self.facing = Some(dir);
+                NavStatus::Act(
+                    Action::new(
+                        format!("turn {dir:?} {what}"),
+                        vec![ControllerCommand::Press(direction_button(dir))],
+                        Expectation::InputsDone,
+                        timeout_frames,
+                    )
+                    .timed(InputKind::Turn, 1),
+                )
+            }
+            WalkStep::Arrived => NavStatus::Arrived,
+            // The executor watches a hold; the navigator is only asked
+            // again once it is over.
+            WalkStep::Cancel | WalkStep::Walking { .. } => {
+                NavStatus::Wait(format!("walking {what}"))
+            }
+        }
     }
 
     /// Walk to a tile on the map's edge that continues into the neighbour,
     /// then step across.
     fn cross_edge(
         &mut self,
+        observation: &Observation,
         world: &World,
         map: &MapData,
         pose: &PlayerPose,
@@ -363,19 +517,23 @@ impl Navigator {
             .map(|(a, _)| a)
             .collect();
         if exits.contains(&(pose.x, pose.y)) {
-            self.pending = Some((pose.clone(), dir, (pose.x, pose.y)));
-            return NavStatus::Act(Action::new(
-                format!("cross into the next map ({dir:?})"),
-                vec![ControllerCommand::Press(direction_button(dir))],
-                Expectation::LeftMap(map.name.clone()),
-                STEP_TIMEOUT * 2,
-            ));
+            self.walker
+                .note_tap(pose.clone(), dir, (pose.x, pose.y), false);
+            return NavStatus::Act(
+                Action::new(
+                    format!("cross into the next map ({dir:?})"),
+                    vec![ControllerCommand::Press(direction_button(dir))],
+                    Expectation::LeftMap(map.name.clone()),
+                    2 * self.sync().timeout_frames(InputKind::WalkTile, 1),
+                )
+                .timed(InputKind::WalkTile, 1),
+            );
         }
         let (dx, dy) = dir.delta();
         let toward = (pose.x + dx * 100, pose.y + dy * 100);
         self.walk(
+            observation,
             map,
-            pose,
             |p| exits.contains(&p),
             toward,
             &format!("to the {dir:?} edge"),
@@ -384,35 +542,45 @@ impl Navigator {
 
     /// Doors: stand below and push Up. Exit mats: stand on them and push
     /// their arrow. Stairs and other warps: walk onto them.
-    fn use_warp(&mut self, map: &MapData, pose: &PlayerPose, index: usize) -> NavStatus {
+    fn use_warp(
+        &mut self,
+        observation: &Observation,
+        map: &MapData,
+        pose: &PlayerPose,
+        index: usize,
+    ) -> NavStatus {
         let Some(warp) = map.warps.get(index) else {
             return NavStatus::Fail(format!("{} has no warp {index}", map.name));
         };
         // A plain tile beside a marked warp to the same place: use that one.
         let usable = usable_warp(map, index);
         if usable != index {
-            return self.use_warp(map, pose, usable);
+            return self.use_warp(observation, map, pose, usable);
         }
         let (wx, wy) = (warp.x, warp.y);
         let tile = map.tile(wx, wy);
+        let sync = self.sync();
         let push = |dir: Direction| {
-            NavStatus::Act(Action::new(
-                format!("take warp {index} of {} ({dir:?})", map.name),
-                vec![ControllerCommand::Press(direction_button(dir))],
-                Expectation::LeftMap(map.name.clone()),
-                WARP_TIMEOUT,
-            ))
+            NavStatus::Act(
+                Action::new(
+                    format!("take warp {index} of {} ({dir:?})", map.name),
+                    vec![ControllerCommand::Press(direction_button(dir))],
+                    Expectation::LeftMap(map.name.clone()),
+                    sync.timeout_frames(InputKind::WarpFade, 1),
+                )
+                .timed(InputKind::WarpFade, 1),
+            )
         };
         if let Some(dir) =
             tile.and_then(|t| arrow_warp(t.behavior).or_else(|| stair_warp(t.behavior)))
         {
             if (pose.x, pose.y) == (wx, wy) {
-                self.pending = None;
+                self.walker.clear_pending();
                 return push(dir);
             }
             return self.walk(
+                observation,
                 map,
-                pose,
                 |p| p == (wx, wy),
                 (wx, wy),
                 &format!("to exit ({wx}, {wy})"),
@@ -420,12 +588,12 @@ impl Navigator {
         }
         if tile.is_some_and(|t| t.behavior == WARP_DOOR || t.collision != 0) {
             if (pose.x, pose.y) == (wx, wy + 1) {
-                self.pending = None;
+                self.walker.clear_pending();
                 return push(Direction::Up);
             }
             return self.walk(
+                observation,
                 map,
-                pose,
                 |p| p == (wx, wy + 1),
                 (wx, wy + 1),
                 &format!("to door ({wx}, {wy})"),
@@ -434,7 +602,7 @@ impl Navigator {
         if (pose.x, pose.y) == (wx, wy) {
             // A plain warp tile that didn't fire on arrival: push toward the
             // nearest map edge (exits sit on edges).
-            self.pending = None;
+            self.walker.clear_pending();
             let edges = [
                 (wy, Direction::Up),
                 (map.height - 1 - wy, Direction::Down),
@@ -459,25 +627,38 @@ impl Navigator {
             |p| p == (wx, wy),
             heuristic,
         ) {
+            // Up to the tile before the warp: the walker (holds, taps,
+            // turns first). Flash-6: this branch tapped every tile, and
+            // each direction change timed out once.
+            Some(path) if path.len() >= 2 => {
+                self.step_along(observation, &path[..path.len() - 1], &label)
+            }
+            // The step onto the warp tile itself: the map changes.
             Some(path) if !path.is_empty() => {
                 let step = path[0];
-                self.pending = Some((pose.clone(), step.dir, step.to));
-                let expect = if step.to == (wx, wy) {
-                    Expectation::LeftMap(map.name.clone())
-                } else {
-                    Expectation::PlayerMovedFrom(pose.clone())
-                };
-                let timeout = if step.to == (wx, wy) {
-                    WARP_TIMEOUT
-                } else {
-                    STEP_TIMEOUT
-                };
-                NavStatus::Act(Action::new(
-                    format!("walk {label}: {:?}", step.dir),
-                    vec![ControllerCommand::Press(direction_button(step.dir))],
-                    expect,
-                    timeout,
-                ))
+                if self.facing != Some(step.dir) {
+                    self.walker.clear_pending();
+                    self.facing = Some(step.dir);
+                    return NavStatus::Act(
+                        Action::new(
+                            format!("turn {:?} {label}", step.dir),
+                            vec![ControllerCommand::Press(direction_button(step.dir))],
+                            Expectation::InputsDone,
+                            sync.timeout_frames(InputKind::Turn, 1),
+                        )
+                        .timed(InputKind::Turn, 1),
+                    );
+                }
+                self.walker.note_tap(pose.clone(), step.dir, step.to, true);
+                NavStatus::Act(
+                    Action::new(
+                        format!("walk {label}: {:?}", step.dir),
+                        vec![ControllerCommand::Press(direction_button(step.dir))],
+                        Expectation::LeftMap(map.name.clone()),
+                        sync.timeout_frames(InputKind::WarpFade, 1),
+                    )
+                    .timed(InputKind::WarpFade, 1),
+                )
             }
             // Learned blocks may be stale (a wandering NPC moved on, or a
             // step in a featureless corridor that did happen but couldn't
@@ -493,7 +674,7 @@ impl Navigator {
 /// Where to talk to `(x, y)` from: an adjacent tile, or across a counter
 /// (the tile between is a counter, e.g. Pokémon Center nurses, clerks), with
 /// the direction to face.
-fn facing_spots(map: &MapData, x: i32, y: i32) -> Vec<((i32, i32), Direction)> {
+pub(crate) fn facing_spots(map: &MapData, x: i32, y: i32) -> Vec<((i32, i32), Direction)> {
     Direction::ALL
         .iter()
         .flat_map(|&dir| {
@@ -917,32 +1098,170 @@ mod tests {
             },
         );
         // Both corridor rows ahead learned as blocked.
-        nav.learned.insert(
-            "MtMoon_B2F".into(),
-            Obstacles::from([(28, 38), (28, 37), (27, 37)]),
-        );
+        let block = |nav: &Navigator| {
+            let mut learned = nav.learned();
+            for tile in [(28, 38), (28, 37), (27, 37)] {
+                learned.insert("MtMoon_B2F", tile);
+            }
+        };
+        block(&nav);
         match nav.next(&o) {
             NavStatus::Wait(r) => assert!(r.contains("forgetting"), "{r}"),
             _ => panic!("expected a wait"),
         }
         match nav.next(&o) {
             NavStatus::Act(a) => {
-                assert!(a.label.starts_with("walk to warp (25, 21)"), "{}", a.label)
+                assert!(a.label.ends_with("to warp (25, 21)"), "{}", a.label)
             }
             _ => panic!("expected a step"),
         }
         // A block that keeps coming back is forgotten at most MAX_FORGETS
         // times on a map; then the walk fails instead of cycling.
-        let blocked = || Obstacles::from([(28, 38), (28, 37), (27, 37)]);
         for _ in 1..MAX_FORGETS {
-            nav.learned.insert("MtMoon_B2F".into(), blocked());
+            block(&nav);
             assert!(matches!(nav.next(&o), NavStatus::Wait(_)));
         }
-        nav.learned.insert("MtMoon_B2F".into(), blocked());
+        block(&nav);
         match nav.next(&o) {
             NavStatus::Fail(r) => assert!(r.contains("no path to warp"), "{r}"),
             _ => panic!("expected the walk to fail"),
         }
+    }
+
+    /// Flash-6: on MtMoon_1F (16, 17), facing Down after the walk there,
+    /// with Youngster Josh standing on (15, 17) (he walked up to the
+    /// player; his data position is (13, 17)). The walk to the ladder at
+    /// (5, 6) pressed Left three times (a turn, an interrupted tap, a
+    /// blocked tap) and the loop rule failed the leg before the detour;
+    /// the replanned leg knew nothing and did it again.
+    #[test]
+    fn a_blocked_npc_is_learnt_in_one_tap_after_a_turn_and_shared_with_the_next_leg() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = Arc::new(world);
+        let at = |x, y| PlayerPose {
+            map: "MtMoon_1F".into(),
+            x,
+            y,
+        };
+        let observation = |pose: PlayerPose| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation { pose, score: 1000 });
+            o
+        };
+        let ladder = Destination::Warp {
+            map: "MtMoon_1F".into(),
+            warp: 0,
+        };
+        let blocked = Blocked::default();
+        let mut nav =
+            Navigator::new(Arc::clone(&world), ladder.clone()).with_blocked(Arc::clone(&blocked));
+        // Facing Down after the last hold Down. The path's first steps
+        // are Left: a hold (it turns and walks by itself), which Josh
+        // stalls; the walker falls back to taps, facing Left now.
+        nav.facing = Some(Direction::Down);
+        let o = observation(at(16, 17));
+        let NavStatus::Act(hold) = nav.next(&o) else {
+            panic!("expected a hold");
+        };
+        assert!(hold.label.ends_with("Left ×2"), "{}", hold.label);
+        assert!(nav.on_outcome(&hold, Outcome::Stalled, &o).is_none());
+        assert_eq!(nav.facing(), Some(Direction::Left));
+        // The tap Left he blocks is learnt at once (no second miss).
+        let NavStatus::Act(tap) = nav.next(&o) else {
+            panic!("expected a tap");
+        };
+        assert!(tap.label.ends_with("Left"), "{}", tap.label);
+        assert!(matches!(tap.expect, Expectation::PlayerMovedFrom(_)));
+        assert_eq!(
+            nav.on_outcome(&tap, Outcome::TimedOut, &o),
+            Some(("MtMoon_1F".to_owned(), (15, 17)))
+        );
+        // The detour turns Down and steps, without Left again.
+        let NavStatus::Act(detour) = nav.next(&o) else {
+            panic!("expected the detour");
+        };
+        assert!(detour.label.starts_with("turn Down"), "{}", detour.label);
+        // A new leg (the replanned Go) shares the store: it never tries
+        // (15, 17) again.
+        let mut again = Navigator::new(world, ladder).with_blocked(blocked);
+        again.facing = Some(Direction::Left);
+        let NavStatus::Act(first) = again.next(&o) else {
+            panic!("expected a step");
+        };
+        assert!(first.label.starts_with("turn Down"), "{}", first.label);
+    }
+
+    /// Flash-7: on MtMoon_1F a hold stalled because a wild encounter
+    /// froze the player, the follow-up tap timed out during the battle's
+    /// fade, and (20, 25), the tile the player had just stepped onto, was
+    /// learnt as blocked.
+    #[test]
+    fn a_tap_timing_out_into_a_transition_learns_nothing() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "MtMoon_1F".into(),
+            x: 19,
+            y: 25,
+        };
+        let observation = |screen: ScreenState, located: bool| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: screen,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = located.then(|| PoseObservation {
+                pose: pose.clone(),
+                score: 1000,
+            });
+            o
+        };
+        let mut nav = Navigator::new(
+            Arc::new(world),
+            Destination::Warp {
+                map: "MtMoon_1F".into(),
+                warp: 0,
+            },
+        );
+        nav.facing = Some(Direction::Right);
+        let quiet = observation(ScreenState::Unknown, true);
+        // Two taps for a bit after a stalled hold.
+        nav.walker
+            .note_tap(pose.clone(), Direction::Right, (20, 25), true);
+        let tap = Action::new(
+            "walk to warp (5, 6): Right",
+            vec![],
+            Expectation::PlayerMovedFrom(pose.clone()),
+            30,
+        )
+        .timed(InputKind::WalkTile, 1);
+        let fade = observation(ScreenState::Transition, false);
+        assert_eq!(nav.on_outcome(&tap, Outcome::TimedOut, &fade), None);
+        assert!(nav.learned().on_map("MtMoon_1F").is_empty());
+        // The same miss on a quiet frame is a block.
+        nav.walker
+            .note_tap(pose.clone(), Direction::Right, (20, 25), true);
+        assert_eq!(
+            nav.on_outcome(&tap, Outcome::TimedOut, &quiet),
+            Some(("MtMoon_1F".to_owned(), (20, 25)))
+        );
     }
 
     #[test]

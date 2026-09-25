@@ -143,6 +143,20 @@ pub fn starter_mon(data: &GameData, species: &str, level: u8) -> PartyMon {
     mon
 }
 
+/// Reject impossible HUD totals before they can overwrite the party belief.
+/// Ordinary Pokémon have at least level + 10 HP; use `plausible_hp_for`
+/// when species is known so Shedinja's one HP is handled correctly.
+/// The Switch OCR has read `22` as `2`, including on a nearly fainted lead.
+pub fn plausible_hp(read: (u16, u16), level: u8) -> bool {
+    let (current, maximum) = read;
+    current <= maximum && maximum >= u16::from(level) + 10
+}
+
+/// Species-aware validation, including Shedinja's fixed one HP.
+pub fn plausible_hp_for(read: (u16, u16), level: u8, species: Option<&str>) -> bool {
+    plausible_hp(read, level) || (species == Some("SPECIES_SHEDINJA") && read.1 == 1 && read.0 <= 1)
+}
+
 /// Events for what the battle HUD and move menu show that the party view
 /// doesn't know yet. Nothing is emitted for unchanged or ambiguous readings.
 pub fn battle_events(data: &GameData, party: &Party, battle: &BattleObservation) -> Vec<GameEvent> {
@@ -164,7 +178,13 @@ pub fn battle_events(data: &GameData, party: &Party, battle: &BattleObservation)
                 species: Some(species.to_owned()),
                 nickname: None,
                 level: battle.player_level,
-                hp: battle.player_hp_numbers,
+                hp: battle.player_hp_numbers.filter(|hp| {
+                    plausible_hp_for(
+                        *hp,
+                        battle.player_level.unwrap_or(member.level),
+                        Some(&member.species),
+                    )
+                }),
                 status: None,
                 held_item: None,
             });
@@ -176,7 +196,13 @@ pub fn battle_events(data: &GameData, party: &Party, battle: &BattleObservation)
         events.push(GameEvent::Evolved { slot, species });
     }
     let level = battle.player_level.filter(|l| *l != member.level);
-    let hp = battle.player_hp_numbers.filter(|hp| Some(*hp) != member.hp);
+    let hp = battle.player_hp_numbers.filter(|hp| {
+        plausible_hp_for(
+            *hp,
+            battle.player_level.unwrap_or(member.level),
+            Some(&member.species),
+        ) && Some(*hp) != member.hp
+    });
     if level.is_some() || hp.is_some() {
         events.push(GameEvent::PartyObserved {
             slot,

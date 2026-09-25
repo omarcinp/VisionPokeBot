@@ -81,6 +81,7 @@ impl StateReducer for DefaultReducer {
                     state.synchronization = SynchronizationState::Synchronized;
                 }
                 GameEvent::PartyMonDerived { .. }
+                | GameEvent::PartyAudited { .. }
                 | GameEvent::PartyObserved { .. }
                 | GameEvent::MovesObserved { .. }
                 | GameEvent::MovePpObserved { .. }
@@ -101,8 +102,22 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::MonWithdrawn { .. }
                 | GameEvent::SpeciesSeen { .. }
                 | GameEvent::SpeciesCaught { .. }
+                | GameEvent::PokedexCountObserved { .. }
                 | GameEvent::ShinySeen { .. }
-                | GameEvent::CheckpointRestored { .. } => {
+                | GameEvent::CheckpointRestored { .. }
+                | GameEvent::FlagObserved { .. }
+                | GameEvent::FlagTracked { .. }
+                | GameEvent::VarObserved { .. }
+                | GameEvent::VarTracked { .. }
+                | GameEvent::MapVisited { .. }
+                | GameEvent::RespawnSet { .. }
+                | GameEvent::NpcSeen { .. }
+                | GameEvent::NpcAbsent { .. }
+                | GameEvent::ScriptPathRun { .. }
+                | GameEvent::IntentInfeasible { .. }
+                | GameEvent::TileBlocked { .. }
+                | GameEvent::TileUnblocked { .. }
+                | GameEvent::WhitedOut => {
                     unreachable!("handled by reduce_knowledge")
                 }
             }

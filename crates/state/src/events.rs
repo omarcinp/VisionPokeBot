@@ -4,7 +4,7 @@ use pokebot_core::{CapturedFrame, ControllerCommand};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BoxMon, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
+    BoxMon, Direction, Gender, ItemList, Observation, PartyMon, PlayerPose, Pocket, SavedKnowledge,
     ScreenState, Status,
 };
 
@@ -81,6 +81,11 @@ pub enum GameEvent {
     PartyMonDerived {
         slot: u8,
         mon: Box<PartyMon>,
+    },
+    /// Atomic, complete roster read through the party summaries. Replaces
+    /// stale slots and their old identities, including a smaller party.
+    PartyAudited {
+        members: Vec<crate::PartyMon>,
     },
     /// Fields of a party member read from the screen (`None` = not shown).
     PartyObserved {
@@ -178,6 +183,12 @@ pub enum GameEvent {
     SpeciesCaught {
         species: String,
     },
+    /// The Pokédex totals as the Pokédex shows them, or the caught total
+    /// alone from the Trainer Card.
+    PokedexCountObserved {
+        seen: Option<u16>,
+        caught: u16,
+    },
     /// A shiny appeared (for the log and the catch policy).
     ShinySeen {
         species: String,
@@ -191,6 +202,79 @@ pub enum GameEvent {
     CheckpointRestored {
         knowledge: Box<SavedKnowledge>,
     },
+    /// A flag's value read from the screen (trainer card, a dialogue branch
+    /// that implies it, an NPC at its tile).
+    FlagObserved {
+        flag: String,
+        value: bool,
+    },
+    /// A flag a script path is known to have set or cleared.
+    FlagTracked {
+        flag: String,
+        value: bool,
+    },
+    VarObserved {
+        var: String,
+        value: u16,
+    },
+    VarTracked {
+        var: String,
+        value: u16,
+    },
+    /// The player was on `map` (a transition seen, or the Fly map lit).
+    MapVisited {
+        map: String,
+    },
+    /// Where a blackout now lands (the last Pokémon Center used).
+    RespawnSet {
+        map: String,
+        x: i32,
+        y: i32,
+    },
+    /// An NPC was seen at a tile of `map`.
+    NpcSeen {
+        map: String,
+        local_id: u32,
+        x: i32,
+        y: i32,
+        facing: Direction,
+    },
+    /// An NPC's scripted tile was looked at and it was not there.
+    NpcAbsent {
+        map: String,
+        local_id: u32,
+    },
+    /// The agent ran path `path` of the compiled script `script` to
+    /// completion. The reducer only records it: the agent emits the
+    /// `FlagTracked`/`VarTracked`/`ItemsChanged` the path's effects imply,
+    /// so the reducer needs no world data.
+    ScriptPathRun {
+        script: String,
+        path: usize,
+    },
+    /// An intent failed in a way that replanning it would repeat; forgotten
+    /// on `CheckpointRestored`.
+    IntentInfeasible {
+        intent: String,
+    },
+    /// A tile the walker found blocked (an NPC met by bumping): the
+    /// session's legs route around it (log only; the agent keeps the set).
+    TileBlocked {
+        map: String,
+        x: i32,
+        y: i32,
+    },
+    /// A `TileBlocked` taken back: something else stopped the step.
+    TileUnblocked {
+        map: String,
+        x: i32,
+        y: i32,
+    },
+    /// The party's last Pokémon fainted (the white-out screens, or HP 0 on
+    /// the HUD): the lead is at 0 HP. The game then heals the party and
+    /// puts the player at the respawn spot (`Healed` and `PlayerLocated`
+    /// follow from the agent).
+    WhitedOut,
 }
 
 /// An event and the frame it was derived at.

@@ -3,14 +3,18 @@
 pub mod bag;
 pub mod battle;
 pub mod dialogue;
+pub mod fly_map;
 pub mod hud;
 pub mod main_menu;
 pub mod menu;
 pub mod move_list;
 pub mod naming;
+pub mod party;
 pub mod pokedex;
 pub mod shop;
 pub mod title;
+pub mod trainer_card;
+pub mod whiteout;
 
 use pokebot_core::RgbImage;
 use pokebot_state::Region;
@@ -31,6 +35,26 @@ pub(crate) fn share(image: &RgbImage, region: Region, color: Rgb, step: u32) -> 
         while x < region.x + region.width {
             total += 1;
             if near(px(image, x, y), color, TOLERANCE) {
+                hits += 1;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    (hits * 1000).checked_div(total).unwrap_or(0)
+}
+
+/// Share (per mille) of pixels in `region`, sampled every `step` pixels,
+/// that match any of `colors`.
+pub(crate) fn share_any(image: &RgbImage, region: Region, colors: &[Rgb], step: u32) -> u32 {
+    let (mut hits, mut total) = (0u32, 0u32);
+    let mut y = region.y;
+    while y < region.y + region.height {
+        let mut x = region.x;
+        while x < region.x + region.width {
+            total += 1;
+            let p = px(image, x, y);
+            if colors.iter().any(|&c| near(p, c, TOLERANCE)) {
                 hits += 1;
             }
             x += step;
