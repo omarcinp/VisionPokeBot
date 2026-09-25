@@ -195,6 +195,7 @@ impl PlannerData {
         let options = PlanOptions {
             expensive_secs: args.expensive_secs,
             budget_s: args.plan_budget_secs,
+            supported_probes: Some(Toolbox::supported_probes()),
             ..PlanOptions::default()
         };
         Ok(PlannerData {

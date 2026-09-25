@@ -116,6 +116,9 @@ pub struct PlanOptions {
     pub budget_s: f64,
     /// Set (by a signal handler) to end planning early, the same way.
     pub stop: Option<Arc<AtomicBool>>,
+    /// The probe screens the toolbox can open ([`ProbeFact::kind`]);
+    /// `None` for all of them. Others are never planned.
+    pub supported_probes: Option<BTreeSet<String>>,
 }
 
 impl PartialEq for PlanOptions {
@@ -133,6 +136,7 @@ impl PartialEq for PlanOptions {
             && self.candidates_per_goal == other.candidates_per_goal
             && self.unknown_edge_alt_s == other.unknown_edge_alt_s
             && self.budget_s == other.budget_s
+            && self.supported_probes == other.supported_probes
     }
 }
 
@@ -147,6 +151,7 @@ impl Default for PlanOptions {
             unknown_edge_alt_s: 120.0,
             budget_s: 60.0,
             stop: None,
+            supported_probes: None,
         }
     }
 }
@@ -1127,6 +1132,35 @@ impl<'p, 'a> Session<'p, 'a> {
         }
     }
 
+    /// Whether a probe of `fact` can be planned: the toolbox opens that
+    /// screen and it hasn't failed twice this session.
+    fn probe_allowed(&self, fact: &ProbeFact) -> bool {
+        let opts = &self.planner.options;
+        if opts
+            .supported_probes
+            .as_ref()
+            .is_some_and(|s| !s.contains(fact.kind()))
+        {
+            return false;
+        }
+        let intent = Intent::Probe { fact: fact.clone() };
+        !self
+            .base
+            .knowledge
+            .world
+            .infeasible
+            .contains(&intent.to_string())
+    }
+
+    /// Whether the session found this exact intent infeasible.
+    fn infeasible(&self, intent: &Intent) -> bool {
+        self.base
+            .knowledge
+            .world
+            .infeasible
+            .contains(&intent.to_string())
+    }
+
     /// The wall clock, the stop flag or the node budget ran out.
     fn out_of_budget(&self) -> bool {
         let opts = &self.planner.options;
@@ -1415,9 +1449,7 @@ impl<'p, 'a> Session<'p, 'a> {
         let probe = Intent::Probe {
             fact: ProbeFact::PcBoxes,
         };
-        if knowledge.world.infeasible.contains(&probe.to_string())
-            || intents.iter().any(|s| s.intent == probe)
-        {
+        if !self.probe_allowed(&ProbeFact::PcBoxes) || intents.iter().any(|s| s.intent == probe) {
             return 0.0;
         }
         let mut audit = PlannedIntent::new(probe, ProbeFact::PcBoxes.cost_s());
@@ -1607,17 +1639,8 @@ impl<'p, 'a> Session<'p, 'a> {
         let opts = &self.planner.options;
         let p = goal.p.clone();
         let prior = self.planner.prior(&self.base.knowledge.world, &p);
-        let probe = ProbeFact::for_predicate(&p, self.planner.data).filter(|fact| {
-            // A probe that failed twice this session (no tool for it) is
-            // no way to settle anything.
-            let intent = Intent::Probe { fact: fact.clone() };
-            !self
-                .base
-                .knowledge
-                .world
-                .infeasible
-                .contains(&intent.to_string())
-        });
+        let probe =
+            ProbeFact::for_predicate(&p, self.planner.data).filter(|fact| self.probe_allowed(fact));
         let pos = node.insert_pos(goal.before);
         // What a wrong guess costs is the explicit work: nothing the walk
         // was expected to yield can be counted on then.
@@ -1777,11 +1800,15 @@ impl<'p, 'a> Session<'p, 'a> {
         for mut c in candidates {
             let mut n = node.clone();
             if c.steps.is_empty() {
-                // Nothing to do: the way there yields it. The step that
+                // Nothing to do there: the way yields it. The step that
                 // needs it says so.
                 n.expected.insert(p.clone());
                 if let Some(i) = goal.before.and_then(|id| n.position(id)) {
                     n.plan[i].planned.expected.push((p.clone(), 1.0));
+                }
+                if !c.lead.is_empty() {
+                    let lead_ids: Vec<u64> = c.lead.iter().map(|_| self.next_seq()).collect();
+                    n.insert(0, c.lead, lead_ids);
                 }
                 n.g += c.cost;
                 out.push(n);
@@ -2279,17 +2306,9 @@ impl<'p, 'a> Session<'p, 'a> {
             GoalPredicate::Money { money } => {
                 vec![self.unsupported(format!("earning ₽{money} is not planned"), p, &ctx)]
             }
-            GoalPredicate::Healed { .. } | GoalPredicate::LeadHp { .. } => self
-                .nearest(self.planner.centers.iter().collect())
-                .into_iter()
-                .map(|center| {
-                    let intent = Intent::Heal {
-                        center: center.clone(),
-                    };
-                    let cost = intent.cost_s(&ctx);
-                    Candidate::single(intent, &ctx, cost)
-                })
-                .collect(),
+            GoalPredicate::Healed { .. } | GoalPredicate::LeadHp { .. } => {
+                self.heal_candidates(belief, &ctx)
+            }
         };
         out.retain(|c| c.cost.is_finite());
         // Intents that failed this session the same way twice (spec §8,
@@ -2316,6 +2335,42 @@ impl<'p, 'a> Session<'p, 'a> {
             out.truncate(1);
         }
         out
+    }
+
+    /// `Heal` at the heal spots (Pokémon Centers, and Mom's house) the
+    /// route planner reaches, the cheapest [`NEAREST_SHOPS`] trips first.
+    /// A heal the session found infeasible is left out, so the others
+    /// still stand (the first Switch goal run lost every plan when the
+    /// heal at home failed twice).
+    fn heal_candidates(&self, belief: &StateBelief<'a>, ctx: &PlanContext<'_>) -> Vec<Candidate> {
+        let mut spots: Vec<(OrdF64, &String, Intent)> = self
+            .planner
+            .centers
+            .iter()
+            .filter_map(|center| {
+                let intent = Intent::Heal {
+                    center: center.clone(),
+                };
+                if self.infeasible(&intent) {
+                    return None;
+                }
+                let trip = if self.hops.is_empty() {
+                    0.0
+                } else {
+                    self.go_cost(center, belief)?
+                };
+                Some((OrdF64(trip), center, intent))
+            })
+            .collect();
+        spots.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+        spots.truncate(NEAREST_SHOPS);
+        spots
+            .into_iter()
+            .map(|(_, _, intent)| {
+                let cost = intent.cost_s(ctx);
+                Candidate::single(intent, ctx, cost)
+            })
+            .collect()
     }
 
     fn unsupported(&self, reason: String, p: &GoalPredicate, ctx: &PlanContext<'_>) -> Candidate {
@@ -2363,7 +2418,9 @@ impl<'p, 'a> Session<'p, 'a> {
                 .map(GoalPredicate::World)
                 .collect();
             self.route_needs(&route, &mut c.preconditions);
-            if self.crosses_encounters(&route) {
+            // A trip to a heal spot is the way to a fit lead, not something
+            // that waits for one.
+            if !self.planner.centers.iter().any(|c| c == map) && self.crosses_encounters(&route) {
                 c.preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
             }
             for leg in &route.legs {
@@ -2406,7 +2463,9 @@ impl<'p, 'a> Session<'p, 'a> {
             c.preconditions = req.iter().cloned().map(GoalPredicate::World).collect();
             // Its legs are not known yet; a trip that needs opening is long
             // enough to cross grass somewhere.
-            c.preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
+            if !self.planner.centers.iter().any(|c| c == map) {
+                c.preconditions.push(GoalPredicate::lead_hp(LEAD_HP_MIN));
+            }
             out.push(c);
         }
         if out.is_empty() {
@@ -2902,6 +2961,17 @@ impl<'p, 'a> Session<'p, 'a> {
             }
         };
         if expected_alone.floor() as usize >= need {
+            if !self.probe_allowed(&ProbeFact::TrainerCard) {
+                // Nothing to confirm it with: expected, and judged again
+                // when the step that needs the count runs.
+                return Some(Candidate {
+                    steps: Vec::new(),
+                    lead,
+                    preconditions: Vec::new(),
+                    assumes: Vec::new(),
+                    cost: lead_cost,
+                });
+            }
             let probe = Intent::Probe {
                 fact: ProbeFact::TrainerCard,
             };
