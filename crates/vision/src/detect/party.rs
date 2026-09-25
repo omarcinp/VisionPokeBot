@@ -52,12 +52,12 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
             if !name.is_empty() && name.chars().all(|c| c == '-') {
                 continue;
             }
-            let pp = pair(
-                &font
-                    .read_dark(image, Region::new(205, 32 + 28 * i, 31, 13))
-                    .join(""),
-            )
-            .and_then(|(a, b)| Some((a.try_into().ok()?, b.try_into().ok()?)));
+            // PP prints dark, then yellow/orange/red as it runs low: the
+            // fixed dark mask first, any ink when it misses.
+            let region = Region::new(205, 32 + 28 * i, 31, 13);
+            let pp = pair(&font.read_dark(image, region).join(""))
+                .or_else(|| pair(&font.read(image, region, &[]).join("")))
+                .and_then(|(a, b)| Some((a.try_into().ok()?, b.try_into().ok()?)));
             moves.push((name, pp));
         }
     }
@@ -256,6 +256,15 @@ mod tests {
                 .unwrap()
                 .actions
         );
+        for name in [
+            "emu-summary-moves-low-pp.png",
+            "switch-summary-moves-low-pp.png",
+        ] {
+            if let Ok(image) = load(name) {
+                let s = summary(&image, &font).unwrap();
+                assert_eq!(s.moves[3], ("VINE WHIP".into(), Some((5, 10))), "{name}");
+            }
+        }
         if let Ok(image) = load("switch-summary-skills-27.png") {
             assert_eq!(summary(&image, &font).unwrap().hp, Some((27, 27)));
         }
