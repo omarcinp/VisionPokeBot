@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1014">
+<title>Emulators · PokéBot</title>
+<style>
+:root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;background:#0d1014;color:#dde3ea;--muted:#94a0af;--line:#2b3440;--panel:#161a20;--accent:#e8573f}
+*{box-sizing:border-box}body{margin:0}header{display:flex;align-items:center;gap:20px;padding:14px 24px;border-bottom:1px solid var(--line);background:var(--panel)}header b{color:var(--accent);letter-spacing:1px}nav{display:flex;gap:8px}nav a{padding:5px 14px;border:1px solid var(--line);border-radius:20px;color:var(--muted);text-decoration:none}nav a[aria-current]{border-color:var(--accent);color:#fff}main{max-width:1800px;padding:24px;margin:auto}h1{margin:0;font-size:28px;letter-spacing:-.5px}p{color:var(--muted);margin:6px 0 20px}.toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}label{display:grid;gap:6px;color:var(--muted);font-size:12px}input,select,button{font:inherit;background:#202731;color:#fff;border:1px solid #465365;border-radius:6px;padding:9px 12px}input{width:90px}button{cursor:pointer}button:hover{border-color:#fff}button:disabled{opacity:.45;cursor:default}button.primary{background:var(--accent);border-color:var(--accent)}.preview{margin-left:auto}.summary{display:flex;flex-wrap:wrap;gap:25px;margin:24px 0;color:var(--muted)}.summary strong{font:600 22px ui-monospace,monospace;color:#fff;margin-right:6px}#error{color:#ff9292;white-space:pre-wrap}#notice{color:#94d9ae}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(275px,1fr));gap:16px}.tile{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden;min-width:0}.tile-head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px}.tile-head a{color:#fff;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{font-size:11px;color:#85dfa5;white-space:nowrap}.badge.off{color:#edb363}.picture{aspect-ratio:3/2;background:#07090c;position:relative;display:flex;align-items:center;justify-content:center}.picture img{width:100%;height:100%;object-fit:contain;image-rendering:pixelated}.picture span{position:absolute;left:8px;bottom:8px;color:#e8d5ae;background:#07090cbd;font-size:11px;padding:2px 6px;border-radius:4px}.picture span:empty{display:none}.info{padding:12px}.metrics{font:13px ui-monospace,monospace;color:#b7c6d9}.latest{height:3em;overflow:auto;color:var(--muted);font-size:12px;margin:10px 0}.actions{display:flex;gap:8px;align-items:center}.actions a{color:#8dbdff;font-size:12px;margin-left:auto}.actions button{font-size:12px;padding:5px 9px}#empty{padding:60px 20px;text-align:center;border:1px dashed var(--line);border-radius:12px}dialog{background:var(--panel);color:#dde3ea;border:1px solid var(--line);border-radius:10px;width:min(900px,94vw)}dialog pre{white-space:pre-wrap;word-break:break-word;max-height:65vh;overflow:auto;font-size:12px}dialog button{float:right}@media(max-width:600px){header,main{padding:14px}.toolbar{padding:12px}.preview{margin-left:0}h1{font-size:24px}}
+</style>
+</head>
+<body>
+<header><b>POKÉBOT</b><nav aria-label="Instances"><a href="/switch/">Switch</a><a href="/emulators/" aria-current="page">Emulators</a></nav></header>
+<main>
+<h1>Emulators</h1>
+<p>Independent bot runs, together in one view. Each emulator runs as fast as the host allows.</p>
+<form class="toolbar" id="launch">
+<label>Instances<input id="count" type="number" min="1" step="1" value="1" required></label>
+<label>Bot task<select id="task"><option value="new-game">Start a new game</option><option value="story">Play the story</option><option value="observe">Observe only</option></select></label>
+<button class="primary" id="start" type="submit">Start emulators</button>
+<button id="stop-all" type="button" disabled>Stop managed runs</button>
+<label class="preview">Preview refresh<select id="refresh"><option value="500">2 fps</option><option value="1000" selected>1 fps</option><option value="2000">0.5 fps</option><option value="0">Paused</option></select></label>
+</form>
+<div class="summary"><span><strong id="active">0</strong>active</span><span><strong id="throughput">0</strong>observed fps</span><span id="resources">Connecting to supervisor…</span></div>
+<div id="error" role="alert"></div><div id="notice" role="status" aria-live="polite"></div>
+<div id="grid"></div><p id="empty">No emulators yet. Choose how many to start and a bot task above.</p>
+<dialog id="logs"><button id="close-log">Close</button><h2 id="log-title">Worker log</h2><pre id="log-text"></pre></dialog>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const tiles = new Map();
+let workers = [], busy = false, fleetRefresh = null, connectionError = null;
+async function api(path, body) {
+  const response = await fetch(path, {cache:'no-store', signal:AbortSignal.timeout(5000),
+    ...(body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Pokebot-Control':'1'}, body:JSON.stringify(body)})});
+  const data = await response.json();
+  if (!response.ok) throw Object.assign(Error(data.error || `Request failed (${response.status})`), {status:response.status});
+  return data;
+}
+async function control(path, body) {
+  $('error').textContent = ''; $('notice').textContent = '';
+  busy = true; $('start').disabled = true; $('stop-all').disabled = true;
+  try {
+    const result = await api(path, body);
+    $('notice').textContent = result.started ? `Started ${result.started.length} emulator${result.started.length === 1 ? '' : 's'}.` : 'Stopping; saves and logs are retained.';
+  } catch (error) { $('error').textContent = error.message; }
+  finally { busy = false; await refreshFleet(); }
+}
+$('launch').onsubmit = e => { e.preventDefault(); control('/api/emulators', {count:Number($('count').value),task:$('task').value}); };
+$('stop-all').onclick = () => control('/api/emulators/stop', {});
+$('close-log').onclick = () => $('logs').close();
+function tile(worker) {
+  let t = tiles.get(worker.name);
+  if (t) return t;
+  const el = document.createElement('article'); el.className = 'tile';
+  el.innerHTML = '<div class="tile-head"><a></a><span class="badge"></span></div><div class="picture"><img alt="Emulator preview" hidden><span>Waiting for first frame</span></div><div class="info"><div class="metrics">Waiting for telemetry…</div><div class="latest"></div><div class="actions"><button class="stop">Stop</button><button class="log">Log</button><a>Full report ↗</a></div></div>';
+  const links = el.querySelectorAll('a'); links.forEach(a => a.href = worker.path);
+  links[0].textContent = worker.label; links[0].title = worker.name;
+  el.querySelector('.stop').onclick = () => control(`/api/emulators/${worker.name}/stop`, {});
+  el.querySelector('.log').onclick = async () => {
+    $('log-title').textContent = worker.name; $('log-text').textContent = 'Loading…'; $('logs').showModal();
+    try { $('log-text').textContent = (await api(`/api/emulators/${worker.name}/log`)).log || 'No log output yet.'; }
+    catch (error) { $('log-text').textContent = error.message; }
+  };
+  t = {el, img:el.querySelector('img'), fps:0, lastPreview:0, lastStatus:0, url:null, visible:true};
+  tiles.set(worker.name,t); $('grid').append(el); observer.observe(el);
+  return t;
+}
+const observer = new IntersectionObserver(entries => {
+  for (const entry of entries) for (const t of tiles.values()) if (t.el === entry.target) t.visible = entry.isIntersecting;
+}, {rootMargin:'150px'});
+function refreshFleet() {
+  if (fleetRefresh) return fleetRefresh;
+  fleetRefresh = loadFleet().finally(() => { fleetRefresh = null; });
+  return fleetRefresh;
+}
+async function loadFleet() {
+  try {
+    const data = await api('/api/emulators'); workers = data.workers;
+    if ($('error').textContent === connectionError) $('error').textContent = '';
+    connectionError = null;
+    $('resources').textContent = `${data.cpus} CPUs · ${Math.round(data.available_memory_mb/1024)} GiB available · limit ${data.max_workers} managed runs`;
+    const running = workers.filter(w => w.alive), managed = running.filter(w => w.managed);
+    $('active').textContent = running.length; $('count').max = Math.max(1,data.max_workers - managed.length);
+    $('start').disabled = busy || managed.length >= data.max_workers;
+    $('stop-all').disabled = busy || !managed.length; $('empty').hidden = !!workers.length;
+    for (const worker of workers) {
+      const t = tile(worker), badge = t.el.querySelector('.badge');
+      badge.textContent = `${worker.task || 'bot'} · ${worker.status}`;
+      badge.classList.toggle('off', !worker.alive || worker.status === 'stopping');
+      t.el.querySelector('.stop').disabled = busy || !worker.managed || !worker.alive || worker.status === 'stopping';
+      t.el.querySelector('.log').hidden = !worker.managed;
+      if (!worker.alive) { t.fps = 0; t.el.querySelector('.picture span').textContent = worker.status; }
+    }
+    for (const [name,t] of tiles) if (!workers.some(w => w.name === name)) {
+      observer.unobserve(t.el); t.el.remove(); if(t.url) URL.revokeObjectURL(t.url); tiles.delete(name);
+    }
+  } catch(error) { connectionError = error.message; $('error').textContent = connectionError; $('start').disabled = true; }
+}
+// At most four short HTTP requests at once. Long-lived streams per tile would
+// exhaust HTTP/1 browser connections as soon as the fleet grows past six runs.
+async function update(worker) {
+  const t = tiles.get(worker.name); if (!t || !worker.alive) return;
+  if (Date.now() - t.lastStatus >= 1000) {
+    t.lastStatus = Date.now();
+    try {
+      let data;
+      try { data = await api(worker.path + 'api/summary'); }
+      catch(error) {
+        if (worker.managed || error.status !== 404) throw error;
+        // An older externally launched emulator may predate the summary API.
+        const snapshot = await api(worker.path + 'api/snapshot');
+        data = {stats:snapshot.status.stats, latest:snapshot.log.at(-1)};
+      }
+      const stats = data.stats;
+      t.fps = stats.fps;
+      t.el.querySelector('.metrics').textContent = `${stats.fps.toFixed(0)} fps · ${(stats.fps/59.7275).toFixed(1)}× · frame ${(stats.frame_id ?? 0).toLocaleString()}`;
+      t.el.querySelector('.latest').textContent = [stats.task_status ? `Task ${stats.task_status}.` : '', data.latest?.summary || ''].filter(Boolean).join(' ');
+      t.el.querySelector('.picture span').textContent = '';
+    } catch (_) { t.fps = 0; t.el.querySelector('.picture span').textContent = 'Telemetry unavailable · retrying'; }
+  }
+  const interval = Number($('refresh').value);
+  if (!interval || !t.visible || Date.now() - t.lastPreview < interval) return;
+  t.lastPreview = Date.now();
+  try {
+    const response = await fetch(worker.path + 'frame.png', {cache:'no-store',signal:AbortSignal.timeout(3000)});
+    if (!response.ok) throw Error(response.status);
+    const url = URL.createObjectURL(await response.blob());
+    const previous = t.url; t.url = url; t.img.src = url; t.img.hidden = false;
+    if (previous) URL.revokeObjectURL(previous);
+  } catch (_) { t.el.querySelector('.picture span').textContent = 'Preview unavailable · retrying'; }
+}
+async function pollTiles() {
+  if (!document.hidden) {
+    const queue = [...workers];
+    await Promise.all(Array.from({length:Math.min(4,queue.length)}, async () => { while(queue.length) await update(queue.shift()); }));
+    $('throughput').textContent = Math.round([...tiles.values()].reduce((sum,t)=>sum+t.fps,0)).toLocaleString();
+  }
+  setTimeout(pollTiles,100);
+}
+async function pollFleet() { if (!document.hidden) await refreshFleet(); setTimeout(pollFleet,2000); }
+pollFleet(); pollTiles();
+</script>
+</body>
+</html>

@@ -68,6 +68,7 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Re
         .route("/sprite/{species}", get(sprite))
         .route("/world/{file}", get(world_file))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/summary", get(summary))
         .route("/api/stream", get(sse))
         .with_state(AppState {
             telemetry,
@@ -195,6 +196,17 @@ async fn snapshot(State(app): State<AppState>) -> Json<serde_json::Value> {
         "status": status,
         "log": app.telemetry.recent_log(),
         "instance_label": &*app.instance_label,
+    }))
+}
+
+/// Fleet polling avoids copying the full state and 2,000-entry log per tile.
+async fn summary(State(app): State<AppState>) -> Json<serde_json::Value> {
+    let status = app.telemetry.inner.status.borrow();
+    Json(json!({
+        "stats": status.stats,
+        "screen": status.state.get("screen"),
+        "player": status.state.get("player"),
+        "latest": app.telemetry.latest_log(),
     }))
 }
 

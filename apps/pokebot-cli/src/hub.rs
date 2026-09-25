@@ -1,5 +1,5 @@
 //! `pokebot hub`: the always-on front door on port 8080 that puts every bot
-//! instance's web UI under one address (`/switch/`, `/emu/`). The proxy
+//! instance's web UI under one address (`/switch/`, `/emulators/`). The proxy
 //! itself lives in `pokebot_telemetry::hub_proxy`.
 
 use std::net::SocketAddr;
@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use crate::fleet::{Fleet, FleetArgs};
 use anyhow::Result;
 use pokebot_telemetry::hub_proxy;
 
@@ -19,10 +20,26 @@ pub struct HubArgs {
     /// [default: $POKEBOT_INSTANCES_DIR, else /tmp/pokebot-instances]
     #[arg(long)]
     instances_dir: Option<PathBuf>,
+    #[command(flatten)]
+    fleet: FleetArgs,
 }
 
 pub fn run(args: HubArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let dir = hub_proxy::resolve_instances_dir(args.instances_dir);
-    hub_proxy::run_blocking(args.listen, dir, stop)?;
+    let fleet = Arc::new(Fleet::new(args.fleet, dir.clone())?);
+    let monitor = Arc::clone(&fleet);
+    let monitor_stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::clone(&monitor_stop);
+    let reaper = std::thread::spawn(move || {
+        while !done.load(std::sync::atomic::Ordering::Relaxed) {
+            monitor.reap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+    let result = hub_proxy::run_blocking_with_fleet(args.listen, dir, stop, Some(fleet.clone()));
+    monitor_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = reaper.join();
+    fleet.shutdown();
+    result?;
     Ok(())
 }
