@@ -2,6 +2,7 @@
 
 pub mod bag;
 pub mod battle;
+pub mod cut_in;
 pub mod dialogue;
 pub mod fly_map;
 pub mod hud;

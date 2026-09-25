@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_state::{Direction, Observation, PlayerPose};
 use pokebot_world::behavior::{arrow_warp, stair_warp, COUNTER, WARP_DOOR};
-use pokebot_world::path::{find_path, Obstacles, Step};
+use pokebot_world::path::{find_path, find_path_with, Obstacles, Step, Walk};
 use pokebot_world::{MapData, World};
 use serde::Serialize;
 
@@ -189,6 +189,8 @@ pub struct Navigator {
     /// Map objects no longer there (items and fossils taken), by map and
     /// local id: they don't block their tiles.
     gone: Gone,
+    /// Water is walkable: the player is surfing (or about to).
+    surf: bool,
 }
 
 /// Map objects known to be gone, as (map, local id).
@@ -207,7 +209,15 @@ impl Navigator {
             syncer: Arc::new(Mutex::new(Syncer::new("emulator"))),
             hop: None,
             gone: Gone::new(),
+            surf: false,
         }
+    }
+
+    /// Walks over water too (the player surfs on it; stepping back onto
+    /// land dismounts).
+    pub fn with_surf(mut self, surf: bool) -> Self {
+        self.surf = surf;
+        self
     }
 
     /// Hold lengths and timeouts from this timing model instead of the
@@ -421,7 +431,12 @@ impl Navigator {
         let mut obstacles = self.obstacles(map);
         obstacles.remove(&(pose.x, pose.y));
         let heuristic = |p: (i32, i32)| (p.0 - toward.0).abs() + (p.1 - toward.1).abs();
-        let Some(path) = find_path(map, (pose.x, pose.y), &obstacles, &goal, heuristic) else {
+        let walk = Walk {
+            obstacles: &obstacles,
+            surf: self.surf,
+        };
+        let Some(path) = find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, heuristic)
+        else {
             // Learned blocks may be stale (a wandering NPC moved on).
             if self.forget_learned(&map.name) {
                 return NavStatus::Wait(format!("no path {what}; forgetting learned obstacles"));

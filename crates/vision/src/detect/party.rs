@@ -94,27 +94,48 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
 
 pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
     // Dialogue can also say "POKéMON". Require the party menu's striped
-    // teal background, outside all six panels and the bottom message.
+    // teal background, outside all six panels, the bottom message and a
+    // field move's description box (over the prompt, from y 112).
     if super::share_any(
         image,
-        Region::new(16, 80, 70, 40),
+        Region::new(16, 80, 70, 28),
         &[[74, 170, 165], [57, 138, 140]],
         2,
     ) < 850
     {
         return None;
     }
+    // A message over the party screen ("IVYSAUR wants to learn …") is the
+    // full-width message box (its mauve band runs along the whole bottom,
+    // unlike the prompt box's or the action window's): dialogue, not the
+    // menu's prompt.
+    // (Tight tolerance: the prompt box's grey border is within the usual
+    // one of the mauve.)
+    let mauve = (12..228)
+        .step_by(2)
+        .filter(|&x| crate::color::near(image.pixel(x, 156), crate::color::SCENE_BORDER, 6))
+        .count();
+    if mauve * 10 >= 108 * 8 {
+        return None;
+    }
     let prompt = read(image, font, 6, 136, 173, 19);
-    let actions = read(image, font, 156, 104, 79, 18).contains("SUMMARY");
-    if !prompt.contains("POKéMON") && !actions {
+    let (options, option_cursor) = action_window(image, font);
+    let actions = options.iter().any(|o| o == "SUMMARY")
+        || read(image, font, 156, 104, 79, 18).contains("SUMMARY");
+    // The prompt box also answers a field move the game refuses ("Can't
+    // use that here.").
+    if prompt.is_empty() && !actions {
         return None;
     }
     // Empty slots are striped teal; occupied panels have a pale cyan fill
     // (red for fainted members). Do not derive size from cached roster.
+    // The action window covers the lower panels' right halves: probe
+    // left of it then.
     let occupied = |r| share(image, r, [74, 170, 165], 1) < 500;
+    let probe_x = if options.is_empty() { 164 } else { 116 };
     let mut count = 1;
     for i in 0..5 {
-        if occupied(Region::new(164, 12 + 24 * i, 16, 12)) {
+        if occupied(Region::new(probe_x, 12 + 24 * i, 16, 12)) {
             count += 1;
         } else {
             break;
@@ -124,15 +145,69 @@ pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
         let r = if i == 0 {
             Region::new(8, 26, 77, 2)
         } else {
-            Region::new(96, 8 + 24 * (i - 1) as u32, 142, 2)
+            // The panel's orange top border: rows 10..=11 (measured); left
+            // of the action window when it is open.
+            let width = if options.is_empty() { 142 } else { 48 };
+            Region::new(96, 9 + 24 * (i - 1) as u32, width, 3)
         };
         share(image, r, [255, 131, 49], 1) > 200
     });
+    // While a TM or HM is taught every panel says ABLE! or NOT ABLE!
+    // where the HP bar is (the lead's under its name, the others right
+    // of theirs).
+    let able: Vec<Option<bool>> = (0..count)
+        .map(|i| {
+            let text = if i == 0 {
+                read(image, font, 8, 56, 80, 14)
+            } else {
+                read(image, font, 168, 10 + 24 * (u32::from(i) - 1), 70, 14)
+            };
+            match text.as_str() {
+                "ABLE!" => Some(true),
+                "NOT ABLE!" => Some(false),
+                _ => None,
+            }
+        })
+        .collect();
+    let able = if able.iter().any(Option::is_some) {
+        able
+    } else {
+        Vec::new()
+    };
     Some(PartyMenuObservation {
         count,
         selected,
         actions,
+        prompt,
+        options,
+        option_cursor,
+        able,
     })
+}
+
+/// The action window opened on a member (right half, above the prompt):
+/// its rows read one at a time, since field moves print in blue and the
+/// rest in grey (one read picks one ink), and the ▶'s row.
+fn action_window(image: &RgbImage, font: &Font) -> (Vec<String>, Option<u8>) {
+    let Some(menu) = super::menu::detect(image).filter(|m| m.window.x >= 140) else {
+        return (Vec::new(), None);
+    };
+    let cursor = super::menu::cursor_region(image, &menu);
+    let options: Vec<String> = (0..u32::from(menu.rows))
+        .map(|row| {
+            let r = Region::new(
+                menu.window.x,
+                menu.window.y + 16 * row,
+                menu.window.width,
+                16,
+            );
+            font.read(image, r, &[cursor]).join(" ").trim().to_owned()
+        })
+        .collect();
+    if options.iter().all(String::is_empty) {
+        return (Vec::new(), None);
+    }
+    (options, Some(menu.cursor_row))
 }
 
 #[cfg(test)]
@@ -192,5 +267,87 @@ mod tests {
         }
         assert_eq!(pair("9/2?"), None);
         assert_eq!(pair("9/2"), None);
+    }
+
+    /// The action window with a field move (CUT printed in blue), the
+    /// description box that covers the prompt while CUT is under the ▶,
+    /// a member without field moves, and ABLE!/NOT ABLE! while teaching.
+    #[test]
+    fn reads_the_action_window_and_teach_panels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let load = |name: &str| pokebot_video::png::load(root.join("captures/fixtures").join(name));
+        let rows = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        if let Ok(image) = load("emu-party-field-moves.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert!(m.actions);
+            assert_eq!(
+                m.options,
+                rows(&["SUMMARY", "CUT", "SWITCH", "ITEM", "CANCEL"])
+            );
+            assert_eq!(m.option_cursor, Some(0));
+            assert_eq!(m.selected, Some(0));
+            assert_eq!(m.count, 5);
+            assert!(m.able.is_empty());
+        }
+        if let Ok(image) = load("emu-party-field-move-hover.png") {
+            let m = menu(&image, &font).expect("party menu under the description");
+            assert_eq!(m.option_cursor, Some(1));
+            assert_eq!(m.options.get(1).map(String::as_str), Some("CUT"));
+        }
+        if let Ok(image) = load("emu-party-actions-clefairy.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.selected, Some(4), "under the action window");
+            assert_eq!(
+                m.options,
+                rows(&["SUMMARY", "FLASH", "SWITCH", "ITEM", "CANCEL"])
+            );
+        }
+        if let Ok(image) = load("emu-party-actions-geodude.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.options, rows(&["SUMMARY", "SWITCH", "ITEM", "CANCEL"]));
+            assert_eq!(m.selected, Some(1));
+        }
+        if let Ok(image) = load("emu-teach-which.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.prompt, "Teach which POKéMON?");
+            assert_eq!(
+                m.able,
+                vec![
+                    Some(true),
+                    Some(false),
+                    Some(false),
+                    Some(true),
+                    Some(false)
+                ]
+            );
+            assert!(m.options.is_empty());
+        }
+        if let Ok(image) = load("emu-teach-which-clefairy.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.selected, Some(4));
+            assert_eq!(
+                m.able,
+                vec![
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(true)
+                ]
+            );
+        }
+        if let Ok(image) = load("emu-party-cant-use.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.prompt, "Can’t use that here.");
+        }
+        // Messages over the party screen are dialogue, not the menu.
+        for name in ["emu-teach-four-moves.png", "emu-teach-replace-yes-no.png"] {
+            if let Ok(image) = load(name) {
+                assert!(menu(&image, &font).is_none(), "{name}");
+            }
+        }
     }
 }

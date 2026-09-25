@@ -169,7 +169,8 @@ fn container(image: &RgbImage, font: &Font, small: &Font) -> Option<BagObservati
         pocket: if tm { "TM CASE" } else { "BERRY POUCH" }.into(),
         rows,
         cursor,
-        prompt: None,
+        // USE / GIVE / EXIT on a TM or HM.
+        prompt: field_prompt(image, font),
     })
 }
 
@@ -250,6 +251,29 @@ mod tests {
             vec![("TM39".into(), Some(1)), ("CANCEL".into(), None)]
         );
         assert_eq!(bag.cursor, Some(0));
+        if let Some((image, font, small)) = fixture("emu-tm-use-prompt.png") {
+            let bag = detect(&image, &font, &small).unwrap();
+            assert_eq!(bag.pocket, "TM CASE");
+            assert_eq!(
+                bag.prompt,
+                Some((vec!["USE".into(), "GIVE".into(), "EXIT".into()], 0))
+            );
+            assert_eq!(bag.cursor, None, "the list's ▶ is hollow under the prompt");
+        }
+        if let Some((image, font, small)) = fixture("emu-tm-case-hms.png") {
+            let bag = detect(&image, &font, &small).unwrap();
+            assert_eq!(
+                bag.rows,
+                vec![
+                    ("HM01".into(), Some(1)),
+                    ("HM05".into(), Some(1)),
+                    ("TM03".into(), Some(1)),
+                    ("TM39".into(), Some(1)),
+                    ("CANCEL".into(), None)
+                ]
+            );
+            assert_eq!(bag.prompt, None);
+        }
         let (image, font, small) = fixture("emu-case-prompt.png").unwrap();
         assert_eq!(
             detect(&image, &font, &small).unwrap().prompt,

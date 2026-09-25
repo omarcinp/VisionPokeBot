@@ -272,6 +272,7 @@ def main():
             "height": h,
             "pad": PAD,
             "map_type": m.get("map_type"),
+            "requires_flash": bool(m.get("requires_flash")),
             "tiles": tiles,
             "warps": [
                 # Dynamic warps (e.g. building exits back to "where you came

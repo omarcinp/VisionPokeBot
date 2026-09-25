@@ -306,11 +306,20 @@ impl<'a> ToolContext<'a> {
             let map = &p.pose.map;
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
-                // NPCs are back at their data positions on re-entry.
+                // NPCs are back at their data positions on re-entry, and cut
+                // trees and smashed rocks have grown back.
                 self.blocked
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .forget(map);
+                if let Some(places) = self.world.places() {
+                    self.gone.retain(|(m, id)| {
+                        m != map
+                            || !places.gates.iter().any(|g| {
+                                g.map == *m && g.local_id == *id && super::field::regrows(&g.kind)
+                            })
+                    });
+                }
                 self.emit(GameEvent::MapVisited { map: map.clone() })?;
             }
         }

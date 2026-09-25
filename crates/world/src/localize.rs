@@ -108,6 +108,42 @@ pub fn score(
     (s >= floor).then_some(s)
 }
 
+/// Share (per mille) of the pixels of map tile `tile` that look like the
+/// map's render there, with the player standing at `pose`: high once an
+/// object drawn over the tile (a cut tree, a smashed rock) is gone. `None`
+/// when the tile is off screen.
+pub fn tile_score(
+    frame: &RgbImage,
+    render: &RgbImage,
+    map: &MapData,
+    pose: &PlayerPose,
+    tile: (i32, i32),
+) -> Option<u32> {
+    let sx0 = PLAYER_SCREEN_X + (tile.0 - pose.x) * BLOCK;
+    let sy0 = PLAYER_SCREEN_Y + (tile.1 - pose.y) * BLOCK;
+    let rx0 = (tile.0 + map.pad) * BLOCK;
+    let ry0 = (tile.1 + map.pad) * BLOCK;
+    let (fw, fh) = (frame.width() as i32, frame.height() as i32);
+    let (rw, rh) = (render.width() as i32, render.height() as i32);
+    if sx0 < 0 || sy0 < 0 || sx0 + BLOCK > fw || sy0 + BLOCK > fh {
+        return None;
+    }
+    if rx0 < 0 || ry0 < 0 || rx0 + BLOCK > rw || ry0 + BLOCK > rh {
+        return None;
+    }
+    let mut matched = 0u32;
+    for dy in 0..BLOCK {
+        for dx in 0..BLOCK {
+            let f = frame.pixel((sx0 + dx) as u32, (sy0 + dy) as u32);
+            let r = render.pixel((rx0 + dx) as u32, (ry0 + dy) as u32);
+            if (0..3).all(|c| f[c].abs_diff(r[c]) <= TOLERANCE) {
+                matched += 1;
+            }
+        }
+    }
+    Some(matched * 1000 / (BLOCK * BLOCK) as u32)
+}
+
 /// Whether the sampled frame is one flat colour (a white flash, a fade):
 /// it would match any equally flat stretch of some map (a white frame scored
 /// 1000 on NavelRock_Fork).

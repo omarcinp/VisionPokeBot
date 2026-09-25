@@ -12,11 +12,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pokebot_state::{GameEvent, PlayerPose};
+use pokebot_world::behavior::is_water;
+use pokebot_world::path::{find_path_with, Walk};
+use pokebot_world::route::{self, EdgeKind, Leg, Place, UnknownPolicy};
 use pokebot_world::World;
 
+use super::field::{self, FieldMove};
 use super::{
-    Dest, Expects, Intent, StepContext, Tool, ToolContext, ToolOutcome, ToolStep, SETTLE_FRAMES,
+    Dest, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome, ToolStep,
+    SETTLE_FRAMES,
 };
+use crate::belief_view::StateBelief;
 use crate::motion::{InputKind, SyncerHandle};
 use crate::nav::{goal_tiles, Blocked, Destination, Gone, NavStatus, Navigator};
 use crate::{Action, Decision, Outcome};
@@ -77,9 +83,15 @@ impl GoStep {
     }
 
     pub fn with(parts: &NavParts, dest: Destination) -> Self {
+        Self::with_surf(parts, dest, false)
+    }
+
+    /// A leg that may cross water: the player surfs (or is about to).
+    pub fn with_surf(parts: &NavParts, dest: Destination, surf: bool) -> Self {
         let nav = Navigator::new(Arc::clone(&parts.world), dest.clone())
             .with_gone(parts.gone.clone())
-            .with_blocked(Arc::clone(&parts.blocked));
+            .with_blocked(Arc::clone(&parts.blocked))
+            .with_surf(surf);
         let nav = match &parts.syncer {
             Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
             None => nav,
@@ -263,9 +275,21 @@ impl Tool for GoTool {
         let Intent::Go { dest } = intent else {
             return ToolOutcome::failed("not a Go");
         };
-        let walked = match dest {
-            Dest::Map { map } => go_to_map(ctx, map),
-            other => go(ctx, Destination::from(other)),
+        let walked = match field_route(ctx, dest) {
+            Some(legs) => {
+                ctx.info(format!(
+                    "go: the route needs field moves: {}",
+                    legs.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+                walk_legs(ctx, &legs, dest)
+            }
+            None => match dest {
+                Dest::Map { map } => go_to_map(ctx, map),
+                other => go(ctx, Destination::from(other)),
+            },
         };
         match walked {
             Ok(pose) => ToolOutcome {
@@ -274,6 +298,221 @@ impl Tool for GoTool {
             },
             Err(e) => e.into(),
         }
+    }
+}
+
+/// Whether `leg` needs a field move (or enters a dark map).
+fn special(world: &World, leg: &Leg) -> bool {
+    match &leg.kind {
+        EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        _ => field::is_dark(world, &leg.to.map) && !field::is_dark(world, &leg.from.map),
+    }
+}
+
+/// The route to `dest` from where the player stands, when it needs field
+/// moves (a Cut or Rock Smash gate, Surf, Fly) or enters a dark map with
+/// a Flash user in the party; `None` when the navigator alone walks it.
+/// Requirements the belief doesn't know count as unmet (the planner
+/// establishes them first).
+pub fn field_route(ctx: &mut ToolContext<'_>, dest: &Dest) -> Option<Vec<Leg>> {
+    let pose = ctx.pose()?;
+    let world = Arc::clone(&ctx.world);
+    let graph = ctx
+        .scheduler
+        .graph
+        .get_or_insert_with(|| crate::scheduler::graph(&world));
+    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest)
+}
+
+/// [`field_route`] without a context.
+pub fn plan_field_route(
+    world: &World,
+    graph: &route::PlaceGraph,
+    state: &pokebot_state::GameState,
+    pose: &PlayerPose,
+    dest: &Dest,
+) -> Option<Vec<Leg>> {
+    let belief = StateBelief(state);
+    let result = match dest {
+        Dest::Map { map } => {
+            route::route_to_map(world, graph, &belief, pose, map, UnknownPolicy::Pessimistic)
+        }
+        Dest::Tile { map, x, y } => route::route(
+            world,
+            graph,
+            &belief,
+            pose,
+            &Place::tile(map, *x, *y),
+            UnknownPolicy::Pessimistic,
+        ),
+        // Talking and warp legs end next to their target: the navigator's.
+        Dest::Facing { .. } | Dest::Warp { .. } => return None,
+    };
+    if !result.found() {
+        return None;
+    }
+    let flash = field::carrier(state, FieldMove::Flash.move_id()).is_some();
+    let needed = result.legs.iter().any(|l| match &l.kind {
+        EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        // Entering a dark map matters only with someone to use Flash.
+        _ => special(world, l) && flash,
+    });
+    needed.then_some(result.legs)
+}
+
+/// Walks to a place of the route (the navigator routes across maps).
+fn walk_to(ctx: &mut ToolContext<'_>, place: &Place) -> Result<(), ToolError> {
+    if ctx
+        .pose()
+        .is_some_and(|p| p.map == place.map && (p.x, p.y) == (place.x, place.y))
+    {
+        return Ok(());
+    }
+    go(
+        ctx,
+        Destination::Tile {
+            map: place.map.clone(),
+            x: place.x,
+            y: place.y,
+        },
+    )
+    .map(|_| ())
+}
+
+/// The shore tile and the first water tile of a surf leg's path.
+fn surf_entry(world: &World, leg: &Leg) -> Option<((i32, i32), (i32, i32))> {
+    let map = world.map(&leg.from.map)?;
+    let obstacles = crate::nav::static_obstacles(map);
+    let walk = Walk {
+        obstacles: &obstacles,
+        surf: true,
+    };
+    let to = (leg.to.x, leg.to.y);
+    let path = find_path_with(
+        map,
+        (leg.from.x, leg.from.y),
+        &walk,
+        |_| 0,
+        |p| p == to,
+        |p| (p.0 - to.0).abs() + (p.1 - to.1).abs(),
+    )?;
+    let mut prev = (leg.from.x, leg.from.y);
+    for step in path {
+        if map
+            .tile(step.to.0, step.to.1)
+            .is_some_and(|t| is_water(t.behavior))
+        {
+            return Some((prev, step.to));
+        }
+        prev = step.to;
+    }
+    None
+}
+
+fn on_water(ctx: &ToolContext<'_>) -> bool {
+    ctx.pose().is_some_and(|p| {
+        ctx.world
+            .map(&p.map)
+            .and_then(|m| m.tile(p.x, p.y))
+            .is_some_and(|t| is_water(t.behavior))
+    })
+}
+
+fn use_move(ctx: &mut ToolContext<'_>, mv: FieldMove, at: Option<Dest>) -> Result<(), ToolError> {
+    ctx.invoke(&Intent::FieldMove {
+        mv: mv.move_id().to_owned(),
+        at,
+        push: Vec::new(),
+    })
+    .result
+}
+
+/// Carries out the legs of a route that needs field moves: plain legs are
+/// walked by the navigator up to the next special one, which uses its
+/// move through the `FieldMove` tool.
+pub fn walk_legs(
+    ctx: &mut ToolContext<'_>,
+    legs: &[Leg],
+    dest: &Dest,
+) -> Result<Option<PlayerPose>, ToolError> {
+    let world = Arc::clone(&ctx.world);
+    for leg in legs {
+        if !special(&world, leg) {
+            continue;
+        }
+        match &leg.kind {
+            EdgeKind::Gate { kind } => {
+                walk_to(ctx, &leg.from)?;
+                let (gx, gy) = ((leg.from.x + leg.to.x) / 2, (leg.from.y + leg.to.y) / 2);
+                let gate = world
+                    .places()
+                    .and_then(|p| {
+                        p.gates
+                            .iter()
+                            .find(|g| g.map == leg.from.map && (g.x, g.y) == (gx, gy))
+                    })
+                    .ok_or_else(|| {
+                        ToolError::Failed(format!("no {kind} at {} ({gx}, {gy})", leg.from.map))
+                    })?;
+                let mv = FieldMove::from_move(&gate.requires.r#move).ok_or_else(|| {
+                    ToolError::Failed(format!("{} is not a field move", gate.requires.r#move))
+                })?;
+                use_move(
+                    ctx,
+                    mv,
+                    Some(Dest::Facing {
+                        map: gate.map.clone(),
+                        x: gx,
+                        y: gy,
+                    }),
+                )?;
+                // The tool marked it gone until the map loads again.
+                walk_to(ctx, &leg.to)?;
+            }
+            EdgeKind::Walk { surf: true, .. } => {
+                if !on_water(ctx) {
+                    let (shore, water) = surf_entry(&world, leg).ok_or_else(|| {
+                        ToolError::Failed(format!("no water on the surf leg {leg}"))
+                    })?;
+                    walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
+                    use_move(
+                        ctx,
+                        FieldMove::Surf,
+                        Some(Dest::Facing {
+                            map: leg.from.map.clone(),
+                            x: water.0,
+                            y: water.1,
+                        }),
+                    )?;
+                }
+                let to = Destination::Tile {
+                    map: leg.to.map.clone(),
+                    x: leg.to.x,
+                    y: leg.to.y,
+                };
+                let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
+                ctx.drive(&mut step)?;
+            }
+            EdgeKind::Fly => use_move(
+                ctx,
+                FieldMove::Fly,
+                Some(Dest::Map {
+                    map: leg.to.map.clone(),
+                }),
+            )?,
+            _ => {
+                // Into a dark map: light it up on arrival when someone
+                // knows Flash.
+                go_to_map(ctx, &leg.to.map)?;
+                if field::carrier(ctx.state(), FieldMove::Flash.move_id()).is_some() {
+                    use_move(ctx, FieldMove::Flash, None)?;
+                }
+            }
+        }
+    }
+    match dest {
+        Dest::Map { map } => go_to_map(ctx, map),
+        other => go(ctx, Destination::from(other)),
     }
 }
 
@@ -463,6 +702,53 @@ mod tests {
             .unwrap()
             .on_map("MtMoon_B2F")
             .contains(&(43, 22)));
+    }
+
+    fn cutter(badges: bool) -> pokebot_state::GameState {
+        use pokebot_state::{Knowledge, MoveSlot, PartyMon};
+        let mut state = pokebot_state::GameState::default();
+        let mut mon = PartyMon::default();
+        mon.moves[0] = Some(MoveSlot {
+            mv: Knowledge::observed("MOVE_CUT".into(), 1),
+            pp: Knowledge::observed((30, 30), 1),
+        });
+        state.party = Knowledge::observed(vec![mon], 1);
+        if badges {
+            state
+                .world
+                .flags
+                .insert("FLAG_BADGE02_GET".into(), Knowledge::observed(true, 1));
+        }
+        state
+    }
+
+    /// Cerulean's cut tree (26, 32): with CUT known and the Cascade Badge,
+    /// the walk to the tile south of it goes through the tree (a gate leg
+    /// the `FieldMove` tool carries out); without the badge the plain
+    /// navigator walks (or fails) as before.
+    #[test]
+    fn a_route_through_a_cut_tree_is_a_field_route() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let pose = PlayerPose {
+            map: "CeruleanCity".into(),
+            x: 26,
+            y: 29,
+        };
+        let dest = Dest::Tile {
+            map: "CeruleanCity".into(),
+            x: 26,
+            y: 33,
+        };
+        let legs = plan_field_route(&world, &graph, &cutter(true), &pose, &dest)
+            .expect("a route through the tree");
+        let gate = legs
+            .iter()
+            .find(|l| matches!(&l.kind, EdgeKind::Gate { kind } if kind == "cut_tree"))
+            .expect("a gate leg");
+        assert_eq!((gate.from.x, gate.from.y), (26, 31));
+        assert_eq!((gate.to.x, gate.to.y), (26, 33));
+        assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest).is_none());
     }
 
     #[test]

@@ -828,14 +828,17 @@ fn planner_intents_convert_to_tool_intents() {
     );
     assert_eq!(conv(&Planned::Save).unwrap(), Intent::Save);
     assert_eq!(conv(&Planned::Unstick).unwrap(), Intent::Unstick);
-    // No tool yet.
-    assert!(matches!(
+    assert_eq!(
         conv(&Planned::Teach {
             hm: "ITEM_HM01".into(),
             mon: "SPECIES_IVYSAUR".into()
-        }),
-        Err(ToolError::Unsupported(_))
-    ));
+        })
+        .unwrap(),
+        Intent::Teach {
+            item: "ITEM_HM01".into(),
+            member: "SPECIES_IVYSAUR".into()
+        }
+    );
     assert_eq!(
         conv(&Planned::Probe {
             fact: PlannedFact::Party

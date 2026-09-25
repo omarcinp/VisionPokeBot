@@ -12,6 +12,7 @@ mod catch;
 mod context;
 pub mod dialogue;
 pub mod effects;
+pub mod field;
 mod go;
 mod heal;
 pub mod lookup;
@@ -21,9 +22,10 @@ mod party_audit;
 pub mod probe;
 mod save;
 mod talk;
+pub mod teach;
 mod unstick;
 
-use pokebot_state::{GameEvent, PlayerPose, Pocket};
+use pokebot_state::{Direction, GameEvent, PlayerPose, Pocket};
 use pokebot_world::World;
 use serde::{Deserialize, Serialize};
 
@@ -191,6 +193,25 @@ pub enum Intent {
     Save,
     /// Get out of an unrecognised screen (§7.4).
     Unstick,
+    /// Teach the TM or HM `item` (`ITEM_HM01`) to `member`: a species
+    /// constant (the first party member of that species), `lead`, or
+    /// `slot:N`. With four moves known, the lowest-value move is forgotten
+    /// (never the last damaging one, never an HM move).
+    Teach {
+        item: String,
+        member: String,
+    },
+    /// Use a field move: `mv` (`MOVE_CUT`) on the obstacle `at` faces
+    /// (`Dest::Facing`: Cut, Rock Smash, Strength, Surf, Waterfall), to
+    /// the map `at` names (Fly), or where the player stands (Flash).
+    /// Strength then pushes the boulder along `push`.
+    FieldMove {
+        mv: String,
+        #[serde(default)]
+        at: Option<Dest>,
+        #[serde(default)]
+        push: Vec<Direction>,
+    },
 }
 
 impl Intent {
@@ -209,14 +230,16 @@ impl Intent {
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
+            Intent::Teach { .. } => "Teach",
+            Intent::FieldMove { .. } => "FieldMove",
         }
     }
 
     /// The tool intent for a planner intent (spec §4.1 → §7.2). `Beat`
     /// becomes a `Talk` to the object on `map` whose script fights the
     /// trainer (found in the compiled events, so it needs the world);
-    /// `Teach`, the party probe and `Unsupported` have no tool yet and fail
-    /// as `Unsupported`.
+    /// the PC box probe and `Unsupported` have no tool yet and fail as
+    /// `Unsupported`.
     pub fn from_planned(
         intent: &pokebot_planner::Intent,
         world: Option<&World>,
@@ -284,11 +307,10 @@ impl Intent {
                 item: item.clone(),
                 count: u16::try_from(*count).unwrap_or(u16::MAX),
             },
-            P::Teach { hm, mon } => {
-                return Err(ToolError::Unsupported(format!(
-                    "teaching {hm} to {mon}: no tool yet"
-                )))
-            }
+            P::Teach { hm, mon } => Intent::Teach {
+                item: hm.clone(),
+                member: mon.clone(),
+            },
             P::Probe { fact } => Intent::Probe {
                 fact: match fact {
                     pokebot_planner::ProbeFact::TrainerCard => ProbeFact::TrainerCard,
@@ -383,6 +405,17 @@ impl std::fmt::Display for Intent {
             Intent::Probe { fact } => write!(f, "Probe {fact:?}"),
             Intent::Save => write!(f, "Save"),
             Intent::Unstick => write!(f, "Unstick"),
+            Intent::Teach { item, member } => write!(f, "Teach {item} to {member}"),
+            Intent::FieldMove { mv, at, push } => {
+                write!(f, "FieldMove {mv}")?;
+                if let Some(at) = at {
+                    write!(f, " at {at:?}")?;
+                }
+                if !push.is_empty() {
+                    write!(f, " push {push:?}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -494,6 +527,8 @@ impl Default for Toolbox {
             Box::new(catch::TrainTool),
             Box::new(buy::BuyTool),
             Box::new(probe::ProbeTool),
+            Box::new(teach::TeachTool),
+            Box::new(field::FieldMoveTool),
             Box::new(save::SaveTool),
             Box::new(UnstickTool),
         ])
@@ -627,6 +662,19 @@ mod tests {
             },
             Intent::Save,
             Intent::Unstick,
+            Intent::Teach {
+                item: "ITEM_HM01".into(),
+                member: "SPECIES_IVYSAUR".into(),
+            },
+            Intent::FieldMove {
+                mv: "MOVE_STRENGTH".into(),
+                at: Some(Dest::Facing {
+                    map: "VictoryRoad_1F".into(),
+                    x: 5,
+                    y: 4,
+                }),
+                push: vec![Direction::Up, Direction::Up],
+            },
         ];
         for intent in intents {
             let json = serde_json::to_string(&intent).unwrap();
@@ -639,6 +687,34 @@ mod tests {
             serde_json::from_str(r#"{"intent":"probe","fact":"pocket","pocket":"PokeBalls"}"#)
                 .unwrap();
         assert!(matches!(probe, Intent::Probe { .. }));
+    }
+
+    #[test]
+    fn the_planners_teach_becomes_the_teach_tool() {
+        let planned = pokebot_planner::Intent::Teach {
+            hm: "ITEM_HM01".into(),
+            mon: "SPECIES_IVYSAUR".into(),
+        };
+        assert_eq!(
+            Intent::try_from(&planned).unwrap(),
+            Intent::Teach {
+                item: "ITEM_HM01".into(),
+                member: "SPECIES_IVYSAUR".into()
+            }
+        );
+        assert!(Toolbox::default()
+            .take(&Intent::Teach {
+                item: "ITEM_HM01".into(),
+                member: "lead".into()
+            })
+            .is_ok());
+        assert!(Toolbox::default()
+            .take(&Intent::FieldMove {
+                mv: "MOVE_FLASH".into(),
+                at: None,
+                push: vec![]
+            })
+            .is_ok());
     }
 
     #[test]

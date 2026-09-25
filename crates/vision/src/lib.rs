@@ -90,6 +90,13 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
+        if detect::cut_in::detect(image) {
+            return Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Transition, "field-move-cut-in"),
+                metrics,
+            );
+        }
         if let Some(naming) = detect::naming::detect(image) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -113,6 +120,18 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
             observation.menu = Some(menu);
+            return observation;
+        }
+        // The KNOWN MOVES list a move is forgotten on is the summary's
+        // moves page with a red selection frame: it must win over the
+        // summary reading of the same page (its title reads the same).
+        if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
+            let mut observation = Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::LearnMove, "known-moves"),
+                metrics,
+            );
+            observation.move_list = Some(list);
             return observation;
         }
         if let Some(font) = self.font.as_deref() {
@@ -171,15 +190,6 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
             observation.pokedex_list = Some(list);
-            return observation;
-        }
-        if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::LearnMove, "known-moves"),
-                metrics,
-            );
-            observation.move_list = Some(list);
             return observation;
         }
         if let (Some(font), Some(small_font)) = (&self.font, &self.small_font) {
@@ -615,6 +625,51 @@ mod tests {
         };
         let mut p = FireRedPerception::default().with_font(font);
         assert!(p.observe(&frame(0, image)).menu_lines.is_empty());
+    }
+
+    /// Teaching a TM/HM: the mauve-framed messages over the party menu and
+    /// the TM scene are dialogue (YES/NO included), and the KNOWN MOVES
+    /// list with its red frame is the move list, not the summary page.
+    #[test]
+    fn teach_screens_are_recognised() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        let observe = |name: &str| {
+            let image =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+                    .ok()?;
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            Some(p.observe(&frame(0, image)))
+        };
+        if let Some(o) = observe("emu-teach-four-moves") {
+            let d = o.dialogue.expect("dialogue over the party menu");
+            assert_eq!(d.lines, ["IVYSAUR wants to learn the", "move CUT."]);
+            assert!(d.waiting_for_input);
+            assert!(o.party_menu.is_none());
+        }
+        if let Some(o) = observe("emu-teach-replace-yes-no") {
+            assert!(o.dialogue.is_some());
+            assert_eq!(o.menu_lines, ["YES", "NO"]);
+        }
+        if let Some(o) = observe("emu-teach-learned") {
+            assert_eq!(o.dialogue.unwrap().lines, ["IVYSAUR learned", "CUT!"]);
+        }
+        if let Some(o) = observe("emu-teach-known-moves") {
+            let list = o.move_list.expect("move list");
+            assert_eq!(
+                list.moves,
+                ["TACKLE", "SLEEP POWDER", "RAZOR LEAF", "VINE WHIP", "CUT"]
+            );
+            assert_eq!(list.selected, Some(0));
+            assert!(o.summary.is_none());
+        }
+        if let Some(o) = observe("emu-summary-moves") {
+            assert!(o.move_list.is_none());
+            assert!(o.summary.is_some());
+        }
     }
 
     #[test]

@@ -148,11 +148,27 @@ pub struct TrainerCardObservation {
     pub money: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PartyMenuObservation {
     pub count: u8,
     pub selected: Option<u8>,
     pub actions: bool,
+    /// The bottom-left prompt as read ("Choose a POKéMON.", "Teach which
+    /// POKéMON?"); empty when a message covers it.
+    #[serde(default)]
+    pub prompt: String,
+    /// The action window opened on a member, top to bottom as read, one
+    /// row at a time (field moves print in blue): `SUMMARY`, `CUT`, …,
+    /// `CANCEL`. Empty when it isn't open.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Row of the ▶ in `options`.
+    #[serde(default)]
+    pub option_cursor: Option<u8>,
+    /// Per slot, while a TM or HM is being taught: `ABLE!` (`Some(true)`),
+    /// `NOT ABLE!` (`Some(false)`), or not shown / unreadable (`None`).
+    #[serde(default)]
+    pub able: Vec<Option<bool>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +200,9 @@ pub struct FlyMapObservation {
     pub lit: Vec<String>,
     /// Fly spots whose cell shows no icon.
     pub dark: Vec<String>,
+    /// The Kanto grid cell the map cursor's brackets frame, when found.
+    #[serde(default)]
+    pub cursor: Option<(u32, u32)>,
 }
 
 /// The Pokédex numerical list.

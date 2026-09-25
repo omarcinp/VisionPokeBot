@@ -123,6 +123,8 @@ struct MapFile {
     height: i32,
     pad: i32,
     map_type: Option<String>,
+    #[serde(default)]
+    requires_flash: bool,
     tiles: Vec<Vec<[u16; 4]>>,
     warps: Vec<Warp>,
     connections: Vec<Connection>,
@@ -140,6 +142,8 @@ pub struct MapData {
     /// Blocks of context around the map in its render.
     pub pad: i32,
     pub map_type: Option<String>,
+    /// Dark until Flash is used (the decomp's `requires_flash`).
+    pub requires_flash: bool,
     tiles: Vec<Tile>,
     pub warps: Vec<Warp>,
     pub connections: Vec<Connection>,
@@ -227,6 +231,7 @@ impl World {
                     height: file.height,
                     pad: file.pad,
                     map_type: file.map_type,
+                    requires_flash: file.requires_flash,
                     tiles,
                     warps: file.warps,
                     connections: file.connections,

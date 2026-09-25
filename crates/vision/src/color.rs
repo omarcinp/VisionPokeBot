@@ -12,6 +12,9 @@ pub const ARROW_RED: Rgb = [231, 8, 8];
 pub const MESSAGE_BORDER: Rgb = [74, 113, 165];
 /// Frame of the message box signs open (grey instead of blue).
 pub const SIGN_BORDER: Rgb = [107, 115, 123];
+/// Border of the message box over the party menu and the TM / evolution
+/// scenes (`std` window frame): a mauve band inside a dark outline.
+pub const SCENE_BORDER: Rgb = [115, 105, 132];
 pub const MESSAGE_INNER: Rgb = [165, 211, 231];
 pub const INFO_HEADER: Rgb = [0, 121, 198];
 pub const TITLE_TOP: Rgb = [255, 89, 0];
