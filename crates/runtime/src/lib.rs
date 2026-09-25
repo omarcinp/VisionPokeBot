@@ -10,6 +10,7 @@
 //! what the bot decides.
 
 use std::path::Path;
+use std::time::Instant;
 
 use pokebot_core::{
     CapturedFrame, ConsoleLink, Controller, ControllerCommand, ControllerReceipt, NormalizedFrame,
@@ -52,6 +53,9 @@ pub struct Runtime {
     dark: bool,
     frames_seen: u64,
     recorder: Option<SessionRecorder>,
+    /// Per-stage timing of `observe` (`VPB_PROFILE=1`), reported every
+    /// [`Profile::EVERY`] frames on stderr.
+    profile: Option<Profile>,
     telemetry: Option<Telemetry>,
     echo_events: bool,
 }
@@ -83,6 +87,7 @@ impl Runtime {
             dark: false,
             frames_seen: 0,
             recorder: None,
+            profile: std::env::var_os("VPB_PROFILE").map(|_| Profile::default()),
             telemetry: None,
             echo_events: false,
         }
@@ -124,20 +129,44 @@ impl Runtime {
 
     /// Reads, normalizes and interprets the next frame.
     pub fn observe(&mut self) -> Result<&NormalizedFrame> {
+        let mut lap = self.profile.as_mut().map(|p| p.lap());
         let captured = self.devices.video.next_frame()?;
+        if let Some(l) = lap.as_mut() {
+            l.mark(0);
+        }
         let frame = self.devices.normalizer.normalize(&captured)?;
         self.outside_game = self.devices.normalizer.outside_viewport_lit(&captured);
         self.dark = Normalizer::dark(&captured);
+        if let Some(l) = lap.as_mut() {
+            l.mark(1);
+        }
         let observation = self.perception.observe(&frame);
+        if let Some(l) = lap.as_mut() {
+            l.mark(2);
+        }
         let events = self
             .extractor
             .observe(&observation, FrameArrival::from(&captured));
         self.apply(&events)?;
+        if let Some(l) = lap.as_mut() {
+            l.mark(3);
+        }
         if let Some(recorder) = &mut self.recorder {
             recorder.record_frame(&captured, &frame)?;
         }
+        if let Some(l) = lap.as_mut() {
+            l.mark(4);
+        }
         if let Some(telemetry) = &self.telemetry {
             telemetry.publish_frame(&frame, &self.state, &observation);
+        }
+        if let Some(l) = lap.as_mut() {
+            l.mark(5);
+        }
+        if let (Some(lap), Some(profile)) = (lap, self.profile.as_mut()) {
+            if let Some(report) = profile.add(lap) {
+                eprintln!("{report}");
+            }
         }
         self.frames_seen += 1;
         self.observation = Some(observation);
@@ -560,5 +589,79 @@ mod tests {
         runtime.observe().unwrap();
         assert_eq!(runtime.state().screen.value, None, "back to not knowing");
         assert!(matches!(runtime.observe(), Err(Error::EndOfStream)));
+    }
+}
+
+/// Where the frame loop's time goes: capture (the device, or the stepped
+/// emulator's frame), normalize, perceive, extract + reduce, record,
+/// telemetry. Between `observe` calls the caller (executor, tools, planner)
+/// runs; that gap is reported as `agent`.
+#[derive(Debug, Default)]
+struct Profile {
+    sums: [f64; 7],
+    frames: u64,
+    last_end: Option<Instant>,
+}
+
+struct Lap {
+    start: Instant,
+    marks: [f64; 6],
+    gap: f64,
+}
+
+impl Lap {
+    fn mark(&mut self, i: usize) {
+        self.marks[i] = self.start.elapsed().as_secs_f64() * 1000.0;
+    }
+}
+
+impl Profile {
+    const EVERY: u64 = 600;
+    const NAMES: [&'static str; 7] = [
+        "capture",
+        "normalize",
+        "perceive",
+        "extract",
+        "record",
+        "telemetry",
+        "agent",
+    ];
+
+    fn lap(&mut self) -> Lap {
+        let now = Instant::now();
+        let gap = self
+            .last_end
+            .map_or(0.0, |e| now.duration_since(e).as_secs_f64() * 1000.0);
+        Lap {
+            start: now,
+            marks: [0.0; 6],
+            gap,
+        }
+    }
+
+    fn add(&mut self, lap: Lap) -> Option<String> {
+        let mut prev = 0.0;
+        for (i, m) in lap.marks.iter().enumerate() {
+            self.sums[i] += m - prev;
+            prev = *m;
+        }
+        self.sums[6] += lap.gap;
+        self.frames += 1;
+        self.last_end = Some(Instant::now());
+        if self.frames % Self::EVERY != 0 {
+            return None;
+        }
+        let n = self.frames as f64;
+        let total: f64 = self.sums.iter().sum::<f64>() / n;
+        let parts: Vec<String> = Self::NAMES
+            .iter()
+            .zip(self.sums.iter())
+            .map(|(name, sum)| format!("{name} {:.2}", sum / n))
+            .collect();
+        Some(format!(
+            "profile: {total:.2} ms/frame over {} frames: {}",
+            self.frames,
+            parts.join(", ")
+        ))
     }
 }

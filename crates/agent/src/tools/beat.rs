@@ -19,8 +19,11 @@ const BATTLE_CONFIDENCE: f64 = 0.9;
 
 pub struct BeatTool;
 
-/// Why the lead should heal before fighting `trainer`, if it should.
-pub fn unready(data: &GameData, party: &Party, trainer: &str) -> Option<String> {
+/// Why the lead is too worn to walk on (through encounters and trainers'
+/// sight), if it is: HP under [`LEAD_HP_MIN`] or no attacking move with
+/// PP left (flash-11: IVYSAUR walked into Lass Iris's sight at 25/60 with
+/// only Sleep Powder and fainted).
+pub fn worn(data: &GameData, party: &Party) -> Option<String> {
     let lead = party.lead()?;
     let name = lead.display_name();
     if let Some((hp, max)) = lead.hp {
@@ -35,6 +38,15 @@ pub fn unready(data: &GameData, party: &Party, trainer: &str) -> Option<String> 
     if choose_move(data, party, None, &memory, &BattlePolicy::default()).is_none() {
         return Some(format!("{name} has no attacking move with PP left"));
     }
+    None
+}
+
+/// Why the lead should heal before fighting `trainer`, if it should.
+pub fn unready(data: &GameData, party: &Party, trainer: &str) -> Option<String> {
+    if let Some(why) = worn(data, party) {
+        return Some(why);
+    }
+    let lead = party.lead()?;
     let p_now = lead_p_win(data, lead, trainer, false);
     if p_now < BATTLE_CONFIDENCE {
         let p_full = lead_p_win(data, lead, trainer, true);
