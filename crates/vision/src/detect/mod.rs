@@ -13,6 +13,7 @@ pub mod pokedex;
 pub mod shop;
 pub mod title;
 pub mod trainer_card;
+pub mod whiteout;
 
 use pokebot_core::RgbImage;
 use pokebot_state::Region;

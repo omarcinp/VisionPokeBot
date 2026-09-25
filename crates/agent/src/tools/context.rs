@@ -317,6 +317,11 @@ impl<'a> ToolContext<'a> {
         if self.runtime.outside_game() {
             return Ok(false);
         }
+        // The white-out screens: nothing to handle here; the goal loop
+        // ends the run and the session reloads the save.
+        if o.screen.value == ScreenState::Whiteout {
+            return Err(ToolError::Failed("whited out".into()));
+        }
         let expects = self.expects;
         if o.battle.is_some() {
             if expects.battle {

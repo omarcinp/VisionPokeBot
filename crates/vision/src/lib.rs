@@ -83,6 +83,13 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
+        if detect::whiteout::is_whiteout(image) {
+            return Observation::bare(
+                frame.frame_id,
+                screen(ScreenState::Whiteout, "whiteout-text"),
+                metrics,
+            );
+        }
         if let Some(naming) = detect::naming::detect(image) {
             let mut observation = Observation::bare(
                 frame.frame_id,
@@ -454,6 +461,22 @@ mod tests {
             p.observe(&frame(20, image)).dialogue.unwrap().stable_frames,
             10
         );
+    }
+
+    /// Switch goal run: after the white-out on Route 1 these screens read
+    /// `Unknown` for ~1200 frames until the stuck rule pressed B.
+    #[test]
+    fn the_white_out_screen_is_recognised() {
+        let Some(image) = fixture("switch-whiteout-scurried-home.png") else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(0, image));
+        assert_eq!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
+        // A black frame with a lone bright spot is not one.
+        let mut image = RgbImage::filled(240, 160, [0, 0, 0]);
+        image.put_pixel(120, 80, [255, 255, 255]);
+        let o = FireRedPerception::default().observe(&frame(1, image));
+        assert_ne!(o.screen.value, ScreenState::Whiteout);
     }
 
     #[test]

@@ -447,6 +447,7 @@ fn summarize(event: &GameEvent) -> String {
         GameEvent::ScriptPathRun { script, path } => format!("Ran {script} path {path}"),
         GameEvent::IntentInfeasible { intent } => format!("Intent {intent} infeasible"),
         GameEvent::TileBlocked { map, x, y } => format!("Tile {map} ({x}, {y}) blocked (learnt)"),
+        GameEvent::WhitedOut => "Whited out: the lead fainted (HP 0)".into(),
         GameEvent::TileUnblocked { map, x, y } => {
             format!("Tile {map} ({x}, {y}) not blocked after all (something came up)")
         }

@@ -32,6 +32,10 @@ pub enum ScreenState {
     Naming,
     SaveMenu,
     Transition,
+    /// The white-out screens after the last Pokémon fainted ("RED scurried
+    /// back home, protecting the exhausted and fainted POKéMON…": white
+    /// text on black, no box).
+    Whiteout,
     #[default]
     Unknown,
 }

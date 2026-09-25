@@ -45,7 +45,8 @@ pub enum Start {
 pub enum CycleEnd {
     /// The goal holds (summary).
     Satisfied(String),
-    /// The loop gave up (outcome).
+    /// The loop gave up (outcome; `fainted: …` when a Pokémon fainted, and
+    /// the save is reloaded at once).
     Unsatisfied(String),
     /// The cycle broke off: a device error, a failed task (reason).
     Failed(String),
@@ -56,6 +57,11 @@ pub enum CycleEnd {
 impl CycleEnd {
     pub fn is_stopped(&self) -> bool {
         matches!(self, CycleEnd::Stopped)
+    }
+
+    /// A faint: the goal loop's outcome `fainted: …`.
+    pub fn is_faint(&self) -> bool {
+        matches!(self, CycleEnd::Unsatisfied(outcome) if outcome.starts_with("fainted"))
     }
 }
 
@@ -91,8 +97,10 @@ pub struct SessionReport {
 /// Runs cycles until stopped, or once without `restart`. Every end of a
 /// cycle (satisfied, given up or failed) is followed by the pause and a
 /// restart: soft reset → CONTINUE → the goal again, so the console never
-/// idles. A new game that failed before its first save is started again;
-/// without any save to continue from, the session waits and looks again.
+/// idles. A faint reloads the last save at once (story's rule: no Pokémon
+/// faints; the whited-out game is not played on). A new game that failed
+/// before its first save is started again; without any save to continue
+/// from, the session waits and looks again.
 pub fn run(session: Session, runner: &mut dyn Runner) -> SessionReport {
     let mut start = session.start;
     let mut cycle = 1u64;
@@ -110,6 +118,15 @@ pub fn run(session: Session, runner: &mut dyn Runner) -> SessionReport {
                 cycles: cycle,
                 last: end,
             };
+        }
+        if end.is_faint() && runner.has_checkpoint() {
+            runner.log(&format!(
+                "restart: cycle {}: a Pokémon fainted; soft reset and CONTINUE the last save now",
+                cycle + 1
+            ));
+            start = Start::Continue;
+            cycle += 1;
+            continue;
         }
         // The pause, then the next start; without any save (and no new
         // game to redo) only look again after another pause.
@@ -483,6 +500,64 @@ mod tests {
         assert_eq!(logs.len(), 4);
         assert!(logs[0].contains("cycle 2 in 240 s"), "{logs:?}");
         assert!(logs[0].contains("CONTINUE"), "{logs:?}");
+    }
+
+    /// Switch goal run: a white-out on Route 1 was followed by the 240 s
+    /// pause like any other end. A faint reloads the save at once.
+    #[test]
+    fn a_faint_continues_the_last_save_without_the_pause() {
+        let mut fake = Fake {
+            ends: VecDeque::from([
+                CycleEnd::Unsatisfied("fainted: our Pokémon fainted (BULBASAUR)".into()),
+                CycleEnd::Unsatisfied("fainted: whited out".into()),
+                CycleEnd::Unsatisfied("out of replans".into()),
+                CycleEnd::Stopped,
+            ]),
+            checkpoint: true,
+            ..Fake::default()
+        };
+        let report = run(
+            Session {
+                start: Start::AsIs,
+                restart: Some(WAIT),
+            },
+            &mut fake,
+        );
+        assert_eq!(report.cycles, 4);
+        assert_eq!(
+            fake.starts,
+            vec![
+                (Start::AsIs, 1),
+                (Start::Continue, 2),
+                (Start::Continue, 3),
+                (Start::Continue, 4)
+            ]
+        );
+        // Only the third end (not a faint) waited.
+        assert_eq!(fake.waits, vec![WAIT]);
+        let logs = fake.logs.borrow();
+        assert!(
+            logs[0].contains("fainted") && logs[0].contains("now"),
+            "{logs:?}"
+        );
+        // Without a save to reload, a faint waits like any other end.
+        let mut fake = Fake {
+            ends: VecDeque::from([
+                CycleEnd::Unsatisfied("fainted: whited out".into()),
+                CycleEnd::Stopped,
+            ]),
+            checkpoint: false,
+            stop_on_wait: Some(1),
+            ..Fake::default()
+        };
+        run(
+            Session {
+                start: Start::AsIs,
+                restart: Some(WAIT),
+            },
+            &mut fake,
+        );
+        assert_eq!(fake.waits.len(), 1);
     }
 
     #[test]

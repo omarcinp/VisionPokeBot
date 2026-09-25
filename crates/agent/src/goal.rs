@@ -19,7 +19,7 @@ use std::time::Instant;
 use pokebot_planner::{
     GoalBelief, GoalPredicate, Plan, PlanError, PlannedIntent, Planner, ProbeFact, StateBelief,
 };
-use pokebot_state::{GameEvent, KnowledgeSource, PlayerPose, SavedKnowledge};
+use pokebot_state::{GameEvent, KnowledgeSource, PlayerPose, SavedKnowledge, ScreenState};
 use pokebot_world::predicate::{Predicate, Truth};
 use serde::Serialize;
 
@@ -243,6 +243,10 @@ impl Run<'_, '_> {
                     return Ok(());
                 }
                 Executed::Replan(why) => reason = why,
+                Executed::Fainted(why) => {
+                    self.report.outcome = why;
+                    return Ok(());
+                }
                 Executed::Completed => {
                     let (knowledge, pose) = self.snapshot(ctx)?;
                     if self.holds(ctx, &knowledge, pose) {
@@ -351,13 +355,61 @@ impl Run<'_, '_> {
                 }
                 Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
                 Err(e) => {
-                    let why = self.failed(ctx, plan, step, &e.to_string())?;
+                    let reason = e.to_string();
+                    if let Some(why) = self.fainted(ctx, &reason)? {
+                        self.report
+                            .failures
+                            .push(format!("{} failed: {reason}", step.intent));
+                        self.set_status("fainted", why.clone(), k, Some(step), ctx);
+                        return Ok(Executed::Fainted(why));
+                    }
+                    let why = self.failed(ctx, plan, step, &reason)?;
                     self.set_status("failed", why.clone(), k, Some(step), ctx);
                     return Ok(Executed::Replan(why));
                 }
             }
         }
         Ok(Executed::Completed)
+    }
+
+    /// A faint (the tool's reason, the white-out screen, or HP 0 read on
+    /// the HUD) ends the run: the user's rule is that no Pokémon faints,
+    /// so the session reloads the last save instead of playing on. On the
+    /// white-out the belief gets what the game does: the lead at 0 HP,
+    /// then the party healed and the player at the respawn spot.
+    fn fainted(
+        &mut self,
+        ctx: &mut ToolContext<'_>,
+        reason: &str,
+    ) -> Result<Option<String>, ToolError> {
+        let screen = ctx.observation().map(|o| o.screen.value);
+        let whiteout = screen == Some(ScreenState::Whiteout) || reason.contains("whited out");
+        let lead_hp0 = ctx
+            .state()
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.first())
+            .and_then(|m| m.hp.value)
+            .is_some_and(|(hp, _)| hp == 0);
+        if !whiteout && !lead_hp0 && !reason.contains("fainted") {
+            return Ok(None);
+        }
+        let why = format!("fainted: {reason}");
+        ctx.emit(progress(GOAL, why.clone()))?;
+        if whiteout {
+            ctx.emit(GameEvent::WhitedOut)?;
+            let respawn = respawn_pose(ctx);
+            ctx.emit(GameEvent::Healed)?;
+            ctx.runtime.clear_pose_hint();
+            if let Some(pose) = respawn {
+                ctx.info(format!("whited out: the game puts the player at {pose}"));
+                ctx.emit(GameEvent::PlayerLocated { pose: pose.clone() })?;
+                ctx.runtime.set_pose_hint(pose);
+            }
+        }
+        self.report.outcome = why.clone();
+        Ok(Some(why))
     }
 
     /// Books a step's failure and applies the plan-level loop rules; the
@@ -607,6 +659,45 @@ enum Executed {
     Satisfied,
     Completed,
     Replan(String),
+    /// A Pokémon fainted: the run ends (`fainted: …`) for the session to
+    /// reload the save.
+    Fainted(String),
+}
+
+/// Where the game puts the player after a white-out: the respawn heal
+/// spot's interior (`respawn_map` of `places.json`; the last Pokémon
+/// Center healed at, else Mom's house), at a walkable tile near its
+/// middle (the exact spot isn't in the data; the localizer's search
+/// widens from there).
+fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
+    let places = ctx.world.places()?;
+    let known = ctx.state().world.respawn.value.as_ref();
+    let spot = known
+        .and_then(|r| {
+            places
+                .heal_spots
+                .iter()
+                .find(|h| h.map == r.map && h.x == r.x && h.y == r.y)
+        })
+        .or_else(|| places.heal_spot("HEAL_LOCATION_PALLET_TOWN"))?;
+    let map = ctx.world.map(&spot.respawn_map)?;
+    let (cx, cy) = (map.width / 2, map.height / 2);
+    let mut best: Option<(i32, (i32, i32))> = None;
+    for y in 0..map.height {
+        for x in 0..map.width {
+            if map.tile(x, y).is_some_and(|t| t.collision == 0) {
+                let d = (x - cx).abs() + (y - cy).abs();
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, (x, y)));
+                }
+            }
+        }
+    }
+    best.map(|(_, (x, y))| PlayerPose {
+        map: spot.respawn_map.clone(),
+        x,
+        y,
+    })
 }
 
 fn frame_id(ctx: &ToolContext<'_>) -> u64 {

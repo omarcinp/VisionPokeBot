@@ -252,6 +252,11 @@ pub enum GameEvent {
         x: i32,
         y: i32,
     },
+    /// The party's last Pokémon fainted (the white-out screens, or HP 0 on
+    /// the HUD): the lead is at 0 HP. The game then heals the party and
+    /// puts the player at the respawn spot (`Healed` and `PlayerLocated`
+    /// follow from the agent).
+    WhitedOut,
 }
 
 /// An event and the frame it was derived at.

@@ -337,6 +337,12 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         }
         // Session-scoped and kept by the agent's navigator, not the belief.
         GameEvent::TileBlocked { .. } | GameEvent::TileUnblocked { .. } => {}
+        GameEvent::WhitedOut => {
+            let m = member(state, 0, KnowledgeSource::Observed, frame);
+            let max = m.hp.value.map_or(0, |(_, max)| max);
+            m.hp = Knowledge::observed((0, max), frame);
+            m.status = Knowledge::observed(Status::Fainted, frame);
+        }
         _ => return false,
     }
     true

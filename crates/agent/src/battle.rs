@@ -210,9 +210,19 @@ pub fn decide(
     if !memory.trainer && !memory.catch.decided && matches!(menu, BattleMenu::Command { .. }) {
         return Some(Decision::Wait("identifying the wild opponent".into()));
     }
-    let low = battle.player_hp.is_some_and(|hp| hp < policy.flee_below);
+    // Low HP: the HUD numbers first (exact; the bar isn't always read on
+    // the Switch's capture: a Bulbasaur fought on at 3/22 and whited out
+    // on Route 1), the bar otherwise. A wild battle is run from unless
+    // one more hit surely ends it first.
+    let low = battle
+        .player_hp_numbers
+        .map(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * u32::from(policy.flee_below))
+        .or_else(|| battle.player_hp.map(|hp| hp < policy.flee_below))
+        .unwrap_or(false);
     let no_attacks = choose_move(data, party, None, memory, policy).is_none();
-    let flee = (low || no_attacks || memory.catch.flee)
+    let opponent = identify_opponent(data, observation);
+    let safe_ko = low && !no_attacks && safe_ko(data, party, opponent.as_ref(), battle);
+    let flee = ((low && !safe_ko) || no_attacks || memory.catch.flee)
         && !memory.trainer
         && memory.run_attempts < policy.max_run_attempts;
     Some(match menu {
@@ -237,7 +247,6 @@ pub fn decide(
             45,
         )),
         BattleMenu::Moves { column, row } => {
-            let opponent = identify_opponent(data, observation);
             let Some((slot, name)) = choose_move(data, party, opponent.as_ref(), memory, policy)
                 .or_else(|| fallback_move(data, party, memory))
             else {
@@ -255,6 +264,33 @@ pub fn decide(
             )
         }
     })
+}
+
+/// Probability of a KO in one hit to count as sure (a 95 %-accurate move
+/// such as Tackle against a nearly fainted foe counts).
+const SAFE_KO: f64 = 0.9;
+
+/// Whether our lead surely faints the (identified) opponent before it
+/// moves: it is faster, and its best move KOs the opponent's remaining HP
+/// (from its bar) with probability [`SAFE_KO`] at least.
+pub fn safe_ko(
+    data: &GameData,
+    party: &Party,
+    opponent: Option<&Combatant>,
+    battle: &pokebot_state::BattleObservation,
+) -> bool {
+    let (Some(lead), Some(foe), Some(bar)) = (party.lead(), opponent, battle.opponent_hp) else {
+        return false;
+    };
+    let Some(us) = Combatant::new(data, &lead.species, lead.level, lead.moves.clone(), 10) else {
+        return false;
+    };
+    if us.stats.speed() <= foe.stats.speed() {
+        return false;
+    }
+    let mut now = foe.clone();
+    now.hp = (foe.hp * u32::from(bar)).div_ceil(1000).max(1);
+    pokebot_planner::evaluate::faint_probability(data, &us, &now, 1) >= SAFE_KO
 }
 
 pub(crate) fn step_toward(
@@ -357,6 +393,101 @@ mod tests {
         Party {
             members: vec![member],
         }
+    }
+
+    /// Switch goal run: a Lv6 Bulbasaur fought two wild Pidgeys on Route
+    /// 1 at 7/22 then 3/22 HP (the bar unread) and whited out. The HUD
+    /// numbers decide: below the threshold a wild battle is run from,
+    /// unless one hit surely ends it; a trainer battle fights on.
+    #[test]
+    fn a_wild_battle_at_low_hp_is_run_from_unless_a_hit_surely_ends_it() {
+        use pokebot_state::{BattleMenu, BattleObservation, Observation, Observed};
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        let party = {
+            let mut m = Member::new(&data, "SPECIES_BULBASAUR", 6);
+            m.hp = Some((3, 22));
+            Party { members: vec![m] }
+        };
+        let hud = |hp: (u16, u16), foe: &str, level: u8, foe_bar: u16| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::BattleCommand,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.battle = Some(BattleObservation {
+                menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+                player_name: Some("BULBASAUR".into()),
+                player_level: Some(6),
+                player_hp_numbers: Some(hp),
+                opponent_name: Some(foe.into()),
+                opponent_level: Some(level),
+                player_hp: None,
+                opponent_hp: Some(foe_bar),
+                move_pp: None,
+                move_names: Vec::new(),
+                opponent_caught: Some(true),
+                opponent_shiny: None,
+            });
+            o
+        };
+        let mut wild = BattleMemory::default();
+        wild.catch.decided = true;
+        let mut events = Vec::new();
+        let label = |d: Option<Decision>| match d {
+            Some(Decision::Act(a)) => a.label,
+            Some(Decision::Wait(w)) => format!("wait: {w}"),
+            Some(Decision::Done(x)) | Some(Decision::Fail(x)) => x,
+            None => "none".into(),
+        };
+        // 3/22 against a healthy Pidgey: RUN.
+        let d = label(decide(
+            &hud((3, 22), "PIDGEY", 4, 1000),
+            &policy,
+            &mut wild,
+            &party,
+            &data,
+            &mut events,
+        ));
+        assert!(d.contains("RUN"), "{d}");
+        // The same against a Pidgey at 1 % of its HP: one Tackle ends it
+        // first (Bulbasaur is faster): FIGHT.
+        let d = label(decide(
+            &hud((3, 22), "PIDGEY", 4, 10),
+            &policy,
+            &mut wild,
+            &party,
+            &data,
+            &mut events,
+        ));
+        assert!(d.contains("FIGHT"), "{d}");
+        // Healthy: FIGHT.
+        let d = label(decide(
+            &hud((20, 22), "PIDGEY", 4, 1000),
+            &policy,
+            &mut wild,
+            &party,
+            &data,
+            &mut events,
+        ));
+        assert!(d.contains("FIGHT"), "{d}");
+        // A trainer's battle can't be run from.
+        let mut trainer = BattleMemory {
+            trainer: true,
+            ..BattleMemory::default()
+        };
+        let d = label(decide(
+            &hud((3, 22), "PIDGEY", 4, 1000),
+            &policy,
+            &mut trainer,
+            &party,
+            &data,
+            &mut events,
+        ));
+        assert!(d.contains("FIGHT"), "{d}");
     }
 
     #[test]
