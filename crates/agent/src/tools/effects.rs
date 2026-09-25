@@ -8,6 +8,8 @@ use pokebot_gamedata::GameData;
 use pokebot_state::{GameEvent, GameState, Pocket};
 use pokebot_world::events::{Effect, Events, Val};
 use pokebot_world::places::Places;
+use pokebot_world::predicate::{BeliefView, Truth};
+use pokebot_world::route::requirement_of;
 
 /// Label → (script, path index) of every path whose text includes the
 /// label: `say`, a battle's intro/defeat/victory, a gift's "received" text.
@@ -97,7 +99,8 @@ pub struct Skipped(pub String);
 /// | `heal` | `Healed` |
 /// | `respawn` heal location | `RespawnSet` (from `places.json`) |
 /// | `money` | `MoneyChanged` |
-/// | anything else | skipped (`say`, `battle`, objects, gifts of Pokémon…) |
+/// | `givemon` of a known species and level, party known and not full | `PartyMonDerived` in the next slot |
+/// | anything else | skipped (`say`, `battle`, objects, eggs…) |
 pub fn translate(
     effect: &Effect,
     state: &GameState,
@@ -167,7 +170,22 @@ pub fn translate(
         Effect::Battle { battle, .. } => {
             skip(&format!("battle {battle} (the battle tool learns it)"))
         }
-        Effect::GiveMon { .. } => skip("givemon"),
+        Effect::GiveMon { givemon, level } => {
+            let (Val::Sym(species), Some(level)) = (givemon, level.as_int()) else {
+                return skip("givemon: species or level not a constant");
+            };
+            let Some(party) = state.party.value.as_ref() else {
+                return skip("givemon: party unknown");
+            };
+            if party.len() >= 6 {
+                return skip("givemon: party full (sent to the PC)");
+            }
+            let level = u8::try_from(level).map_err(|_| Skipped("givemon: level".into()))?;
+            Ok(vec![GameEvent::PartyMonDerived {
+                slot: party.len() as u8,
+                mon: Box::new(crate::party::starter_mon(data, species, level)),
+            }])
+        }
         Effect::GiveEgg { .. } => skip("giveegg"),
         Effect::Wild { .. } => skip("wild"),
         Effect::SetWarp { .. } => skip("set_warp"),
@@ -212,6 +230,63 @@ fn item_event(
     }])
 }
 
+/// The scenes a path sets off by itself: a map's `on_frame` script whose
+/// var the path leaves at the scene's value on the map it ends on (Oak's
+/// trigger walks the player into the lab and arms its starter scene), each
+/// with its one path, in order. The planner chains the same scenes into the
+/// path's effects (`pokebot_planner::intents::frame_scene`).
+pub fn chained_scenes(
+    events: &Events,
+    map_name: &dyn Fn(&str) -> Option<String>,
+    script: &str,
+    path: usize,
+) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut at = (script.to_owned(), path);
+    for _ in 0..3 {
+        let Some(s) = events.script(&at.0) else { break };
+        let Some(p) = s.paths.get(at.1) else { break };
+        let end = p
+            .does
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Effect::Warp { warp, .. } => map_name(warp),
+                _ => None,
+            })
+            .or_else(|| s.map.clone());
+        let Some(end) = end else { break };
+        let Some(frames) = events.map_scripts.get(&end) else {
+            break;
+        };
+        let mut set: Vec<(&str, i64)> = Vec::new();
+        for e in &p.does {
+            if let Effect::Var { var, change } = e {
+                if let Some(v) = change.eq.as_ref().and_then(Val::as_int) {
+                    set.retain(|(n, _)| *n != var.as_str());
+                    set.push((var.as_str(), v));
+                }
+            }
+        }
+        let next = frames.on_frame.iter().find_map(|f| {
+            let v = f.value.as_int()?;
+            if !set.contains(&(f.var.as_str(), v)) {
+                return None;
+            }
+            let label = f.script.as_deref()?;
+            (events.script(label)?.paths.len() == 1).then(|| (label.to_owned(), 0))
+        });
+        match next {
+            Some(n) if !out.contains(&n) => {
+                out.push(n.clone());
+                at = n;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 /// The events of running path `path` of `script` to completion:
 /// `ScriptPathRun`, then its effects translated ([`translate`]); the
 /// skipped effects are returned as log lines.
@@ -240,4 +315,179 @@ pub fn path_events(
         }
     }
     (out, log)
+}
+
+/// What entering `map` does by itself, silently: its `on_load` and
+/// `on_transition` scripts run on every arrival (Pallet Town marks itself
+/// on the Town Map, the bedroom sets where a blackout lands). For each
+/// script, the paths `belief` doesn't rule out; when one is left, its run
+/// and its effects; when several, the effects they all have. Scenes with
+/// dialogue (`on_frame`) are the conversation's to recognise.
+pub fn entry_events(
+    events: &Events,
+    map: &str,
+    belief: &dyn BeliefView,
+    state: &GameState,
+    data: &GameData,
+    places: Option<&Places>,
+    map_name: &dyn Fn(&str) -> Option<String>,
+) -> Vec<GameEvent> {
+    let Some(ms) = events.map_scripts.get(map) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for label in ms.on_load.iter().chain(&ms.on_transition) {
+        let Some(script) = events.script(label) else {
+            continue;
+        };
+        let possible: Vec<usize> = script
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| match requirement_of(&p.when) {
+                Some(req) => !req.iter().any(|q| belief.eval(q) == Truth::False),
+                None => true,
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let runs: Vec<Vec<GameEvent>> = possible
+            .iter()
+            .map(|&i| path_events(events, label, i, state, data, places, map_name).0)
+            .collect();
+        match runs.as_slice() {
+            [] => {}
+            [one] => out.extend(one.iter().cloned()),
+            [first, rest @ ..] => out.extend(
+                first
+                    .iter()
+                    .filter(|e| !matches!(e, GameEvent::ScriptPathRun { .. }))
+                    .filter(|e| rest.iter().all(|r| r.contains(e)))
+                    .cloned(),
+            ),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pokebot_state::{Knowledge, PartyMon};
+    use pokebot_world::World;
+
+    fn world() -> Option<(World, GameData)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let world = World::load(&dir).ok()?;
+        world.events()?;
+        let data = GameData::load(dir.join("gamedata.json")).ok()?;
+        Some((world, data))
+    }
+
+    /// Oak's trigger walks the player into the lab with its scene var at
+    /// the starter scene's value: the scene plays too.
+    #[test]
+    fn a_path_that_arms_a_maps_scene_sets_it_off() {
+        let Some((world, _)) = world() else { return };
+        let events = world.events().unwrap();
+        let name = |id: &str| world.name_of(id).map(str::to_owned);
+        assert_eq!(
+            chained_scenes(events, &name, "PalletTown_EventScript_OakTriggerLeft", 0),
+            vec![(
+                "PalletTown_ProfessorOaksLab_ChooseStarterScene".to_owned(),
+                0
+            )]
+        );
+        // The Mart's parcel scene arms nothing on arrival.
+        assert!(chained_scenes(
+            events,
+            &name,
+            "ViridianCity_Mart_EventScript_ParcelScene",
+            0
+        )
+        .is_empty());
+    }
+
+    /// Arriving in the bedroom runs its silent transition script: where a
+    /// blackout lands is set. A script whose paths the belief can't tell
+    /// apart gives only what they all do (Pallet Town marks itself on the
+    /// Town Map whatever the sign lady does).
+    #[test]
+    fn entering_a_map_books_its_silent_entry_scripts() {
+        let Some((world, data)) = world() else { return };
+        let events = world.events().unwrap();
+        let name = |id: &str| world.name_of(id).map(str::to_owned);
+        let mut state = GameState::default();
+        state.world.vars.insert(
+            "VAR_MAP_SCENE_PALLET_TOWN_PLAYERS_HOUSE_2F".into(),
+            Knowledge::derived(0, 0),
+        );
+        let belief = crate::belief_view::StateBelief(&state);
+        let got = entry_events(
+            events,
+            "PalletTown_PlayersHouse_2F",
+            &belief,
+            &state,
+            &data,
+            world.places(),
+            &name,
+        );
+        assert!(
+            got.iter()
+                .any(|e| matches!(e, GameEvent::RespawnSet { map, .. } if map == "PalletTown")),
+            "{got:?}"
+        );
+        let unknown = GameState::default();
+        let belief = crate::belief_view::StateBelief(&unknown);
+        let got = entry_events(
+            events,
+            "PalletTown",
+            &belief,
+            &unknown,
+            &data,
+            world.places(),
+            &name,
+        );
+        assert!(got.contains(&GameEvent::FlagTracked {
+            flag: "FLAG_WORLD_MAP_PALLET_TOWN".into(),
+            value: true
+        }));
+        assert!(!got
+            .iter()
+            .any(|e| matches!(e, GameEvent::ScriptPathRun { .. })));
+    }
+
+    /// A gift of a Pokémon joins the party (known empty or not full) as
+    /// the species at the script's level, with its default moves.
+    #[test]
+    fn a_given_pokemon_joins_the_party() {
+        let Some((world, data)) = world() else { return };
+        let _ = world;
+        let effect = Effect::GiveMon {
+            givemon: Val::Sym("SPECIES_SQUIRTLE".into()),
+            level: Val::Int(5),
+        };
+        let name = |_: &str| None;
+        let mut state = GameState::default();
+        assert!(
+            translate(&effect, &state, &data, None, &name).is_err(),
+            "party unknown"
+        );
+        state.party = Knowledge::derived(Vec::new(), 0);
+        match translate(&effect, &state, &data, None, &name)
+            .unwrap()
+            .as_slice()
+        {
+            [GameEvent::PartyMonDerived { slot: 0, mon }] => {
+                assert_eq!(mon.species.value.as_deref(), Some("SPECIES_SQUIRTLE"));
+                assert_eq!(mon.level.value, Some(5));
+                assert!(mon.moves[0].is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        state.party = Knowledge::derived(vec![PartyMon::default(); 6], 0);
+        assert!(
+            translate(&effect, &state, &data, None, &name).is_err(),
+            "party full"
+        );
+    }
 }

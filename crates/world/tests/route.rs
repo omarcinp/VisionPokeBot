@@ -690,3 +690,117 @@ fn story_gates_come_from_the_scripts() {
         |l| matches!(&l.kind, EdgeKind::ScriptWarp { script } if script.contains("EnterRoom"))
     ));
 }
+
+/// Oak's trigger at the edge of Pallet Town carries the player off to his
+/// lab (it warps): while its scene is armed the tile is walked onto, never
+/// past, so Route 1 is out of reach until the scene has run. The lab's
+/// exit is closed while the starter scene waits for a choice.
+#[test]
+fn a_story_scene_that_carries_the_player_off_closes_its_tile() {
+    let Some(world) = world() else { return };
+    if world.events().is_none_or(|e| e.initial.set.is_empty()) {
+        return;
+    }
+    let gates = pokebot_world::gates::derive(&world);
+    let oak = |v: i64| Predicate::Var {
+        name: "VAR_MAP_SCENE_PALLET_TOWN_OAK".into(),
+        op: pokebot_world::predicate::CmpOp::Gt,
+        value: v,
+    };
+    for x in [12, 13] {
+        assert_eq!(gates["PalletTown"][&(x, 1)].ways, vec![vec![oak(0)]]);
+    }
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let home = pose("PalletTown", 6, 8);
+    let armed = MapBelief::default().var("VAR_MAP_SCENE_PALLET_TOWN_OAK", 0);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &armed,
+        &home,
+        "Route1",
+        UnknownPolicy::Pessimistic,
+    );
+    print("Pallet -> Route 1, Oak's scene armed", &r);
+    assert!(!r.found());
+    assert!(r.blocked.iter().any(|(req, _)| req.contains(&oak(0))));
+    let done = MapBelief::default().var("VAR_MAP_SCENE_PALLET_TOWN_OAK", 1);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &done,
+        &home,
+        "Route1",
+        UnknownPolicy::Pessimistic,
+    );
+    assert!(r.found());
+
+    // As the navigator sees them.
+    use pokebot_world::gates::GateTiles;
+    let tiles = GateTiles::believed(&world, &gates, &armed);
+    let closed: Vec<(i32, i32)> = tiles.closed_on("PalletTown").collect();
+    assert!(closed.contains(&(12, 1)) && closed.contains(&(13, 1)));
+    // A walk to the trigger may end on it.
+    let onto = tiles.clone().without("PalletTown", (12, 1));
+    assert!(!onto.closed_on("PalletTown").any(|t| t == (12, 1)));
+    assert!(onto.closed_on("PalletTown").any(|t| t == (13, 1)));
+    assert!(GateTiles::believed(&world, &gates, &done)
+        .closed_on("PalletTown")
+        .next()
+        .is_none());
+    // Unknown: left as the map draws it.
+    assert!(GateTiles::believed(&world, &gates, &MapBelief::default())
+        .closed_on("PalletTown")
+        .next()
+        .is_none());
+    let lab = "PalletTown_ProfessorOaksLab";
+    let choosing = MapBelief::default().var("VAR_MAP_SCENE_PALLET_TOWN_PROFESSOR_OAKS_LAB", 2);
+    let exit: Vec<(i32, i32)> = GateTiles::believed(&world, &gates, &choosing)
+        .closed_on(lab)
+        .collect();
+    assert_eq!(exit, vec![(5, 8), (6, 8), (7, 8)]);
+    let chosen = MapBelief::default().var("VAR_MAP_SCENE_PALLET_TOWN_PROFESSOR_OAKS_LAB", 3);
+    assert!(GateTiles::believed(&world, &gates, &chosen)
+        .closed_on(lab)
+        .next()
+        .is_none());
+}
+
+/// A door a script opens (Silph Co.'s card-key doors, the Elite Four's
+/// doors): a wall in the map data, walkable once the belief knows the
+/// flag that opens it.
+#[test]
+fn a_door_a_script_opens_is_walkable_once_believed_open() {
+    let Some(world) = world() else { return };
+    if world.events().is_none_or(|e| e.initial.set.is_empty()) {
+        return;
+    }
+    use pokebot_world::gates::GateTiles;
+    let gates = pokebot_world::gates::derive(&world);
+    // Some gate on a wall tile with a single-flag way.
+    let (map, tile, flag) = gates
+        .iter()
+        .flat_map(|(m, g)| g.iter().map(move |(t, gate)| (m, *t, gate)))
+        .find_map(|(m, t, gate)| {
+            let wall = world
+                .map(m)?
+                .tile(t.0, t.1)
+                .is_some_and(|x| x.collision != 0);
+            match gate.ways.as_slice() {
+                [way] if wall => match way.as_slice() {
+                    [Predicate::Flag { name, is: true }] => Some((m.clone(), t, name.clone())),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .expect("a door opened by a flag");
+    let open = MapBelief::default().flag(&flag, true);
+    assert!(GateTiles::believed(&world, &gates, &open)
+        .opened_on(&map)
+        .contains(&tile));
+    let shut = MapBelief::default().flag(&flag, false);
+    assert!(!GateTiles::believed(&world, &gates, &shut)
+        .opened_on(&map)
+        .contains(&tile));
+}

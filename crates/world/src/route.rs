@@ -570,6 +570,11 @@ impl PlaceGraph {
         self.gates.contains_key(map)
     }
 
+    /// The passages the story opens and closes ([`crate::gates`]).
+    pub fn gates(&self) -> &Gates {
+        &self.gates
+    }
+
     /// Whether a route can depend on `p` (an edge or passage requires it,
     /// or it sets a var one compares): the rest of a belief leaves routes
     /// unchanged, so caches may ignore it.

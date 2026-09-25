@@ -27,10 +27,10 @@
 //! reduced against the blocking ones, so a way names only what matters
 //! (`FLAG_SILPH_2F_DOOR_1`, not the state of the floor's other door).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::events::{Condition, Effect, Events, ScriptPath, Val};
-use crate::predicate::{CmpOp, Predicate, Requirement};
+use crate::predicate::{check, BeliefView, CmpOp, Predicate, Requirement, Truth};
 use crate::{MapData, World};
 
 /// Alternatives kept per gate.
@@ -614,9 +614,16 @@ fn trigger_gates(
         let switches_off = |p: &ScriptPath| {
             own.is_some_and(|(var, v)| sets_var(p, var).is_some_and(|now| now != v))
         };
+        // A scene the story arms (a var of its own, not a map visit's
+        // local) that carries the player off elsewhere: the tile is not
+        // walked past while it is armed, only onto (Oak stopping the
+        // player at the edge of Pallet Town and taking them to his lab).
+        let story_scene = own.is_some_and(|(var, _)| !is_local_var(var));
         let (mut blocking, mut passing) = (Vec::new(), Vec::new());
         for p in &script.paths {
-            if moves_player(p) && !warps(p) && !switches_off(p) {
+            let turned_back = moves_player(p) && !warps(p) && !switches_off(p);
+            let carried_off = story_scene && warps(p);
+            if turned_back || carried_off {
                 if let Some(c) = conj_of(&p.when, true) {
                     blocking.push(c);
                 }
@@ -675,6 +682,81 @@ fn trigger_gates(
                 out.insert(tile, gate);
             }
         }
+    }
+}
+
+/// Whether a gate is open as a belief stands: some way holds (open), every
+/// way fails (closed), or the belief can't tell.
+pub fn gate_truth(gate: &Gate, belief: &dyn BeliefView) -> Truth {
+    let mut unknown = false;
+    for way in &gate.ways {
+        let c = check(belief, way);
+        if c.failed.is_empty() && c.unknown.is_empty() {
+            return Truth::True;
+        }
+        unknown |= c.failed.is_empty();
+    }
+    if unknown {
+        Truth::Unknown
+    } else {
+        Truth::False
+    }
+}
+
+/// The gated tiles as a belief stands, for walking (the navigator): the
+/// walkable tiles it knows closed (a trigger that turns the player back
+/// while its scene is armed, an object a script put in the way) and the
+/// walls it knows opened (a door a script unlocked). What the belief can't
+/// tell is left as the map draws it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GateTiles {
+    pub closed: BTreeMap<String, BTreeSet<(i32, i32)>>,
+    pub opened: BTreeMap<String, BTreeSet<(i32, i32)>>,
+}
+
+impl GateTiles {
+    pub fn believed(world: &World, gates: &Gates, belief: &dyn BeliefView) -> GateTiles {
+        let mut out = GateTiles::default();
+        for (name, tiles) in gates {
+            let Some(map) = world.map(name) else { continue };
+            for (&tile, gate) in tiles {
+                let base_open = map.tile(tile.0, tile.1).is_some_and(|t| t.collision == 0);
+                match (base_open, gate_truth(gate, belief)) {
+                    (true, Truth::False) => {
+                        out.closed.entry(name.clone()).or_default().insert(tile);
+                    }
+                    (false, Truth::True) => {
+                        out.opened.entry(name.clone()).or_default().insert(tile);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// Tiles of `map` known closed.
+    pub fn closed_on(&self, map: &str) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.closed.get(map).into_iter().flatten().copied()
+    }
+
+    /// Walls of `map` known opened, as the path search takes them.
+    pub fn opened_on(&self, map: &str) -> crate::path::Obstacles {
+        self.opened
+            .get(map)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// The same, with `tile` of `map` never closed: a walk may always end
+    /// on a gate (stepping onto a trigger is what starts its scene).
+    pub fn without(mut self, map: &str, tile: (i32, i32)) -> GateTiles {
+        if let Some(t) = self.closed.get_mut(map) {
+            t.remove(&tile);
+        }
+        self
     }
 }
 

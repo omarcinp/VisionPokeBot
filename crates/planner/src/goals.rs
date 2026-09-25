@@ -11,8 +11,10 @@
 //! earlier facts needs, in the order the walk meets it (a derived method).
 //! What the knowledge implies fills the start state: the flags a known flag
 //! came with, the vars a scene moved on, the choice a party member records
-//! (the starter), and the gates the way from home to the player's position
-//! must have opened.
+//! (the starter, evolved or not), what had to happen for the party to hold
+//! who it holds (the scenes before the starter was given, followed back
+//! through the event graph), and the gates the way from home to the
+//! player's position must have opened.
 //!
 //! The open set holds partial plans. Each expansion takes the last unmet
 //! predicate of a plan and either drops it (the belief plus the plan's
@@ -136,6 +138,10 @@ pub struct PlanOptions {
     /// The probe screens the toolbox can open ([`ProbeFact::kind`]);
     /// `None` for all of them. Others are never planned.
     pub supported_probes: Option<BTreeSet<String>>,
+    /// Species preferred where the story offers a choice of Pokémon (the
+    /// starter), most preferred first: a script path giving another
+    /// species costs more ([`CostParams::prefer_species`]).
+    pub prefer_species: Vec<String>,
 }
 
 impl PartialEq for PlanOptions {
@@ -154,6 +160,7 @@ impl PartialEq for PlanOptions {
             && self.unknown_edge_alt_s == other.unknown_edge_alt_s
             && self.budget_s == other.budget_s
             && self.supported_probes == other.supported_probes
+            && self.prefer_species == other.prefer_species
     }
 }
 
@@ -169,6 +176,7 @@ impl Default for PlanOptions {
             budget_s: 60.0,
             stop: None,
             supported_probes: None,
+            prefer_species: Vec::new(),
         }
     }
 }
@@ -411,6 +419,10 @@ pub struct Planner<'a> {
     warp_scripts: BTreeMap<String, Vec<(String, usize)>>,
     /// Var → (value, script, path) of every path that leaves it at a value.
     var_effects: BTreeMap<String, Vec<(i64, String, usize)>>,
+    /// Var → (value, script, path) of every path that sets it to a value
+    /// on the way, the final one or not (Oak's trigger sets the lab's
+    /// scene var to 1, and the scene it arms moves it to 2).
+    var_sets: BTreeMap<String, Vec<(i64, String, usize)>>,
     /// Trigger script → (map, the var condition the coord event fires on).
     triggers: BTreeMap<String, (String, Option<(String, i64)>)>,
     /// Map script → the var condition of its `on_frame` entry.
@@ -570,6 +582,23 @@ impl<'a> Planner<'a> {
                 }
             }
         }
+        let mut var_sets: BTreeMap<String, Vec<(i64, String, usize)>> = BTreeMap::new();
+        if let Some(events) = world.events() {
+            for (label, script) in &events.scripts {
+                for (i, path) in script.paths.iter().enumerate() {
+                    for e in &path.does {
+                        if let ScriptEffect::Var { var, change } = e {
+                            if let Some(v) = change.eq.as_ref().and_then(|v| v.as_int()) {
+                                let sets = var_sets.entry(var.clone()).or_default();
+                                if !sets.contains(&(v, label.clone(), i)) {
+                                    sets.push((v, label.clone(), i));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut var_effects: BTreeMap<String, Vec<(i64, String, usize)>> = BTreeMap::new();
         for (p, sources) in &scripts_by_effect {
             if let GoalPredicate::World(Predicate::Var {
@@ -661,8 +690,11 @@ impl<'a> Planner<'a> {
             obtain,
             priors,
             methods,
+            params: CostParams {
+                prefer_species: options.prefer_species.clone(),
+                ..CostParams::default()
+            },
             options,
-            params: CostParams::default(),
             scripts_by_effect,
             marts,
             centers,
@@ -677,6 +709,7 @@ impl<'a> Planner<'a> {
             },
             warp_scripts,
             var_effects,
+            var_sets,
             triggers,
             frames,
             boulders,
@@ -727,12 +760,26 @@ impl<'a> Planner<'a> {
             levels: Rc::new(Levels::unknown()),
             bound_routes: RefCell::new(HashMap::new()),
             story: StoryPrior {
-                implied: self.implied_flags(knowledge),
+                implied: {
+                    let mut implied = self.implied_flags(knowledge);
+                    for (flag, v) in self.history(knowledge).flags {
+                        if knowledge.world.flag(&flag).value.is_none() {
+                            implied.entry(flag).or_insert(v);
+                        }
+                    }
+                    implied
+                },
                 ..self.story.clone()
             },
             spot_needs_cache: RefCell::new(HashMap::new()),
             candidate_memo: RefCell::new(HashMap::new()),
         };
+        if session.trace {
+            eprintln!(
+                "[plan] the knowledge implies var floors {:?}",
+                session.base.floors
+            );
+        }
         if let Some(pose) = &pose {
             let (flags, floors) = self.position_implied(&session.base, &session.story, pose);
             if session.trace {
@@ -1015,6 +1062,7 @@ impl<'a> Planner<'a> {
                         effects,
                         script: Some((label.clone(), i)),
                         spots: spots.clone(),
+                        stand_on: script.kind == "trigger",
                     });
                 }
             }
@@ -1045,6 +1093,7 @@ impl<'a> Planner<'a> {
                 effects: vec![Predicate::PartyHasMove { mv: mv.to_string() }],
                 script: None,
                 spots: Vec::new(),
+                stand_on: false,
             });
         }
         for (map, items) in &self.marts {
@@ -1060,6 +1109,7 @@ impl<'a> Planner<'a> {
                     .collect(),
                 script: None,
                 spots: Vec::new(),
+                stand_on: false,
             });
         }
         out
@@ -1103,11 +1153,14 @@ impl<'a> Planner<'a> {
         let mut out = knowledge.clone();
         let mut learnt = false;
         for species in &party {
+            // Given as itself or as what it evolved from (a starter that
+            // has evolved).
+            let family = pre_evolutions(self.data, species);
             let mut common: Option<BTreeSet<(String, i64)>> = None;
             for script in events.scripts.values() {
                 for path in &script.paths {
                     let gives_it = path.does.iter().any(|e| {
-                        matches!(e, ScriptEffect::GiveMon { givemon: pokebot_world::events::Val::Sym(s), .. } if s == species)
+                        matches!(e, ScriptEffect::GiveMon { givemon: pokebot_world::events::Val::Sym(s), .. } if family.contains(s))
                     });
                     if !gives_it {
                         continue;
@@ -1289,6 +1342,16 @@ impl<'a> Planner<'a> {
     /// inference): every path that sets the flag moves the var to at least
     /// this (the badge from Brock means Pewter's scene var moved on).
     fn var_floors(&self, knowledge: &SavedKnowledge) -> BTreeMap<String, i64> {
+        let mut out = self.flag_floors(knowledge);
+        for (var, v) in self.history_floors(knowledge) {
+            let floor = out.entry(var).or_insert(v);
+            *floor = (*floor).max(v);
+        }
+        out
+    }
+
+    /// [`Planner::var_floors`] from the flags known set alone.
+    fn flag_floors(&self, knowledge: &SavedKnowledge) -> BTreeMap<String, i64> {
         let mut out: BTreeMap<String, i64> = BTreeMap::new();
         let Some(events) = self.world.events() else {
             return out;
@@ -1351,6 +1414,167 @@ impl<'a> Planner<'a> {
             }
         }
         out
+    }
+
+    /// Lower bounds on unknown vars from what must have happened for the
+    /// knowledge to hold (spec §3.2 inference, followed back through the
+    /// event graph): a Pokémon in the party was given by one of the paths
+    /// that give it, so their common effects hold, and so did their common
+    /// conditions when they ran, which the paths setting those vars had
+    /// established before, and so on. A starter in the party means the
+    /// lab's starter scene ran, which Oak's trigger armed: Pallet Town's
+    /// scene var moved on even in a checkpoint that never recorded it.
+    fn history_floors(&self, knowledge: &SavedKnowledge) -> BTreeMap<String, i64> {
+        let mut out = BTreeMap::new();
+        for (var, v) in self.history(knowledge).vars {
+            if v > 0 && knowledge.world.var(&var).value.is_none() {
+                out.insert(var, v);
+            }
+        }
+        out
+    }
+
+    /// What the party implies happened ([`Planner::history_floors`]): the
+    /// vars' least values and the flags the paths behind it left, merged
+    /// over every member.
+    fn history(&self, knowledge: &SavedKnowledge) -> History {
+        let mut out = History::default();
+        let mut memo: BTreeMap<(String, i64), History> = BTreeMap::new();
+        for species in knowledge
+            .party
+            .value
+            .iter()
+            .flatten()
+            .filter_map(|m| m.species.value.as_deref())
+        {
+            // Given as itself or as what it evolved from.
+            let sources: Vec<(String, usize)> = pre_evolutions(self.data, species)
+                .iter()
+                .flat_map(|s| {
+                    self.scripts_by_effect
+                        .get(&GoalPredicate::caught(s))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            let h = self.implied_by(&sources, &mut memo, 0);
+            for (var, v) in h.vars {
+                let floor = out.vars.entry(var).or_insert(v);
+                *floor = (*floor).max(v);
+            }
+            for (flag, v) in h.flags {
+                out.flags.entry(flag).or_insert(v);
+            }
+        }
+        out
+    }
+
+    /// What holds after any one of the script paths `sources` ran: what
+    /// each leaves behind, over what held when it ran (its var conditions)
+    /// and, recursively, what the paths setting those vars left behind.
+    /// Only what every source implies (vars at the least value, flags
+    /// where they agree).
+    fn implied_by(
+        &self,
+        sources: &[(String, usize)],
+        memo: &mut BTreeMap<(String, i64), History>,
+        depth: u32,
+    ) -> History {
+        /// Steps back through the event graph at most.
+        const MAX_BACK: u32 = 8;
+        let Some(events) = self.world.events() else {
+            return History::default();
+        };
+        let mut common: Option<History> = None;
+        for (label, idx) in sources {
+            let Some(script) = events.script(label) else {
+                continue;
+            };
+            let (Some(map), Some(path)) = (&script.map, script.paths.get(*idx)) else {
+                continue;
+            };
+            // What held before: its var conditions, and what set them.
+            let mut here = History::default();
+            let mut pre = crate::intents::path_preconditions(path);
+            pre.extend(
+                self.start_conditions(script, label, map)
+                    .unwrap_or_default(),
+            );
+            for p in pre {
+                let GoalPredicate::World(Predicate::Var {
+                    name: var,
+                    op: CmpOp::Eq,
+                    value: v,
+                }) = p
+                else {
+                    continue;
+                };
+                if v <= 0 || is_local_var(&var) {
+                    continue;
+                }
+                here.raise(&var, v);
+                if depth >= MAX_BACK {
+                    continue;
+                }
+                let key = (var.clone(), v);
+                let before = match memo.get(&key) {
+                    Some(h) => h.clone(),
+                    None => {
+                        // In progress: nothing more from this branch.
+                        memo.insert(key.clone(), History::default());
+                        let setters: Vec<(String, usize)> = self
+                            .var_sets
+                            .get(&var)
+                            .map(|s| {
+                                s.iter()
+                                    .filter(|(set, _, _)| *set == v)
+                                    .map(|(_, l, i)| (l.clone(), *i))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let h = self.implied_by(&setters, memo, depth + 1);
+                        memo.insert(key, h.clone());
+                        h
+                    }
+                };
+                for (k, w) in before.vars {
+                    here.raise(&k, w);
+                }
+                for (f, b) in before.flags {
+                    here.flags.insert(f, b);
+                }
+            }
+            // Then what it did, over that.
+            for p in path_effects_in(path, map, self.world) {
+                match p {
+                    GoalPredicate::World(Predicate::Var {
+                        name,
+                        op: CmpOp::Eq,
+                        value,
+                    }) if !is_local_var(&name) => here.raise(&name, value),
+                    GoalPredicate::World(Predicate::Flag { name, is }) if !is_local_flag(&name) => {
+                        here.flags.insert(name, is);
+                    }
+                    _ => {}
+                }
+            }
+            common = Some(match common {
+                None => here,
+                Some(c) => History {
+                    vars: c
+                        .vars
+                        .into_iter()
+                        .filter_map(|(k, v)| here.vars.get(&k).map(|w| (k, v.min(*w))))
+                        .collect(),
+                    flags: c
+                        .flags
+                        .into_iter()
+                        .filter(|(k, v)| here.flags.get(k) == Some(v))
+                        .collect(),
+                },
+            });
+        }
+        common.unwrap_or_default()
     }
 
     /// What holds before the plan does anything, for the reachability
@@ -1445,6 +1669,41 @@ impl<'a> Planner<'a> {
                 (1.0 - prob) * alt
             }
         })
+    }
+}
+
+/// `species` and what it evolves from, nearest first (IVYSAUR, BULBASAUR).
+fn pre_evolutions(data: &GameData, species: &str) -> Vec<String> {
+    let mut out = vec![species.to_string()];
+    while out.len() < 4 {
+        let last = out.last().expect("not empty").clone();
+        let mut from: Vec<&String> = data
+            .species
+            .iter()
+            .filter(|(_, s)| s.evolutions.iter().any(|(_, _, to)| *to == last))
+            .map(|(name, _)| name)
+            .collect();
+        from.sort();
+        match from.first() {
+            Some(f) if !out.contains(f) => out.push((*f).clone()),
+            _ => break,
+        }
+    }
+    out
+}
+
+/// What a stretch of the story left behind: vars at least at these
+/// values, flags at these.
+#[derive(Debug, Clone, Default)]
+struct History {
+    vars: BTreeMap<String, i64>,
+    flags: BTreeMap<String, bool>,
+}
+
+impl History {
+    fn raise(&mut self, var: &str, v: i64) {
+        let e = self.vars.entry(var.to_string()).or_insert(v);
+        *e = (*e).max(v);
     }
 }
 

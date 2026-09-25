@@ -78,7 +78,17 @@ fn glob(p: &[char], t: &[char]) -> bool {
         }
         Some((c, rest)) => t
             .split_first()
-            .is_some_and(|(d, t_rest)| (*d == '?' || d == c) && glob(rest, t_rest)),
+            .is_some_and(|(d, t_rest)| (*d == '?' || fold(*d) == fold(*c)) && glob(rest, t_rest)),
+    }
+}
+
+/// The game prints the script's ASCII quotes as its curly glyphs (the
+/// charmap's `'` is `’`): the two read alike.
+fn fold(c: char) -> char {
+    match c {
+        '’' | '‘' => '\'',
+        '“' | '”' => '"',
+        c => c,
     }
 }
 
@@ -96,6 +106,8 @@ mod tests {
         assert!(glob_match("Caught * POKéMON!", "Caught 15 POKé?ON!"));
         assert!(!glob_match("down!", "down"));
         assert!(glob_match("a**b", "axyzb"));
+        // Seen on screen: the game's curly apostrophe for the script's `'`.
+        assert!(glob_match("OAK: It's unsafe!", "OAK: It’s unsafe!"));
     }
 
     #[test]

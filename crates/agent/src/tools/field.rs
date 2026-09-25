@@ -1022,6 +1022,7 @@ mod tests {
             gone: Default::default(),
             syncer: None,
             blocked: Default::default(),
+            gates: Default::default(),
         };
         let facing = Destination::Facing {
             map: "CeruleanCity".into(),
@@ -1133,6 +1134,7 @@ mod tests {
             gone: Default::default(),
             syncer: None,
             blocked: Default::default(),
+            gates: Default::default(),
         };
         let facing = Destination::Facing {
             map: "CeruleanCity".into(),

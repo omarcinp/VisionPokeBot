@@ -39,6 +39,10 @@ pub struct Achiever {
     /// Where the player stands to run it, on a map whose passages the
     /// story opens (empty elsewhere: being on the map is enough).
     pub spots: Vec<(i32, i32)>,
+    /// The spots are stepped onto (a trigger's tile): one next to a tile
+    /// reached counts, since a trigger that carries the player off closes
+    /// its own tile to walks past it, never to the step onto it.
+    pub stand_on: bool,
 }
 
 /// A fact as the pass tracks it: flags (badges too) with their value,
@@ -251,7 +255,14 @@ pub fn compute(
             // On a gated map, one of its spots must be reached too.
             if let (false, Some(m)) = (a.spots.is_empty(), &a.map) {
                 if let Some(t) = tiles.get(m) {
-                    if !a.spots.iter().any(|s| t.contains(s)) {
+                    let reached = |s: &(i32, i32)| {
+                        t.contains(s)
+                            || (a.stand_on
+                                && [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                                    .iter()
+                                    .any(|(dx, dy)| t.contains(&(s.0 + dx, s.1 + dy))))
+                    };
+                    if !a.spots.iter().any(reached) {
                         continue;
                     }
                 }

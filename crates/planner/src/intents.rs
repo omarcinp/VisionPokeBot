@@ -452,6 +452,16 @@ pub struct CostParams {
     pub ball_reserve: u32,
     /// Charged for an `Unsupported` intent so plans that avoid it win.
     pub unsupported_s: f64,
+    /// Charged per command on a script path the compiler doesn't model
+    /// (a naming screen, a party menu): of two paths to the same facts,
+    /// the one the tools can follow wins.
+    pub opaque_s: f64,
+    /// Species preferred where a script gives a Pokémon, most preferred
+    /// first ([`PlanOptions::prefer_species`](crate::PlanOptions)); a path
+    /// giving one ranked `k` (or unlisted: after them all) costs
+    /// `k × choice_s` more, so the preferred gift wins a choice.
+    pub prefer_species: Vec<String>,
+    pub choice_s: f64,
 }
 
 impl Default for CostParams {
@@ -475,6 +485,9 @@ impl Default for CostParams {
             encounter_steps_at_rate_1: 180.0,
             ball_reserve: 5,
             unsupported_s: 6000.0,
+            opaque_s: 30.0,
+            prefer_species: Vec::new(),
+            choice_s: 60.0,
         }
     }
 }
@@ -707,6 +720,8 @@ impl Intent {
             } => {
                 let mut cost = p.script_s + p.answer_s * answers.len() as f64;
                 if let Some(sp) = ctx.script_path(script, *path) {
+                    cost += p.opaque_s * sp.opaque.len() as f64;
+                    cost += p.choice_s * choice_rank(&p.prefer_species, sp) as f64;
                     for e in &sp.does {
                         cost += match e {
                             ScriptEffect::Say { .. } => p.say_s,
@@ -806,7 +821,9 @@ pub fn path_preconditions(path: &ScriptPath) -> Vec<GoalPredicate> {
             GoalPredicate::World(Predicate::Badge { n }) => {
                 format!("flag:{}", Predicate::badge_flag(*n))
             }
-            GoalPredicate::World(Predicate::Var { name, .. }) => format!("var:{name}"),
+            // Every comparison of a var counts (`!= 1`, `!= 7`, `== 8` on
+            // one path is `== 8`, not `!= 1`); the same one twice once.
+            GoalPredicate::World(Predicate::Var { .. }) => format!("var:{p}"),
             other => format!("p:{other}"),
         };
         if seen.contains_key(&key) {
@@ -815,6 +832,24 @@ pub fn path_preconditions(path: &ScriptPath) -> Vec<GoalPredicate> {
         seen.insert(key, p.clone());
         out.push(p);
     }
+    // A var compared for equality needs nothing else about it.
+    let equal: Vec<String> = out
+        .iter()
+        .filter_map(|p| match p {
+            GoalPredicate::World(Predicate::Var {
+                name,
+                op: CmpOp::Eq,
+                ..
+            }) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    out.retain(|p| match p {
+        GoalPredicate::World(Predicate::Var { name, op, .. }) => {
+            *op == CmpOp::Eq || !equal.contains(name)
+        }
+        _ => true,
+    });
     out
 }
 
@@ -856,7 +891,96 @@ pub fn path_effects(path: &ScriptPath) -> Vec<GoalPredicate> {
 /// an object sets the flag that hides it (the game's `removeobject`), so a
 /// route past it opens; adding one clears it.
 pub fn path_effects_in(path: &ScriptPath, map: &str, world: &World) -> Vec<GoalPredicate> {
-    let mut out = path_effects(path);
+    path_effects_at(path, map, world, 0)
+}
+
+/// Scenes chained into a path's effects at most (a scene arming another).
+const MAX_SCENE_CHAIN: u32 = 3;
+
+/// Adds `p` to `out`, replacing what it contradicts (its negation, or the
+/// same var at another value).
+fn merge_effect(out: &mut Vec<GoalPredicate>, p: GoalPredicate) {
+    if let Some(neg) = p.negation() {
+        out.retain(|q| *q != neg);
+    }
+    if let GoalPredicate::World(Predicate::Var { name, .. }) = &p {
+        out.retain(
+            |q| !matches!(q, GoalPredicate::World(Predicate::Var { name: n, .. }) if n == name),
+        );
+    }
+    if !out.contains(&p) {
+        out.push(p);
+    }
+}
+
+/// The map a path leaves the player on: where its last warp goes, else
+/// the script's own map.
+pub fn path_end_map(path: &ScriptPath, map: &str, world: &World) -> String {
+    path.does
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            ScriptEffect::Warp { warp, .. } => world.name_of(warp).map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_else(|| map.to_owned())
+}
+
+/// The scene a map plays by itself (an `on_frame` script) once `var` is
+/// left at `value` while the player is on it, when it has one path: the
+/// lab's starter scene right after Oak brings the player in.
+pub fn frame_scene<'w>(
+    world: &'w World,
+    map: &str,
+    var: &str,
+    value: i64,
+) -> Option<(&'w str, &'w ScriptPath)> {
+    let events = world.events()?;
+    events.map_scripts.get(map)?.on_frame.iter().find_map(|f| {
+        if f.var != var || f.value.as_int() != Some(value) {
+            return None;
+        }
+        let label = f.script.as_deref()?;
+        match events.script(label)?.paths.as_slice() {
+            [only] => Some((label, only)),
+            _ => None,
+        }
+    })
+}
+
+/// [`path_effects_in`], `depth` scenes deep: a path that leaves the player
+/// on a map with the var of one of its `on_frame` scenes at the scene's
+/// value runs that scene too (the game plays it on the next frame; nothing
+/// the player does can skip it).
+fn path_effects_at(path: &ScriptPath, map: &str, world: &World, depth: u32) -> Vec<GoalPredicate> {
+    let mut out = path_effects_own(path, map, world);
+    if depth >= MAX_SCENE_CHAIN {
+        return out;
+    }
+    let here = path_end_map(path, map, world);
+    let set: Vec<(String, i64)> = out
+        .iter()
+        .filter_map(|p| match p {
+            GoalPredicate::World(Predicate::Var {
+                name,
+                op: CmpOp::Eq,
+                value,
+            }) => Some((name.clone(), *value)),
+            _ => None,
+        })
+        .collect();
+    for (var, value) in set {
+        if let Some((_, scene)) = frame_scene(world, &here, &var, value) {
+            for p in path_effects_at(scene, &here, world, depth + 1) {
+                merge_effect(&mut out, p);
+            }
+        }
+    }
+    out
+}
+
+/// The path's own effects, objects included.
+fn path_effects_own(path: &ScriptPath, map: &str, world: &World) -> Vec<GoalPredicate> {
     let hide_flag = |id: &Val, on: &Option<String>| -> Option<String> {
         let id = u32::try_from(id.as_int()?).ok()?;
         let name = match on {
@@ -872,8 +996,11 @@ pub fn path_effects_in(path: &ScriptPath, map: &str, world: &World) -> Vec<GoalP
             .clone()?;
         (flag != "0" && !flag.starts_with("FLAG_TEMP_")).then_some(flag)
     };
+    // In the order the script does them: Oak's lab scene removes him (his
+    // hide flag set) and then clears the flag to show him at his desk.
+    let mut out: Vec<GoalPredicate> = Vec::new();
     for e in &path.does {
-        let p = match e {
+        let object = match e {
             ScriptEffect::RemoveObject { remove_object, map } => {
                 hide_flag(remove_object, map).map(|f| GoalPredicate::flag(&f, true))
             }
@@ -882,16 +1009,35 @@ pub fn path_effects_in(path: &ScriptPath, map: &str, world: &World) -> Vec<GoalP
             }
             _ => None,
         };
-        if let Some(p) = p {
-            if let Some(neg) = p.negation() {
-                out.retain(|q| *q != neg);
-            }
-            if !out.contains(&p) {
-                out.push(p);
-            }
+        for p in GoalPredicate::from_effect(e).into_iter().chain(object) {
+            merge_effect(&mut out, p);
         }
     }
     out
+}
+
+/// How far down `prefer` the Pokémon a path gives comes: 0 for the first
+/// (or when the path gives none, or nothing is preferred), the list's
+/// length for a species not on it.
+pub fn choice_rank(prefer: &[String], path: &ScriptPath) -> usize {
+    if prefer.is_empty() {
+        return 0;
+    }
+    path.does
+        .iter()
+        .find_map(|e| match e {
+            ScriptEffect::GiveMon {
+                givemon: Val::Sym(species),
+                ..
+            } => Some(
+                prefer
+                    .iter()
+                    .position(|p| p == species)
+                    .unwrap_or(prefer.len()),
+            ),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 /// The trainer of the path's first battle; later battles on the same path

@@ -1,0 +1,194 @@
+{
+ "identity": {
+  "milestones": [],
+  "saved_at": {
+   "map": "PalletTown_PlayersHouse_2F",
+   "x": 6,
+   "y": 6
+  }
+ },
+ "party": {
+  "value": [],
+  "source": "Observed",
+  "last_verified_frame": 1
+ },
+ "bag": {
+  "pockets": {
+   "Items": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "KeyItems": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "PokeBalls": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "TmCase": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "BerryPouch": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 1
+   }
+  }
+ },
+ "money": {
+  "value": 3000,
+  "source": "Observed",
+  "last_verified_frame": 1
+ },
+ "pc": {
+  "boxes": [
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   }
+  ],
+  "items": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  }
+ },
+ "pokedex": {
+  "caught": {},
+  "seen": {},
+  "counts": {
+   "value": {
+    "seen": 0,
+    "caught": 0
+   },
+   "source": "Observed",
+   "last_verified_frame": 1
+  }
+ },
+ "world": {
+  "flags": {
+   "FLAG_BADGE01_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE02_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE03_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE04_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE05_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE06_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE07_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   },
+   "FLAG_BADGE08_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 1
+   }
+  },
+  "vars": {},
+  "visited": {},
+  "respawn": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "npcs": {},
+  "infeasible": [],
+  "paths_run": []
+ }
+}

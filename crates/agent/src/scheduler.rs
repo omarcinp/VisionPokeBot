@@ -59,9 +59,13 @@ fn valid_hp(mon: &PartyMon) -> Option<(u16, u16)> {
 }
 
 pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
-    let Some(party) = party.filter(|p| !p.is_empty()) else {
+    let Some(party) = party else {
         return Some(Need::AuditParty);
     };
+    // No Pokémon yet (a new game): no health to keep.
+    if party.is_empty() {
+        return None;
+    }
     // Unknown fields must be observed before estimating risk.
     if party.iter().any(|m| {
         valid_hp(m).is_none()

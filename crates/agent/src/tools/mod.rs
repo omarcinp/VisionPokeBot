@@ -21,6 +21,7 @@ pub mod menu;
 mod party_audit;
 pub mod probe;
 mod save;
+pub mod scene;
 mod talk;
 pub mod teach;
 mod unstick;

@@ -134,6 +134,34 @@ def test_yesno_call_and_loop_cut(compiler):
     assert paths[2]["does"] == [{"say": "Fixture_Text_Hmm"}, {"set": "FLAG_TEMP_2"}]
 
 
+def test_a_yes_no_tested_twice_is_one_question(compiler):
+    # `goto_if_eq VAR_RESULT, YES` then `goto_if_eq VAR_RESULT, NO`: the
+    # second test is decided by the first answer, not a second question
+    # (and not a third path where the answer is neither).
+    paths = compiler.compile("Fixture_EventScript_Choice")["paths"]
+    assert [p["when"] for p in paths] == [[{"answer": "yes"}], [{"answer": "no"}]]
+    assert paths[1]["does"] == [{"say": "Fixture_Text_Hmm"}, {"say": "Fixture_Text_Ready"}]
+
+
+def test_facing_tests_are_decided_once_directions_are_numbers(parsed, tmp_path):
+    header = tmp_path / "include/constants/global.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("#define DIR_NONE 0\n#define DIR_SOUTH 1\n#define DIR_NORTH 2\n")
+    saved = dict(ce.CONSTANTS)
+    try:
+        ce.load_direction_constants(tmp_path)
+        assert ce.CONSTANTS["DIR_NORTH"] == 2 and ce.CONSTANTS["DIR_SOUTH"] == 1
+        paths = ce.Compiler(parsed.labels, parsed.data).compile("Fixture_EventScript_Facing")["paths"]
+    finally:
+        ce.CONSTANTS.clear()
+        ce.CONSTANTS.update(saved)
+    # North, south, neither: the second pair of tests follows the first.
+    assert len(paths) == 3
+    facing = [[(c.get("eq"), c.get("ne")) for c in p["when"]] for p in paths]
+    assert facing[0] == [(2, None)]
+    assert facing[1] == [(None, 2), (1, None)]
+
+
 def test_var_env_resolves_givemon(compiler):
     paths = compiler.compile("Fixture_EventScript_Version")["paths"]
     assert paths[0]["does"][-1] == {"givemon": "SPECIES_SCYTHER", "level": 25}
@@ -308,6 +336,19 @@ def test_map_scripts_and_triggers(events):
     triggers = [t for t in events["triggers"] if t["map"] == "PalletTown" and t["x"] == 12 and t["y"] == 1]
     assert triggers == [{"map": "PalletTown", "x": 12, "y": 1, "when": [{"var": "VAR_MAP_SCENE_PALLET_TOWN_OAK", "eq": 0}], "script": "PalletTown_EventScript_OakTriggerLeft"}]
     assert events["scripts"]["PalletTown_EventScript_OakTriggerLeft"]["kind"] == "trigger"
+
+
+def test_oaks_parcel_scene_is_compiled_whole(events):
+    # Oak's object script branches on the facing again and again: with
+    # the directions as numbers the parcel path (the Pokédex) fits.
+    oak = events["scripts"]["PalletTown_ProfessorOaksLab_EventScript_ProfOak"]
+    assert not oak.get("truncated")
+    dex = [p for p in oak["paths"] if {"set": "FLAG_SYS_POKEDEX_GET"} in p["does"]]
+    assert dex and all({"var": "VAR_MAP_SCENE_VIRIDIAN_CITY_MART", "ge": 1} in p["when"] for p in dex)
+    ball = events["scripts"]["PalletTown_ProfessorOaksLab_EventScript_BulbasaurBall"]["paths"]
+    answers = sorted({json_key([c for c in p["when"] if "answer" in c]) for p in ball})
+    assert json_key([{"answer": "yes"}, {"answer": "no"}]) in answers
+    assert json_key([{"answer": "yes"}, {"answer": "no"}, {"answer": "no"}]) not in answers
 
 
 def test_objects_carry_area_and_flag(events):

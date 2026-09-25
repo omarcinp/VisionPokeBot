@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROM = "firered_rev1"
-MAX_PATHS = 128  # the plan said 64; the Game Corner prize clerk needs ~120
+MAX_PATHS = 512  # Oak (object 4) needs 247 once facing tests are decided; nothing reaches 512
 DEFINED = {"FIRERED"}  # assembler symbols for this ROM (.ifdef)
 
 # Symbolic values that scripts compare against; everything else stays a name.
@@ -412,11 +412,13 @@ class PathState:
     stack: tuple = ()  # (label, next index) return addresses of inlined calls
     dead: bool = False  # a statically decided branch took the whole path
     flags: dict = field(default_factory=dict)  # ("flag"|"trainer", name) -> value set on this path
+    answered: dict = field(default_factory=dict)  # YES/NO box site -> "yes"|"no" taken on this path
 
     def fork(self):
         return PathState(
             list(self.when), list(self.does), list(self.opaque), dict(self.env), dict(self.typed),
             self.result, self.compare, self.trail, self.stack, False, dict(self.flags),
+            dict(self.answered),
         )
 
     def finish(self):
@@ -507,7 +509,10 @@ class Compiler:
                 return {"move": rest[0], "known": True}
             if kind == "yesno" and op in ("eq", "ne"):
                 yes = (value == 1) == (op == "eq")
-                return {"answer": "yes" if yes else "no"}
+                # The box it answers: a second test of the same answer
+                # (`goto_if_eq VAR_RESULT, NO` after the YES test) is the
+                # same question, decided by the first (see `branch`).
+                return {"answer": "yes" if yes else "no", "_q": rest[0] if rest else None}
             if kind == "choice":
                 return {"choice": rest[0], op: value}
             if kind == "special":
@@ -538,7 +543,10 @@ class Compiler:
         """Explore the taken branch (first), then continue with the negation.
         A condition on a value the path already set (`setvar VAR_TEMP_1, 0`
         then `goto_if_eq VAR_TEMP_1, 0`) is decided here instead of forking."""
+        question = cond.pop("_q", None) if cond else None
         decided = static_eval(cond, state.env, state.flags)
+        if question is not None and question in state.answered:
+            decided = state.answered[question] == cond["answer"]
         if decided is None and cond is not None:
             # A branch the path's own conditions rule out is not a path.
             if not consistent(state.when, cond):
@@ -552,6 +560,8 @@ class Compiler:
         taken = state.fork()
         if cond is not None:
             taken.when.append(cond)
+            if question is not None:
+                taken.answered[question] = cond["answer"]
         if call:
             taken.stack = state.stack + ((label, i + 1),)
             self.enter(taken_label, taken, is_call=True)
@@ -559,6 +569,8 @@ class Compiler:
             self.jump(taken_label, taken)
         if cond is not None:
             state.when.append(negate(cond))
+            if question is not None:
+                state.answered[question] = negate(cond)["answer"]
         elif decided is True:
             # Only the taken branch exists; the caller must not continue.
             state.dead = True
@@ -722,7 +734,7 @@ class Compiler:
                 self.set_result(state, ("move", a[0]))
                 continue
             if name == "yesnobox":
-                self.set_result(state, ("yesno",))
+                self.set_result(state, ("yesno", self.site))
                 continue
             if name.startswith("multichoice"):
                 self.set_result(state, ("choice", a[2]))
@@ -769,7 +781,7 @@ class Compiler:
             if name in ("msgbox", "message"):
                 state.does.append({"say": a[0]})
                 if len(a) > 1 and a[1] == "MSGBOX_YESNO":
-                    self.set_result(state, ("yesno",))
+                    self.set_result(state, ("yesno", self.site))
                 continue
             if name in ("setflag", "setworldmapflag"):
                 state.does.append({"set": a[0]})
@@ -1000,9 +1012,23 @@ def load_world(pret):
                 label_map[label] = map_name
         texts.update(parsed.texts)
         data.update(parsed.data)
+    load_direction_constants(pret)
     sha1_file = pret / f"{ROM}.sha1"
     sha1 = sha1_file.read_text().split()[0] if sha1_file.exists() else ""
     return WorldSources(pret, maps, map_names, labels, texts, data, label_map, local_ids, sha1)
+
+
+def load_direction_constants(pret):
+    """`DIR_*` as numbers (`include/constants/global.h`): a script tests
+    `VAR_FACING` against each direction in turn, and with the values known
+    the tests after the first are decided by the path's own conditions
+    (facing north is not facing south) instead of forking 2^n paths. Oak's
+    parcel scene was cut at the path cap before it gave the Pokédex."""
+    header = Path(pret) / "include/constants/global.h"
+    if not header.exists():
+        return
+    for name, value in re.findall(r"#define (DIR_[A-Z]+)\s+(\d+)\b", header.read_text()):
+        CONSTANTS.setdefault(name, int(value))
 
 
 def special_effects(pret):

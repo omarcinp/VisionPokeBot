@@ -145,6 +145,9 @@ pub struct ToolContext<'a> {
     /// Where unrecognised dialogue is saved (frame and text).
     pub unknown_dir: PathBuf,
     pub scheduler: crate::scheduler::Scheduler,
+    /// The compiled script `RunScript` is following, if any (a battle it
+    /// starts is its battle).
+    pub running_script: Option<String>,
     next_need_check: u64,
     toolbox: Toolbox,
     expects: Expects,
@@ -156,6 +159,9 @@ pub struct ToolContext<'a> {
     outside: OutsideRecovery,
     /// Frames in a row the white-out screen has shown.
     whiteout_frames: u32,
+    /// The world's story passages ([`pokebot_world::gates::derive`]),
+    /// derived once.
+    gates: std::cell::OnceCell<Arc<pokebot_world::gates::Gates>>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -179,6 +185,7 @@ impl<'a> ToolContext<'a> {
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
             scheduler: crate::scheduler::Scheduler::default(),
+            running_script: None,
             next_need_check: 0,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
@@ -189,7 +196,22 @@ impl<'a> ToolContext<'a> {
             last_dialogue_frame: None,
             outside: OutsideRecovery::default(),
             whiteout_frames: 0,
+            gates: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The story passages as the belief stands now: what a walk must go
+    /// around and may go through.
+    pub fn gate_tiles(&self) -> pokebot_world::gates::GateTiles {
+        let gates = self.gates.get_or_init(|| match &self.scheduler.graph {
+            Some(g) => Arc::new(g.gates().clone()),
+            None => Arc::new(pokebot_world::gates::derive(&self.world)),
+        });
+        pokebot_world::gates::GateTiles::believed(
+            &self.world,
+            gates,
+            &crate::belief_view::StateBelief(self.runtime.state()),
+        )
     }
 
     pub fn with_toolbox(mut self, toolbox: Toolbox) -> Self {
@@ -321,7 +343,34 @@ impl<'a> ToolContext<'a> {
                     });
                 }
                 self.emit(GameEvent::MapVisited { map: map.clone() })?;
+                self.track_entry(map)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Books what arriving on `map` does by itself (its silent entry
+    /// scripts, [`super::effects::entry_events`]).
+    fn track_entry(&mut self, map: &str) -> Result<(), ToolError> {
+        let world = Arc::clone(&self.world);
+        let Some(events) = world.events() else {
+            return Ok(());
+        };
+        let map_name = |id: &str| world.name_of(id).map(str::to_owned);
+        let learned = {
+            let state = self.runtime.state();
+            super::effects::entry_events(
+                events,
+                map,
+                &crate::belief_view::StateBelief(state),
+                state,
+                &self.data,
+                world.places(),
+                &map_name,
+            )
+        };
+        for event in learned {
+            self.emit(event)?;
         }
         Ok(())
     }
@@ -379,7 +428,11 @@ impl<'a> ToolContext<'a> {
             let outcome = self.invoke(&Intent::Unstick);
             return outcome.result.map(|()| true);
         }
+        // A conversation or scene being followed is not an overworld
+        // boundary: its gaps (people walking off) are not the time to
+        // leave for a heal (the rival's scene was left half-recorded).
         if o.player.is_some()
+            && !expects.dialogue
             && o.dialogue.is_none()
             && o.menu.is_none()
             && o.battle.is_none()

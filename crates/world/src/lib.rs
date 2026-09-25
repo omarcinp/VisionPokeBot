@@ -105,6 +105,24 @@ pub struct Sign {
     pub x: i32,
     pub y: i32,
     pub script: Option<String>,
+    /// `BG_EVENT_PLAYER_FACING_*`: the way the player must face to read
+    /// it (absent in data built before it was extracted: any).
+    #[serde(default)]
+    pub facing: Option<String>,
+}
+
+impl Sign {
+    /// The direction the player must face to read the sign; `None` when
+    /// any will do.
+    pub fn facing_dir(&self) -> Option<Direction> {
+        match self.facing.as_deref()? {
+            "BG_EVENT_PLAYER_FACING_NORTH" => Some(Direction::Up),
+            "BG_EVENT_PLAYER_FACING_SOUTH" => Some(Direction::Down),
+            "BG_EVENT_PLAYER_FACING_EAST" => Some(Direction::Right),
+            "BG_EVENT_PLAYER_FACING_WEST" => Some(Direction::Left),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

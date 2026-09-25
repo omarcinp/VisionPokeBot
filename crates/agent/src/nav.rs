@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_state::{Direction, Observation, PlayerPose};
 use pokebot_world::behavior::{arrow_warp, stair_warp, COUNTER, WARP_DOOR};
-use pokebot_world::path::{find_path, find_path_with, Obstacles, Step, Walk};
+use pokebot_world::gates::GateTiles;
+use pokebot_world::path::{find_path_with, Obstacles, Step, Walk};
 use pokebot_world::{MapData, World};
 use serde::Serialize;
 
@@ -191,6 +192,9 @@ pub struct Navigator {
     gone: Gone,
     /// Water is walkable: the player is surfing (or about to).
     surf: bool,
+    /// Story passages as the belief stands (closed triggers, opened doors),
+    /// the destination's own tile never closed.
+    gates: Arc<GateTiles>,
 }
 
 /// Map objects known to be gone, as (map, local id).
@@ -210,7 +214,20 @@ impl Navigator {
             hop: None,
             gone: Gone::new(),
             surf: false,
+            gates: Arc::new(GateTiles::default()),
         }
+    }
+
+    /// Walks through the doors the belief knows a script opened and around
+    /// the passages it knows closed ([`GateTiles::believed`]); the
+    /// destination tile itself stays reachable (a trigger is stepped onto).
+    pub fn with_gates(mut self, gates: &GateTiles) -> Self {
+        let gates = match &self.destination {
+            Destination::Tile { map, x, y } => gates.clone().without(map, (*x, *y)),
+            _ => gates.clone(),
+        };
+        self.gates = Arc::new(gates);
+        self
     }
 
     /// Walks over water too (the player surfs on it; stepping back onto
@@ -285,7 +302,7 @@ impl Navigator {
         let hop = match &self.hop {
             Some((map, hop)) if *map == pose.map => *hop,
             _ => {
-                let hop = plan_hop(&world, &pose, &self.destination, &self.gone);
+                let hop = plan_hop_with(&world, &pose, &self.destination, &self.gone, &self.gates);
                 self.hop = Some((pose.map.clone(), hop));
                 hop
             }
@@ -414,6 +431,7 @@ impl Navigator {
     fn obstacles(&self, map: &MapData) -> Obstacles {
         let mut obstacles = object_obstacles(map, &self.gone);
         obstacles.extend(self.learned().on_map(&map.name));
+        obstacles.extend(self.gates.closed_on(&map.name));
         obstacles
     }
 
@@ -431,10 +449,11 @@ impl Navigator {
         let mut obstacles = self.obstacles(map);
         obstacles.remove(&(pose.x, pose.y));
         let heuristic = |p: (i32, i32)| (p.0 - toward.0).abs() + (p.1 - toward.1).abs();
+        let opened = self.gates.opened_on(&map.name);
         let walk = Walk {
             obstacles: &obstacles,
             surf: self.surf,
-            opened: None,
+            opened: Some(&opened),
         };
         let Some(path) = find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, heuristic)
         else {
@@ -636,10 +655,17 @@ impl Navigator {
         let mut obstacles = self.obstacles(map);
         obstacles.remove(&(pose.x, pose.y));
         let heuristic = |p: (i32, i32)| (p.0 - wx).abs() + (p.1 - wy).abs();
-        match find_path(
+        let opened = self.gates.opened_on(&map.name);
+        let walk = Walk {
+            obstacles: &obstacles,
+            surf: self.surf,
+            opened: Some(&opened),
+        };
+        match find_path_with(
             map,
             (pose.x, pose.y),
-            &obstacles,
+            &walk,
+            |_| 0,
             |p| p == (wx, wy),
             heuristic,
         ) {
@@ -763,8 +789,22 @@ pub fn goal_tiles(world: &World, dest: &Destination) -> HashSet<(i32, i32)> {
 /// that leads to the part holding the destination; when the destination
 /// isn't reachable from here at tile level, fall back to reaching its map.
 pub fn plan_hop(world: &World, pose: &PlayerPose, dest: &Destination, gone: &Gone) -> Option<Hop> {
+    plan_hop_with(world, pose, dest, gone, &GateTiles::default())
+}
+
+/// [`plan_hop`] around the passages `gates` knows closed and through the
+/// doors it knows opened.
+pub fn plan_hop_with(
+    world: &World,
+    pose: &PlayerPose,
+    dest: &Destination,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> Option<Hop> {
     let goals = goal_tiles(world, dest);
-    if let Some(hop) = route_search(world, pose, dest.map(), |p| goals.contains(&p), gone) {
+    if let Some(hop) =
+        route_search_with(world, pose, dest.map(), |p| goals.contains(&p), gone, gates)
+    {
         return hop;
     }
     if pose.map == dest.map() {
@@ -839,13 +879,13 @@ fn neighbours(
     world: &World,
     map: &MapData,
     (x, y): (i32, i32),
-    obstacles: &Obstacles,
+    walk: &Walk,
 ) -> Vec<(Node, Option<Hop>)> {
     let name = &map.name;
     let mut next: Vec<(Node, Option<Hop>)> = Vec::new();
     // Walking within the map.
     for dir in Direction::ALL {
-        if let Some(s) = pokebot_world::path::step(map, (x, y), dir, obstacles) {
+        if let Some(s) = pokebot_world::path::step_with(map, (x, y), dir, walk) {
             next.push(((name.clone(), s.to.0, s.to.1), None));
         }
     }
@@ -896,7 +936,20 @@ pub fn route_search(
     goal: impl Fn((i32, i32)) -> bool,
     gone: &Gone,
 ) -> Option<Option<Hop>> {
-    let mut blocked: HashMap<String, Obstacles> = HashMap::new();
+    route_search_with(world, pose, to, goal, gone, &GateTiles::default())
+}
+
+/// [`route_search`] around the passages `gates` knows closed and through
+/// the doors it knows opened.
+pub fn route_search_with(
+    world: &World,
+    pose: &PlayerPose,
+    to: &str,
+    goal: impl Fn((i32, i32)) -> bool,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> Option<Option<Hop>> {
+    let mut blocked: HashMap<String, (Obstacles, Obstacles)> = HashMap::new();
     let start: Node = (pose.map.clone(), pose.x, pose.y);
     let mut first: HashMap<Node, Option<Hop>> = HashMap::from([(start.clone(), None)]);
     let mut queue = VecDeque::from([start]);
@@ -909,10 +962,17 @@ pub fn route_search(
         let Some(map) = world.map(&name) else {
             continue;
         };
-        let obstacles = blocked
-            .entry(name.clone())
-            .or_insert_with(|| object_obstacles(map, gone));
-        for (n, hop) in neighbours(world, map, (x, y), obstacles) {
+        let (obstacles, opened) = blocked.entry(name.clone()).or_insert_with(|| {
+            let mut o = object_obstacles(map, gone);
+            o.extend(gates.closed_on(&name));
+            (o, gates.opened_on(&name))
+        });
+        let walk = Walk {
+            obstacles,
+            surf: false,
+            opened: Some(opened),
+        };
+        for (n, hop) in neighbours(world, map, (x, y), &walk) {
             if first.contains_key(&n) {
                 continue;
             }
@@ -964,7 +1024,12 @@ pub fn nearest_reachable(
         let obstacles = blocked
             .entry(name.clone())
             .or_insert_with(|| object_obstacles(map, gone));
-        for (n, _) in neighbours(world, map, (x, y), obstacles) {
+        let walk = Walk {
+            obstacles,
+            surf: false,
+            opened: None,
+        };
+        for (n, _) in neighbours(world, map, (x, y), &walk) {
             if !dist.contains_key(&n) {
                 dist.insert(n.clone(), d + 1);
                 queue.push_back(n);
@@ -1025,6 +1090,114 @@ mod tests {
                 Step { dir, to: at }
             })
             .collect()
+    }
+
+    fn located(map: &str, x: i32, y: i32) -> Observation {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation {
+            pose: PlayerPose {
+                map: map.into(),
+                x,
+                y,
+            },
+            score: 1000,
+        });
+        o
+    }
+
+    fn world_with_events() -> Option<Arc<World>> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let world = World::load(root.join("data/world")).ok()?;
+        world.events()?;
+        Some(Arc::new(world))
+    }
+
+    /// Cinnabar Gym's quiz doors are walls in the map data that a script
+    /// opens once its question is answered: the navigator walks through
+    /// one the belief knows open, and finds no way while it doesn't.
+    #[test]
+    fn a_door_the_belief_knows_open_is_walked_through() {
+        use pokebot_world::predicate::MapBelief;
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let gates = pokebot_world::gates::derive(&world);
+        let map = "CinnabarIsland_Gym";
+        let dest = Destination::Tile {
+            map: map.into(),
+            x: 26,
+            y: 7,
+        };
+        let o = located(map, 26, 10);
+        let open = GateTiles::believed(
+            &world,
+            &gates,
+            &MapBelief::default().flag("FLAG_CINNABAR_GYM_QUIZ_1", true),
+        );
+        let mut nav = Navigator::new(Arc::clone(&world), dest.clone()).with_gates(&open);
+        match nav.next(&o) {
+            NavStatus::Act(a) => assert!(a.label.contains("Up"), "{}", a.label),
+            _ => panic!("expected a step through the door"),
+        }
+        let shut = GateTiles::believed(
+            &world,
+            &gates,
+            &MapBelief::default().flag("FLAG_CINNABAR_GYM_QUIZ_1", false),
+        );
+        let mut nav = Navigator::new(Arc::clone(&world), dest).with_gates(&shut);
+        assert!(
+            !matches!(nav.next(&o), NavStatus::Act(a) if a.label.contains("Up")),
+            "the closed door is a wall"
+        );
+    }
+
+    /// Oak's trigger at the edge of Pallet Town while its scene is armed:
+    /// no walk goes past it to Route 1, but a walk to the trigger itself
+    /// (to start the scene) ends on it.
+    #[test]
+    fn a_passage_the_belief_knows_closed_is_not_walked_past_but_may_be_stepped_onto() {
+        use pokebot_world::predicate::MapBelief;
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let gates = pokebot_world::gates::derive(&world);
+        let armed = GateTiles::believed(
+            &world,
+            &gates,
+            &MapBelief::default().var("VAR_MAP_SCENE_PALLET_TOWN_OAK", 0),
+        );
+        let o = located("PalletTown", 12, 3);
+        let north = Destination::Tile {
+            map: "Route1".into(),
+            x: 12,
+            y: 30,
+        };
+        let mut nav = Navigator::new(Arc::clone(&world), north.clone()).with_gates(&armed);
+        match nav.next(&o) {
+            NavStatus::Fail(r) => assert!(r.contains("no path"), "{r}"),
+            _ => panic!("expected no way past the trigger"),
+        }
+        // As the map draws it (nothing known): the walk goes north.
+        let mut nav = Navigator::new(Arc::clone(&world), north);
+        assert!(matches!(nav.next(&o), NavStatus::Act(_)));
+        let onto = Destination::Tile {
+            map: "PalletTown".into(),
+            x: 12,
+            y: 1,
+        };
+        let mut nav = Navigator::new(world, onto).with_gates(&armed);
+        match nav.next(&o) {
+            NavStatus::Act(a) => assert!(a.label.contains("(12, 1)"), "{}", a.label),
+            _ => panic!("expected a step toward the trigger"),
+        }
     }
 
     #[test]

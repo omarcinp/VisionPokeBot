@@ -1,31 +1,34 @@
-//! The long-lived wrapper around a goal run: how it starts (a new game
-//! through the opening milestones, CONTINUE from the checkpoint, or the
-//! game as it stands) and how it cycles with `--restart` (finish or fail →
-//! wait → soft reset → CONTINUE → run the goal again, forever), the way
-//! `story --restart` keeps the Switch busy.
+//! The long-lived wrapper around a goal run: how it starts (a new game,
+//! CONTINUE from the checkpoint, or the game as it stands) and how it
+//! cycles with `--restart` (finish or fail → wait → soft reset → CONTINUE
+//! → run the goal again, forever), the way `story --restart` keeps the
+//! Switch busy.
 //!
 //! The cycle logic ([`run`]) is pure: it drives a [`Runner`] and never
-//! touches a device, so it is tested with a fake. The device-bound halves
-//! ([`start_new_game`], [`play_milestones`]) run the proven `NewGameTask`
-//! and `StoryTask` milestones with the same save/retry rules as `story`.
+//! touches a device, so it is tested with a fake. A new game
+//! ([`start_new_game`]) is only the menus (title, intro, names): from the
+//! first overworld frame the goal loop plays, the story included, with
+//! the belief a new game is known to start with ([`new_game_knowledge`]).
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::Duration;
 
 use pokebot_core::Error;
 use pokebot_gamedata::GameData;
 use pokebot_runtime::Runtime;
-use pokebot_state::{GameEvent, PlayerPose};
+use pokebot_state::{
+    GameEvent, Knowledge, PlayerPose, Pocket, PokedexCounts, SavedKnowledge, WorldBelief,
+};
+use pokebot_world::events::{Condition, Effect};
+use pokebot_world::gates::{is_local_flag, is_local_var};
 use pokebot_world::World;
 
 use crate::console::bring_up_game;
-use crate::motion::SyncerHandle;
-use crate::party::{self, Party};
+use crate::party::Party;
 use crate::{
-    checkpoint, ContinueTask, Executor, ExecutorError, Milestone, NewGameConfig, NewGameTask,
-    Progress, SaveGameTask, Starter, StoryTask,
+    checkpoint, ContinueTask, Executor, ExecutorError, NewGameConfig, NewGameTask, Progress,
+    SaveGameTask, Starter,
 };
 
 /// Where a cycle starts from.
@@ -178,15 +181,116 @@ pub fn bedroom() -> PlayerPose {
     }
 }
 
-/// Soft reset, title, intro and names (`NewGameTask`) as `story --new-game`
-/// does; the fresh progress (no milestones, unsaved). The starter is
-/// derived at level 5, as the story will hand it over.
+/// Money a new game starts with (`src/new_game.c`: `SetMoney(…, 3000)`).
+pub const NEW_GAME_MONEY: u32 = 3000;
+
+/// What a new game is known to hold, from the game's rules and the
+/// compiled events alone: no Pokémon, an empty bag, empty PC boxes, ¥3000,
+/// an empty Pokédex, and every story flag and var the scripts name at its
+/// start value (the flags `EventScript_ResetAllMapFlags` sets on, every
+/// other flag off, every var 0), as `Derived` facts. What the scripts do
+/// next is tracked as they run.
+pub fn new_game_knowledge(world: &World) -> SavedKnowledge {
+    let mut k = SavedKnowledge {
+        party: Knowledge::derived(Vec::new(), 0),
+        money: Knowledge::derived(NEW_GAME_MONEY, 0),
+        ..SavedKnowledge::default()
+    };
+    for pocket in Pocket::ALL {
+        k.bag
+            .pockets
+            .insert(pocket, Knowledge::derived(Vec::new(), 0));
+    }
+    for b in k.pc.boxes.iter_mut() {
+        *b = Knowledge::derived(Vec::new(), 0);
+    }
+    k.pokedex.counts = Knowledge::derived(
+        PokedexCounts {
+            seen: Some(0),
+            caught: 0,
+        },
+        0,
+    );
+    k.world = story_start(world);
+    k
+}
+
+/// Every story flag and var the compiled events name, at its new-game
+/// value.
+fn story_start(world: &World) -> WorldBelief {
+    let mut belief = WorldBelief::default();
+    let Some(events) = world.events() else {
+        return belief;
+    };
+    let initial = &events.initial.set;
+    let mut flag = |name: &str| {
+        if !is_local_flag(name) && name.starts_with("FLAG_") {
+            let on = initial.iter().any(|f| f == name);
+            belief
+                .flags
+                .entry(name.to_owned())
+                .or_insert_with(|| Knowledge::derived(on, 0));
+        }
+    };
+    let mut vars: Vec<String> = Vec::new();
+    let mut var = |name: &str| {
+        if !is_local_var(name) && name.starts_with("VAR_") {
+            vars.push(name.to_owned());
+        }
+    };
+    for script in events.scripts.values() {
+        for path in &script.paths {
+            for c in &path.when {
+                match c {
+                    Condition::Flag { flag: f, .. } => flag(f),
+                    Condition::Var { var: v, .. } => var(v),
+                    _ => {}
+                }
+            }
+            for e in &path.does {
+                match e {
+                    Effect::Set { set: f } | Effect::Clear { clear: f } => flag(f),
+                    Effect::Var { var: v, .. } => var(v),
+                    _ => {}
+                }
+            }
+        }
+    }
+    for t in &events.triggers {
+        for c in &t.when {
+            if let Condition::Var { var: v, .. } = c {
+                var(v);
+            }
+        }
+    }
+    for ms in events.map_scripts.values() {
+        for f in ms.on_frame.iter().chain(&ms.on_warp) {
+            var(&f.var);
+        }
+    }
+    for o in &events.objects {
+        if let Some(f) = &o.hidden_by {
+            flag(f);
+        }
+    }
+    for v in vars {
+        belief
+            .vars
+            .entry(v)
+            .or_insert_with(|| Knowledge::derived(0, 0));
+    }
+    belief
+}
+
+/// Soft reset, title, intro and names (`NewGameTask`, menu input only),
+/// then the belief a new game starts with ([`new_game_knowledge`]); the
+/// fresh progress (unsaved). Nothing of the story is played here.
 pub fn start_new_game(
     runtime: &mut Runtime,
     executor: &Executor,
     config: &NewGameConfig,
     starter: Starter,
-    data: &GameData,
+    world: &World,
     stop: &AtomicBool,
     snapshots: Option<&Path>,
 ) -> Result<Progress, ExecutorError> {
@@ -197,9 +301,8 @@ pub fn start_new_game(
     })?;
     executor.run(runtime, &mut task, stop)?;
     runtime.set_pose_hint(bedroom());
-    runtime.emit(GameEvent::PartyMonDerived {
-        slot: 0,
-        mon: Box::new(party::starter_mon(data, starter.species(), 5)),
+    runtime.emit(GameEvent::CheckpointRestored {
+        knowledge: Box::new(new_game_knowledge(world)),
     })?;
     Ok(Progress {
         player_name: config.player_name.clone(),
@@ -280,109 +383,41 @@ pub fn save_checkpoint(
     Ok(())
 }
 
-/// What [`play_milestones`] runs with.
-pub struct MilestoneOptions<'a> {
-    pub world: Arc<World>,
-    pub data: Arc<GameData>,
-    pub syncer: SyncerHandle,
-    /// Save after every milestone and write the checkpoint.
-    pub save_game: bool,
-    pub progress_path: &'a Path,
-    /// Tries per milestone; a failed attempt reloads the last save.
-    pub attempts: u32,
-    pub console_snapshots: Option<&'a Path>,
-    /// Told about every failed attempt (milestone, reason): debug bundles.
-    pub on_failure: &'a mut dyn FnMut(&Runtime, &str, &str),
-}
-
-/// Plays `milestones` one at a time through `StoryTask`, the way `story`
-/// does: save after each, and on a failed attempt (stuck, fainted, …)
-/// reload the last save and retry that milestone. Milestones already in
-/// `progress` are skipped.
-pub fn play_milestones(
-    runtime: &mut Runtime,
-    executor: &Executor,
-    opts: &mut MilestoneOptions<'_>,
-    milestones: Vec<Milestone>,
-    progress: &mut Progress,
-    stop: &AtomicBool,
-) -> Result<(), ExecutorError> {
-    let state_path = checkpoint::path_for(opts.progress_path);
-    for milestone in milestones {
-        if progress.milestones.contains(&milestone.name) {
-            continue;
-        }
-        let mut attempt = 1;
-        loop {
-            let mut task = StoryTask::new(Arc::clone(&opts.world), vec![milestone.clone()])
-                .with_data(Arc::clone(&opts.data))
-                .with_syncer(Arc::clone(&opts.syncer));
-            match executor.run(runtime, &mut task, stop) {
-                Ok(_) => {
-                    progress.milestones.push(milestone.name.clone());
-                    break;
-                }
-                Err(ExecutorError::Stopped) => return Err(ExecutorError::Stopped),
-                Err(e) => {
-                    (opts.on_failure)(runtime, &milestone.name, &e.to_string());
-                    let saved = Progress::load(opts.progress_path).ok();
-                    let Some(saved) = saved.filter(|_| attempt < opts.attempts) else {
-                        let why = if attempt >= opts.attempts {
-                            "out of attempts"
-                        } else {
-                            "no save to reload"
-                        };
-                        return Err(ExecutorError::TaskFailed {
-                            task: milestone.name.clone(),
-                            reason: format!("{e} ({why})"),
-                        });
-                    };
-                    attempt += 1;
-                    runtime.error(format!(
-                        "{}: {e} — reloading the last save (attempt {attempt}/{})",
-                        milestone.name, opts.attempts
-                    ));
-                    continue_game(
-                        runtime,
-                        executor,
-                        &saved,
-                        &state_path,
-                        &opts.data,
-                        stop,
-                        opts.console_snapshots,
-                    )?;
-                    *progress = saved;
-                }
-            }
-        }
-        if opts.save_game {
-            save_checkpoint(runtime, executor, progress, opts.progress_path, stop)?;
-            let party = Party::from_state(runtime.state());
-            runtime.info(format!(
-                "checkpoint after {}: saved in-game at {}; party {}",
-                milestone.name,
-                progress
-                    .saved_at
-                    .as_ref()
-                    .map_or("?".into(), |p| p.to_string()),
-                party
-                    .members
-                    .iter()
-                    .map(|m| format!("{} Lv{}", m.display_name(), m.level))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
     use super::*;
+
+    /// What a new game starts with, from the rules and the compiled events:
+    /// nothing held, ¥3000, the story at its start (the flags the new-game
+    /// script sets on, the rest off, every var 0).
+    #[test]
+    fn a_new_game_starts_known() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let Some(events) = world.events() else { return };
+        if events.initial.set.is_empty() {
+            return;
+        }
+        let k = new_game_knowledge(&world);
+        assert_eq!(k.party.value.as_deref(), Some(&[][..]));
+        assert_eq!(k.money.value, Some(NEW_GAME_MONEY));
+        assert!(k
+            .bag
+            .pockets
+            .values()
+            .all(|p| p.value.as_deref() == Some(&[][..])));
+        let w = &k.world;
+        assert_eq!(w.var("VAR_MAP_SCENE_PALLET_TOWN_OAK").value, Some(0));
+        assert_eq!(w.flag("FLAG_SYS_POKEDEX_GET").value, Some(false));
+        assert_eq!(w.flag("FLAG_HIDE_OAK_IN_HIS_LAB").value, Some(true));
+        assert_eq!(w.flag("FLAG_BADGE01_GET").value, Some(false));
+        // Script-local state is not the save's.
+        assert!(!w.vars.keys().any(|v| v.starts_with("VAR_TEMP_")));
+        assert!(!w.flags.keys().any(|f| f.starts_with("FLAG_TEMP_")));
+    }
 
     /// A scripted runner: the ends of its cycles in order, whether a
     /// checkpoint exists after each, and everything it was asked to do.

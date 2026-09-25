@@ -9,11 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use pokebot_agent::checkpoint;
 use pokebot_agent::goal::{self, GoalOptions, GoalReport, DEFAULT_MAX_REPLANS};
-use pokebot_agent::goal_session::{self, CycleEnd, MilestoneOptions, Runner, Session, Start};
+use pokebot_agent::goal_session::{self, CycleEnd, Runner, Session, Start};
 use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};
-use pokebot_agent::{
-    opening, Executor, ExecutorError, NewGameConfig, Progress, Starter, SyncerHandle,
-};
+use pokebot_agent::{Executor, ExecutorError, NewGameConfig, Progress, Starter};
 use pokebot_core::Error;
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
@@ -68,9 +66,10 @@ pub struct GoalArgs {
     /// Continue the saved game (title → CONTINUE) and restore its checkpoint
     #[arg(long, conflicts_with = "new_game")]
     pub r#continue: bool,
-    /// Start with a new game (soft reset, intro, names), play the opening
-    /// milestones (bedroom → Mom → Oak → starter → rival → parcel) through
-    /// the story, save, and only then run the goal. Overwrites the save.
+    /// Start with a new game (soft reset, intro, names) and run the goal
+    /// from the first overworld frame: the story's opening (Oak, the
+    /// starter, the parcel) is planned like everything else. Overwrites the
+    /// save.
     #[arg(long, requires = "save_game")]
     pub new_game: bool,
     #[arg(long, value_enum, default_value_t = GenderArg::Boy)]
@@ -81,11 +80,10 @@ pub struct GoalArgs {
     /// The rival's name (GREEN, GARY, KAZ, TORU from the list; else typed)
     #[arg(long, default_value = "GREEN")]
     pub rival: String,
+    /// The Pokémon preferred where the story offers a choice (the starter):
+    /// the planner prices the script paths giving another species higher
     #[arg(long, value_enum, default_value_t = Starter::Bulbasaur)]
     pub starter: Starter,
-    /// Tries per opening milestone; a failed attempt reloads the last save
-    #[arg(long, default_value_t = 5)]
-    pub attempts: u32,
     /// Never stop: when the goal run ends (satisfied or not) or fails, wait
     /// --restart-wait seconds (still observing), then soft reset, CONTINUE
     /// the last save and run the goal again. Keeps the Switch in use.
@@ -196,6 +194,7 @@ impl PlannerData {
             expensive_secs: args.expensive_secs,
             budget_s: args.plan_budget_secs,
             supported_probes: Some(Toolbox::supported_probes()),
+            prefer_species: vec![args.starter.species().to_owned()],
             ..PlanOptions::default()
         };
         Ok(PlannerData {
@@ -392,7 +391,6 @@ fn execute(
         runtime,
         executor,
         telemetry,
-        syncer,
         session_dir,
         state_path: args.state_path(),
         progress_path,
@@ -425,7 +423,7 @@ fn execute(
 }
 
 /// One goal cycle against the devices: bring the game to where the cycle
-/// starts (a new game and the opening milestones, CONTINUE, or as it
+/// starts (a new game's menus, CONTINUE, or as it
 /// stands), run the goal loop, save at the end.
 struct CliRunner<'a> {
     args: &'a GoalArgs,
@@ -434,7 +432,6 @@ struct CliRunner<'a> {
     runtime: Runtime,
     executor: Executor,
     telemetry: Option<Telemetry>,
-    syncer: SyncerHandle,
     session_dir: Option<PathBuf>,
     progress_path: PathBuf,
     state_path: PathBuf,
@@ -448,53 +445,17 @@ impl CliRunner<'_> {
         let snapshots = Some(Path::new(CONSOLE_SNAPSHOTS));
         match start {
             Start::NewGame => {
-                let mut progress = goal_session::start_new_game(
+                let progress = goal_session::start_new_game(
                     &mut self.runtime,
                     &self.executor,
                     &self.new_game,
                     self.args.starter,
-                    &self.pd.data,
+                    &self.pd.world,
                     self.stop,
                     snapshots,
                 )?;
-                let bundles = self.args.bundles.clone();
-                let mut on_failure = |runtime: &Runtime, milestone: &str, reason: &str| {
-                    runtime.error(format!("NOTIFY retry: {milestone}: {reason}"));
-                    match write_bundle(runtime, &bundles, milestone, reason) {
-                        Ok(dir) => runtime.error(format!("debug bundle: {}", dir.display())),
-                        Err(e) => runtime.error(format!("debug bundle: {e:#}")),
-                    }
-                };
-                let mut opts = MilestoneOptions {
-                    world: Arc::clone(&self.pd.world),
-                    data: Arc::clone(&self.pd.data),
-                    syncer: Arc::clone(&self.syncer),
-                    save_game: self.args.save_game,
-                    progress_path: &self.progress_path,
-                    attempts: self.args.attempts,
-                    console_snapshots: snapshots,
-                    on_failure: &mut on_failure,
-                };
-                self.runtime.info(format!(
-                    "new game done: playing the opening milestones ({}) before the goal",
-                    opening(self.args.starter)
-                        .iter()
-                        .map(|m| m.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                goal_session::play_milestones(
-                    &mut self.runtime,
-                    &self.executor,
-                    &mut opts,
-                    opening(self.args.starter),
-                    &mut progress,
-                    self.stop,
-                )?;
-                self.runtime.info(format!(
-                    "opening done ({}); handing over to the goal",
-                    progress.milestones.join(", ")
-                ));
+                self.runtime
+                    .info("new game done: the goal loop plays from the first overworld frame");
                 Ok(Some(progress))
             }
             Start::Continue => {
@@ -565,7 +526,13 @@ impl CliRunner<'_> {
             }));
         }
         ctx = ctx.with_toolbox(toolbox);
-        pokebot_agent::tools::probe::audit_core(&mut ctx)?;
+        if start == Start::NewGame {
+            // Nothing to read: a new game's party, bag and money are known
+            // (and there is no POKéMON entry in the Start menu yet).
+            ctx.scheduler.enabled = true;
+        } else {
+            pokebot_agent::tools::probe::audit_core(&mut ctx)?;
+        }
         let on_status = self.telemetry.clone().map(|t| {
             Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
         });

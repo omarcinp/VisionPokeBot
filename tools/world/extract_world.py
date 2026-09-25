@@ -301,7 +301,12 @@ def main():
                 }
                 for i, e in enumerate(m.get("object_events") or [])
             ],
-            "signs": [{"x": e["x"], "y": e["y"], "script": e.get("script")} for e in m.get("bg_events") or []],
+            # `facing`: the direction the player must face to read it
+            # (`BG_EVENT_PLAYER_FACING_*`; ANY for most signs).
+            "signs": [
+                {"x": e["x"], "y": e["y"], "script": e.get("script"), "facing": e.get("player_facing_dir")}
+                for e in m.get("bg_events") or []
+            ],
             "triggers": [
                 {"x": e["x"], "y": e["y"], "var": e.get("var"), "value": e.get("var_value"), "script": e.get("script")}
                 for e in m.get("coord_events") or []

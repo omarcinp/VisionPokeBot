@@ -10,17 +10,23 @@ use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, MenuObservation, Observation};
+use pokebot_state::{GameEvent, MenuObservation, Observation, PlayerPose, ScreenState};
 use pokebot_world::dialogue::Dialogue;
 use pokebot_world::events::{Condition, Effect, Script, Val};
+use pokebot_world::predicate::{BeliefView, Truth};
+use pokebot_world::route::requirement_of;
 use pokebot_world::World;
 
-use super::effects::{path_events, path_labels, LabelIndex};
+use super::effects::{chained_scenes, path_events, path_labels, LabelIndex};
+use super::go::{GoStep, NavParts};
+use super::scene::SceneStep;
 use super::talk::TalkStep;
 use super::{
     progress, Answer, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
 };
+use crate::belief_view::StateBelief;
+use crate::nav::Destination;
 use crate::new_game::{advance_or_wait, select};
 use crate::track::TextTracker;
 use crate::{Action, Decision, Expectation, Outcome};
@@ -167,13 +173,33 @@ pub fn policy_answer(script: Option<&Script>, answered: &[bool]) -> Answer {
 /// consistent path printing the most of them (ties: the lowest index).
 /// With no labels recognised, the only consistent path, if there is one.
 pub fn resolve_path(script: &Script, labels: &[String], answered: &[bool]) -> Option<usize> {
+    resolve_path_in(script, labels, answered, None)
+}
+
+/// [`resolve_path`] among the paths whose conditions `belief` doesn't know
+/// to be false (the rival's battle path for the starter the player took).
+pub fn resolve_path_in(
+    script: &Script,
+    labels: &[String],
+    answered: &[bool],
+    belief: Option<&dyn BeliefView>,
+) -> Option<usize> {
+    let possible = |p: &pokebot_world::events::ScriptPath| {
+        let Some(belief) = belief else { return true };
+        match requirement_of(&p.when) {
+            Some(req) => !req.iter().any(|q| belief.eval(q) == Truth::False),
+            None => true,
+        }
+    };
     let consistent: Vec<(usize, usize)> = script
         .paths
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             let branches = question_branches(&p.when);
-            branches.len() >= answered.len() && branches[..answered.len()] == *answered
+            branches.len() >= answered.len()
+                && branches[..answered.len()] == *answered
+                && possible(p)
         })
         .map(|(i, p)| {
             let printed = path_labels(&p.does);
@@ -229,6 +255,10 @@ pub struct Conversation {
     pub unknown: Option<(u64, String)>,
     /// An item was received in this conversation.
     pub gained_item: bool,
+    /// Where the player stood when it started: tells apart scripts that
+    /// print the same text (the three tiles of one trigger, one map's
+    /// scene and another's).
+    pub near: Option<PlayerPose>,
 }
 
 impl Conversation {
@@ -258,7 +288,14 @@ impl Conversation {
             unknown_logged: false,
             unknown: None,
             gained_item: false,
+            near: None,
         }
+    }
+
+    /// Started where the player stands at `pose`.
+    pub fn near(mut self, pose: Option<PlayerPose>) -> Self {
+        self.near = pose;
+        self
     }
 
     fn script_data(&self) -> Option<&Script> {
@@ -333,20 +370,82 @@ impl Conversation {
         if self.recognised.is_empty() {
             return None;
         }
-        match index.scripts_for(&self.recognised).as_slice() {
+        let candidates = index.scripts_for(&self.recognised);
+        match candidates.as_slice() {
             [one] => Some(one.clone()),
+            [] => None,
+            _ => self.nearest_script(&candidates),
+        }
+    }
+
+    /// Of scripts printing the same text, the one where the player is: a
+    /// trigger under (or next to) the tile the conversation started on,
+    /// else the only one on the player's map.
+    fn nearest_script(&self, candidates: &[String]) -> Option<String> {
+        let near = self.near.as_ref()?;
+        let events = self.world.events()?;
+        let close = |(x, y): (i32, i32)| (x - near.x).abs() + (y - near.y).abs() <= 1;
+        let at: Vec<&String> = candidates
+            .iter()
+            .filter(|label| {
+                events.triggers.iter().any(|t| {
+                    t.map == near.map
+                        && t.script.as_deref() == Some(label.as_str())
+                        && close((t.x, t.y))
+                })
+            })
+            .collect();
+        if let [one] = at.as_slice() {
+            // Under the player first, then beside.
+            return Some((*one).clone());
+        }
+        if at.len() > 1 {
+            let under: Vec<&&String> = at
+                .iter()
+                .filter(|label| {
+                    events.triggers.iter().any(|t| {
+                        t.map == near.map
+                            && t.script.as_deref() == Some(label.as_str())
+                            && (t.x, t.y) == (near.x, near.y)
+                    })
+                })
+                .collect();
+            if let [one] = under.as_slice() {
+                return Some((**one).clone());
+            }
+        }
+        let on_map: Vec<&String> = candidates
+            .iter()
+            .filter(|label| {
+                events
+                    .script(label)
+                    .and_then(|s| s.map.as_deref())
+                    .is_some_and(|m| m == near.map)
+            })
+            .collect();
+        match on_map.as_slice() {
+            [one] => Some((*one).clone()),
             _ => None,
         }
     }
 
     /// The (script, path) that ran, if it can be told.
     pub fn resolved(&self, index: &LabelIndex) -> Option<(String, usize)> {
+        self.resolved_in(index, None)
+    }
+
+    /// [`Conversation::resolved`] among the paths `belief` allows.
+    pub fn resolved_in(
+        &self,
+        index: &LabelIndex,
+        belief: Option<&dyn BeliefView>,
+    ) -> Option<(String, usize)> {
         let script = self.resolved_script(index)?;
         if let Some(p) = self.path {
             return Some((script, p));
         }
         let data = self.world.events()?.script(&script)?;
-        let path = resolve_path(data, &self.recognised, &self.answered)?;
+        let path = resolve_path_in(data, &self.recognised, &self.answered, belief)?;
         Some((script, path))
     }
 }
@@ -452,7 +551,11 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         return Ok(());
     };
     let index = LabelIndex::build_for(events, &conversation.recognised);
-    let Some((script, path)) = conversation.resolved(&index) else {
+    let resolved = {
+        let belief = StateBelief(ctx.state());
+        conversation.resolved_in(&index, Some(&belief))
+    };
+    let Some((script, path)) = resolved else {
         if !conversation.recognised.is_empty() {
             ctx.emit(progress(
                 "Dialogue",
@@ -464,31 +567,44 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         }
         return Ok(());
     };
+    record_path(ctx, &script, path)
+}
+
+/// Records that path `path` of `script` ran, with its effects, and then
+/// the scenes it sets off by itself ([`chained_scenes`]).
+pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Result<(), ToolError> {
     let world = Arc::clone(&ctx.world);
+    let Some(events) = world.events() else {
+        return Ok(());
+    };
     let map_name = |id: &str| world.name_of(id).map(str::to_owned);
-    let (learned, log) = path_events(
-        events,
-        &script,
-        path,
-        ctx.state(),
-        &ctx.data,
-        world.places(),
-        &map_name,
-    );
-    ctx.emit(progress(
-        "Dialogue",
-        format!(
-            "ran {script}[{path}]: {} events{}",
-            learned.len() - 1,
-            if log.is_empty() {
-                String::new()
-            } else {
-                format!("; {}", log.join("; "))
-            }
-        ),
-    ))?;
-    for event in learned {
-        ctx.emit(event)?;
+    let mut runs = vec![(script.to_owned(), path)];
+    runs.extend(chained_scenes(events, &map_name, script, path));
+    for (script, path) in runs {
+        let (learned, log) = path_events(
+            events,
+            &script,
+            path,
+            ctx.state(),
+            &ctx.data,
+            world.places(),
+            &map_name,
+        );
+        ctx.emit(progress(
+            "Dialogue",
+            format!(
+                "ran {script}[{path}]: {} events{}",
+                learned.len() - 1,
+                if log.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", log.join("; "))
+                }
+            ),
+        ))?;
+        for event in learned {
+            ctx.emit(event)?;
+        }
     }
     Ok(())
 }
@@ -529,8 +645,132 @@ impl LabelIndex {
     }
 }
 
-/// Follows the conversation on screen as `script` (spec §7.2 `Dialogue`).
+/// Runs compiled script `script` (spec §7.2 `Dialogue`), however it
+/// starts, and follows it to its end (dialogue, questions, battles, the
+/// forced movement of a scene):
+///
+/// | kind | how it starts |
+/// |---|---|
+/// | `object` | face the object and press A |
+/// | `sign` | face the sign (from the side it is read from) and press A |
+/// | `trigger` | step onto the nearest of its tiles |
+/// | `map` | enter the map (an `on_frame` scene plays on arrival) |
+///
+/// A conversation already on screen is followed as the script. A map's
+/// scene that already ran (seen and recorded while walking in) is done.
 pub struct DialogueTool;
+
+/// Where a script is started from, by its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// Press A facing the object.
+    Object { map: String, object: u32 },
+    /// Press A facing the sign at `(x, y)`, from `facing`'s side only.
+    Sign {
+        map: String,
+        x: i32,
+        y: i32,
+        facing: Option<pokebot_state::Direction>,
+    },
+    /// Step onto one of the tiles.
+    Trigger { map: String, tiles: Vec<(i32, i32)> },
+    /// Be on the map.
+    Map { map: String },
+}
+
+/// How `script` is started, from the world data; `None` for scripts no
+/// map places (shared helpers).
+pub fn start_of(world: &World, script: &str, pose: Option<&PlayerPose>) -> Option<Start> {
+    let events = world.events()?;
+    let s = events.script(script)?;
+    let map = s.map.clone()?;
+    let dist = |(x, y): (i32, i32)| {
+        pose.filter(|p| p.map == map)
+            .map_or(0, |p| (p.x - x).abs() + (p.y - y).abs())
+    };
+    match s.kind.as_str() {
+        "object" => Some(Start::Object {
+            map,
+            object: s.local_id?,
+        }),
+        "sign" => {
+            let m = world.map(&map)?;
+            let sign = m
+                .signs
+                .iter()
+                .filter(|g| g.script.as_deref() == Some(script))
+                .min_by_key(|g| (dist((g.x, g.y)), g.x, g.y))?;
+            Some(Start::Sign {
+                map: map.clone(),
+                x: sign.x,
+                y: sign.y,
+                facing: sign.facing_dir(),
+            })
+        }
+        "trigger" => {
+            let mut tiles: Vec<(i32, i32)> = events
+                .triggers
+                .iter()
+                .filter(|t| t.map == map && t.script.as_deref() == Some(script))
+                .map(|t| (t.x, t.y))
+                .collect();
+            tiles.sort_by_key(|&t| (dist(t), t));
+            tiles.dedup();
+            (!tiles.is_empty()).then_some(Start::Trigger { map, tiles })
+        }
+        "map" => Some(Start::Map { map }),
+        _ => None,
+    }
+}
+
+/// Walks to where a trigger or a map's scene starts, then follows the
+/// scene. The walk ends early when the scene starts on the way (the
+/// trigger fired, the map faded in).
+pub struct ScriptStep {
+    approach: Option<GoStep>,
+    pub scene: SceneStep,
+}
+
+impl ScriptStep {
+    pub fn new(approach: Option<GoStep>, scene: SceneStep) -> Self {
+        Self { approach, scene }
+    }
+}
+
+impl ToolStep for ScriptStep {
+    fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+        let o = ctx.observation;
+        if let Some(go) = &mut self.approach {
+            let started = o.dialogue.is_some()
+                || o.battle.is_some()
+                || o.screen.value == ScreenState::Transition;
+            if !started {
+                match go.next(ctx) {
+                    Decision::Done(_) => {
+                        // There: the scene starts by itself.
+                        self.approach = None;
+                        return Decision::Wait("at the script's start".into());
+                    }
+                    d => return d,
+                }
+            }
+            self.approach = None;
+            self.scene.happened = true;
+        }
+        self.scene.next(ctx)
+    }
+
+    fn on_outcome(&mut self, action: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
+        match &mut self.approach {
+            Some(go) => go.on_outcome(action, outcome, ctx),
+            None => self.scene.on_outcome(action, outcome, ctx),
+        }
+    }
+
+    fn expects(&self) -> Expects {
+        Expects::DIALOGUE
+    }
+}
 
 impl Tool for DialogueTool {
     fn name(&self) -> &str {
@@ -550,37 +790,93 @@ impl Tool for DialogueTool {
         else {
             return ToolOutcome::failed("not a RunScript");
         };
-        let conversation = Conversation::new(
-            Arc::clone(&ctx.world),
-            Arc::clone(&ctx.data),
-            Some(script.clone()),
-            *path,
-            answers.clone(),
-        );
-        // An object's script starts by talking to it: approach and press A
-        // unless its conversation is already on screen.
-        let on_screen = ctx.observation().is_some_and(|o| o.dialogue.is_some());
-        let object = ctx
-            .world
-            .events()
-            .and_then(|e| e.script(script))
-            .filter(|s| s.kind == "object")
-            .and_then(|s| Some((s.map.clone()?, s.local_id?)));
-        if let (false, Some((map, object))) = (on_screen, object) {
-            let mut step = match TalkStep::new(ctx, &map, object, answers.clone()) {
-                Ok(step) => step,
-                Err(e) => return Err::<(), _>(e).into(),
-            };
-            step.conversation = conversation;
-            return ctx
-                .drive(&mut step)
-                .and_then(|_| finish(ctx, &step.conversation))
-                .into();
+        let outer = ctx.running_script.replace(script.clone());
+        let result = run_script(ctx, script, *path, answers);
+        ctx.running_script = outer;
+        result.into()
+    }
+}
+
+/// [`DialogueTool`]'s work.
+fn run_script(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: Option<usize>,
+    answers: &[Answer],
+) -> Result<(), ToolError> {
+    let pose = ctx.pose();
+    let conversation = Conversation::new(
+        Arc::clone(&ctx.world),
+        Arc::clone(&ctx.data),
+        Some(script.to_owned()),
+        path,
+        answers.to_vec(),
+    )
+    .near(pose.clone());
+    let on_screen = ctx.observation().is_some_and(|o| o.dialogue.is_some());
+    let start = start_of(&ctx.world, script, pose.as_ref());
+    if on_screen || start.is_none() {
+        let mut scene = SceneStep::new(conversation);
+        ctx.drive(&mut scene)?;
+        return finish(ctx, &scene.conversation);
+    }
+    match start.expect("checked above") {
+        Start::Object { map, object } => {
+            let mut step = TalkStep::new(ctx, &map, object, answers.to_vec())?.with_scene();
+            step.scene.conversation = conversation;
+            ctx.drive(&mut step)?;
+            finish(ctx, step.conversation())
         }
-        let mut conversation = conversation;
-        ctx.drive(&mut conversation)
-            .and_then(|_| finish(ctx, &conversation))
-            .into()
+        Start::Sign { map, x, y, facing } => {
+            let mut step = TalkStep::toward(
+                ctx,
+                &map,
+                (x, y),
+                facing,
+                Some(script.to_owned()),
+                answers.to_vec(),
+            )
+            .with_scene();
+            step.scene.conversation = conversation;
+            ctx.drive(&mut step)?;
+            finish(ctx, step.conversation())
+        }
+        Start::Trigger { map, tiles } => {
+            let (x, y) = tiles[0];
+            let go = GoStep::with(
+                &NavParts::of(ctx),
+                Destination::Tile {
+                    map: map.clone(),
+                    x,
+                    y,
+                },
+            );
+            let mut step = ScriptStep::new(Some(go), SceneStep::new(conversation));
+            ctx.drive(&mut step)?;
+            let mut conversation = step.scene.conversation;
+            // The tile it fired on tells the trigger's paths apart.
+            conversation.near = Some(PlayerPose { map, x, y });
+            finish(ctx, &conversation)
+        }
+        Start::Map { map } => {
+            if let Some(p) = path {
+                let ran = ctx
+                    .state()
+                    .world
+                    .paths_run
+                    .iter()
+                    .any(|(s, i)| s == script && *i == p);
+                if ran {
+                    ctx.info(format!("{script}[{p}] already played on arrival"));
+                    return Ok(());
+                }
+            }
+            let here = pose.as_ref().is_some_and(|p| p.map == map);
+            let approach = (!here).then(|| GoStep::to_map(&NavParts::of(ctx), &map));
+            let mut step = ScriptStep::new(approach, SceneStep::new(conversation));
+            ctx.drive(&mut step)?;
+            finish(ctx, &step.scene.conversation)
+        }
     }
 }
 
@@ -620,6 +916,214 @@ mod tests {
 
     fn say(label: &str) -> Effect {
         Effect::Say { say: label.into() }
+    }
+
+    fn world_and_data() -> Option<(Arc<World>, Arc<GameData>)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let world = World::load(&dir).ok()?;
+        world.events()?;
+        let data = GameData::load(dir.join("gamedata.json")).ok()?;
+        Some((Arc::new(world), Arc::new(data)))
+    }
+
+    #[test]
+    fn scripts_start_where_their_kind_says() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let near = PlayerPose {
+            map: "PalletTown".into(),
+            x: 13,
+            y: 5,
+        };
+        // A trigger: its tiles, the nearest first.
+        assert_eq!(
+            start_of(&world, "PalletTown_EventScript_OakTriggerLeft", Some(&near)),
+            Some(Start::Trigger {
+                map: "PalletTown".into(),
+                tiles: vec![(12, 1)]
+            })
+        );
+        let lab = "PalletTown_ProfessorOaksLab";
+        let at_exit = PlayerPose {
+            map: lab.into(),
+            x: 7,
+            y: 9,
+        };
+        match start_of(
+            &world,
+            "PalletTown_ProfessorOaksLab_EventScript_LeaveStarterSceneTrigger",
+            Some(&at_exit),
+        ) {
+            Some(Start::Trigger { tiles, .. }) => assert_eq!(tiles[0], (7, 8)),
+            other => panic!("{other:?}"),
+        }
+        // A map's entry scene: be on the map.
+        assert_eq!(
+            start_of(&world, "ViridianCity_Mart_EventScript_ParcelScene", None),
+            Some(Start::Map {
+                map: "ViridianCity_Mart".into()
+            })
+        );
+        // An object: talk to it.
+        assert_eq!(
+            start_of(
+                &world,
+                "PalletTown_ProfessorOaksLab_EventScript_ProfOak",
+                None
+            ),
+            Some(Start::Object {
+                map: lab.into(),
+                object: 4
+            })
+        );
+        // A sign read from one side only: faced from there.
+        let events = world.events().unwrap();
+        let (label, sign) = world
+            .maps()
+            .flat_map(|m| m.signs.iter().map(move |g| (m, g)))
+            .filter(|(_, g)| g.facing_dir() == Some(pokebot_state::Direction::Up))
+            .filter_map(|(m, g)| {
+                let label = g.script.clone()?;
+                (events.script(&label)?.kind == "sign"
+                    && m.signs.iter().filter(|o| o.script == g.script).count() == 1)
+                    .then(|| (label, g.clone()))
+            })
+            .next()
+            .expect("a sign read facing north");
+        match start_of(&world, &label, None) {
+            Some(Start::Sign { x, y, facing, .. }) => {
+                assert_eq!((x, y), (sign.x, sign.y));
+                assert_eq!(facing, Some(pokebot_state::Direction::Up));
+            }
+            other => panic!("{label}: {other:?}"),
+        }
+    }
+
+    /// `RunScript` of a trigger: walk onto its tile, then follow the scene
+    /// it starts (dialogue, then an NPC walking with no text, then more
+    /// dialogue) until the player has been in control and the picture at
+    /// rest for a while; the walk between the pages is not the end.
+    #[test]
+    fn a_trigger_is_stepped_onto_and_its_scene_followed_to_the_end() {
+        use pokebot_state::{
+            DialogueKind, DialogueObservation, FrameMetrics, GameState, Observed, PoseObservation,
+            Region,
+        };
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let parts = NavParts {
+            world: Arc::clone(&world),
+            gone: Default::default(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+        };
+        let go = GoStep::with(
+            &parts,
+            Destination::Tile {
+                map: "PalletTown".into(),
+                x: 12,
+                y: 1,
+            },
+        );
+        let conversation = Conversation::new(
+            Arc::clone(&world),
+            Arc::clone(&data),
+            Some("PalletTown_EventScript_OakTriggerLeft".into()),
+            Some(0),
+            Vec::new(),
+        );
+        let mut step = ScriptStep::new(Some(go), SceneStep::new(conversation));
+        let state = GameState::default();
+        let obs = |frame: u64, y: i32, text: Option<&str>, changed: u32| {
+            let mut o = Observation::bare(
+                frame,
+                Observed {
+                    value: if text.is_some() {
+                        ScreenState::Dialogue
+                    } else {
+                        ScreenState::Overworld
+                    },
+                    detector: "test".into(),
+                },
+                FrameMetrics {
+                    mean_luma: 100,
+                    changed_pixels: changed,
+                },
+            );
+            o.player = Some(PoseObservation {
+                pose: PlayerPose {
+                    map: "PalletTown".into(),
+                    x: 12,
+                    y,
+                },
+                score: 1000,
+            });
+            o.dialogue = text.map(|t| DialogueObservation {
+                kind: DialogueKind::MessageBox,
+                region: Region::new(0, 112, 240, 48),
+                waiting_for_input: true,
+                arrow: None,
+                stable_frames: 60,
+                text_cells: Vec::new(),
+                lines: vec![t.to_owned()],
+                help: false,
+            });
+            o
+        };
+        let mut events = Vec::new();
+        let mut next = |step: &mut ScriptStep, o: &Observation, quiet: u32| {
+            step.next(&mut StepContext {
+                observation: o,
+                state: &state,
+                events: &mut events,
+                quiet_frames: quiet,
+                frame: None,
+                learned: &[],
+            })
+        };
+        // One tile below the trigger: step up onto it.
+        match next(&mut step, &obs(100, 2, None, 0), 500) {
+            // Facing unknown: a turn toward the trigger, or the step.
+            Decision::Act(a) => assert!(a.label.contains("to (12, 1)"), "{}", a.label),
+            Decision::Wait(r) | Decision::Done(r) | Decision::Fail(r) => panic!("{r}"),
+        }
+        // On the trigger: the walk is over, the scene starts by itself.
+        assert!(matches!(
+            next(&mut step, &obs(120, 1, None, 0), 500),
+            Decision::Wait(_)
+        ));
+        assert!(step.approach.is_none());
+        // Oak's first line: read on two frames, then advanced.
+        let advanced = (130..145).any(|f| {
+            matches!(
+                next(&mut step, &obs(f, 1, Some("OAK: Hey! Wait!"), 0), 0),
+                Decision::Act(a) if a.label == "advance text"
+            )
+        });
+        assert!(advanced);
+        // Oak walks up, no text, for 200 frames: the scene goes on.
+        for f in (140..340).step_by(4) {
+            assert!(
+                matches!(next(&mut step, &obs(f, 1, None, 200), 0), Decision::Wait(_)),
+                "frame {f}"
+            );
+        }
+        // Then a flower animates now and then while nothing else moves:
+        // rest, and the scene ends after SCENE_STILL_FRAMES.
+        let mut done = None;
+        for f in (340..700).step_by(4) {
+            let changed = if f % 16 == 0 { 400 } else { 0 };
+            if let Decision::Done(d) = next(&mut step, &obs(f, 1, None, changed), 0) {
+                done = Some(f);
+                assert!(d.contains("scene over"), "{d}");
+                break;
+            }
+        }
+        let done = done.expect("the scene ends");
+        assert!(done >= 340 + super::super::scene::SCENE_STILL_FRAMES as u64);
     }
 
     #[test]

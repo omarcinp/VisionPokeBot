@@ -748,6 +748,10 @@ fn urgent_health(knowledge: &SavedKnowledge) -> bool {
     let Some(party) = knowledge.party.value.as_ref() else {
         return true;
     };
+    // No Pokémon yet (a new game): nothing can faint or be healed.
+    if party.is_empty() {
+        return false;
+    }
     let usable = party
         .iter()
         .filter(|mon| {

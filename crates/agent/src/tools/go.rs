@@ -13,11 +13,13 @@ use std::sync::Arc;
 
 use pokebot_state::{GameEvent, PlayerPose};
 use pokebot_world::behavior::is_water;
+use pokebot_world::gates::GateTiles;
 use pokebot_world::path::{find_path_with, Walk};
 use pokebot_world::route::{self, EdgeKind, Leg, Place, UnknownPolicy};
 use pokebot_world::World;
 
 use super::field::{self, FieldMove};
+use super::scene::SettleStep;
 use super::{
     Dest, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome, ToolStep,
     SETTLE_FRAMES,
@@ -64,6 +66,8 @@ pub struct NavParts {
     pub syncer: Option<SyncerHandle>,
     /// The session's tiles learnt to be blocked.
     pub blocked: Blocked,
+    /// Story passages as the belief stood when the parts were taken.
+    pub gates: Arc<GateTiles>,
 }
 
 impl NavParts {
@@ -73,6 +77,7 @@ impl NavParts {
             gone: ctx.gone.clone(),
             syncer: ctx.syncer.clone(),
             blocked: Arc::clone(&ctx.blocked),
+            gates: Arc::new(ctx.gate_tiles()),
         }
     }
 }
@@ -91,6 +96,7 @@ impl GoStep {
         let nav = Navigator::new(Arc::clone(&parts.world), dest.clone())
             .with_gone(parts.gone.clone())
             .with_blocked(Arc::clone(&parts.blocked))
+            .with_gates(&parts.gates)
             .with_surf(surf);
         let nav = match &parts.syncer {
             Some(syncer) => nav.with_syncer(Arc::clone(syncer)),
@@ -291,6 +297,12 @@ impl Tool for GoTool {
                 other => go(ctx, Destination::from(other)),
             },
         };
+        // A map may play a scene on arrival (an entry scene, a trigger at
+        // the door): it is over, and recognised, before the leg is.
+        let walked = walked.and_then(|pose| {
+            ctx.drive(&mut SettleStep::new(SETTLE_FRAMES))?;
+            Ok(ctx.pose().or(pose))
+        });
         match walked {
             Ok(pose) => ToolOutcome {
                 pose,
@@ -544,6 +556,7 @@ mod tests {
             gone: Gone::new(),
             syncer: None,
             blocked: Blocked::default(),
+            gates: Arc::default(),
         };
         let mut step = GoStep::with(
             &parts,
@@ -609,6 +622,7 @@ mod tests {
             gone: Gone::new(),
             syncer: None,
             blocked: Blocked::default(),
+            gates: Arc::default(),
         };
         let mut step = GoStep::with(
             &parts,
