@@ -28,7 +28,7 @@
   header h1 { font-size: 15px; margin: 0; color: var(--accent); letter-spacing: 1px; font-weight: 800; }
   .stat { color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
   .stat b { color: var(--text); font-weight: 600; }
-  /* Instance tabs (behind the hub) and live thumbnails of the other instances */
+  /* The hub has one Switch tab and one fleet tab. */
   #tabs { display: flex; gap: 4px; flex-wrap: wrap; }
   #tabs:empty { display: none; }
   #tabs a { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 10px;
@@ -37,12 +37,6 @@
   #tabs a.cur { color: var(--text); border-color: var(--accent); background: var(--panel2); }
   #tabs i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
   #tabs a.alive i { background: var(--event); }
-  #thumbs { position: fixed; right: 12px; bottom: 12px; z-index: 6; display: flex; flex-direction: column; gap: 8px; }
-  #thumbs a { display: block; width: 240px; height: 160px; position: relative; background: #000; border-radius: 8px;
-              border: 1px solid var(--line); overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
-  #thumbs img { width: 100%; height: 100%; object-fit: contain; display: block; image-rendering: pixelated; }
-  #thumbs span { position: absolute; left: 6px; top: 4px; padding: 1px 6px; border-radius: 8px; background: rgba(0,0,0,.7);
-                 color: var(--text); font: 11px var(--mono); }
   #conn { margin-left: auto; display: flex; align-items: center; gap: 6px; }
   #conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--goal); display: inline-block; }
   #conn.live i { background: var(--event); box-shadow: 0 0 8px var(--event); }
@@ -226,7 +220,6 @@
     :root { font-size: 14px; }
     header { padding: 6px 10px; gap: 2px 10px; }
     header .opt { display: none; }
-    #thumbs a { width: 120px; height: 80px; }
     main { padding: 0 0 env(safe-area-inset-bottom); gap: 8px; }
     .card { border-radius: 0; border-left: 0; border-right: 0; padding: 10px; }
     #video-card { padding: 0 0 8px; position: sticky; top: var(--hdr, 38px); z-index: 4; border-top: 0; }
@@ -254,7 +247,6 @@
   <span class="stat">up <b id="uptime">–</b></span>
   <span class="stat" id="conn"><i></i><b>connecting</b></span>
 </header>
-<div id="thumbs"></div>
 <main>
   <div id="left">
   <section class="card" id="video-card">
@@ -929,98 +921,25 @@ $('pause').addEventListener('change', () => frames.pump());
 
 // ---------------------------------------------------------------- instances
 
-/// Behind the hub (`pokebot hub`) the page lives at /<name>/ and
-/// ../api/instances lists every instance: show them as tabs. Standalone
-/// that request fails and there are no tabs. The Switch page also shows a
-/// live thumbnail of every other running instance.
+// Standalone pages hide hub navigation. Worker detail pages keep two tabs.
 const instances = {
-  label: null, list: null,
-  setLabel(label) {
-    if (label === this.label) return;
-    this.label = label;
-    this.render();
-  },
+  setLabel() {},
   async refresh() {
     try {
       const r = await fetch('../api/instances', { cache: 'no-store' });
-      if (!r.ok) throw new Error(r.status);
+      if (!r.ok) return;
       const list = await r.json();
-      this.list = Array.isArray(list) ? list : null;
-    } catch (e) {
-      this.list = null;
-    }
-    this.render();
-  },
-  render() {
-    const list = this.list || [];
-    setHtml($('tabs'), list.map((e) => {
-      const cls = [e.alive ? 'alive' : '', e.label === this.label ? 'cur' : ''].join(' ');
-      const href = new URL(e.path, location.origin).href;
-      return `<a class="${cls}" href="${esc(href)}" title="${e.alive ? 'running' : 'stopped'}"><i></i>${esc(e.label)}</a>`;
-    }).join(''));
-    const others = this.label === 'Switch' ? list.filter((e) => e.alive && e.label !== this.label) : [];
-    const box = $('thumbs');
-    for (const a of [...box.children]) {
-      if (!others.some((e) => e.path === a.dataset.path)) a.remove();
-    }
-    for (const e of others) {
-      let a = [...box.children].find((x) => x.dataset.path === e.path);
-      if (!a) {
-        a = document.createElement('a');
-        a.dataset.path = e.path;
-        a.href = new URL(e.path, location.origin).href;
-        a.title = `open ${e.label}`;
-        a.innerHTML = `<img alt=""><span>${esc(e.label)}</span>`;
-        const img = a.querySelector('img');
-        // A dropped stream (restart, Wi-Fi) retries until the instance is gone.
-        img.onerror = () => setTimeout(() => { if (a.isConnected) this.connect(a); }, 2000);
-        box.append(a);
-      }
-      // A new run behind the same path starts a new stream.
-      if (a.dataset.run !== String(e.started_at)) {
-        a.dataset.run = String(e.started_at);
-        this.connect(a);
-      }
-    }
-  },
-  /// Small and slow: the thumbnail goes through the user's reverse proxy.
-  connect(a) {
-    a._stale = 0;
-    a._sig = null;
-    a.querySelector('img').src = `..${a.dataset.path}stream.mjpg?scale=1&fps=10&t=${Date.now()}`;
-  },
-  /// A stream that ends cleanly leaves a frozen picture and no `error` (some
-  /// browsers fire `load` then, others once per part, so neither says
-  /// "ended"). Instead sample the picture on every refresh and reconnect when
-  /// it hasn't changed for 3 refreshes (15 s). A static game screen costs one
-  /// cheap reconnect per 15 s; the old picture stays up until the new one
-  /// arrives.
-  checkStale() {
-    const c = this._canvas || (this._canvas = Object.assign(document.createElement('canvas'), { width: 24, height: 16 }));
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    for (const a of $('thumbs').children) {
-      const img = a.querySelector('img');
-      let sig = null;
-      if (img.complete && img.naturalWidth) {
-        try {
-          ctx.drawImage(img, 0, 0, 24, 16);
-          const d = ctx.getImageData(0, 0, 24, 16).data;
-          let h = 0;
-          for (let i = 0; i < d.length; i += 3) h = (h * 31 + d[i]) | 0;
-          sig = h;
-        } catch (e) { /* not decodable right now */ }
-      }
-      a._stale = sig === null || sig === a._sig ? a._stale + 1 : 0;
-      a._sig = sig;
-      if (a._stale >= 3 && !document.hidden) this.connect(a);
-    }
-  },
-  reconnectAll() {
-    for (const a of $('thumbs').children) this.connect(a);
+      if (!Array.isArray(list)) return;
+      const onSwitch = location.pathname.startsWith('/switch/');
+      setHtml($('tabs'), [
+        ['Switch', '/switch/', onSwitch, list.some(e => e.name === 'switch' && e.alive)],
+        ['Emulators', '/emulators/', !onSwitch, list.some(e => e.name !== 'switch' && e.alive)],
+      ].map(([label, path, current, alive]) => `<a class="${current ? 'cur' : ''} ${alive ? 'alive' : ''}" href="${path}"><i></i>${label}</a>`).join(''));
+    } catch (_) { /* standalone */ }
   },
 };
 instances.refresh();
-setInterval(() => instances.refresh().then(() => instances.checkStale()), 5000);
+setInterval(() => instances.refresh(), 5000);
 
 // ---------------------------------------------------------------- connection
 
@@ -1076,10 +995,10 @@ document.addEventListener('visibilitychange', () => {
   pad.releaseAll();
   if (performance.now() - link.lastMsg > 2500) link.connect();
   frames.pump();
-  instances.reconnectAll();
+  instances.refresh();
 });
-window.addEventListener('pageshow', (e) => { if (e.persisted) { link.connect(); instances.reconnectAll(); } });
-window.addEventListener('online', () => { link.connect(); instances.reconnectAll(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) { link.connect(); instances.refresh(); } });
+window.addEventListener('online', () => { link.connect(); instances.refresh(); });
 </script>
 </body>
 </html>

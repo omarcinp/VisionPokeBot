@@ -35,6 +35,94 @@ const MAX_HEAD: usize = 64 * 1024;
 /// A client that doesn't finish its request head in this long is dropped.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const EMULATORS_HTML: &str = include_str!("../web/emulators.html");
+const INSTANCE_HTML: &str = include_str!("../web/index.html");
+
+/// Process supervision belongs to the CLI; the hub only exposes its bounded API.
+pub trait FleetControl: Send + Sync {
+    fn request(&self, method: &str, path: &str, body: Value) -> (u16, Value);
+}
+
+/// A route name safe to use as both a URL segment and a manifest filename.
+pub fn is_emulator_name(name: &str) -> bool {
+    name.strip_prefix("emu-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.len() <= 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+/// Discover loopback workers on every request, so a hub restart is unnecessary.
+fn discover_routes(base: &[Route], dir: &Path) -> Vec<Route> {
+    let mut routes = base.to_vec();
+    let mut workers = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !is_emulator_name(name) || base.iter().any(|r| r.name == name) {
+                continue;
+            }
+            let Some(value) = std::fs::read(&path)
+                .ok()
+                .and_then(|s| serde_json::from_slice::<Value>(&s).ok())
+            else {
+                continue;
+            };
+            let Some(port) = value["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p != 0)
+            else {
+                continue;
+            };
+            workers.push(Route::new(
+                name,
+                value["label"].as_str().unwrap_or(name),
+                port,
+            ));
+        }
+    }
+    workers.sort_by(|a, b| a.name.cmp(&b.name));
+    routes.extend(workers);
+    routes
+}
+
+/// Linux process birth identity, preventing a reused PID from appearing alive.
+pub fn process_start(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    Some(
+        stat.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .to_owned(),
+    )
+}
+
+/// Called after the worker has bound its OS-assigned port.
+pub fn register_worker(path: &Path, label: &str, port: u16) -> std::io::Result<()> {
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if !is_emulator_name(name) {
+        return Err(std::io::Error::other("invalid emulator name"));
+    }
+    let pid = std::process::id();
+    let entry = json!({"name": name, "label": label, "port": port, "pid": pid,
+        "process_start": process_start(pid)});
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, entry.to_string())?;
+    std::fs::rename(temp, path)
+}
 /// Headers that describe the client's connection, not the request.
 const HOP_BY_HOP: [&str; 3] = ["connection", "keep-alive", "proxy-connection"];
 
@@ -79,7 +167,7 @@ pub fn resolve_instances_dir(flag: Option<PathBuf>) -> PathBuf {
 /// Every default route with what its instance file says, see
 /// [`list_instances_for`].
 pub fn list_instances(dir: &Path) -> Vec<Value> {
-    list_instances_for(&default_routes(), dir)
+    list_instances_for(&discover_routes(&default_routes(), dir), dir)
 }
 
 /// [`list_instances_in`] against the real `/proc`.
@@ -111,11 +199,26 @@ pub fn list_instances_in(routes: &[Route], dir: &Path, proc_root: &Path) -> Vec<
             };
             let expected = format!("pokebot-{}", route.name);
             let alive = entry["pid"].as_u64().is_some_and(|pid| {
-                std::fs::read_to_string(proc_root.join(pid.to_string()).join("comm"))
-                    .is_ok_and(|comm| comm.trim_end() == expected)
+                if let Some(birth) = entry["process_start"].as_str() {
+                    std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat"))
+                        .ok()
+                        .and_then(|stat| {
+                            Some(
+                                stat.rsplit_once(") ")?
+                                    .1
+                                    .split_whitespace()
+                                    .nth(19)?
+                                    .to_owned(),
+                            )
+                        })
+                        .is_some_and(|actual| actual == birth)
+                } else {
+                    std::fs::read_to_string(proc_root.join(pid.to_string()).join("comm"))
+                        .is_ok_and(|comm| comm.trim_end() == expected)
+                }
             });
             let obj = entry.as_object_mut().expect("checked above");
-            obj.entry("name").or_insert_with(|| json!(route.name));
+            obj.insert("name".into(), json!(route.name));
             obj.entry("label").or_insert_with(|| json!(route.label));
             obj.insert("path".into(), json!(route.path()));
             obj.insert("alive".into(), json!(alive));
@@ -160,6 +263,15 @@ pub fn rewrite_head(head: &str, target: &str) -> String {
 
 /// Binds `addr` and serves the default routes until `stop` is set.
 pub fn run_blocking(addr: SocketAddr, instances_dir: PathBuf, stop: Arc<AtomicBool>) -> Result<()> {
+    run_blocking_with_fleet(addr, instances_dir, stop, None)
+}
+
+pub fn run_blocking_with_fleet(
+    addr: SocketAddr,
+    instances_dir: PathBuf,
+    stop: Arc<AtomicBool>,
+    fleet: Option<Arc<dyn FleetControl>>,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -178,7 +290,7 @@ pub fn run_blocking(addr: SocketAddr, instances_dir: PathBuf, stop: Arc<AtomicBo
             eprintln!("  {} -> {}", route.path(), route.backend);
         }
         tokio::select! {
-            () = run(listener, default_routes(), instances_dir) => {}
+            () = run_with_fleet(listener, default_routes(), instances_dir, fleet) => {}
             () = async {
                 while !stop.load(Ordering::Relaxed) {
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -191,14 +303,25 @@ pub fn run_blocking(addr: SocketAddr, instances_dir: PathBuf, stop: Arc<AtomicBo
 
 /// Serves connections from `listener` forever.
 pub async fn run(listener: TcpListener, routes: Vec<Route>, instances_dir: PathBuf) {
+    run_with_fleet(listener, routes, instances_dir, None).await;
+}
+
+pub async fn run_with_fleet(
+    listener: TcpListener,
+    routes: Vec<Route>,
+    instances_dir: PathBuf,
+    fleet: Option<Arc<dyn FleetControl>>,
+) {
     let routes = Arc::new(routes);
     let instances_dir = Arc::new(instances_dir);
     loop {
         match listener.accept().await {
             Ok((client, _)) => {
                 let (routes, dir) = (Arc::clone(&routes), Arc::clone(&instances_dir));
+                let fleet = fleet.clone();
                 tokio::spawn(async move {
-                    let _ = handle(client, &routes, &dir).await;
+                    let routes = discover_routes(&routes, &dir);
+                    let _ = handle(client, &routes, &dir, fleet).await;
                 });
             }
             // Out of file descriptors and the like: wait instead of spinning.
@@ -207,7 +330,12 @@ pub async fn run(listener: TcpListener, routes: Vec<Route>, instances_dir: PathB
     }
 }
 
-async fn handle(mut client: TcpStream, routes: &[Route], dir: &Path) -> std::io::Result<()> {
+async fn handle(
+    mut client: TcpStream,
+    routes: &[Route],
+    dir: &Path,
+    fleet: Option<Arc<dyn FleetControl>>,
+) -> std::io::Result<()> {
     let _ = client.set_nodelay(true);
     let Ok(Ok(Some((head, body)))) =
         tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await
@@ -235,6 +363,119 @@ async fn handle(mut client: TcpStream, routes: &[Route], dir: &Path) -> std::io:
         Some((path, query)) => (path, format!("?{query}")),
         None => (target, String::new()),
     };
+
+    if path == "/emulators" || path == "/emulators/" {
+        return respond(
+            &mut client,
+            head_only,
+            "200 OK",
+            "",
+            "text/html; charset=utf-8",
+            EMULATORS_HTML,
+        )
+        .await;
+    }
+    if path == "/api/emulators" || path.starts_with("/api/emulators/") {
+        let Some(fleet) = fleet else {
+            return respond(
+                &mut client,
+                head_only,
+                "503 Service Unavailable",
+                "",
+                "application/json",
+                r#"{"error":"Emulator management is unavailable on this hub"}"#,
+            )
+            .await;
+        };
+        // JSON + a custom header prevent cross-origin forms from launching bots.
+        // No CORS is enabled. The hub is intended for a trusted LAN/proxy.
+        let header = |name: &str| {
+            head.lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim())
+        };
+        let payload = if method == "POST" {
+            if header("x-pokebot-control") != Some("1")
+                || header("content-type") != Some("application/json")
+            {
+                return respond(
+                    &mut client,
+                    false,
+                    "403 Forbidden",
+                    "",
+                    "application/json",
+                    r#"{"error":"JSON and X-Pokebot-Control: 1 required"}"#,
+                )
+                .await;
+            }
+            let length = header("content-length").and_then(|n| n.parse::<usize>().ok());
+            let Some(length) =
+                length.filter(|n| *n <= 4096 && header("transfer-encoding").is_none())
+            else {
+                return respond(
+                    &mut client,
+                    false,
+                    "400 Bad Request",
+                    "",
+                    "application/json",
+                    r#"{"error":"A Content-Length of at most 4096 is required"}"#,
+                )
+                .await;
+            };
+            let mut body = body;
+            if body.len() < length {
+                let at = body.len();
+                body.resize(length, 0);
+                if !matches!(
+                    tokio::time::timeout(HEAD_TIMEOUT, client.read_exact(&mut body[at..])).await,
+                    Ok(Ok(_))
+                ) {
+                    return Ok(());
+                }
+            }
+            match serde_json::from_slice(&body[..length]) {
+                Ok(value) => value,
+                Err(_) => {
+                    return respond(
+                        &mut client,
+                        false,
+                        "400 Bad Request",
+                        "",
+                        "application/json",
+                        r#"{"error":"Invalid JSON"}"#,
+                    )
+                    .await
+                }
+            }
+        } else {
+            Value::Null
+        };
+        let (method, path) = (method.to_owned(), path.to_owned());
+        let (code, value) =
+            tokio::task::spawn_blocking(move || fleet.request(&method, &path, payload))
+                .await
+                .unwrap_or_else(|_| (500, json!({"error":"Fleet supervisor failed"})));
+        let reason = match code {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            409 => "Conflict",
+            503 => "Service Unavailable",
+            _ => "Internal Server Error",
+        };
+        return respond(
+            &mut client,
+            head_only,
+            &format!("{code} {reason}"),
+            "",
+            "application/json",
+            &value.to_string(),
+        )
+        .await;
+    }
 
     if path == "/" {
         let home = routes.first().map_or_else(|| "/".to_owned(), Route::path);
@@ -285,6 +526,22 @@ async fn handle(mut client: TcpStream, routes: &[Route], dir: &Path) -> std::io:
         .await;
     };
 
+    // Ephemeral ports can be reused after exit. Never forward a stale worker
+    // route to whichever unrelated process happens to bind that port next.
+    if is_emulator_name(&route.name)
+        && list_instances_for(std::slice::from_ref(route), dir)[0]["alive"] != true
+    {
+        return respond(
+            &mut client,
+            head_only,
+            "503 Service Unavailable",
+            "",
+            "text/html; charset=utf-8",
+            &not_running_page(route, routes),
+        )
+        .await;
+    }
+
     let backend = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(route.backend)).await;
     let Ok(Ok(mut backend)) = backend else {
         let page = not_running_page(route, routes);
@@ -298,6 +555,19 @@ async fn handle(mut client: TcpStream, routes: &[Route], dir: &Path) -> std::io:
         )
         .await;
     };
+    // The hub owns navigation even when an older Switch bot must keep
+    // running. Upgrading just the hub removes the old floating thumbnail.
+    if matches!(method, "GET" | "HEAD") && stripped.split('?').next() == Some("/") {
+        return respond(
+            &mut client,
+            head_only,
+            "200 OK",
+            "",
+            "text/html; charset=utf-8",
+            INSTANCE_HTML,
+        )
+        .await;
+    }
     let _ = backend.set_nodelay(true);
     backend
         .write_all(rewrite_head(&head, &stripped).as_bytes())
@@ -373,7 +643,7 @@ fn not_running_page(route: &Route, routes: &[Route]) -> String {
          <style>body{{background:#0d1014;color:#d8dee6;font:15px system-ui,sans-serif;padding:24px}}a{{color:#7fb3ff}}</style>\
          </head><body><h1>{label} instance is not running</h1>\
          <p>Start it with <code>tools/live-run.sh --instance {name} …</code>; this page reloads every 5 s.</p>\
-         <p>Other instances:</p><ul>{links}</ul></body></html>",
+         <p><a href=\"/switch/\">Switch</a> · <a href=\"/emulators/\">Emulators</a></p><ul>{links}</ul></body></html>",
         label = esc(&route.label),
         name = esc(&route.name),
     )

@@ -245,6 +245,12 @@ impl Runtime {
         self.frames_seen
     }
 
+    pub fn task_finished(&self, success: bool) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.task_finished(success);
+        }
+    }
+
     pub fn info(&self, message: impl Into<String>) {
         let message = message.into();
         eprintln!("{message}");

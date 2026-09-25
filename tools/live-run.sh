@@ -4,7 +4,8 @@
 # finishes (--hold). Starting an instance replaces only the previous run of
 # the same instance: the Switch and the emulator run side by side.
 #
-# Usage: tools/live-run.sh [--instance switch|emu] <log file> <pokebot args...>
+# Usage: tools/live-run.sh --hub <log file> [hub args...]
+#        tools/live-run.sh [--instance switch|emu] <log file> <pokebot args...>
 #   --instance defaults to switch when an argument starts with capture-card:,
 #   else emu.
 #
@@ -20,13 +21,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTANCES_DIR="${POKEBOT_INSTANCES_DIR:-/tmp/pokebot-instances}"
 HUB_PORT=8080
 
+HUB_ONLY=0
+if [[ "${1:-}" == "--hub" ]]; then HUB_ONLY=1; shift; fi
 INSTANCE=""
 if [[ "${1:-}" == "--instance" ]]; then
   INSTANCE="${2:?--instance needs switch or emu}"
   shift 2
 fi
-if [[ $# -lt 2 ]]; then
-  echo "usage: $0 [--instance switch|emu] <log file> <pokebot args...>" >&2
+if [[ $# -lt 1 ]] || { [[ "${HUB_ONLY}" == 0 ]] && [[ $# -lt 2 ]]; }; then
+  echo "usage: $0 --hub <log file> [hub args...] | [--instance switch|emu] <log file> <pokebot args...>" >&2
   exit 2
 fi
 LOG="$1"; shift
@@ -84,6 +87,17 @@ stop_process() {
   echo "warning: ${name} is still running" >&2
 }
 
+# Start or upgrade just the supervisor; the physical Switch keeps running.
+if [[ "${HUB_ONLY}" == 1 ]]; then
+  stop_process pokebot-hub
+  cp "${ROOT}/target/release/pokebot" /tmp/pokebot-hub
+  start_unit pokebot-hub "$(realpath -m "${LOG}")" /tmp/pokebot-hub hub \
+    --instances-dir "${INSTANCES_DIR}" "$@"
+  unit_pid pokebot-hub >/dev/null || { echo "hub failed; see ${LOG}" >&2; exit 1; }
+  echo "hub started (log ${LOG}); open /emulators/ to launch workers"
+  exit 0
+fi
+
 # Replace only this instance. The pre-hub name pokebot-webrun was the Switch
 # view and held port 8080 itself.
 stop_process "${NAME}"
@@ -109,7 +123,7 @@ if ! pgrep -x pokebot-hub >/dev/null; then
   fi
   cp "${BIN}" /tmp/pokebot-hub
   : > /tmp/pokebot-hub.log
-  start_unit pokebot-hub /tmp/pokebot-hub.log /tmp/pokebot-hub hub --listen "0.0.0.0:${HUB_PORT}"
+  start_unit pokebot-hub /tmp/pokebot-hub.log /tmp/pokebot-hub hub --listen "0.0.0.0:${HUB_PORT}" --instances-dir "${INSTANCES_DIR}"
   if unit_pid pokebot-hub >/dev/null; then
     echo "started the hub on port ${HUB_PORT} (log /tmp/pokebot-hub.log)"
   else
