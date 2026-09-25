@@ -141,6 +141,32 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 .pockets
                 .insert(*pocket, Knowledge::observed(items.clone(), frame));
         }
+        GameEvent::PocketRowsObserved { pocket, items } => {
+            if let Some(k) = state.bag.pockets.get_mut(pocket) {
+                // Unknown pocket: what was seen is all that is known, as a
+                // lower bound (tracked, so a decision audits it first).
+                let mut list = k.value.clone().unwrap_or_default();
+                for (item, count) in items {
+                    match list.iter_mut().find(|(i, _)| i == item) {
+                        Some(entry) => entry.1 = *count,
+                        None => list.push((item.clone(), *count)),
+                    }
+                }
+                *k = match k.source {
+                    KnowledgeSource::Observed => Knowledge::observed(list, frame),
+                    _ => Knowledge::tracked(list, k.last_verified_frame.or(Some(frame))),
+                };
+            }
+        }
+        GameEvent::PartySizeObserved { size } => {
+            let size = usize::from(*size);
+            if size > 0 {
+                member(state, size as u8 - 1, KnowledgeSource::Observed, frame);
+            }
+            if let Some(list) = state.party.value.as_mut() {
+                list.truncate(size);
+            }
+        }
         GameEvent::MoneyObserved { amount } => state.money = Knowledge::observed(*amount, frame),
         GameEvent::MoneyChanged { delta, .. } => {
             if let Some(m) = state.money.value {
@@ -328,7 +354,9 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         } => {
             let npc = state.world.npc_mut(map, *local_id);
             npc.pos = Knowledge::observed((*x, *y), frame);
-            npc.facing = Knowledge::observed(*facing, frame);
+            if let Some(facing) = facing {
+                npc.facing = Knowledge::observed(*facing, frame);
+            }
             npc.present = Knowledge::observed(true, frame);
         }
         GameEvent::NpcAbsent { map, local_id } => {

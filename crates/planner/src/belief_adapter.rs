@@ -67,6 +67,9 @@ pub struct StateBelief<'a> {
     pub established: BTreeSet<GoalPredicate>,
     /// P(win) a trainer must reach for `CanBeat` to hold.
     pub confidence: f64,
+    /// Lower bounds on vars whose value is unknown (story vars only move
+    /// on: the flag a scene set shows the var it set is at least that).
+    pub floors: BTreeMap<String, i64>,
 }
 
 impl<'a> StateBelief<'a> {
@@ -81,6 +84,7 @@ impl<'a> StateBelief<'a> {
             pose,
             established: BTreeSet::new(),
             confidence: 0.9,
+            floors: BTreeMap::new(),
         }
     }
 
@@ -91,6 +95,7 @@ impl<'a> StateBelief<'a> {
             pose: self.pose.clone(),
             established,
             confidence: self.confidence,
+            floors: self.floors.clone(),
         }
     }
 
@@ -185,6 +190,29 @@ impl<'a> StateBelief<'a> {
             let as_badge = GoalPredicate::World(Predicate::from_flag(name, true));
             if as_badge != *p && self.established.contains(&as_badge) {
                 return Some(Truth::True);
+            }
+        }
+        // A var the plan set answers any comparison on it (the latest
+        // value the story reaches: story vars only move on).
+        if let GoalPredicate::World(Predicate::Var { name, op, value }) = p {
+            let set = self
+                .established
+                .iter()
+                .filter_map(|q| match q {
+                    GoalPredicate::World(Predicate::Var {
+                        name: n,
+                        op: pokebot_world::predicate::CmpOp::Eq,
+                        value: v,
+                    }) if n == name => Some(*v),
+                    _ => None,
+                })
+                .max();
+            if let Some(v) = set {
+                return Some(if op.holds(v, *value) {
+                    Truth::True
+                } else {
+                    Truth::False
+                });
             }
         }
         if let GoalPredicate::World(Predicate::HasItem { item, n }) = p {
@@ -302,9 +330,35 @@ impl<'a> StateBelief<'a> {
         let w = &self.knowledge.world;
         match p {
             Predicate::Flag { name, is } => known(w.flag(name).value.map(|v| v == *is)),
-            Predicate::Var { name, op, value } => {
-                known(w.var(name).value.map(|v| op.holds(i64::from(v), *value)))
-            }
+            Predicate::Var { name, op, value } => match w.var(name).value {
+                Some(v) => known(Some(op.holds(i64::from(v), *value))),
+                None => match self.floors.get(name) {
+                    // Every value from the floor up answers alike, or not.
+                    Some(&floor) => {
+                        use pokebot_world::predicate::CmpOp;
+                        let all = match op {
+                            CmpOp::Gt => floor > *value,
+                            CmpOp::Ge => floor >= *value,
+                            CmpOp::Ne => *value < floor,
+                            _ => false,
+                        };
+                        let none = match op {
+                            CmpOp::Lt => floor >= *value,
+                            CmpOp::Le => floor > *value,
+                            CmpOp::Eq => *value < floor,
+                            _ => false,
+                        };
+                        if all {
+                            Truth::True
+                        } else if none {
+                            Truth::False
+                        } else {
+                            Truth::Unknown
+                        }
+                    }
+                    None => Truth::Unknown,
+                },
+            },
             Predicate::Visited { map } => known(w.visited(map).value),
             Predicate::HasItem { item, n } => known(self.item_count(item).map(|have| have >= *n)),
             Predicate::PartyHasMove { mv } => self.party_has_move(mv),

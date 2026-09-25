@@ -430,16 +430,34 @@ impl FleetControl for Fleet {
                 // Include legacy and externally registered runs without taking ownership.
                 for mut entry in hub_proxy::list_instances(&state.registry) {
                     let name = entry["name"].as_str().unwrap_or_default();
-                    if name == "switch"
+                    if name == "switch-device"
                         || state.workers.contains_key(name)
                         || entry["alive"] != true
                     {
                         continue;
                     }
+                    entry["kind"] = json!(if name == "switch" {
+                        "switch"
+                    } else {
+                        "emulator"
+                    });
                     entry["managed"] = json!(false);
                     entry["status"] = json!("external");
                     workers.push(entry);
                 }
+                let device = hub_proxy::list_instances(&state.registry)
+                    .into_iter()
+                    .find(|v| {
+                        v["name"] == "switch-device" && v["alive"] == true && v["connected"] == true
+                    });
+                if device.is_some() && !workers.iter().any(|w| w["name"] == "switch") {
+                    workers.insert(
+                        0,
+                        json!({"name":"switch","label":"Switch","kind":"switch","path":"/switch/",
+                        "alive":true,"managed":false,"status":"connected","task":"no bot"}),
+                    );
+                }
+                workers.sort_by_key(|w| w["name"] != "switch");
                 (
                     200,
                     json!({"workers": workers, "max_workers": state.limit,
@@ -452,8 +470,29 @@ impl FleetControl for Fleet {
                 Err(error) => (409, json!({"error":format!("{error:#}")})),
             },
             ("POST", "/api/emulators/stop") => {
-                for worker in state.workers.values_mut() {
-                    worker.stop();
+                let names = if let Some(names) = body.get("names") {
+                    let Some(names) = names.as_array() else {
+                        return (400, json!({"error":"names must be an array"}));
+                    };
+                    if names
+                        .iter()
+                        .any(|n| n.as_str().is_none_or(|n| !state.workers.contains_key(n)))
+                    {
+                        return (404, json!({"error":"Select only managed emulator sets"}));
+                    }
+                    Some(
+                        names
+                            .iter()
+                            .map(|n| n.as_str().unwrap().to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                };
+                for (name, worker) in &mut state.workers {
+                    if names.as_ref().is_none_or(|names| names.contains(name)) {
+                        worker.stop();
+                    }
                 }
                 (200, json!({"stopping": true}))
             }
@@ -532,6 +571,49 @@ mod tests {
         .unwrap();
         fleet.state.lock().unwrap().executable = executable;
         (fleet, root)
+    }
+
+    #[test]
+    fn batch_stop_validates_names_before_stopping_anything() {
+        if available_memory() < WORKER_MEMORY * 2 {
+            return;
+        }
+        let (fleet, root) = fixture();
+        let (_, started) = fleet.request(
+            "POST",
+            "/api/emulators",
+            json!({"count":2,"task":"observe"}),
+        );
+        let names = started["started"].as_array().unwrap();
+        assert_eq!(
+            fleet
+                .request(
+                    "POST",
+                    "/api/emulators/stop",
+                    json!({"names":[names[0],"switch"]})
+                )
+                .0,
+            404
+        );
+        assert!(fleet
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .values()
+            .all(|w| w.stopping.is_none()));
+        assert_eq!(
+            fleet
+                .request("POST", "/api/emulators/stop", json!({"names":[names[0]]}))
+                .0,
+            200
+        );
+        let state = fleet.state.lock().unwrap();
+        assert!(state.workers[names[0].as_str().unwrap()].stopping.is_some());
+        assert!(state.workers[names[1].as_str().unwrap()].stopping.is_none());
+        drop(state);
+        drop(fleet);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

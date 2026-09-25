@@ -6,11 +6,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use pokebot_core::NormalizedFrame;
 use pokebot_gamedata::GameData;
-use pokebot_runtime::Runtime;
+use pokebot_runtime::{Notice, Origin, Runtime};
 use pokebot_state::{GameEvent, GameState, Observation, PlayerPose, ScreenState};
 use pokebot_world::World;
 
@@ -145,6 +146,9 @@ pub struct ToolContext<'a> {
     /// Where unrecognised dialogue is saved (frame and text).
     pub unknown_dir: PathBuf,
     pub scheduler: crate::scheduler::Scheduler,
+    /// The compiled script `RunScript` is following, if any (a battle it
+    /// starts is its battle).
+    pub running_script: Option<String>,
     next_need_check: u64,
     toolbox: Toolbox,
     expects: Expects,
@@ -156,6 +160,26 @@ pub struct ToolContext<'a> {
     outside: OutsideRecovery,
     /// Frames in a row the white-out screen has shown.
     whiteout_frames: u32,
+    /// The world's story passages ([`pokebot_world::gates::derive`]),
+    /// derived once.
+    gates: std::cell::OnceCell<Arc<pokebot_world::gates::Gates>>,
+    /// Facts the runtime's sensor read, not yet handed to the scheduler.
+    perceived: Receiver<Notice>,
+}
+
+/// Sensor facts a tool learns from (not the screen classification, the
+/// pose or the view, which the tools read from observations).
+fn sensed(event: &GameEvent) -> bool {
+    !matches!(
+        event,
+        GameEvent::ScreenChanged { .. }
+            | GameEvent::PlayerLocated { .. }
+            | GameEvent::PlayerMoved { .. }
+            | GameEvent::MapChanged { .. }
+            | GameEvent::FramesDroppedByCard { .. }
+            | GameEvent::FramesDroppedByProcessing { .. }
+            | GameEvent::ViewObserved { .. }
+    )
 }
 
 impl<'a> ToolContext<'a> {
@@ -167,7 +191,11 @@ impl<'a> ToolContext<'a> {
         stop: &'a AtomicBool,
     ) -> Self {
         let syncer = executor.syncer.clone();
+        let perceived = runtime.subscribe(|n| {
+            matches!(n, Notice::Event { record, origin: Origin::Perception } if sensed(&record.event))
+        });
         Self {
+            perceived,
             runtime,
             executor,
             world,
@@ -179,6 +207,7 @@ impl<'a> ToolContext<'a> {
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
             scheduler: crate::scheduler::Scheduler::default(),
+            running_script: None,
             next_need_check: 0,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
@@ -189,7 +218,22 @@ impl<'a> ToolContext<'a> {
             last_dialogue_frame: None,
             outside: OutsideRecovery::default(),
             whiteout_frames: 0,
+            gates: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The story passages as the belief stands now: what a walk must go
+    /// around and may go through.
+    pub fn gate_tiles(&self) -> pokebot_world::gates::GateTiles {
+        let gates = self.gates.get_or_init(|| match &self.scheduler.graph {
+            Some(g) => Arc::new(g.gates().clone()),
+            None => Arc::new(pokebot_world::gates::derive(&self.world)),
+        });
+        pokebot_world::gates::GateTiles::believed(
+            &self.world,
+            gates,
+            &crate::belief_view::StateBelief(self.runtime.state()),
+        )
     }
 
     pub fn with_toolbox(mut self, toolbox: Toolbox) -> Self {
@@ -244,6 +288,12 @@ impl<'a> ToolContext<'a> {
     /// outcome.
     pub fn emit(&mut self, event: GameEvent) -> Result<(), ToolError> {
         self.runtime.emit(event.clone())?;
+        self.learn(event);
+        Ok(())
+    }
+
+    /// An event into the scheduler's needs and the running tool's outcome.
+    fn learn(&mut self, event: GameEvent) {
         if self
             .scheduler
             .event(&event, self.runtime.state(), &self.data)
@@ -258,7 +308,17 @@ impl<'a> ToolContext<'a> {
             self.next_need_check = 0;
         }
         self.learned.push(event);
-        Ok(())
+    }
+
+    /// Hands what the sensor read since the last call to the scheduler and
+    /// the running tool (it reads every frame, including those the
+    /// executor observes while an action is pending).
+    fn take_perceived(&mut self) {
+        while let Ok(notice) = self.perceived.try_recv() {
+            if let Notice::Event { record, .. } = notice {
+                self.learn(record.event);
+            }
+        }
     }
 
     pub fn info(&self, message: impl Into<String>) {
@@ -285,6 +345,7 @@ impl<'a> ToolContext<'a> {
     }
 
     fn note_frame(&mut self, o: &Observation) -> Result<(), ToolError> {
+        self.take_perceived();
         let busy = o.dialogue.is_some()
             || o.menu.is_some()
             || o.battle.is_some()
@@ -306,13 +367,49 @@ impl<'a> ToolContext<'a> {
             let map = &p.pose.map;
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
-                // NPCs are back at their data positions on re-entry.
+                // NPCs are back at their data positions on re-entry, and cut
+                // trees and smashed rocks have grown back.
                 self.blocked
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .forget(map);
+                if let Some(places) = self.world.places() {
+                    self.gone.retain(|(m, id)| {
+                        m != map
+                            || !places.gates.iter().any(|g| {
+                                g.map == *m && g.local_id == *id && super::field::regrows(&g.kind)
+                            })
+                    });
+                }
                 self.emit(GameEvent::MapVisited { map: map.clone() })?;
+                self.track_entry(map)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Books what arriving on `map` does by itself (its silent entry
+    /// scripts, [`super::effects::entry_events`]).
+    fn track_entry(&mut self, map: &str) -> Result<(), ToolError> {
+        let world = Arc::clone(&self.world);
+        let Some(events) = world.events() else {
+            return Ok(());
+        };
+        let map_name = |id: &str| world.name_of(id).map(str::to_owned);
+        let learned = {
+            let state = self.runtime.state();
+            super::effects::entry_events(
+                events,
+                map,
+                &crate::belief_view::StateBelief(state),
+                state,
+                &self.data,
+                world.places(),
+                &map_name,
+            )
+        };
+        for event in learned {
+            self.emit(event)?;
         }
         Ok(())
     }
@@ -370,7 +467,11 @@ impl<'a> ToolContext<'a> {
             let outcome = self.invoke(&Intent::Unstick);
             return outcome.result.map(|()| true);
         }
+        // A conversation or scene being followed is not an overworld
+        // boundary: its gaps (people walking off) are not the time to
+        // leave for a heal (the rival's scene was left half-recorded).
         if o.player.is_some()
+            && !expects.dialogue
             && o.dialogue.is_none()
             && o.menu.is_none()
             && o.battle.is_none()

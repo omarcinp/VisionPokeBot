@@ -67,7 +67,7 @@ fn replaying_world_events_rebuilds_the_belief() {
                 local_id: 1,
                 x: 4,
                 y: 8,
-                facing: Direction::Down,
+                facing: Some(Direction::Down),
             },
         ),
         (

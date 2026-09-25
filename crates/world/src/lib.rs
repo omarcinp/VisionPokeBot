@@ -5,12 +5,14 @@
 pub mod behavior;
 pub mod dialogue;
 pub mod events;
+pub mod gates;
 pub mod localize;
 pub mod obstacles;
 pub mod path;
 pub mod places;
 pub mod predicate;
 pub mod route;
+pub mod sprites;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +106,24 @@ pub struct Sign {
     pub x: i32,
     pub y: i32,
     pub script: Option<String>,
+    /// `BG_EVENT_PLAYER_FACING_*`: the way the player must face to read
+    /// it (absent in data built before it was extracted: any).
+    #[serde(default)]
+    pub facing: Option<String>,
+}
+
+impl Sign {
+    /// The direction the player must face to read the sign; `None` when
+    /// any will do.
+    pub fn facing_dir(&self) -> Option<Direction> {
+        match self.facing.as_deref()? {
+            "BG_EVENT_PLAYER_FACING_NORTH" => Some(Direction::Up),
+            "BG_EVENT_PLAYER_FACING_SOUTH" => Some(Direction::Down),
+            "BG_EVENT_PLAYER_FACING_EAST" => Some(Direction::Right),
+            "BG_EVENT_PLAYER_FACING_WEST" => Some(Direction::Left),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +143,8 @@ struct MapFile {
     height: i32,
     pad: i32,
     map_type: Option<String>,
+    #[serde(default)]
+    requires_flash: bool,
     tiles: Vec<Vec<[u16; 4]>>,
     warps: Vec<Warp>,
     connections: Vec<Connection>,
@@ -140,6 +162,8 @@ pub struct MapData {
     /// Blocks of context around the map in its render.
     pub pad: i32,
     pub map_type: Option<String>,
+    /// Dark until Flash is used (the decomp's `requires_flash`).
+    pub requires_flash: bool,
     tiles: Vec<Tile>,
     pub warps: Vec<Warp>,
     pub connections: Vec<Connection>,
@@ -227,6 +251,7 @@ impl World {
                     height: file.height,
                     pad: file.pad,
                     map_type: file.map_type,
+                    requires_flash: file.requires_flash,
                     tiles,
                     warps: file.warps,
                     connections: file.connections,

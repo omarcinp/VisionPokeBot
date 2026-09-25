@@ -1,9 +1,14 @@
-//! Facts in dialogue text that change the bag, money or party: money won,
-//! items found or received (and the mart's Premier Ball bonus), balls
-//! thrown, the nurse's heal, and an empty move.
+//! A tool's view of a page of text: whether the page was read (on two
+//! observations) and so may be advanced, and the facts on it (money won,
+//! items found or received, the Premier Ball bonus, balls thrown, the
+//! nurse's heal, and an empty move) for the tool's own decisions. The
+//! parsing is `pokebot_sense::text`; the runtime's sensor emits those facts
+//! as events, so a tool emits only what [`tool_emits`] allows.
 
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, Pocket};
+use pokebot_state::GameEvent;
+#[cfg(test)]
+use pokebot_state::Pocket;
 
 #[derive(Debug, Default)]
 pub struct TextTracker {
@@ -42,55 +47,10 @@ impl TextTracker {
             return Vec::new();
         }
         self.last_page = page.clone();
-        let mut events = Vec::new();
-        if let Some(amount) = money_won(&page) {
-            events.push(GameEvent::MoneyChanged {
-                delta: i64::from(amount),
-                reason: "won a battle".into(),
-            });
-        }
-        if let Some((name, reason)) = item_gained(&page) {
-            if let Some(key) = data.item_named(&name) {
-                if let Some(pocket) = data.items[key]
-                    .pocket
-                    .as_deref()
-                    .and_then(Pocket::from_decomp)
-                {
-                    events.push(GameEvent::ItemsChanged {
-                        pocket,
-                        item: key.to_owned(),
-                        delta: 1,
-                        reason,
-                    });
-                }
-            }
-        }
-        // A ball thrown in battle: "RED used POKé BALL!".
-        if let Some(item) = ball_thrown(&page, data) {
-            events.push(GameEvent::ItemsChanged {
-                pocket: Pocket::PokeBalls,
-                item,
-                delta: -1,
-                reason: "thrown".into(),
-            });
-        }
-        // Buying 10+ Poké Balls at once: "I'll throw in a PREMIER BALL, too."
-        if page.contains("PREMIER BALL, too") {
-            events.push(GameEvent::ItemsChanged {
-                pocket: Pocket::PokeBalls,
-                item: "ITEM_PREMIER_BALL".into(),
-                delta: 1,
-                reason: "bonus".into(),
-            });
-        }
-        if let Some(badge) = badge_received(&page) {
-            events.push(GameEvent::BadgeEarned {
-                badge: badge.to_owned(),
-            });
-        }
-        if page.contains("restored your POKéMON") {
-            events.push(GameEvent::Healed);
-        }
+        let mut events = pokebot_sense::text::page_events(&page, data);
+        // Only the sensor sees the catch on every page; the tools here act
+        // on the rest.
+        events.retain(|e| !matches!(e, GameEvent::SpeciesCaught { .. }));
         if page.contains("no PP left for") {
             if let Some((slot, move_slot)) = last_move {
                 events.push(GameEvent::MoveOutOfPp { slot, move_slot });
@@ -100,83 +60,14 @@ impl TextTracker {
     }
 }
 
-/// "RED got ¥1,200 for winning!" → 1200.
-fn money_won(page: &str) -> Option<u32> {
-    let rest = &page[page.find(" got ¥")? + " got ¥".len()..];
-    let digits: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == ',')
-        .filter(|c| *c != ',')
-        .collect();
-    page.contains("for winning")
-        .then(|| digits.parse().ok())
-        .flatten()
+/// Whether a tool emits `event` itself: the runtime's sensor reads the
+/// same pages on every frame and emits every other fact of a page (money,
+/// items, badges, heals); emitting them here too would count them twice.
+pub fn tool_emits(event: &GameEvent) -> bool {
+    matches!(event, GameEvent::MoveOutOfPp { .. })
 }
 
-/// "RED used POKé BALL!" → `ITEM_POKE_BALL`; only items of the Poké Balls
-/// pocket (moves and other items used are not balls thrown).
-fn ball_thrown(page: &str, data: &GameData) -> Option<String> {
-    let rest = &page[page.find(" used ")? + " used ".len()..];
-    let name = rest[..rest.find('!')?].trim();
-    let key = data.item_named(name)?;
-    (data.items[key]
-        .pocket
-        .as_deref()
-        .and_then(Pocket::from_decomp)
-        == Some(Pocket::PokeBalls))
-    .then(|| key.to_owned())
-}
-
-/// Kanto's gym badges in gym order, as the game spells them.
-pub const BADGES: [&str; 8] = [
-    "BOULDERBADGE",
-    "CASCADEBADGE",
-    "THUNDERBADGE",
-    "RAINBOWBADGE",
-    "SOULBADGE",
-    "MARSHBADGE",
-    "VOLCANOBADGE",
-    "EARTHBADGE",
-];
-
-/// "RED received the BOULDERBADGE from BROCK." → `BOULDERBADGE`. Misty
-/// prints no "received" page: her defeat page "You can have the
-/// CASCADEBADGE to show you beat me." gives it.
-fn badge_received(page: &str) -> Option<&'static str> {
-    BADGES.into_iter().find(|b| {
-        page.contains(&format!(" received the {b}"))
-            || page.contains(&format!("You can have the {b}"))
-    })
-}
-
-/// "RED found a POTION!" / "received the TOWN MAP." / "received TM03 from
-/// MISTY." / "obtained a X!", and
-/// the Mt. Moon fossil's "Obtained the HELIX FOSSIL!" (no name before it).
-fn item_gained(page: &str) -> Option<(String, String)> {
-    for (verb, reason) in [
-        (" found ", "found"),
-        (" received ", "received"),
-        (" obtained ", "obtained"),
-    ] {
-        let leading = format!("{}{}", verb[1..2].to_uppercase(), &verb[2..]);
-        let at = page
-            .find(verb)
-            .map(|at| at + verb.len())
-            .or_else(|| page.starts_with(&leading).then_some(leading.len()));
-        if let Some(at) = at {
-            let rest = &page[at..];
-            let rest = ["a ", "an ", "the ", "one "]
-                .iter()
-                .find_map(|p| rest.strip_prefix(p))
-                .unwrap_or(rest);
-            let end = rest.find(['!', '.'])?;
-            // "RED received TM03 from MISTY.": the giver follows the item.
-            let name = rest[..end].split(" from ").next().unwrap_or_default();
-            return Some((name.trim().to_owned(), reason.to_owned()));
-        }
-    }
-    None
-}
+pub use pokebot_sense::text::BADGES;
 
 #[cfg(test)]
 mod tests {
@@ -335,15 +226,6 @@ mod tests {
         ] {
             assert!(read(&mut t, page, &d, None).is_empty(), "{page}");
         }
-    }
-
-    #[test]
-    fn badge_page_becomes_badge_event() {
-        assert_eq!(
-            badge_received("RED received the BOULDERBADGE from BROCK."),
-            Some("BOULDERBADGE")
-        );
-        assert_eq!(badge_received("The BOULDERBADGE raises ATTACK."), None);
     }
 
     /// Live (Task 13): Misty never prints "received the CASCADEBADGE"; her

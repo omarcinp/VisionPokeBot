@@ -4,7 +4,9 @@ use pokebot_core::RgbImage;
 use pokebot_state::{DialogueKind, DialogueObservation, Region};
 
 use super::{px, share};
-use crate::color::{is_arrow_red, luma, INFO_HEADER, MESSAGE_BORDER, SIGN_BORDER, WHITE};
+use crate::color::{
+    is_arrow_red, luma, INFO_HEADER, MESSAGE_BORDER, SCENE_BORDER, SIGN_BORDER, WHITE,
+};
 
 /// Interior of the standard bottom message box.
 pub const MESSAGE_TEXT: Region = Region {
@@ -58,7 +60,18 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
     let (kind, region) = if is_message_box(image) {
         (DialogueKind::MessageBox, MESSAGE_TEXT)
     } else if super::battle::is_battle_text_box(image) {
-        (DialogueKind::BattleText, BATTLE_TEXT)
+        // The level-up stats window covers the box's right side; its white
+        // and grey ink would outvote the message's ("BULBASAUR grew to /
+        // LV. 15!" read as nothing on switch-goal-15 frame 87930).
+        let region = if super::battle::is_level_up_panel(image) {
+            Region {
+                width: super::battle::LEVEL_UP_PANEL_LEFT - BATTLE_TEXT.x,
+                ..BATTLE_TEXT
+            }
+        } else {
+            BATTLE_TEXT
+        };
+        (DialogueKind::BattleText, region)
     } else if is_info_page(image) {
         (DialogueKind::InfoPage, INFO_BODY)
     } else {
@@ -77,7 +90,9 @@ pub fn detect(image: &RgbImage) -> Option<DialogueObservation> {
     })
 }
 
-/// The bottom message box: blue frame (people, events) or grey (signs).
+/// The bottom message box: blue frame (people, events), grey (signs), or
+/// mauve (over the party menu, where TMs are taught, and the TM and
+/// evolution scenes: "IVYSAUR wants to learn the move CUT.").
 fn is_message_box(image: &RgbImage) -> bool {
     let framed = |border| {
         share(image, Region::new(12, 115, 216, 1), border, 2) >= 800
@@ -85,7 +100,13 @@ fn is_message_box(image: &RgbImage) -> bool {
             && share(image, Region::new(5, 126, 1, 20), border, 2) >= 800
             && share(image, Region::new(234, 126, 1, 20), border, 2) >= 800
     };
-    (framed(MESSAGE_BORDER) || framed(SIGN_BORDER)) && share(image, MESSAGE_TEXT, WHITE, 2) >= 500
+    // The mauve band is two pixels wide, one pixel further out.
+    let scene = share(image, Region::new(12, 115, 216, 1), SCENE_BORDER, 2) >= 800
+        && share(image, Region::new(12, 156, 216, 1), SCENE_BORDER, 2) >= 800
+        && share(image, Region::new(3, 126, 1, 20), SCENE_BORDER, 2) >= 800
+        && share(image, Region::new(236, 126, 1, 20), SCENE_BORDER, 2) >= 800;
+    (framed(MESSAGE_BORDER) || framed(SIGN_BORDER) || scene)
+        && share(image, MESSAGE_TEXT, WHITE, 2) >= 500
 }
 
 fn is_info_page(image: &RgbImage) -> bool {

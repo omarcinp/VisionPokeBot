@@ -182,3 +182,26 @@ Fixture_Text_Ready::
 
 Fixture_Text_Yes::
 	.string "Yes.$"
+
+@ One YES/NO tested twice (YES, then NO), as Oak's starter balls do.
+Fixture_EventScript_Choice::
+	msgbox Fixture_Text_Hmm, MSGBOX_YESNO
+	goto_if_eq VAR_RESULT, YES, Fixture_EventScript_ChoiceYes
+	goto_if_eq VAR_RESULT, NO, Fixture_EventScript_ChoiceNo
+	end
+
+Fixture_EventScript_ChoiceYes::
+	setflag FLAG_TEMP_3
+	end
+
+Fixture_EventScript_ChoiceNo::
+	msgbox Fixture_Text_Ready
+	end
+
+@ The facing tested direction by direction, twice (Oak's scenes).
+Fixture_EventScript_Facing::
+	call_if_eq VAR_FACING, DIR_NORTH, Fixture_EventScript_Helper
+	call_if_eq VAR_FACING, DIR_SOUTH, Fixture_EventScript_Helper
+	call_if_eq VAR_FACING, DIR_NORTH, Fixture_EventScript_Helper
+	call_if_eq VAR_FACING, DIR_SOUTH, Fixture_EventScript_Helper
+	end

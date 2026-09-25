@@ -74,6 +74,7 @@ impl StateReducer for DefaultReducer {
                     state.progression.badges = Knowledge::observed(badges, record.frame_id);
                 }
                 GameEvent::GameSaved => {}
+                GameEvent::ViewObserved { view } => state.view = (**view).clone(),
                 GameEvent::BattleStarted => state.in_battle = true,
                 GameEvent::BattleEnded => state.in_battle = false,
                 GameEvent::ControlConfirmed => {
@@ -93,6 +94,8 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::Healed
                 | GameEvent::ItemsChanged { .. }
                 | GameEvent::PocketObserved { .. }
+                | GameEvent::PocketRowsObserved { .. }
+                | GameEvent::PartySizeObserved { .. }
                 | GameEvent::MoneyObserved { .. }
                 | GameEvent::MoneyChanged { .. }
                 | GameEvent::BoxObserved { .. }

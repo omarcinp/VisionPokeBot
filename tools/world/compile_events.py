@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROM = "firered_rev1"
-MAX_PATHS = 128  # the plan said 64; the Game Corner prize clerk needs ~120
+MAX_PATHS = 512  # Oak (object 4) needs 247 once facing tests are decided; nothing reaches 512
 DEFINED = {"FIRERED"}  # assembler symbols for this ROM (.ifdef)
 
 # Symbolic values that scripts compare against; everything else stays a name.
@@ -59,6 +59,9 @@ GATES = {
 }
 # Water metatile behaviours (crates/world/src/behavior.rs `is_water`).
 WATER_BEHAVIORS = set(range(0x10, 0x16)) | set(range(0x19, 0x1C))
+
+# Run by new_game.c when a game starts: the flags set at the start.
+NEW_GAME_SCRIPT = "EventScript_ResetAllMapFlags"
 
 MAP_SCRIPT_KINDS = {
     "MAP_SCRIPT_ON_LOAD": "on_load",
@@ -224,7 +227,7 @@ IGNORED = set(
     setobjectmovementtype turnobject copyobjectxytoperm setobjectxy
     resetobjectsubpriority setobjectsubpriority showcoinsbox hidecoinsbox
     showmoneybox hidemoneybox updatemoneybox updatecoinsbox incrementgamestat
-    setmetatile setobjectpriority resetobjectpriority famechecker
+    setobjectpriority resetobjectpriority famechecker
     set_gym_trainers goto_if_questlog questlog setvaddress vgoto vcall
     vmessage vloadword vbufferstring setmonmetlocation
     playslotmachine setfieldeffect resetweather setweather doweather
@@ -242,13 +245,27 @@ IGNORED_SPECIALS = set(
     DrawWholeMapView QuestLog_CutRecording HelpSystem_Enable HelpSystem_Disable
     Script_SetHelpContext ShakeScreen SetSeenMon StartLegendaryBattle
     PlayTrainerEncounterMusic SetUpTrainerMovement DoPokemonLeagueLightingEffect
-    SetHiddenItemFlag DisableMsgBoxWalkaway DrawElevatorCurrentFloorWindow
+    DisableMsgBoxWalkaway DrawElevatorCurrentFloorWindow
     CloseElevatorCurrentFloorWindow AnimateElevator SetUsedPkmnCenterQuestLogEvent
     CloseLink SpawnCameraObject RemoveCameraObject BufferMonNickname
     Script_BufferFanClubTrainerName BufferBigGuyOrBigGirlString
     ShowFieldMessageStringVar4 QuestLog_StartRecordingInputsAfterDeferredEvent
     """.split()
 )
+
+# Movement actions that move an object one tile (two for `jump_2_*`) in a
+# direction; everything else (`walk_in_place_*`, `face_*`, emotes, delays)
+# leaves it where it is. Only the player's net displacement is recorded
+# (`{"move_player": [dx, dy]}`): a trigger that moves the player back is
+# how the game blocks a passage.
+MOVE_DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
+MOVE_ACTION = re.compile(
+    r"^(?:walk|walk_slow|walk_fast|walk_faster|walk_fastest|walk_slowest|player_run|slide|ride_water_current"
+    r"|jump|jump_2|jump_special|acro_wheelie_hop|acro_wheelie_jump|acro_pop_wheelie_move|acro_wheelie_move"
+    r"|glide|spin)_(up|down|left|right)$"
+)
+PLAYER_IDS = {255, "LOCALID_PLAYER", "OBJ_EVENT_ID_PLAYER"}
+
 
 # Semantic quantities. A command with a known meaning types the var it
 # writes (`state.typed[var]`); `copyvar` carries the type along; any other
@@ -273,6 +290,9 @@ SPECIAL_QUANTITIES = {
     "CountPartyNonEggMons": {"VAR_RESULT": ("count", {"party": "non_egg"})},
     # VAR_0x8004 = the species.
     "DoesPlayerPartyContainSpecies": {"VAR_RESULT": ("bool", {"in_party": "VAR_0x8004", "is": True})},
+    # The ghost of Pokémon Tower 6F (battle_setup.c): without the Silph Scope
+    # the battle can't be won and VAR_RESULT comes back TRUE (driven back).
+    "StartMarowakBattle": {"VAR_RESULT": ("bool", {"item": "ITEM_SILPH_SCOPE", "count": 1, "has": False})},
     # Money >= VAR_0x8005.
     "IsEnoughForCostInVar0x8005": {"VAR_RESULT": ("bool", {"money": "player", "ge": "VAR_0x8005"})},
 }
@@ -308,9 +328,14 @@ def negate(cond):
     return out
 
 
-def static_eval(cond, env):
-    """True/False when `cond` compares a var whose value this path set
-    against a constant; None when it depends on the game."""
+def static_eval(cond, env, flags=None):
+    """True/False when `cond` tests a flag or trainer this path set, or
+    compares a var whose value this path set against a constant; None when
+    it depends on the game."""
+    if cond and flags:
+        for key, value in (("flag", "is"), ("trainer", "defeated")):
+            if key in cond and (key, cond[key]) in flags:
+                return flags[(key, cond[key])] == cond[value]
     if not cond or "var" not in cond or cond["var"] not in env:
         return None
     have = env[cond["var"]]
@@ -328,6 +353,52 @@ def static_eval(cond, env):
     return None
 
 
+def var_bounds(conds, var):
+    """The values `var` may take under the comparisons in `conds`, as
+    (lo, hi, excluded) on integers; None when they contradict."""
+    lo, hi, excluded = -(1 << 31), 1 << 31, set()
+    for c in conds:
+        if c.get("var") != var:
+            continue
+        for op in COMPARE_OPS:
+            v = c.get(op)
+            if op not in c or not isinstance(v, int):
+                continue
+            if op == "eq":
+                lo, hi = max(lo, v), min(hi, v)
+            elif op == "ne":
+                excluded.add(v)
+            elif op == "lt":
+                hi = min(hi, v - 1)
+            elif op == "le":
+                hi = min(hi, v)
+            elif op == "gt":
+                lo = max(lo, v + 1)
+            elif op == "ge":
+                lo = max(lo, v)
+    while lo <= hi and lo in excluded:
+        lo += 1
+    while hi >= lo and hi in excluded:
+        hi -= 1
+    return (lo, hi, excluded) if lo <= hi else None
+
+
+def consistent(when, cond):
+    """Whether `cond` can hold together with the conditions already on the
+    path (a flag tested both ways, `VAR == 0` then `VAR == 1` can't)."""
+    for key, value in (("flag", "is"), ("trainer", "defeated")):
+        if key in cond:
+            return not any(c.get(key) == cond[key] and c.get(value) == (not cond[value]) for c in when)
+    if "item" in cond and "has" in cond:
+        return not any(
+            c.get("item") == cond["item"] and c.get("count") == cond.get("count") and c.get("has") != cond["has"]
+            for c in when if "has" in c
+        )
+    if "var" in cond:
+        return var_bounds(when + [cond], cond["var"]) is not None
+    return True
+
+
 @dataclass
 class PathState:
     when: list = field(default_factory=list)
@@ -340,11 +411,14 @@ class PathState:
     trail: frozenset = frozenset()  # labels entered by goto (loop cut)
     stack: tuple = ()  # (label, next index) return addresses of inlined calls
     dead: bool = False  # a statically decided branch took the whole path
+    flags: dict = field(default_factory=dict)  # ("flag"|"trainer", name) -> value set on this path
+    answered: dict = field(default_factory=dict)  # YES/NO box site -> "yes"|"no" taken on this path
 
     def fork(self):
         return PathState(
             list(self.when), list(self.does), list(self.opaque), dict(self.env), dict(self.typed),
-            self.result, self.compare, self.trail, self.stack,
+            self.result, self.compare, self.trail, self.stack, False, dict(self.flags),
+            dict(self.answered),
         )
 
     def finish(self):
@@ -355,8 +429,9 @@ class PathState:
 
 
 class Compiler:
-    def __init__(self, labels, data, local_ids=None, label_map=None, map_names=None):
+    def __init__(self, labels, data, local_ids=None, label_map=None, map_names=None, specials=None):
         self.labels = labels  # label -> [Command]
+        self.specials = specials or {}  # special name -> [effect] from its C function
         self.data = data  # label -> [values]
         self.local_ids = local_ids or {}  # map name -> {LOCALID_X: n}
         self.label_map = label_map or {}  # label -> map name (for LOCALID resolution)
@@ -434,7 +509,10 @@ class Compiler:
                 return {"move": rest[0], "known": True}
             if kind == "yesno" and op in ("eq", "ne"):
                 yes = (value == 1) == (op == "eq")
-                return {"answer": "yes" if yes else "no"}
+                # The box it answers: a second test of the same answer
+                # (`goto_if_eq VAR_RESULT, NO` after the YES test) is the
+                # same question, decided by the first (see `branch`).
+                return {"answer": "yes" if yes else "no", "_q": rest[0] if rest else None}
             if kind == "choice":
                 return {"choice": rest[0], op: value}
             if kind == "special":
@@ -465,7 +543,16 @@ class Compiler:
         """Explore the taken branch (first), then continue with the negation.
         A condition on a value the path already set (`setvar VAR_TEMP_1, 0`
         then `goto_if_eq VAR_TEMP_1, 0`) is decided here instead of forking."""
-        decided = static_eval(cond, state.env)
+        question = cond.pop("_q", None) if cond else None
+        decided = static_eval(cond, state.env, state.flags)
+        if question is not None and question in state.answered:
+            decided = state.answered[question] == cond["answer"]
+        if decided is None and cond is not None:
+            # A branch the path's own conditions rule out is not a path.
+            if not consistent(state.when, cond):
+                decided = False
+            elif not consistent(state.when, negate(cond)):
+                decided = True
         if decided is not None:
             cond = None
         if decided is False:
@@ -473,6 +560,8 @@ class Compiler:
         taken = state.fork()
         if cond is not None:
             taken.when.append(cond)
+            if question is not None:
+                taken.answered[question] = cond["answer"]
         if call:
             taken.stack = state.stack + ((label, i + 1),)
             self.enter(taken_label, taken, is_call=True)
@@ -480,6 +569,8 @@ class Compiler:
             self.jump(taken_label, taken)
         if cond is not None:
             state.when.append(negate(cond))
+            if question is not None:
+                state.answered[question] = negate(cond)["answer"]
         elif decided is True:
             # Only the taken branch exists; the caller must not continue.
             state.dead = True
@@ -508,6 +599,17 @@ class Compiler:
         state.stack = state.stack[:-1]
         self.run(label, i, state)
 
+    def displacement(self, movement):
+        """Net (dx, dy) of a movement script (`Common_Movement_WalkUp5`)."""
+        dx = dy = 0
+        for cmd in self.labels.get(movement, []):
+            m = MOVE_ACTION.match(cmd.name)
+            if m:
+                step = 2 if cmd.name.startswith("jump_2_") else 1
+                ddx, ddy = MOVE_DIRS[m.group(1)]
+                dx, dy = dx + ddx * step, dy + ddy * step
+        return dx, dy
+
     def unmodelled_site(self, label, i, name):
         if (label, i) not in self._sites:
             self._sites.add((label, i))
@@ -532,6 +634,18 @@ class Compiler:
             name, a = cmd.name, cmd.args
             self.site = (label, i)
             i += 1
+            if name in ("applymovement", "applymovement_at"):
+                if a and value_of(a[0], state.env) in PLAYER_IDS and len(a) > 1:
+                    dx, dy = self.displacement(a[1])
+                    if dx or dy:
+                        state.does.append({"move_player": [dx, dy]})
+                continue
+            if name == "setmetatile":
+                x, y = value_of(a[0], state.env), value_of(a[1], state.env)
+                blocked = value_of(a[3], state.env) if len(a) > 3 else 0
+                if isinstance(x, int) and isinstance(y, int):
+                    state.does.append({"metatile": [x, y], "open": blocked in (0, "FALSE"), "tile": a[2]})
+                continue
             if name in IGNORED:
                 continue
             # -- flow --
@@ -620,7 +734,7 @@ class Compiler:
                 self.set_result(state, ("move", a[0]))
                 continue
             if name == "yesnobox":
-                self.set_result(state, ("yesno",))
+                self.set_result(state, ("yesno", self.site))
                 continue
             if name.startswith("multichoice"):
                 self.set_result(state, ("choice", a[2]))
@@ -667,19 +781,23 @@ class Compiler:
             if name in ("msgbox", "message"):
                 state.does.append({"say": a[0]})
                 if len(a) > 1 and a[1] == "MSGBOX_YESNO":
-                    self.set_result(state, ("yesno",))
+                    self.set_result(state, ("yesno", self.site))
                 continue
             if name in ("setflag", "setworldmapflag"):
                 state.does.append({"set": a[0]})
+                state.flags[("flag", a[0])] = True
                 continue
             if name == "clearflag":
                 state.does.append({"clear": a[0]})
+                state.flags[("flag", a[0])] = False
                 continue
             if name == "settrainerflag":
                 state.does.append({"defeated": a[0]})
+                state.flags[("trainer", a[0])] = True
                 continue
             if name == "cleartrainerflag":
                 state.does.append({"undefeated": a[0]})
+                state.flags[("trainer", a[0])] = False
                 continue
             if name == "setvar":
                 v = value_of(a[1], state.env)
@@ -688,14 +806,21 @@ class Compiler:
                 state.does.append({"var": a[0], "eq": v})
                 continue
             if name in ("addvar", "subvar"):
+                before = state.env.get(a[0])
+                delta = value_of(a[1], state.env)
                 self.write_var(state, a[0])
-                state.does.append({"var": a[0], "add" if name == "addvar" else "sub": value_of(a[1], state.env)})
+                state.does.append({"var": a[0], "add" if name == "addvar" else "sub": delta})
+                # A count the path started from a known value (the grunts
+                # beaten so far) stays known.
+                if isinstance(before, int) and isinstance(delta, int):
+                    state.env[a[0]] = before + delta if name == "addvar" else before - delta
                 continue
             if name in ("copyvar", "setorcopyvar"):
                 src = value_of(a[1], state.env)
                 self.write_var(state, a[0])
                 if isinstance(src, int) or not src.startswith("VAR_"):
                     state.env[a[0]] = src
+                    state.does.append({"var": a[0], "eq": src})
                 elif src in state.typed:
                     state.typed[a[0]] = state.typed[src]
                 continue
@@ -746,6 +871,19 @@ class Compiler:
             if name == "special":
                 if a[0] == "HealPlayerParty":
                     state.does.append({"heal": True})
+                elif a[0] in SPECIAL_QUANTITIES:
+                    for var, (kind, base) in SPECIAL_QUANTITIES[a[0]].items():
+                        self.set_typed(state, var, kind, base)
+                    state.does.extend(dict(e) for e in self.specials.get(a[0], []))
+                elif a[0] in self.specials:
+                    for e in self.specials[a[0]]:
+                        if "set_var_flag" in e:
+                            flag = state.env.get(e["set_var_flag"])
+                            if isinstance(flag, str) and flag.startswith("FLAG_"):
+                                state.does.append({"set": flag})
+                                state.flags[("flag", flag)] = True
+                        else:
+                            state.does.append(dict(e))
                 elif a[0] not in IGNORED_SPECIALS:
                     state.opaque.append(f"special {a[0]}")
                     self.unmodelled_site(label, i - 1, f"special {a[0]}")
@@ -817,6 +955,7 @@ class Compiler:
             fight.when.append({"trainer": battle["battle"], "defeated": False})
         fight.does.append(battle)
         fight.does.append({"defeated": battle["battle"]})
+        fight.flags[("trainer", battle["battle"])] = True
         if after:
             self.jump(after, fight)
         else:
@@ -873,9 +1012,61 @@ def load_world(pret):
                 label_map[label] = map_name
         texts.update(parsed.texts)
         data.update(parsed.data)
+    load_direction_constants(pret)
     sha1_file = pret / f"{ROM}.sha1"
     sha1 = sha1_file.read_text().split()[0] if sha1_file.exists() else ""
     return WorldSources(pret, maps, map_names, labels, texts, data, label_map, local_ids, sha1)
+
+
+def load_direction_constants(pret):
+    """`DIR_*` as numbers (`include/constants/global.h`): a script tests
+    `VAR_FACING` against each direction in turn, and with the values known
+    the tests after the first are decided by the path's own conditions
+    (facing north is not facing south) instead of forking 2^n paths. Oak's
+    parcel scene was cut at the path cap before it gave the Pokédex."""
+    header = Path(pret) / "include/constants/global.h"
+    if not header.exists():
+        return
+    for name, value in re.findall(r"#define (DIR_[A-Z]+)\s+(\d+)\b", header.read_text()):
+        CONSTANTS.setdefault(name, int(value))
+
+
+def special_effects(pret):
+    """What each `special` does to flags and vars, read from its C function
+    (`EnterHallOfFame` sets `FLAG_SYS_GAME_CLEAR`): the `FlagSet`,
+    `FlagClear` and literal `VarSet` calls in the function's own body."""
+    pret = Path(pret)
+    specials_inc = pret / "data/specials.inc"
+    if not specials_inc.exists():
+        return {}
+    names = set(re.findall(r"def_special\s+(\w+)", specials_inc.read_text()))
+    bodies = {}
+    for f in sorted((pret / "src").glob("*.c")):
+        text = f.read_text(errors="ignore")
+        for m in re.finditer(r"^[\w \*]*?\b(\w+)\s*\(\s*void\s*\)\s*\n?\{", text, re.M):
+            if m.group(1) not in names or m.group(1) in bodies:
+                continue
+            start, depth = m.end() - 1, 0
+            for end in range(start, len(text)):
+                if text[end] == "{":
+                    depth += 1
+                elif text[end] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            bodies[m.group(1)] = text[start:end + 1]
+    out = {}
+    for name in sorted(bodies):
+        body = bodies[name]
+        effects = [{"set": f} for f in re.findall(r"\bFlagSet\((FLAG_\w+)\)", body)]
+        # The flag a script put in a special var (`SetHiddenItemFlag`: the
+        # Silph Co. door just unlocked), resolved when the script is compiled.
+        effects += [{"set_var_flag": "VAR_" + v} for v in re.findall(r"\bFlagSet\(gSpecialVar_(0x[0-9A-Fa-f]+)\)", body)]
+        effects += [{"clear": f} for f in re.findall(r"\bFlagClear\((FLAG_\w+)\)", body)]
+        effects += [{"var": v, "eq": int(n, 0)} for v, n in re.findall(r"\bVarSet\((VAR_\w+),\s*(\d+|0x[0-9a-fA-F]+)\)", body)]
+        if effects:
+            out[name] = effects
+    return out
 
 
 def none_if_zero(value):
@@ -885,7 +1076,8 @@ def none_if_zero(value):
 def compile_events(world):
     """Compiles every entry script. Returns (events, unmodelled counter,
     typing report: {"typed": quantity -> sites, "untyped_specials": specialvar -> sites})."""
-    compiler = Compiler(world.labels, world.data, world.local_ids, world.label_map, world.map_names)
+    compiler = Compiler(world.labels, world.data, world.local_ids, world.label_map, world.map_names,
+                        special_effects(world.pret))
     entries = {}  # label -> (kind, map, local_id) of its first reference
 
     def refer(label, kind, map_name, local_id=None):
@@ -893,9 +1085,10 @@ def compile_events(world):
         if label is None:
             return None
         if label not in entries:
-            entries[label] = [kind, map_name, local_id, 1]
+            entries[label] = [kind, map_name, local_id, 1, {map_name}]
         else:
             entries[label][3] += 1
+            entries[label][4].add(map_name)
         return label
 
     objects, triggers, map_scripts = [], [], {}
@@ -941,18 +1134,32 @@ def compile_events(world):
 
     scripts = {}
     for label in sorted(entries):
-        kind, map_name, local_id, refs = entries[label]
+        kind, map_name, local_id, refs, maps = entries[label]
         compiled = compiler.compile(label)
-        script = {"kind": kind, "map": map_name if refs == 1 or label in world.label_map else None}
+        # A script several events of one map share (a door's four tiles)
+        # still belongs to that map.
+        one_map = refs == 1 or len(maps) == 1 or label in world.label_map
+        script = {"kind": kind, "map": map_name if one_map else None}
         if kind == "object" and refs == 1:
             script["local_id"] = local_id
         if refs > 1:
             script["refs"] = refs
         script.update(compiled)
+        if kind == "object" and refs == 1:
+            # An item ball taken disappears (the game sets its object's
+            # flag in C, not in the script).
+            for path in script["paths"]:
+                if any(e.get("find") for e in path["does"]):
+                    path["does"].append({"remove_object": local_id})
         scripts[label] = script
+    # The flags a new game starts with set (new_game.c runs this script):
+    # most `FLAG_HIDE_*` of people who appear later in the story.
+    initial = compiler.compile(NEW_GAME_SCRIPT)
+    initial_set = sorted({e["set"] for p in initial["paths"] for e in p["does"] if "set" in e})
     events = {
         "rom": ROM, "sha1": world.sha1,
         "scripts": scripts, "map_scripts": map_scripts, "triggers": triggers, "objects": objects,
+        "initial": {"set": initial_set},
     }
     typing = {"typed": compiler.typed_sites, "untyped_specials": compiler.untyped_specials}
     return events, compiler.unmodelled, typing

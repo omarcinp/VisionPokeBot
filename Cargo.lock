@@ -1000,6 +1000,7 @@ dependencies = [
  "pokebot-pabotbase",
  "pokebot-planner",
  "pokebot-runtime",
+ "pokebot-sense",
  "pokebot-state",
  "pokebot-video",
  "pokebot-vision",
@@ -1014,6 +1015,7 @@ name = "pokebot-capture-card"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "pokebot-core",
  "v4l",
 ]
@@ -1039,6 +1041,7 @@ dependencies = [
  "pokebot-remote",
  "pokebot-replay",
  "pokebot-runtime",
+ "pokebot-sense",
  "pokebot-state",
  "pokebot-telemetry",
  "pokebot-video",
@@ -1138,11 +1141,21 @@ dependencies = [
  "pokebot-controller",
  "pokebot-core",
  "pokebot-replay",
+ "pokebot-sense",
  "pokebot-state",
  "pokebot-telemetry",
  "pokebot-video",
  "pokebot-vision",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pokebot-sense"
+version = "0.1.0"
+dependencies = [
+ "pokebot-gamedata",
+ "pokebot-state",
  "serde_json",
 ]
 

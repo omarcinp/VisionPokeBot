@@ -4,24 +4,19 @@ The target is the physical Nintendo Switch (HDMI capture card + ESP32-S3
 controller); the emulator is only the fast development loop. Background and
 commands: `docs/HANDOFF.md`, `docs/architecture.md`, `README.md`.
 
-## 1. The Switch routine never stops
+## 1. Switch capture stays available
 
 An idle Switch dims after 5 minutes and sleeps after its Auto-Sleep time
 (TV mode: 1 hour or more). Once asleep, the capture goes black, the
 controller's USB is cut (`usb_mounted: false`), and only a person at the
 console can wake it. So:
 
-- **A bot always runs on the Switch.** Launch it through
-  `tools/live-run.sh` with `story … --continue --save-game --restart`. With
-  `--restart` it never ends: after finishing or failing it waits
-  `--restart-wait` seconds (default 240), soft resets, CONTINUEs the last save
-  and plays on. Use `--until <milestone>` to stop at the segment under test;
-  after it, the cycles only keep the game alive.
-- **Never leave the Switch without a running bot.** Not at the end of a task,
-  not while debugging, not at the end of a session. To deploy a fix, relaunch
-  with `tools/live-run.sh` (it replaces the run in one step). Don't stop
-  `pokebot-switch` (`systemctl --user stop`, `pkill`) without relaunching
-  right away.
+- **Keep the Switch device session available.** The hub owns capture independently
+  of bot execution. A user may stop its bot or take manual control from **Game
+  instances**; never restart a bot merely to override that choice. The ESP32's
+  keepalive prevents idle sleep while no bot is enabled.
+- To deploy a bot fix, use `tools/live-run.sh` to replace the run. Keep the capture
+  hub up during the replacement, and preserve the user's current control mode.
 - **Only `tools/live-run.sh` starts long-lived processes** (the bot, the hub,
   the disk guard). It runs each one in its own systemd user unit
   (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`),

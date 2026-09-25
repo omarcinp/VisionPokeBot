@@ -29,6 +29,7 @@ pokebot-esp32-wifi.workspace = true
 pokebot-remote.workspace = true
 pokebot-planner.workspace = true
 pokebot-replay.workspace = true
+pokebot-sense.workspace = true
 pokebot-runtime.workspace = true
 pokebot-state.workspace = true
 pokebot-telemetry.workspace = true

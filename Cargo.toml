@@ -8,6 +8,7 @@ members = [
     "crates/controller",
     "crates/replay",
     "crates/state",
+    "crates/sense",
     "crates/vision",
     "crates/runtime",
     "crates/telemetry",
@@ -36,6 +37,7 @@ pokebot-video = { path = "crates/video" }
 pokebot-controller = { path = "crates/controller" }
 pokebot-replay = { path = "crates/replay" }
 pokebot-state = { path = "crates/state" }
+pokebot-sense = { path = "crates/sense" }
 pokebot-vision = { path = "crates/vision" }
 pokebot-runtime = { path = "crates/runtime" }
 pokebot-telemetry = { path = "crates/telemetry" }

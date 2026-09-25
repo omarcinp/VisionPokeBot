@@ -22,11 +22,14 @@ pub struct HubArgs {
     instances_dir: Option<PathBuf>,
     #[command(flatten)]
     fleet: FleetArgs,
+    #[command(flatten)]
+    switch: crate::switch_device::SwitchArgs,
 }
 
 pub fn run(args: HubArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let dir = hub_proxy::resolve_instances_dir(args.instances_dir);
     let fleet = Arc::new(Fleet::new(args.fleet, dir.clone())?);
+    let _switch = crate::switch_device::SwitchDevice::start(args.switch, dir.clone())?;
     let monitor = Arc::clone(&fleet);
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let done = Arc::clone(&monitor_stop);

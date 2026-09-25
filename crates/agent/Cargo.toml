@@ -16,6 +16,7 @@ pokebot-planner.workspace = true
 pokebot-runtime.workspace = true
 pokebot-video = { path = "../video" }
 pokebot-state.workspace = true
+pokebot-sense.workspace = true
 pokebot-vision.workspace = true
 pokebot-world.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }

@@ -166,7 +166,7 @@ async fn hub_redirects_lists_and_rejects() {
 
     let reply = get(hub, "/").await;
     assert!(reply.starts_with("HTTP/1.1 302"), "{reply}");
-    assert!(reply.contains("\r\nLocation: /switch/\r\n"), "{reply}");
+    assert!(reply.contains("\r\nLocation: /games/\r\n"), "{reply}");
 
     let reply = get(hub, "/emu?a=1").await;
     assert!(reply.starts_with("HTTP/1.1 301"), "{reply}");
@@ -305,6 +305,36 @@ async fn hub_owns_dashboard_navigation_while_old_switch_keeps_running() {
     // Backend is reachable but needn't serve a new page (or restart its bot).
     let reply = get(hub, "/switch/").await;
     assert!(reply.starts_with("HTTP/1.1 200"));
-    assert!(reply.contains("['Emulators', '/emulators/'"));
+    assert!(reply.contains("['← Game instances', '/games/'"));
     assert!(!reply.contains("id=\"thumbs\""));
+}
+
+#[tokio::test]
+async fn switch_preview_and_detail_survive_without_a_bot() {
+    let dir = std::env::temp_dir().join(format!("hub-switch-device-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (backend, mut heads, release) = streaming_backend().await;
+    let manifest = dir.join("switch-device.json");
+    hub_proxy::register_worker(&manifest, "Switch", backend.port()).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value["connected"] = serde_json::json!(true);
+    value["video_ready"] = serde_json::json!(true);
+    std::fs::write(&manifest, value.to_string()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(hub_proxy::run(
+        listener,
+        hub_proxy::default_routes(),
+        dir.clone(),
+    ));
+    let pending = tokio::spawn(get(addr, "/switch/frame.png"));
+    let head = timeout(WAIT, heads.recv()).await.unwrap().unwrap();
+    assert!(head.starts_with("GET /frame.png HTTP/1.1"));
+    release.send(()).unwrap();
+    assert!(pending.await.unwrap().contains("second"));
+    assert!(get(addr, "/games/").await.contains("Game instances"));
+    assert!(get(addr, "/emulators/").await.contains("Game instances"));
+    task.abort();
+    let _ = std::fs::remove_dir_all(dir);
 }

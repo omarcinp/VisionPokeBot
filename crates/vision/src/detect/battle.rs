@@ -76,6 +76,74 @@ pub fn is_battle_text_box(image: &RgbImage) -> bool {
         && share(image, Region::new(8, 120, 112, 32), BOX_BLUE, 2) >= 450
 }
 
+/// The box's light frame rows (y 117..=118) inside the gold band.
+const BOX_FRAME: Rgb = [231, 219, 231];
+
+/// How a fade has dimmed the screen. The battle's fade-out after its last
+/// message subtracts one amount from every 5-bit channel (rec2-120440:
+/// every colour 33 lower, blue (41,81,107) → (8,48,74); rec2-82040: 115
+/// lower, the blue clamped to black); the fade into the evolution scene
+/// scales instead (switch-goal-14-64460: every colour about halved).
+#[derive(Debug, Clone, Copy)]
+enum Dim {
+    Subtract(u8),
+    /// Brightness in 1/256ths.
+    Scale(u32),
+}
+
+impl Dim {
+    fn apply(self, c: Rgb) -> Rgb {
+        match self {
+            Dim::Subtract(s) => c.map(|v| v.saturating_sub(s)),
+            Dim::Scale(k) => c.map(|v| (u32::from(v) * k / 256) as u8),
+        }
+    }
+}
+
+/// The battle text box under a fade: the same frame and fill, every colour
+/// dimmed by one amount (measured on the gold band's red channel). The
+/// whole screen fades with it, so it is a transition, not a message: its
+/// text is the page already read before the fade began, and pressing A
+/// through it would land on whatever comes next.
+pub fn is_faded_text_box(image: &RgbImage) -> bool {
+    let band = Region::new(10, 114, 110, 2);
+    let (mut sum, mut n) = (0u32, 0u32);
+    for y in band.y..band.y + band.height {
+        for x in (band.x..band.x + band.width).step_by(2) {
+            sum += u32::from(px(image, x, y)[0]);
+            n += 1;
+        }
+    }
+    let red = sum / n.max(1);
+    // Brighter is the box itself (or no box); darker than this, the gold
+    // is indistinguishable from the black a fade ends in.
+    if !(40..=u32::from(BOX_GOLD[0]) - 16).contains(&red) {
+        return false;
+    }
+    let lower = (u32::from(BOX_GOLD[0]) - red) as u8;
+    let scale = red * 256 / u32::from(BOX_GOLD[0]);
+    [Dim::Subtract(lower), Dim::Scale(scale)]
+        .iter()
+        .any(|&dim| {
+            share(image, Region::new(10, 114, 110, 2), dim.apply(BOX_GOLD), 2) >= 800
+                && share(image, Region::new(10, 117, 110, 1), dim.apply(BOX_FRAME), 2) >= 800
+                && share(image, Region::new(8, 120, 112, 32), dim.apply(BOX_BLUE), 2) >= 450
+        })
+}
+
+/// The stats window a level-up opens over the right of the battle text
+/// box ("MAX. HP 39 / ATTACK 18 …"): white, framed in the `std` window's
+/// mauve band (outline x 145, band x 147..=148, top band y 59..=60;
+/// switch-goal-15 frame 87930). It covers the text box from x 145 on.
+pub const LEVEL_UP_PANEL_LEFT: u32 = 145;
+
+pub fn is_level_up_panel(image: &RgbImage) -> bool {
+    use crate::color::{SCENE_BORDER, WHITE};
+    share(image, Region::new(147, 70, 2, 80), SCENE_BORDER, 1) >= 800
+        && share(image, Region::new(160, 59, 70, 2), SCENE_BORDER, 1) >= 800
+        && share(image, Region::new(150, 62, 2, 90), WHITE, 1) >= 800
+}
+
 pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
     let menu = find_cursor(image, PANEL_TOP + 4..image.height()).map(|(x, y)| {
         let row = u8::from(y >= 132);

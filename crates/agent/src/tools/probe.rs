@@ -802,6 +802,7 @@ mod tests {
         let map = FlyMapObservation {
             lit: vec!["PalletTown".into(), "ViridianCity".into()],
             dark: vec!["PewterCity".into()],
+            cursor: None,
         };
         let (events, dark) = fly_map_events(&map);
         assert_eq!(

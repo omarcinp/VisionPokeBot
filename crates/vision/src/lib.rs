@@ -17,7 +17,7 @@ use pokebot_state::{
     BattleMenu, DialogueKind, DialogueObservation, FrameMetrics, Observation, Observed, PlayerPose,
     Region, ScreenState,
 };
-use pokebot_world::{localize::PLAYER_SPRITE, Localizer, World};
+use pokebot_world::{localize::PLAYER_SPRITE, sprites::SpriteDetector, Localizer, World};
 
 pub trait PerceptionSystem {
     fn observe(&mut self, frame: &NormalizedFrame) -> Observation;
@@ -52,6 +52,11 @@ pub struct FireRedPerception {
     last_read: Option<(Vec<u8>, Vec<String>)>,
     /// Species sprite palettes for the opponent's shiny check.
     palettes: Option<Arc<shiny::SpritePalettes>>,
+    /// Brightest-surface level of the last dim frame that turned out not
+    /// to be a fade (see `fade`).
+    fade_miss: Option<u8>,
+    /// Object sprites around the located player.
+    sprites: SpriteDetector,
 }
 
 /// Frames between whole-world searches while the player can't be located
@@ -83,6 +88,15 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
+        if let Some((state, detector)) = scene(image) {
+            // A fade: name the screen under it when brightening shows one.
+            if detector == "fade" {
+                if let Some(fade) = self.fade(frame.frame_id, image, metrics) {
+                    return fade;
+                }
+            }
+            return Observation::bare(frame.frame_id, screen(state, detector), metrics);
+        }
         if detect::whiteout::is_whiteout(image) {
             return Observation::bare(
                 frame.frame_id,
@@ -90,119 +104,15 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
-        if let Some(naming) = detect::naming::detect(image) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::Naming, "naming-keyboard"),
-                metrics,
-            );
-            observation.naming = Some(naming);
-            return observation;
-        }
-        if detect::title::is_title(image) {
+        if detect::cut_in::detect(image) {
             return Observation::bare(
                 frame.frame_id,
-                screen(ScreenState::TitleScreen, "title-bands"),
+                screen(ScreenState::Transition, "field-move-cut-in"),
                 metrics,
             );
         }
-        if let Some(menu) = detect::main_menu::detect(image) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::MainMenu, "main-menu"),
-                metrics,
-            );
-            observation.menu = Some(menu);
+        if let Some(observation) = self.full_screen(frame.frame_id, image, metrics) {
             return observation;
-        }
-        if let Some(font) = self.font.as_deref() {
-            let summary = detect::party::summary(image, font);
-            let party_menu = if summary.is_none() {
-                detect::party::menu(image, font)
-            } else {
-                None
-            };
-            if summary.is_some() || party_menu.is_some() {
-                let mut observation = Observation::bare(
-                    frame.frame_id,
-                    screen(ScreenState::PartyMenu, "party-summary"),
-                    metrics,
-                );
-                observation.summary = summary;
-                observation.party_menu = party_menu;
-                return observation;
-            }
-        }
-        if detect::pokedex::is_page(image) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::Unknown, "pokedex-page"),
-                metrics,
-            );
-            observation.pokedex_page = true;
-            return observation;
-        }
-        if let Some(card) = detect::trainer_card::detect(image, self.font.as_deref()) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::Unknown, "trainer-card"),
-                metrics,
-            );
-            observation.trainer_card = Some(card);
-            return observation;
-        }
-        if let Some(map) = detect::fly_map::detect(image) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::Unknown, "region-map"),
-                metrics,
-            );
-            observation.fly_map = Some(map);
-            return observation;
-        }
-        if let Some(list) = self
-            .font
-            .as_deref()
-            .and_then(|font| detect::pokedex::list(image, font))
-        {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::Unknown, "pokedex-list"),
-                metrics,
-            );
-            observation.pokedex_list = Some(list);
-            return observation;
-        }
-        if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
-            let mut observation = Observation::bare(
-                frame.frame_id,
-                screen(ScreenState::LearnMove, "known-moves"),
-                metrics,
-            );
-            observation.move_list = Some(list);
-            return observation;
-        }
-        if let (Some(font), Some(small_font)) = (&self.font, &self.small_font) {
-            if let Some(bag) = detect::bag::detect(image, font, small_font) {
-                let state = if bag.prompt.is_some() {
-                    ScreenState::BattleBag
-                } else {
-                    ScreenState::Bag
-                };
-                let mut observation =
-                    Observation::bare(frame.frame_id, screen(state, "bag-screen"), metrics);
-                observation.bag = Some(bag);
-                return observation;
-            }
-            if let Some(shop) = detect::shop::detect(image, font, small_font) {
-                let mut observation = Observation::bare(
-                    frame.frame_id,
-                    screen(ScreenState::Shop, "shop-screen"),
-                    metrics,
-                );
-                observation.shop = Some(shop);
-                return observation;
-            }
         }
         let mut dialogue = detect::dialogue::detect(image);
         match &mut dialogue {
@@ -258,6 +168,9 @@ impl PerceptionSystem for FireRedPerception {
             _ if matches!(battle_menu, Some(BattleMenu::Moves { .. })) => {
                 screen(ScreenState::BattleMoveSelection, "battle-cursor")
             }
+            (Some(d), _) if d.kind == DialogueKind::BattleText && is_evolution(d, &battle) => {
+                screen(ScreenState::Evolution, "evolution-text")
+            }
             (Some(d), _) if d.kind == DialogueKind::BattleText => {
                 screen(ScreenState::BattleText, "battle-text-box")
             }
@@ -278,7 +191,21 @@ impl PerceptionSystem for FireRedPerception {
         let in_battle = battle.is_some();
         observation.battle = battle;
         if !in_battle {
-            observation.player = self.locate(image, &observation);
+            let popup = detect::map_popup::detect(image);
+            if let (Some(popup), Some(font)) = (&popup, &self.font) {
+                observation.map_popup = detect::map_popup::read(image, popup, font);
+            }
+            let covered = popup.map(|p| p.covers);
+            observation.player = self.locate(image, &observation, covered);
+            self.see_sprites(frame.frame_id, image, &mut observation, covered);
+        }
+        if observation.screen.value == ScreenState::Unknown
+            && observation.player.is_none()
+            && !in_battle
+        {
+            if let Some(fade) = self.fade(frame.frame_id, image, metrics) {
+                return fade;
+            }
         }
         observation
     }
@@ -324,6 +251,207 @@ impl FireRedPerception {
         self
     }
 
+    /// Whole-screen UIs (naming keyboard, title, menus, party screens,
+    /// bag, mart, …) recognised by their own layout.
+    fn full_screen(
+        &self,
+        frame_id: u64,
+        image: &RgbImage,
+        metrics: FrameMetrics,
+    ) -> Option<Observation> {
+        let screen = |value, detector: &str| Observed {
+            value,
+            detector: detector.to_owned(),
+        };
+        if let Some(naming) = detect::naming::detect(image) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::Naming, "naming-keyboard"),
+                metrics,
+            );
+            observation.naming = Some(naming);
+            return Some(observation);
+        }
+        if detect::title::is_title(image) {
+            return Some(Observation::bare(
+                frame_id,
+                screen(ScreenState::TitleScreen, "title-bands"),
+                metrics,
+            ));
+        }
+        if let Some(menu) = detect::main_menu::detect(image) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::MainMenu, "main-menu"),
+                metrics,
+            );
+            observation.menu = Some(menu);
+            return Some(observation);
+        }
+        // The KNOWN MOVES list a move is forgotten on is the summary's
+        // moves page with a red selection frame: it must win over the
+        // summary reading of the same page (its title reads the same).
+        if let Some(list) = detect::move_list::detect(image, self.font.as_deref()) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::LearnMove, "known-moves"),
+                metrics,
+            );
+            observation.move_list = Some(list);
+            return Some(observation);
+        }
+        if let Some(font) = self.font.as_deref() {
+            let summary = detect::party::summary(image, font);
+            let mut party_menu = if summary.is_none() {
+                detect::party::menu(image, font)
+            } else {
+                None
+            };
+            if let (Some(menu), Some(small)) = (&mut party_menu, &self.small_font) {
+                menu.members = detect::party::members(image, small, menu);
+            }
+            if summary.is_some() || party_menu.is_some() {
+                let mut observation = Observation::bare(
+                    frame_id,
+                    screen(ScreenState::PartyMenu, "party-summary"),
+                    metrics,
+                );
+                observation.summary = summary;
+                observation.party_menu = party_menu;
+                return Some(observation);
+            }
+        }
+        if detect::pokedex::is_page(image) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::Unknown, "pokedex-page"),
+                metrics,
+            );
+            observation.pokedex_page = true;
+            return Some(observation);
+        }
+        if let Some(card) = detect::trainer_card::detect(image, self.font.as_deref()) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::Unknown, "trainer-card"),
+                metrics,
+            );
+            observation.trainer_card = Some(card);
+            return Some(observation);
+        }
+        if let Some(map) = detect::fly_map::detect(image) {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::Unknown, "region-map"),
+                metrics,
+            );
+            observation.fly_map = Some(map);
+            return Some(observation);
+        }
+        if let Some(list) = self
+            .font
+            .as_deref()
+            .and_then(|font| detect::pokedex::list(image, font))
+        {
+            let mut observation = Observation::bare(
+                frame_id,
+                screen(ScreenState::Unknown, "pokedex-list"),
+                metrics,
+            );
+            observation.pokedex_list = Some(list);
+            return Some(observation);
+        }
+        if let (Some(font), Some(small_font)) = (&self.font, &self.small_font) {
+            if let Some(bag) = detect::bag::detect(image, font, small_font) {
+                let state = if bag.prompt.is_some() {
+                    ScreenState::BattleBag
+                } else {
+                    ScreenState::Bag
+                };
+                let mut observation =
+                    Observation::bare(frame_id, screen(state, "bag-screen"), metrics);
+                observation.bag = Some(bag);
+                return Some(observation);
+            }
+            if let Some(shop) = detect::shop::detect(image, font, small_font) {
+                let mut observation =
+                    Observation::bare(frame_id, screen(ScreenState::Shop, "shop-screen"), metrics);
+                observation.shop = Some(shop);
+                return Some(observation);
+            }
+        }
+        None
+    }
+
+    /// A frame darkened by a palette fade whose screen, brightened back,
+    /// is recognised: a `Transition` named after the screen under it
+    /// (`fade:menu-cursor`, `fade:party-summary`, …). The game takes no
+    /// input until the fade ends, and the sensor ignores transitions, so
+    /// nothing is read from it: text and numbers on a frame scaled up by
+    /// up to 16/5 carry that much more capture noise.
+    ///
+    /// Each candidate factor costs a pass of the screen detectors, so a dim
+    /// scene that is no fade (a cave the player can't be located in) is
+    /// searched once: its brightest level holds from frame to frame, while
+    /// a fade changes it at every step.
+    fn fade(
+        &mut self,
+        frame_id: u64,
+        image: &RgbImage,
+        metrics: FrameMetrics,
+    ) -> Option<Observation> {
+        let level = detect::fade::surface_level(image);
+        if self.fade_miss.is_some_and(|miss| miss.abs_diff(level) <= 1) {
+            return None;
+        }
+        let under = detect::fade::candidates(level)
+            .into_iter()
+            .find_map(|sixteenths| {
+                self.screen_detector(
+                    frame_id,
+                    &detect::fade::brighten(image, sixteenths),
+                    metrics,
+                )
+            });
+        self.fade_miss = under.is_none().then_some(level);
+        let under = under?;
+        Some(Observation::bare(
+            frame_id,
+            Observed {
+                value: ScreenState::Transition,
+                detector: format!("fade:{under}"),
+            },
+            metrics,
+        ))
+    }
+
+    /// The detector that recognises `image` as a screen or a window
+    /// (without the stateful parts of `observe`: text settling, locating).
+    fn screen_detector(
+        &self,
+        frame_id: u64,
+        image: &RgbImage,
+        metrics: FrameMetrics,
+    ) -> Option<String> {
+        if let Some(o) = self.full_screen(frame_id, image, metrics) {
+            return Some(o.screen.detector);
+        }
+        if let Some(d) = detect::dialogue::detect(image) {
+            return Some(
+                match d.kind {
+                    DialogueKind::BattleText => "battle-text-box",
+                    DialogueKind::InfoPage => "info-page",
+                    DialogueKind::MessageBox => "message-box",
+                }
+                .into(),
+            );
+        }
+        // A window, not a stray ▶-shaped speck of a dark scene.
+        detect::menu::detect(image)
+            .filter(|m| m.window.width >= 32 && m.window.height >= 16)
+            .map(|_| "menu-cursor".into())
+    }
+
     /// The dialogue's text, re-read only when its text cells changed.
     fn read_text(&mut self, image: &RgbImage, d: &DialogueObservation) -> Vec<String> {
         let Some(font) = &self.font else {
@@ -340,16 +468,22 @@ impl FireRedPerception {
         lines
     }
 
-    /// Allows whole-world searches when the player's map is unknown.
+    /// Allows whole-world searches when the player's map is unknown. The
+    /// first frame that could show the map is searched at once (not 30
+    /// frames in: a run continued in the Pewter Gym stood unlocated).
     pub fn with_global_search(mut self, enabled: bool) -> Self {
         self.global_search = enabled;
+        self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL - 1;
         self
     }
 
+    /// The player's pose, matching the frame outside the player sprite and
+    /// any window drawn over the map (`popup`: the map-name popup's area).
     fn locate(
         &mut self,
         image: &RgbImage,
         observation: &Observation,
+        popup: Option<Region>,
     ) -> Option<pokebot_state::PoseObservation> {
         let world = self.world.clone()?;
         let mut exclude = vec![PLAYER_SPRITE];
@@ -359,17 +493,39 @@ impl FireRedPerception {
         if let Some(menu) = &observation.menu {
             exclude.push(menu.window.inflate(8));
         }
+        if let Some(popup) = popup {
+            exclude.push(popup);
+        }
         let localizer = Localizer::new(&world);
-        let found = match &self.hint {
-            Some(hint) => localizer.locate_from(image, hint, &exclude),
-            None if !self.global_search => return None,
+        let tracked = self
+            .hint
+            .as_ref()
+            .and_then(|hint| localizer.locate_from(image, hint, &exclude));
+        // A hint that stopped matching is searched past: the tracker only
+        // looks at the hint's map and its neighbours, so a wrong hint (a
+        // warp to somewhere unconnected, a reset) otherwise kept the player
+        // unlocated for good (Switch audit: the Pewter Gym read score 994
+        // but was never searched). Past a hint, a map that looks like
+        // another (every Pokémon Center) is no answer: guessing one would
+        // replace a stale hint with a false one.
+        let stale = self.hint.is_some();
+        let found = match tracked {
+            Some(found) => {
+                self.frames_since_global_search = 0;
+                Some(found)
+            }
+            None if !self.global_search => None,
             None => {
                 self.frames_since_global_search += 1;
                 if self.frames_since_global_search < GLOBAL_SEARCH_INTERVAL {
                     return None;
                 }
                 self.frames_since_global_search = 0;
-                localizer.locate_anywhere(image, &exclude)
+                if stale {
+                    localizer.locate_anywhere_unambiguous(image, &exclude)
+                } else {
+                    localizer.locate_anywhere(image, &exclude)
+                }
             }
         };
         if let Some(found) = &found {
@@ -377,6 +533,36 @@ impl FireRedPerception {
         }
         found
     }
+
+    /// The sprites around the located player, and the objects seen not to
+    /// be there. The UI windows `locate` leaves out hide the field.
+    fn see_sprites(
+        &mut self,
+        frame_id: u64,
+        image: &RgbImage,
+        observation: &mut Observation,
+        popup: Option<Region>,
+    ) {
+        let (Some(world), Some(player)) = (&self.world, &observation.player) else {
+            return;
+        };
+        let Some(map) = world.map(&player.pose.map) else {
+            return;
+        };
+        let mut occluded: Vec<Region> = popup.into_iter().collect();
+        if observation.dialogue.is_some() {
+            occluded.push(Region::new(0, 112, 240, 48));
+        }
+        if let Some(menu) = &observation.menu {
+            occluded.push(menu.window.inflate(8));
+        }
+        let scan = self
+            .sprites
+            .scan(frame_id, image, world, map, &player.pose, &occluded);
+        observation.sprites = scan.sprites;
+        observation.objects_absent = scan.absent;
+    }
+
     fn metrics(&mut self, image: &RgbImage) -> FrameMetrics {
         let bytes = image.as_bytes();
         let total = (bytes.len() / 3).max(1) as u64;
@@ -423,6 +609,73 @@ fn opponent_shiny(
         normal,
         shiny_palette,
     ))
+}
+
+/// The evolution scene: the battle text box without either HUD, saying
+/// "What? BULBASAUR is evolving!" (the text stays up through the whole
+/// animation: switch-goal-14 frames 64600–65670), "Congratulations! Your
+/// BULBASAUR evolved into IVYSAUR!" or "Huh? … stopped evolving!". No
+/// battle message says these, and battle text without a HUD is only a
+/// trainer's challenge or the last page before the fade.
+fn is_evolution(
+    d: &DialogueObservation,
+    battle: &Option<pokebot_state::BattleObservation>,
+) -> bool {
+    let hud = battle
+        .as_ref()
+        .is_some_and(|b| b.player_hp.is_some() || b.opponent_hp.is_some());
+    let text = d.lines.join(" ");
+    !hud && [
+        "is evolving",
+        "evolved into",
+        "stopped evolving",
+        "Congratulations",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+/// Brightness (1/256ths) below which Oak's stage is still fading in or
+/// out (live-story-1544, ×0.86, is fading; frames as drawn measure ≥ 250).
+const OAK_STAGE_LIT: u32 = 240;
+
+/// Full-screen scenes that show no state: the boot intro, the Quest Log,
+/// fades, battle wipes and the map preview. Checked before every UI
+/// detector: none of them may be read or localized.
+fn scene(image: &RgbImage) -> Option<(ScreenState, &'static str)> {
+    use detect::{intro, transition};
+    if intro::is_copyright(image) {
+        return Some((ScreenState::Intro, "intro-copyright"));
+    }
+    if intro::is_game_freak(image) {
+        return Some((ScreenState::Intro, "intro-game-freak"));
+    }
+    if detect::quest_log::detect(image) {
+        return Some((ScreenState::QuestLog, "quest-log"));
+    }
+    if transition::is_faded(image) {
+        return Some((ScreenState::Transition, "fade"));
+    }
+    if detect::battle::is_faded_text_box(image) {
+        return Some((ScreenState::Transition, "battle-fade"));
+    }
+    if transition::is_battle_intro(image) {
+        return Some((ScreenState::Transition, "battle-intro"));
+    }
+    if transition::is_clockwise_wipe(image) {
+        return Some((ScreenState::Transition, "battle-wipe"));
+    }
+    if transition::is_pokeballs_trail(image) {
+        return Some((ScreenState::Transition, "battle-wipe"));
+    }
+    if transition::is_map_preview(image) {
+        return Some((ScreenState::Transition, "map-preview"));
+    }
+    match intro::oak_stage_brightness(image) {
+        Some(k) if k < OAK_STAGE_LIT => Some((ScreenState::Transition, "fade")),
+        Some(_) => Some((ScreenState::Intro, "intro-oak")),
+        None => None,
+    }
 }
 
 /// "a/b" → (a, b).
@@ -541,6 +794,34 @@ mod tests {
         assert_eq!(observation.screen.value, ScreenState::Transition);
     }
 
+    /// Emulator, Oak's lab: located frames carry the sprites around the
+    /// player, named.
+    #[test]
+    fn located_frames_carry_the_sprites() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/emu-sprites-oaks-lab.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::with_world(Arc::new(world));
+        p.set_pose_hint(PlayerPose {
+            map: "PalletTown_ProfessorOaksLab".into(),
+            x: 6,
+            y: 4,
+        });
+        let o = p.observe(&frame(0, image.clone()));
+        let named: Vec<u32> = o.sprites.iter().filter_map(|s| s.local_id).collect();
+        assert_eq!(named, [9, 10, 4, 8, 5, 6, 7]);
+        assert!(o.objects_absent.is_empty());
+        // Unlocated frames (a battle, a fade) carry none.
+        let o = p.observe(&frame(1, RgbImage::filled(240, 160, [0, 0, 0])));
+        assert!(o.sprites.is_empty());
+    }
+
     #[test]
     fn synthetic_message_box_with_arrow_is_dialogue_waiting() {
         let mut image = RgbImage::filled(240, 160, [66, 138, 132]);
@@ -615,6 +896,123 @@ mod tests {
         };
         let mut p = FireRedPerception::default().with_font(font);
         assert!(p.observe(&frame(0, image)).menu_lines.is_empty());
+    }
+
+    /// Switch goal run: the frames perception missed around the menus were
+    /// palette fades (the white window at 224/190/124/90 = 14, 12, 8 and 6
+    /// sixteenths): the Start menu fading out after a row was chosen, the
+    /// party menu, the bag's empty ITEMS pocket, the Trainer Card and the
+    /// summary INFO page fading in. The emulator's card (rec2, 36 frames)
+    /// sat at half brightness. They are transitions, named after the
+    /// screen under the fade, and carry no readings.
+    #[test]
+    fn fading_menu_screens_are_transitions() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        for (name, under) in [
+            ("switch-fade-start-menu-pokemon.png", "menu-cursor"),
+            ("switch-fade-start-menu-pokemon-14.png", "menu-cursor"),
+            ("switch-fade-start-menu-red.png", "menu-cursor"),
+            ("switch-fade-start-menu-bag.png", "menu-cursor"),
+            ("switch-fade-party-menu.png", "party-summary"),
+            ("switch-fade-bag-empty-items.png", "bag-screen"),
+            ("switch-fade-trainer-card.png", "trainer-card"),
+            ("switch-fade-summary-info.png", "party-summary"),
+            ("emu-fade-trainer-card.png", "trainer-card"),
+        ] {
+            let Some(image) = fixture(name) else {
+                continue;
+            };
+            let o = p.observe(&frame(0, image));
+            assert_eq!(o.screen.value, ScreenState::Transition, "{name}");
+            assert_eq!(o.screen.detector, format!("fade:{under}"), "{name}");
+            assert!(o.menu.is_none() && o.party_menu.is_none() && o.bag.is_none());
+        }
+    }
+
+    /// Every step of a fade of the emulator's Start menu down to 5/16 is
+    /// the menu (the first steps are still within the colour tolerance)
+    /// or the menu fading; the menu itself and a dark cave are not fades.
+    #[test]
+    fn a_start_menu_fade_is_recognised_at_every_step() {
+        let Some(mut p) = catch_perception() else {
+            return;
+        };
+        let Some(menu) = fixture("start-menu.png") else {
+            return;
+        };
+        assert_eq!(
+            p.observe(&frame(0, menu.clone())).screen.value,
+            ScreenState::Menu
+        );
+        for sixteenths in 5..16 {
+            let o = p.observe(&frame(1, detect::fade::darken(&menu, sixteenths)));
+            let expected = if sixteenths >= 13 {
+                "menu-cursor"
+            } else {
+                "fade:menu-cursor"
+            };
+            assert_eq!(o.screen.detector, expected, "{sixteenths}/16");
+        }
+        for name in [
+            "mtmoon-1f.png",
+            "mtmoon-1f-b.png",
+            "emu-tools-overworld.png",
+        ] {
+            if let Some(image) = fixture(name) {
+                let o = p.observe(&frame(2, image));
+                assert_ne!(o.screen.value, ScreenState::Transition, "{name}");
+            }
+        }
+        // A scene that was no fade doesn't hide the next real one.
+        let o = p.observe(&frame(3, detect::fade::darken(&menu, 8)));
+        assert_eq!(o.screen.detector, "fade:menu-cursor");
+    }
+
+    /// Teaching a TM/HM: the mauve-framed messages over the party menu and
+    /// the TM scene are dialogue (YES/NO included), and the KNOWN MOVES
+    /// list with its red frame is the move list, not the summary page.
+    #[test]
+    fn teach_screens_are_recognised() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        let observe = |name: &str| {
+            let image =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+                    .ok()?;
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            Some(p.observe(&frame(0, image)))
+        };
+        if let Some(o) = observe("emu-teach-four-moves") {
+            let d = o.dialogue.expect("dialogue over the party menu");
+            assert_eq!(d.lines, ["IVYSAUR wants to learn the", "move CUT."]);
+            assert!(d.waiting_for_input);
+            assert!(o.party_menu.is_none());
+        }
+        if let Some(o) = observe("emu-teach-replace-yes-no") {
+            assert!(o.dialogue.is_some());
+            assert_eq!(o.menu_lines, ["YES", "NO"]);
+        }
+        if let Some(o) = observe("emu-teach-learned") {
+            assert_eq!(o.dialogue.unwrap().lines, ["IVYSAUR learned", "CUT!"]);
+        }
+        if let Some(o) = observe("emu-teach-known-moves") {
+            let list = o.move_list.expect("move list");
+            assert_eq!(
+                list.moves,
+                ["TACKLE", "SLEEP POWDER", "RAZOR LEAF", "VINE WHIP", "CUT"]
+            );
+            assert_eq!(list.selected, Some(0));
+            assert!(o.summary.is_none());
+        }
+        if let Some(o) = observe("emu-summary-moves") {
+            assert!(o.move_list.is_none());
+            assert!(o.summary.is_some());
+        }
     }
 
     #[test]
@@ -950,6 +1348,76 @@ mod tests {
         }
     }
 
+    fn world() -> Option<Arc<World>> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        World::load(root.join("data/world")).ok().map(Arc::new)
+    }
+
+    /// Switch audit: after the hint went stale (the player was elsewhere
+    /// than the tracker's map and its neighbours) the Pewter Gym matched at
+    /// 994 but was never searched; with global search on, a failing hint
+    /// now falls back to it every `GLOBAL_SEARCH_INTERVAL` frames.
+    #[test]
+    fn a_stale_hint_falls_back_to_the_global_search() {
+        let (Some(world), Some(image)) = (world(), fixture("switch-pewter-gym.png")) else {
+            return;
+        };
+        let stale = PlayerPose {
+            map: "Route3".into(),
+            x: 5,
+            y: 9,
+        };
+        let gym = |o: Option<pokebot_state::PoseObservation>| {
+            o.is_some_and(|f| (f.pose.map.as_str(), f.pose.x, f.pose.y) == ("PewterCity_Gym", 6, 6))
+        };
+        let mut p = FireRedPerception::with_world(Arc::clone(&world)).with_global_search(true);
+        // The first frame is searched at once.
+        p.set_pose_hint(stale.clone());
+        assert!(gym(p.observe(&frame(0, image.clone())).player));
+        // From there on it is tracked frame by frame.
+        assert!(gym(p.observe(&frame(1, image.clone())).player));
+        // A stale hint again: the world is searched every interval.
+        p.set_pose_hint(stale.clone());
+        let located: Vec<_> = (0..u64::from(GLOBAL_SEARCH_INTERVAL))
+            .map(|i| p.observe(&frame(2 + i, image.clone())).player)
+            .collect();
+        assert!(located[..located.len() - 1].iter().all(Option::is_none));
+        assert!(gym(located.last().unwrap().clone()));
+        // Without global search a stale hint stays unlocated.
+        let mut p = FireRedPerception::with_world(world);
+        p.set_pose_hint(stale);
+        assert!((0..40).all(|i| p.observe(&frame(i, image.clone())).player.is_none()));
+    }
+
+    /// Entering Route 3 from Pewter (Switch): the popup is read, and its
+    /// area is left out of the match. Tracked from Pewter's east edge the
+    /// view is matched in Pewter's render, whose padding draws Route 3.
+    #[test]
+    fn the_map_popup_is_read_and_left_out_of_localization() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Some(world), Some(image), Ok(font)) = (
+            world(),
+            fixture("switch-map-popup-route3.png"),
+            text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let mut p = FireRedPerception::with_world(world).with_font(Arc::new(font));
+        p.set_pose_hint(PlayerPose {
+            map: "PewterCity".into(),
+            x: 47,
+            y: 19,
+        });
+        let o = p.observe(&frame(0, image));
+        assert_eq!(o.map_popup.as_deref(), Some("ROUTE 3"));
+        let found = o.player.expect("located");
+        assert_eq!(
+            (found.pose.map.as_str(), found.pose.x, found.pose.y),
+            ("Route3", 0, 9)
+        );
+        assert!(found.score >= 950, "{}", found.score);
+    }
+
     #[test]
     fn move_menu_names_are_read_with_the_small_font() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -972,5 +1440,283 @@ mod tests {
             vec!["TACKLE", "GROWL", "LEECH SEED", "VINE WHIP"]
         );
         assert_eq!(b.move_pp, Some((35, 35)));
+    }
+
+    /// Perception with the normal font, or `None` without the built world.
+    fn reading_perception() -> Option<FireRedPerception> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let font = text::Font::load(root.join("data/world/font_normal.json")).ok()?;
+        Some(FireRedPerception::default().with_font(std::sync::Arc::new(font)))
+    }
+
+    /// Each fixture reads as `state` from `detector` (missing fixtures are
+    /// skipped).
+    fn assert_screens(cases: &[(&str, ScreenState, &str)]) {
+        for (i, (name, state, detector)) in cases.iter().enumerate() {
+            let Some(image) = fixture(name) else {
+                continue;
+            };
+            let o = FireRedPerception::default().observe(&frame(i as u64, image));
+            assert_eq!(
+                (o.screen.value, o.screen.detector.as_str()),
+                (*state, *detector),
+                "{name}"
+            );
+            if matches!(state, ScreenState::Transition | ScreenState::Intro) {
+                assert!(o.player.is_none() && o.dialogue.is_none(), "{name}");
+            }
+        }
+    }
+
+    /// Emulator (rec2), Mt. Moon: the battle's fade-out after its last
+    /// page ("IVYSAUR gained 98 EXP. Points!", "IVYSAUR grew to LV. 18!")
+    /// dims every colour by one amount, the box included, and read
+    /// `Unknown`; the page was read before the fade began.
+    #[test]
+    fn a_fading_battle_text_box_is_a_transition() {
+        assert_screens(&[
+            (
+                "emu-battle-fade-start.png",
+                ScreenState::Transition,
+                "battle-fade",
+            ),
+            (
+                "emu-battle-fade-level-up.png",
+                ScreenState::Transition,
+                "battle-fade",
+            ),
+            // Dim enough that nothing is bright: the general fade rule.
+            ("emu-battle-fade-exp.png", ScreenState::Transition, "fade"),
+            (
+                "switch-evolution-fade-in.png",
+                ScreenState::Transition,
+                "fade:battle-text-box",
+            ),
+        ]);
+        // The box as drawn is still battle text.
+        assert_screens(&[(
+            "switch-level-up-text.png",
+            ScreenState::BattleText,
+            "battle-text-box",
+        )]);
+    }
+
+    /// Switch goal run: with the level-up stats window over the text box's
+    /// right side the page read as nothing ("MAX. HP 39 / ATTACK 18 …"
+    /// outvoted the message's ink).
+    #[test]
+    fn the_level_up_page_reads_beside_the_stats_window() {
+        let (Some(mut p), Some(image)) = (
+            reading_perception(),
+            fixture("switch-level-up-stats-panel.png"),
+        ) else {
+            return;
+        };
+        let o = p.observe(&frame(0, image));
+        assert_eq!(o.screen.value, ScreenState::BattleText);
+        let d = o.dialogue.unwrap();
+        assert_eq!(d.lines, vec!["BULBASAUR grew to", "LV. 15!"]);
+        assert!(d.waiting_for_input);
+    }
+
+    /// Battle intro windows (emulator, Mt. Moon; Switch, Route 2 grass)
+    /// and the cave wipe read `Unknown` and could be localized in a
+    /// cave's void; Mt. Moon's own rooms framed by void must still not
+    /// be transitions.
+    #[test]
+    fn battle_wipes_are_transitions_and_cave_maps_are_not() {
+        assert_screens(&[
+            (
+                "emu-battle-intro-band.png",
+                ScreenState::Transition,
+                "battle-intro",
+            ),
+            (
+                "emu-battle-intro-band-box.png",
+                ScreenState::Transition,
+                "battle-intro",
+            ),
+            (
+                "switch-battle-intro-band.png",
+                ScreenState::Transition,
+                "battle-intro",
+            ),
+            (
+                "emu-clockwise-wipe-quarter.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "emu-clockwise-wipe-three-quarters.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "emu-clockwise-wipe-late.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "mtmoon-battle-wipe.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "mtmoon-battle-wipe-b.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "switch-pokeballs-trail.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "switch-pokeballs-trail-late.png",
+                ScreenState::Transition,
+                "battle-wipe",
+            ),
+            (
+                "emu-map-preview-mtmoon.png",
+                ScreenState::Transition,
+                "map-preview",
+            ),
+            (
+                "emu-map-preview-mtmoon-fade-in.png",
+                ScreenState::Transition,
+                "map-preview",
+            ),
+            (
+                "mtmoon-entry-intro.png",
+                ScreenState::Transition,
+                "map-preview",
+            ),
+        ]);
+        // The title screen's flash across Charizard's silhouette is not a
+        // battle opening (whatever else it is).
+        if let Some(image) = fixture("emu-title-flash.png") {
+            let o = FireRedPerception::default().observe(&frame(0, image));
+            assert_ne!(o.screen.detector, "battle-intro");
+        }
+        for name in [
+            "mtmoon-1f.png",
+            "mtmoon-1f-b.png",
+            "emu-mtmoon-void-below.png",
+            "emu-mtmoon-popup-void.png",
+            "emu-mtmoon-popup-void-b.png",
+            "emu-tools-overworld.png",
+        ] {
+            let Some(image) = fixture(name) else {
+                continue;
+            };
+            let o = FireRedPerception::default().observe(&frame(0, image));
+            assert_eq!(
+                o.screen.value,
+                ScreenState::Unknown,
+                "{name}: {:?}",
+                o.screen
+            );
+        }
+    }
+
+    /// Fades: the Pokémon Center dimming on the Switch, Viridian City
+    /// under a fade with its message box, Oak's stage fading in (dark
+    /// and nearly lit). They read `Unknown` and dim maps were localized.
+    #[test]
+    fn dimmed_frames_are_fades() {
+        assert_screens(&[
+            (
+                "switch-fade-pokemon-center.png",
+                ScreenState::Transition,
+                "fade",
+            ),
+            (
+                "switch-fade-viridian-message.png",
+                ScreenState::Transition,
+                "fade",
+            ),
+            ("emu-oak-stage-dim.png", ScreenState::Transition, "fade"),
+            ("emu-oak-stage-fading.png", ScreenState::Transition, "fade"),
+        ]);
+    }
+
+    /// The boot sequence and Oak's stage (new game from boot, emulator;
+    /// copyright on the Switch) read `Unknown`.
+    #[test]
+    fn intro_scenes_are_recognised() {
+        assert_screens(&[
+            (
+                "switch-copyright.png",
+                ScreenState::Intro,
+                "intro-copyright",
+            ),
+            ("emu-copyright.png", ScreenState::Intro, "intro-copyright"),
+            (
+                "emu-copyright-fade-white.png",
+                ScreenState::Intro,
+                "intro-copyright",
+            ),
+            (
+                "emu-copyright-fade-grey.png",
+                ScreenState::Intro,
+                "intro-copyright",
+            ),
+            (
+                "emu-game-freak-star.png",
+                ScreenState::Intro,
+                "intro-game-freak",
+            ),
+            ("emu-oak-stage.png", ScreenState::Intro, "intro-oak"),
+            ("emu-oak-stage-nidoran.png", ScreenState::Intro, "intro-oak"),
+            ("emu-oak-stage-player.png", ScreenState::Intro, "intro-oak"),
+        ]);
+    }
+
+    /// CONTINUE plays the Quest Log recap (Switch goal run, emulator): it
+    /// read `Unknown` and its grey replay could be localized.
+    #[test]
+    fn the_quest_log_is_recognised() {
+        assert_screens(&[
+            ("switch-quest-log.png", ScreenState::QuestLog, "quest-log"),
+            ("emu-quest-log.png", ScreenState::QuestLog, "quest-log"),
+            (
+                "emu-quest-log-ending.png",
+                ScreenState::QuestLog,
+                "quest-log",
+            ),
+        ]);
+        // The main menu's slate background and the emulator's plain grey
+        // frames (90,89,90) are not the recap.
+        for name in ["switch-main-menu-continue.png", "emu-plain-grey.png"] {
+            if let Some(image) = fixture(name) {
+                let o = FireRedPerception::default().observe(&frame(0, image));
+                assert_ne!(o.screen.value, ScreenState::QuestLog, "{name}");
+            }
+        }
+    }
+
+    /// Switch goal run: BULBASAUR evolving after a trainer battle read as
+    /// battle text; the text stays readable through the animation.
+    #[test]
+    fn the_evolution_scene_is_recognised_and_read() {
+        let Some(mut p) = reading_perception() else {
+            return;
+        };
+        for (i, name) in [
+            "switch-evolution-start.png",
+            "switch-evolution-dark.png",
+            "switch-evolution-flash.png",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let Some(image) = fixture(name) else {
+                continue;
+            };
+            let o = p.observe(&frame(i as u64, image));
+            assert_eq!(o.screen.value, ScreenState::Evolution, "{name}");
+            let d = o.dialogue.expect(name);
+            assert_eq!(d.lines, vec!["What?", "BULBASAUR is evolving!"], "{name}");
+        }
     }
 }

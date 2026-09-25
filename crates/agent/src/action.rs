@@ -120,6 +120,12 @@ pub enum Expectation {
     ShopQuantity(u16),
     /// The mart is left: no mart window, menu or dialogue is showing.
     ShopClosed,
+    /// The party menu's action window ▶ is on this row.
+    PartyOptionAt(u8),
+    /// The region map (Fly's destination map) is showing.
+    FlyMap,
+    /// The region map's cursor frames this Kanto grid cell.
+    FlyCursorAt(u32, u32),
     /// Nothing to verify; only wait for the inputs to finish.
     InputsDone,
 }
@@ -217,6 +223,15 @@ impl Expectation {
                     && observation.menu.is_none()
                     && observation.dialogue.is_none()
             }
+            Expectation::PartyOptionAt(row) => observation
+                .party_menu
+                .as_ref()
+                .is_some_and(|m| m.option_cursor == Some(*row)),
+            Expectation::FlyMap => observation.fly_map.is_some(),
+            Expectation::FlyCursorAt(x, y) => observation
+                .fly_map
+                .as_ref()
+                .is_some_and(|m| m.cursor == Some((*x, *y))),
             Expectation::InputsDone => true,
         }
     }

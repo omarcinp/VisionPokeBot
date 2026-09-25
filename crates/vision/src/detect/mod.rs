@@ -2,18 +2,24 @@
 
 pub mod bag;
 pub mod battle;
+pub mod cut_in;
 pub mod dialogue;
+pub mod fade;
 pub mod fly_map;
 pub mod hud;
+pub mod intro;
 pub mod main_menu;
+pub mod map_popup;
 pub mod menu;
 pub mod move_list;
 pub mod naming;
 pub mod party;
 pub mod pokedex;
+pub mod quest_log;
 pub mod shop;
 pub mod title;
 pub mod trainer_card;
+pub mod transition;
 pub mod whiteout;
 
 use pokebot_core::RgbImage;

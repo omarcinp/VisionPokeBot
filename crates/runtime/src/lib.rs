@@ -1,10 +1,20 @@
 //! The bot loop shared by every front end:
 //!
 //! ```text
-//! VideoSource → Normalizer → Perception → EventExtractor → Reducer → GameState
-//!                                                   ▲
-//! Controller  ◀── commands ─────────────────────────┘ (InputIssued events)
+//! VideoSource → Normalizer → Perception ─┬→ EventExtractor ─┐
+//!                                        └→ Sensor ─────────┴→ Reducer → GameState
+//!                                                                  │
+//!                         subscribers ◀── events + StateChanges ◀──┘ (diff)
+//! Controller ◀── commands (InputIssued events)
 //! ```
+//!
+//! Every frame: perception reads it, the extractor turns screen and pose
+//! into events, the sensor turns every other stable reading into facts
+//! (with the state as context), the reducer applies them, and `diff`
+//! compares the state before and after. Subscribers (see
+//! [`Runtime::subscribe`]) receive each event with its origin and each
+//! resulting change, whoever caused it: perception, the agent (`emit`) or
+//! an input.
 //!
 //! Recording and telemetry are optional side outputs; neither can influence
 //! what the bot decides.
@@ -16,10 +26,13 @@ use pokebot_core::{
     CapturedFrame, ConsoleLink, Controller, ControllerCommand, ControllerReceipt, NormalizedFrame,
     Result, VideoSource,
 };
+use std::sync::mpsc::{channel, Receiver, Sender};
+
 use pokebot_replay::SessionRecorder;
+use pokebot_sense::Sensor;
 use pokebot_state::{
-    DefaultReducer, EventExtractor, EventRecord, FrameArrival, GameEvent, GameState, Observation,
-    StateReducer,
+    diff, ChangeRecord, DefaultReducer, EventExtractor, EventRecord, FrameArrival, GameEvent,
+    GameState, Observation, StateChange, StateReducer,
 };
 use pokebot_telemetry::{LogKind, Telemetry};
 use pokebot_video::Normalizer;
@@ -58,6 +71,36 @@ pub struct Runtime {
     profile: Option<Profile>,
     telemetry: Option<Telemetry>,
     echo_events: bool,
+    control: Option<pokebot_telemetry::GameControl>,
+    /// Turns stable readings into facts (needs game data; off without it).
+    sensor: Option<Sensor>,
+    subscribers: Vec<Subscriber>,
+}
+
+/// Who caused an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum Origin {
+    /// Read from the screen (extractor or sensor).
+    Perception,
+    /// Emitted by the agent (`Runtime::emit`).
+    Agent,
+    /// An input was sent.
+    Input,
+}
+
+/// What a subscriber receives: every event applied, then the changes it
+/// made to the state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    Event { record: EventRecord, origin: Origin },
+    Change(ChangeRecord),
+}
+
+type Filter = Box<dyn Fn(&Notice) -> bool + Send>;
+
+struct Subscriber {
+    tx: Sender<Notice>,
+    filter: Filter,
 }
 
 impl Runtime {
@@ -90,7 +133,36 @@ impl Runtime {
             profile: std::env::var_os("VPB_PROFILE").map(|_| Profile::default()),
             telemetry: None,
             echo_events: false,
+            control: None,
+            sensor: None,
+            subscribers: Vec::new(),
         }
+    }
+
+    /// Reads facts from every stable screen, whatever the agent is doing.
+    pub fn with_sensor(mut self, sensor: Sensor) -> Self {
+        self.sensor = Some(sensor);
+        self
+    }
+
+    /// Receives the notices `filter` accepts, from now on, in order. Drop
+    /// the receiver to unsubscribe. Notices are queued: a subscriber reads
+    /// them when it gets to it (e.g. after each `observe`).
+    pub fn subscribe(
+        &mut self,
+        filter: impl Fn(&Notice) -> bool + Send + 'static,
+    ) -> Receiver<Notice> {
+        let (tx, rx) = channel();
+        self.subscribers.push(Subscriber {
+            tx,
+            filter: Box::new(filter),
+        });
+        rx
+    }
+
+    /// Only the state changes.
+    pub fn subscribe_changes(&mut self) -> Receiver<Notice> {
+        self.subscribe(|n| matches!(n, Notice::Change(_)))
     }
 
     pub fn record_to(&mut self, dir: &Path, record_raw: bool, stride: u64) -> Result<()> {
@@ -127,8 +199,49 @@ impl Runtime {
         self.telemetry = Some(telemetry);
     }
 
+    pub fn enable_web_control(&mut self) -> pokebot_telemetry::GameControl {
+        let controller = std::mem::replace(
+            &mut self.devices.controller,
+            Box::new(pokebot_controller::NullController::new(
+                pokebot_core::PressProfile::default(),
+            )),
+        );
+        let control = pokebot_telemetry::GameControl::new(controller, true);
+        self.devices.controller = control.bot_controller();
+        self.control = Some(control.clone());
+        control
+    }
+
+    pub fn stop_web_bot(&self) -> Result<()> {
+        if let Some(control) = &self.control {
+            control
+                .request(serde_json::json!({"action":"stop"}))
+                .map_err(pokebot_core::Error::Device)?;
+        }
+        Ok(())
+    }
+
+    pub fn bot_stop_signal(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.control.as_ref().map(|c| c.stop_signal())
+    }
+
+    pub fn bot_stopped(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| !c.bot_enabled())
+    }
+
+    pub fn allow_web_resume(&self, allow: bool) {
+        if let Some(control) = &self.control {
+            control.allow_resume(allow);
+        }
+    }
+
     /// Reads, normalizes and interprets the next frame.
     pub fn observe(&mut self) -> Result<&NormalizedFrame> {
+        // Human input uses wall-clock durations. Keep a stepped emulator near
+        // console speed while stopped or under manual control.
+        if self.bot_stopped() && self.devices.video_name.starts_with("emulator:") {
+            std::thread::sleep(std::time::Duration::from_micros(16_743));
+        }
         let mut lap = self.profile.as_mut().map(|p| p.lap());
         let captured = self.devices.video.next_frame()?;
         if let Some(l) = lap.as_mut() {
@@ -144,10 +257,19 @@ impl Runtime {
         if let Some(l) = lap.as_mut() {
             l.mark(2);
         }
-        let events = self
+        let mut events = self
             .extractor
             .observe(&observation, FrameArrival::from(&captured));
-        self.apply(&events)?;
+        if let Some(sensor) = &mut self.sensor {
+            let frame_id = observation.frame_id;
+            events.extend(
+                sensor
+                    .observe(&observation, &self.state)
+                    .into_iter()
+                    .map(|event| EventRecord { frame_id, event }),
+            );
+        }
+        self.apply(&events, Origin::Perception)?;
         if let Some(l) = lap.as_mut() {
             l.mark(3);
         }
@@ -199,7 +321,7 @@ impl Runtime {
                 &command,
             );
         }
-        self.apply(std::slice::from_ref(&event))?;
+        self.apply(std::slice::from_ref(&event), Origin::Input)?;
         Ok(receipt)
     }
 
@@ -207,7 +329,7 @@ impl Runtime {
     /// goal changing phase or a choice confirmed on screen.
     pub fn emit(&mut self, event: GameEvent) -> Result<()> {
         let frame_id = self.last_frame.as_ref().map_or(0, |f| f.frame_id);
-        self.apply(&[EventRecord { frame_id, event }])
+        self.apply(&[EventRecord { frame_id, event }], Origin::Agent)
     }
 
     /// Logs a planner decision (shown as "goal" entries in the web UI).
@@ -320,23 +442,34 @@ impl Runtime {
     }
 
     pub fn finish(mut self) -> Result<()> {
+        // The web controller retains an emulator handle until process exit.
+        // Flush explicitly instead of relying on the last handle's destructor.
+        self.persist_save()?;
         if let Some(recorder) = &mut self.recorder {
             recorder.flush()?;
         }
         Ok(())
     }
 
-    fn apply(&mut self, events: &[EventRecord]) -> Result<()> {
+    fn apply(&mut self, events: &[EventRecord], origin: Origin) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
-        self.state = self.reducer.reduce(&self.state, events);
+        let before = std::mem::take(&mut self.state);
+        self.state = self.reducer.reduce(&before, events);
+        let frame_id = events.last().map_or(0, |r| r.frame_id);
+        let changes = diff(&before, &self.state);
+        self.publish(events, origin, &changes, frame_id);
         for record in events {
             if let Some(recorder) = &mut self.recorder {
                 recorder.record_event(record)?;
             }
-            // Inputs are already logged as actions.
-            if matches!(record.event, GameEvent::InputIssued { .. }) {
+            // Inputs are already logged as actions; what the view shows is
+            // logged as its changes.
+            if matches!(
+                record.event,
+                GameEvent::InputIssued { .. } | GameEvent::ViewObserved { .. }
+            ) {
                 continue;
             }
             let kind = match record.event {
@@ -355,7 +488,121 @@ impl Runtime {
                 );
             }
         }
+        for change in &changes {
+            // The screen classification already shows as an event.
+            if matches!(change, StateChange::ScreenChanged { .. }) {
+                continue;
+            }
+            if self.echo_events {
+                eprintln!("[{frame_id}] Δ {}", describe_change(change));
+            }
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.log(
+                    LogKind::Change,
+                    Some(frame_id),
+                    describe_change(change),
+                    change,
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Hands events and changes to the subscribers that want them; drops
+    /// subscribers whose receiver is gone.
+    fn publish(
+        &mut self,
+        events: &[EventRecord],
+        origin: Origin,
+        changes: &[StateChange],
+        frame_id: u64,
+    ) {
+        if self.subscribers.is_empty() {
+            return;
+        }
+        let notices = events
+            .iter()
+            .map(|record| Notice::Event {
+                record: record.clone(),
+                origin,
+            })
+            .chain(changes.iter().map(|change| {
+                Notice::Change(ChangeRecord {
+                    frame_id,
+                    change: change.clone(),
+                })
+            }));
+        for notice in notices {
+            self.subscribers
+                .retain(|s| !(s.filter)(&notice) || s.tx.send(notice.clone()).is_ok());
+        }
+    }
+}
+
+/// One line for a change, for the log.
+fn describe_change(change: &StateChange) -> String {
+    use StateChange as C;
+    let opt = |v: &Option<String>| v.as_deref().unwrap_or("?").to_owned();
+    let hp = |v: &Option<(u16, u16)>| v.map_or("?".into(), |(c, m)| format!("{c}/{m}"));
+    let pp = |v: &Option<(u8, u8)>| v.map_or("?".into(), |(c, m)| format!("{c}/{m}"));
+    let num = |v: Option<u32>| v.map_or("?".into(), |n| n.to_string());
+    match change {
+        C::PartyHpChanged { slot, from, to } => {
+            format!("Party {slot} HP {} → {}", hp(from), hp(to))
+        }
+        C::PartyLevelChanged { slot, from, to } => format!(
+            "Party {slot} level {} → {}",
+            num(from.map(u32::from)),
+            num(to.map(u32::from))
+        ),
+        C::PartyPpChanged {
+            slot,
+            move_slot,
+            mv,
+            from,
+            to,
+        } => format!(
+            "Party {slot} {} (slot {move_slot}) PP {} → {}",
+            opt(mv),
+            pp(from),
+            pp(to)
+        ),
+        C::PartyMoveChanged {
+            slot,
+            move_slot,
+            from,
+            to,
+        } => format!("Party {slot} move {move_slot}: {} → {}", opt(from), opt(to)),
+        C::PartySpeciesChanged { slot, from, to } => {
+            format!("Party {slot} species {} → {}", opt(from), opt(to))
+        }
+        C::ItemCountChanged { item, from, to, .. } => format!(
+            "{item} ×{} → ×{}",
+            num(from.map(u32::from)),
+            num(to.map(u32::from))
+        ),
+        C::MoneyChanged { from, to } => format!("Money ¥{} → ¥{}", num(*from), num(*to)),
+        C::PlayerMoved { from, to } => {
+            format!("Player ({}, {}) → ({}, {})", from.x, from.y, to.x, to.y)
+        }
+        C::MapChanged { from, to } => format!("Map {} → {to}", from.map),
+        C::NpcMoved {
+            map,
+            local_id,
+            from,
+            to,
+        } => format!("NPC {map}#{local_id} {from:?} → {to:?}"),
+        C::TextShown { lines } => format!("Text: {}", lines.join(" / ")),
+        C::MenuShown { rows, cursor } => format!("Menu ▶{cursor}: {}", rows.join(" / ")),
+        C::OpponentAppeared { species, level } => {
+            format!("Opponent {} Lv{}", opt(species), num(level.map(u32::from)))
+        }
+        C::OpponentHpChanged { from, to } => format!(
+            "Opponent HP {}‰ → {}‰",
+            num(from.map(u32::from)),
+            num(to.map(u32::from))
+        ),
+        other => format!("{other:?}"),
     }
 }
 
@@ -470,6 +717,11 @@ fn summarize(event: &GameEvent) -> String {
             reason,
             ..
         } => format!("Bag {item} {delta:+} ({reason})"),
+        GameEvent::PocketRowsObserved { pocket, items } => {
+            format!("Bag {pocket:?}: {} rows seen", items.len())
+        }
+        GameEvent::PartySizeObserved { size } => format!("Party size {size}"),
+        GameEvent::ViewObserved { .. } => "View".into(),
         GameEvent::PocketObserved { pocket, items } => {
             format!("Bag {pocket:?}: {} items seen", items.len())
         }
@@ -513,7 +765,10 @@ fn summarize(event: &GameEvent) -> String {
             x,
             y,
             facing,
-        } => format!("NPC {map}#{local_id} at ({x}, {y}) facing {facing:?}"),
+        } => match facing {
+            Some(facing) => format!("NPC {map}#{local_id} at ({x}, {y}) facing {facing:?}"),
+            None => format!("NPC {map}#{local_id} at ({x}, {y})"),
+        },
         GameEvent::NpcAbsent { map, local_id } => format!("NPC {map}#{local_id} absent"),
         GameEvent::ScriptPathRun { script, path } => format!("Ran {script} path {path}"),
         GameEvent::IntentInfeasible { intent } => format!("Intent {intent} infeasible"),
@@ -564,12 +819,38 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_flushes_save_even_when_web_control_retains_the_device() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let saved = Arc::new(AtomicBool::new(false));
+        let written = saved.clone();
+        let mut runtime = Runtime::new(Devices {
+            video: Box::new(Frames(Vec::new().into_iter(), 0)),
+            controller: Box::new(NullController::default()),
+            normalizer: Normalizer::new(ViewportLocator::FullFrame),
+            video_name: "test".into(),
+            controller_name: "null".into(),
+            persist_save: Some(Box::new(move || {
+                written.store(true, Ordering::Relaxed);
+                Ok(())
+            })),
+        });
+        let control = runtime.enable_web_control();
+        runtime.finish().unwrap();
+        assert!(saved.load(Ordering::Relaxed));
+        assert!(control.bot_enabled());
+    }
+
+    #[test]
     fn frames_and_inputs_flow_into_state() {
         let busy = {
             let mut img = RgbImage::filled(240, 160, [0, 0, 0]);
             for x in 0..240 {
                 for y in 0..40 {
-                    img.put_pixel(x, y, [220, 120, 40]);
+                    // Bright enough not to read as a fade.
+                    img.put_pixel(x, y, [255, 220, 120]);
                 }
             }
             img

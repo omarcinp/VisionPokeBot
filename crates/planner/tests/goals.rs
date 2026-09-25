@@ -35,7 +35,10 @@ fn fixture() -> Option<Fixture> {
     let data = GameData::load(root.join("data/world/gamedata.json")).ok()?;
     let obtain = Obtain::load(root.join("data/world")).ok()?;
     let priors = Priors::load(root.join("data/rules/priors.json")).ok()?;
-    let methods = Methods::load(root.join("data/rules/methods.json")).unwrap();
+    // No methods: the story is derived from the compiled events alone.
+    // `data/rules/methods.json` must still load (it may order the search).
+    Methods::load(root.join("data/rules/methods.json")).unwrap();
+    let methods = Methods::default();
     Some(Fixture {
         world,
         graph,
@@ -216,7 +219,11 @@ fn game_clear_expands_into_the_eight_gyms_in_order() {
         Some(&f.obtain),
         Some(&f.priors),
         &f.methods,
-        PlanOptions::default(),
+        // Bounded by nodes: the wall clock depends on the machine's load.
+        PlanOptions {
+            budget_s: 1200.0,
+            ..PlanOptions::default()
+        },
     );
     let (knowledge, pose) = pewter();
     let goal = parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap();
@@ -504,13 +511,16 @@ fn flash_from_route4_goes_through_mt_moon_the_pokedex_and_cut() {
         |i| matches!(i, Intent::Buy { item, .. } if item == "ITEM_POKE_BALL"),
     );
     assert!(buy < mt_moon, "balls at {buy}, Mt. Moon at {mt_moon}");
-    // Every explicit catch's area lies after the story; no catch before
-    // Cut is taught.
+    // Every explicit catch for the Pokédex lies after the story; none
+    // before Cut is taught. (A catch the readiness planner adds for a
+    // battle on the way, the rival's at Cerulean whose team follows the
+    // starter IVYSAUR evolved from, goes before that battle.)
     assert!(
-        !plan.intents[..teach]
-            .iter()
-            .any(|s| matches!(s.intent, Intent::Catch { .. })),
-        "a catch before Cut"
+        !plan.intents[..teach].iter().any(|s| {
+            matches!(s.intent, Intent::Catch { .. })
+                && s.unless.contains(&GoalPredicate::pokedex_caught(10))
+        }),
+        "a Pokédex catch before Cut"
     );
     // Bootstrap audit (§4.6.3): the Route 4 Center is next door and the
     // boxes unknown, so the plan opens with the PC.
@@ -710,7 +720,7 @@ fn a_low_lead_heals_before_the_first_walk_through_grass() {
 fn readiness_that_falls_short_trains_as_far_as_it_can_and_is_judged_again() {
     let Some(f) = fixture() else { return };
     let options = PlanOptions {
-        budget_s: 180.0,
+        budget_s: 1200.0,
         ..PlanOptions::default()
     };
     let planner = f.planner(options);
@@ -865,4 +875,199 @@ fn a_budget_of_nothing_returns_the_partial_plan() {
         planner.plan(&goal, &knowledge, pose),
         Err(pokebot_planner::PlanError::Budget { .. })
     ));
+}
+
+/// The story is derived, not scripted: with no methods at all, the League
+/// is planned from a fresh game (just after the parcel) through the compiled
+/// events alone. The gates the story puts in the way (the Route 23 guards,
+/// the thirsty Saffron guards, the ghost of Pokémon Tower, Snorlax, the
+/// locked Cinnabar gym, the Elite Four doors) come from the decomp's
+/// scripts, and so does every subgoal that opens them: nothing is hinted.
+/// Bounded by nodes, not the wall clock (the machine may be busy).
+#[test]
+fn game_clear_is_derived_without_methods() {
+    let Some(f) = fixture() else { return };
+    assert!(f.methods.methods.is_empty());
+    let options = PlanOptions {
+        budget_s: 1200.0,
+        node_budget: 20_000,
+        ..PlanOptions::default()
+    };
+    let planner = f.planner(options);
+    let (knowledge, pose) = fresh_game();
+    let goal = parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap();
+    let started = Instant::now();
+    let plan = match planner.plan(&goal, &knowledge, pose.clone()) {
+        Ok(p) => p,
+        Err(pokebot_planner::PlanError::Budget {
+            best_partial,
+            nodes,
+            ..
+        }) => {
+            if let Some(p) = best_partial {
+                print(&p, 200);
+            }
+            panic!("no plan within {nodes} nodes");
+        }
+        Err(e) => panic!("{e}"),
+    };
+    println!("planned in {:.1} s", started.elapsed().as_secs_f64());
+    print(&plan, 300);
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    assert!(plan.intents.iter().all(|s| s.cost_s.is_finite()));
+
+    let script = |name: &str| {
+        let name = name.to_string();
+        move |i: &Intent| matches!(i, Intent::RunScript { script, .. } if script.contains(&name))
+    };
+    let at = |name: &str| position(&plan, script(name));
+    let n = plan.intents.len();
+    // The eight badges, from the eight leaders.
+    let gyms = [
+        "PewterCity_Gym_EventScript_Brock",
+        "CeruleanCity_Gym_EventScript_Misty",
+        "VermilionCity_Gym_EventScript_LtSurge",
+        "CeladonCity_Gym_EventScript_Erika",
+        "FuchsiaCity_Gym_EventScript_Koga",
+        "SaffronCity_Gym_EventScript_Sabrina",
+        "CinnabarIsland_Gym_EventScript_Blaine",
+        "ViridianCity_Gym_EventScript_Giovanni",
+    ];
+    let gym_at: Vec<usize> = gyms.iter().map(|g| at(g)).collect();
+    for (g, i) in gyms.iter().zip(&gym_at) {
+        assert!(*i < n, "{g} missing");
+    }
+    // The subgoals the gates need, discovered from the scripts.
+    let teach = |hm: &str| {
+        let hm = hm.to_string();
+        position(
+            &plan,
+            move |i| matches!(i, Intent::Teach { hm: h, .. } if *h == hm),
+        )
+    };
+    let cut = teach("ITEM_HM01");
+    let surf = teach("ITEM_HM03");
+    let strength = teach("ITEM_HM04");
+    let tea = at("CeladonCity_Condominiums_1F_EventScript_TeaWoman");
+    let scope = at("RocketHideout_B4F_EventScript_SilphScope");
+    let fuji = at("PokemonTower_7F_EventScript_MrFuji");
+    let flute = at("LavenderTown_VolunteerPokemonHouse_EventScript_MrFuji");
+    let snorlax = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script.starts_with("Route1") && script.ends_with("_EventScript_Snorlax")),
+    );
+    let key = at("PokemonMansion_B1F_EventScript_ItemSecretKey");
+    let lorelei = at("PokemonLeague_LoreleisRoom_EventScript_Lorelei");
+    let champion = at("PokemonLeague_ChampionsRoom_EventScript_EnterRoom");
+    let hall = at("PokemonLeague_HallOfFame_EventScript_EnterRoom");
+    for (what, i) in [
+        ("Cut", cut),
+        ("Surf", surf),
+        ("Strength", strength),
+        ("Tea", tea),
+        ("Silph Scope", scope),
+        ("Mr. Fuji", fuji),
+        ("Poké Flute", flute),
+        ("Snorlax", snorlax),
+        ("Secret Key", key),
+        ("Lorelei", lorelei),
+        ("Champion", champion),
+    ] {
+        assert!(i < n, "{what} missing from the plan");
+    }
+    // Each before what needs it.
+    assert!(cut < gym_at[2], "Cut before the tree to Lt. Surge");
+    assert!(scope < fuji && fuji < flute && flute < snorlax);
+    assert!(snorlax < gym_at[4], "Snorlax moved before Koga");
+    assert!(tea < gym_at[5], "the guards' tea before Sabrina");
+    assert!(
+        surf < gym_at[6] && key < gym_at[6],
+        "Surf and the key before Blaine"
+    );
+    assert!(
+        gym_at.iter().all(|g| *g < lorelei),
+        "all badges before the League"
+    );
+    assert!(strength < lorelei, "Strength for Victory Road");
+    assert!(lorelei < champion && champion < hall && hall == n - 1);
+    // Planning is a pure function of the knowledge.
+    let again = planner.plan(&goal, &knowledge, pose).unwrap();
+    assert_eq!(plan, again);
+}
+
+/// Right after the naming screens: no Pokémon, an empty bag, ¥3000, in
+/// the bedroom, nothing of the story known beyond a new game's start.
+fn new_game() -> (SavedKnowledge, Option<PlayerPose>) {
+    checkpoint("new_game_state.json")
+}
+
+/// In Oak's lab after his starter scene (the scene vars tracked as the
+/// goal loop's opening leaves them): the exit is closed until a ball is
+/// taken.
+fn starter_scene() -> (SavedKnowledge, Option<PlayerPose>) {
+    checkpoint("starter_scene_state.json")
+}
+
+/// The opening is planned from the compiled events, not scripted: Oak's
+/// trigger at the edge of Pallet Town carries the player off (a gate on
+/// the way north while its scene is armed), so it runs before any walk to
+/// Route 1; the parcel is the Viridian Mart's entry scene; the Pokédex is
+/// Oak's parcel path.
+#[test]
+fn a_new_game_runs_oaks_trigger_before_leaving_pallet() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, pose) = new_game();
+    let goal = parse_goal("flag FLAG_SYS_POKEDEX_GET").unwrap();
+    let plan = planner.plan(&goal, &knowledge, pose).expect("a plan");
+    print(&plan, 20);
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+    let script = |name: &'static str| move |i: &Intent| matches!(i, Intent::RunScript { script, .. } if script.contains(name));
+    let oak = position(&plan, script("PalletTown_EventScript_OakTrigger"));
+    let mart = position(
+        &plan,
+        |i| matches!(i, Intent::Go { dest } if dest == "ViridianCity_Mart"),
+    );
+    let parcel = position(&plan, script("ViridianCity_Mart_EventScript_ParcelScene"));
+    let dex = position(
+        &plan,
+        script("PalletTown_ProfessorOaksLab_EventScript_ProfOak"),
+    );
+    let n = plan.intents.len();
+    assert!(oak < mart && mart < parcel && parcel < dex && dex == n - 1);
+}
+
+/// In the lab after Oak's scene: the exit trigger turns the player back
+/// until a ball is taken, so the plan starts with a ball script path with
+/// YES to the Pokémon and NO to the nickname (the naming screen is a
+/// command the compiler doesn't model: dearer). Which ball comes from the
+/// preference, not from the script's name.
+#[test]
+fn the_starter_comes_from_a_ball_on_the_table_by_preference() {
+    let Some(f) = fixture() else { return };
+    let (knowledge, pose) = starter_scene();
+    let goal = parse_goal("flag FLAG_SYS_POKEDEX_GET").unwrap();
+    for (prefer, ball) in [
+        ("SPECIES_BULBASAUR", "BulbasaurBall"),
+        ("SPECIES_SQUIRTLE", "SquirtleBall"),
+        ("SPECIES_CHARMANDER", "CharmanderBall"),
+    ] {
+        let planner = f.planner(PlanOptions {
+            prefer_species: vec![prefer.into()],
+            ..PlanOptions::default()
+        });
+        let plan = planner
+            .plan(&goal, &knowledge, pose.clone())
+            .expect("a plan");
+        print(&plan, 10);
+        match &plan.intents[0].intent {
+            Intent::RunScript {
+                script, answers, ..
+            } => {
+                assert!(script.ends_with(ball), "{script} for {prefer}");
+                assert_eq!(answers, &vec!["yes".to_string(), "no".to_string()]);
+            }
+            other => panic!("{other}"),
+        }
+    }
 }

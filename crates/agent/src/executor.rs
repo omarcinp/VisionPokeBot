@@ -232,7 +232,7 @@ impl Executor {
         let mut nudged = false;
         let mut outside = OutsideRecovery::default();
         loop {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || runtime.bot_stopped() {
                 let _ = runtime.execute(ControllerCommand::Neutral);
                 return Err(ExecutorError::Stopped);
             }
@@ -382,7 +382,7 @@ impl Executor {
         let mut p = Pending::new(action, issued, issued_on);
         p.tracker = self.hold_tracker(&p);
         loop {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || runtime.bot_stopped() {
                 let _ = runtime.execute(ControllerCommand::Neutral);
                 return Err(ExecutorError::Stopped);
             }

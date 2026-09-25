@@ -4,28 +4,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0d1014">
-<title>Emulators · PokéBot</title>
+<title>Game instances · PokéBot</title>
+<link rel="stylesheet" href="/controls.css"><script src="/controls.js"></script>
 <style>
 :root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;background:#0d1014;color:#dde3ea;--muted:#94a0af;--line:#2b3440;--panel:#161a20;--accent:#e8573f}
 *{box-sizing:border-box}body{margin:0}header{display:flex;align-items:center;gap:20px;padding:14px 24px;border-bottom:1px solid var(--line);background:var(--panel)}header b{color:var(--accent);letter-spacing:1px}nav{display:flex;gap:8px}nav a{padding:5px 14px;border:1px solid var(--line);border-radius:20px;color:var(--muted);text-decoration:none}nav a[aria-current]{border-color:var(--accent);color:#fff}main{max-width:1800px;padding:24px;margin:auto}h1{margin:0;font-size:28px;letter-spacing:-.5px}p{color:var(--muted);margin:6px 0 20px}.toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}label{display:grid;gap:6px;color:var(--muted);font-size:12px}input,select,button{font:inherit;background:#202731;color:#fff;border:1px solid #465365;border-radius:6px;padding:9px 12px}input{width:90px}button{cursor:pointer}button:hover{border-color:#fff}button:disabled{opacity:.45;cursor:default}button.primary{background:var(--accent);border-color:var(--accent)}.preview{margin-left:auto}.summary{display:flex;flex-wrap:wrap;gap:25px;margin:24px 0;color:var(--muted)}.summary strong{font:600 22px ui-monospace,monospace;color:#fff;margin-right:6px}#error{color:#ff9292;white-space:pre-wrap}#notice{color:#94d9ae}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(275px,1fr));gap:16px}.tile{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden;min-width:0}.tile-head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px}.tile-head a{color:#fff;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{font-size:11px;color:#85dfa5;white-space:nowrap}.badge.off{color:#edb363}.picture{aspect-ratio:3/2;background:#07090c;position:relative;display:flex;align-items:center;justify-content:center}.picture img{width:100%;height:100%;object-fit:contain;image-rendering:pixelated}.picture span{position:absolute;left:8px;bottom:8px;color:#e8d5ae;background:#07090cbd;font-size:11px;padding:2px 6px;border-radius:4px}.picture span:empty{display:none}.info{padding:12px}.metrics{font:13px ui-monospace,monospace;color:#b7c6d9}.latest{height:3em;overflow:auto;color:var(--muted);font-size:12px;margin:10px 0}.actions{display:flex;gap:8px;align-items:center}.actions a{color:#8dbdff;font-size:12px;margin-left:auto}.actions button{font-size:12px;padding:5px 9px}#empty{padding:60px 20px;text-align:center;border:1px dashed var(--line);border-radius:12px}dialog{background:var(--panel);color:#dde3ea;border:1px solid var(--line);border-radius:10px;width:min(900px,94vw)}dialog pre{white-space:pre-wrap;word-break:break-word;max-height:65vh;overflow:auto;font-size:12px}dialog button{float:right}@media(max-width:600px){header,main{padding:14px}.toolbar{padding:12px}.preview{margin-left:0}h1{font-size:24px}}
+.eyebrow{font-size:10px;font-weight:600;letter-spacing:1.8px;color:var(--accent);margin:2px 0 8px}h1{font-size:32px}.tile.switch{border-color:#6b4835}.kind{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.tile-head{padding:14px}.tile-head input{width:16px;accent-color:var(--accent)}.actions{flex-wrap:wrap}.actions button.danger{color:#ffa59a}.selection{display:flex;align-items:center;gap:14px;margin:0 0 18px;font-size:12px;color:var(--muted)}.selection button{margin-left:auto;font-size:12px}.play-head{display:flex;justify-content:space-between;align-items:center}.play-head h2{margin:0 0 12px}.play-head button{float:none}#play{max-width:780px}#play-screen{width:100%;aspect-ratio:3/2;object-fit:contain;image-rendering:pixelated;background:#07090c;border-radius:8px}dialog::backdrop{background:#000b}.tile .picture{border-top:1px solid #ffffff08;border-bottom:1px solid #ffffff08}.tile .info{padding:14px}.tile .metrics{font-size:12px}.tile .latest{margin:12px 0}.tile-head a:hover{color:#8dbdff}
 </style>
 </head>
 <body>
-<header><b>POKÉBOT</b><nav aria-label="Instances"><a href="/switch/">Switch</a><a href="/emulators/" aria-current="page">Emulators</a></nav></header>
+<header><b>POKÉBOT</b><nav aria-label="Instances"><a href="/games/" aria-current="page">Game instances</a></nav></header>
 <main>
-<h1>Emulators</h1>
-<p>Independent bot runs, together in one view. Each emulator runs as fast as the host allows.</p>
+<div class="eyebrow">YOUR CONSOLES, ONE PLACE</div><h1>Game instances</h1>
+<p>Your Switch and emulator runs, side by side. Watch, manage the bots, or take the controls.</p>
 <form class="toolbar" id="launch">
 <label>Instances<input id="count" type="number" min="1" step="1" value="1" required></label>
 <label>Bot task<select id="task"><option value="autonomy">Autonomous campaign</option><option value="new-game">Start a new game</option><option value="story">Play the story</option><option value="observe">Observe only</option></select></label>
 <button class="primary" id="start" type="submit">Start emulators</button>
-<button id="stop-all" type="button" disabled>Stop managed runs</button>
+<button id="stop-all" type="button" disabled>Stop managed sets</button>
 <label class="preview">Preview refresh<select id="refresh"><option value="500">2 fps</option><option value="1000" selected>1 fps</option><option value="2000">0.5 fps</option><option value="0">Paused</option></select></label>
 </form>
 <div class="summary"><span><strong id="active">0</strong>active</span><span><strong id="throughput">0</strong>observed fps</span><span id="resources">Connecting to supervisor…</span></div>
 <div id="error" role="alert"></div><div id="notice" role="status" aria-live="polite"></div>
-<div id="grid"></div><p id="empty">No emulators yet. Choose how many to start and a bot task above.</p>
+<div class="selection"><span id="selected-count">Select emulator sets to manage together.</span><button id="stop-selected" disabled>Stop selected sets</button></div>
+<div id="grid"></div><p id="empty">No game instances connected. Plug in the Switch capture card or start an emulator above.</p>
 <dialog id="logs"><button id="close-log">Close</button><h2 id="log-title">Worker log</h2><pre id="log-text"></pre></dialog>
+<dialog id="play"><div class="play-head"><h2 id="play-title">Game controls</h2><button id="close-play">Close</button></div><img id="play-screen" alt="Live game screen"><div id="play-controls"></div></dialog>
 </main>
 <script>
 'use strict';
@@ -44,21 +48,40 @@ async function control(path, body) {
   busy = true; $('start').disabled = true; $('stop-all').disabled = true;
   try {
     const result = await api(path, body);
-    $('notice').textContent = result.started ? `Started ${result.started.length} emulator${result.started.length === 1 ? '' : 's'}.` : 'Stopping; saves and logs are retained.';
+    $('notice').textContent = result.started ? `Started ${result.started.length} emulator${result.started.length === 1 ? '' : 's'}.` : result.mode ? 'Bot stopped. The game screen remains available.' : 'Stopping; saves and logs are retained.';
   } catch (error) { $('error').textContent = error.message; }
   finally { busy = false; await refreshFleet(); }
 }
 $('launch').onsubmit = e => { e.preventDefault(); control('/api/emulators', {count:Number($('count').value),task:$('task').value}); };
 $('stop-all').onclick = () => control('/api/emulators/stop', {});
+const selected = new Set();
+function selection() { $('selected-count').textContent = selected.size ? `${selected.size} emulator sets selected` : 'Select emulator sets to manage together.'; $('stop-selected').disabled = busy || !selected.size; }
+$('stop-selected').onclick = async () => { await control('/api/emulators/stop', {names:[...selected]}); selected.clear(); selection(); };
+let gameControls = null, playWorker = null;
+function closePlay() { gameControls?.close(); gameControls=null; playWorker=null; $('play-screen').removeAttribute('src'); }
+$('close-play').onclick = () => $('play').close(); $('play').onclose = closePlay;
+async function openPlay(worker) {
+  closePlay(); playWorker=worker; $('play-title').textContent=worker.label; $('play').showModal();
+  $('play-screen').src=worker.path+'stream.mjpg?scale=2&fps=30';
+  gameControls=new GameControls($('play-controls'),worker.path);
+  await gameControls.action('take');
+}
+
 $('close-log').onclick = () => $('logs').close();
 function tile(worker) {
   let t = tiles.get(worker.name);
   if (t) return t;
   const el = document.createElement('article'); el.className = 'tile';
-  el.innerHTML = '<div class="tile-head"><a></a><span class="badge"></span></div><div class="picture"><img alt="Emulator preview" hidden><span>Waiting for first frame</span></div><div class="info"><div class="metrics">Waiting for telemetry…</div><div class="latest"></div><div class="actions"><button class="stop">Stop</button><button class="log">Log</button><a>Full report ↗</a></div></div>';
+  el.innerHTML = '<div class="tile-head"><input class="select-instance" type="checkbox" aria-label="Select emulator set"><a></a><span class="badge"></span></div><div class="picture"><img alt="Game preview" hidden><span>Waiting for first frame</span></div><div class="info"><div class="metrics">Waiting for telemetry…</div><div class="latest"></div><div class="actions"><button class="take">Take control</button><button class="stop-bot">Stop bot</button><button class="stop danger">Stop set</button><button class="log">Log</button><a>Details ↗</a></div></div>';
   const links = el.querySelectorAll('a'); links.forEach(a => a.href = worker.path);
   links[0].textContent = worker.label; links[0].title = worker.name;
-  el.querySelector('.stop').onclick = () => control(`/api/emulators/${worker.name}/stop`, {});
+  el.classList.toggle('switch',worker.name==='switch');
+  const checkbox=el.querySelector('.select-instance'); checkbox.hidden=!worker.managed;
+  checkbox.onchange=()=>{ if(checkbox.checked) selected.add(worker.name); else selected.delete(worker.name); selection(); };
+  el.querySelector('.take').onclick = () => openPlay(worker);
+  el.querySelector('.stop-bot').onclick = () => control(worker.path+'api/control',{action:'stop'});
+  el.querySelector('.stop').title='Stop emulator and bot; saved progress and logs are retained';
+  el.querySelector('.stop').onclick = () => worker.managed ? control(`/api/emulators/${worker.name}/stop`, {}) : control(worker.path+'api/control',{action:'shutdown'});
   el.querySelector('.log').onclick = async () => {
     $('log-title').textContent = worker.name; $('log-text').textContent = 'Loading…'; $('logs').showModal();
     try { $('log-text').textContent = (await api(`/api/emulators/${worker.name}/log`)).log || 'No log output yet.'; }
@@ -90,13 +113,21 @@ async function loadFleet() {
       const t = tile(worker), badge = t.el.querySelector('.badge');
       badge.textContent = `${worker.task || 'bot'} · ${worker.status}`;
       badge.classList.toggle('off', !worker.alive || worker.status === 'stopping');
+      t.el.querySelector('.stop').hidden = worker.name==='switch' || !worker.managed;
+      t.el.querySelector('.stop-bot').disabled = busy || !worker.alive;
+      t.el.querySelector('.take').disabled = !worker.alive;
+      t.el.querySelector('.select-instance').checked = selected.has(worker.name);
+      t.el.querySelector('.select-instance').disabled = !worker.alive;
+      if(!worker.alive) selected.delete(worker.name);
       t.el.querySelector('.stop').disabled = busy || !worker.managed || !worker.alive || worker.status === 'stopping';
       t.el.querySelector('.log').hidden = !worker.managed;
+      if(worker.name==='switch') badge.textContent = 'SWITCH · '+worker.status;
       if (!worker.alive) { t.fps = 0; t.el.querySelector('.picture span').textContent = worker.status; }
     }
     for (const [name,t] of tiles) if (!workers.some(w => w.name === name)) {
-      observer.unobserve(t.el); t.el.remove(); if(t.url) URL.revokeObjectURL(t.url); tiles.delete(name);
+      observer.unobserve(t.el); t.el.remove(); if(t.url) URL.revokeObjectURL(t.url); tiles.delete(name); selected.delete(name);
     }
+    selection();
   } catch(error) { connectionError = error.message; $('error').textContent = connectionError; $('start').disabled = true; }
 }
 // At most four short HTTP requests at once. Long-lived streams per tile would
@@ -115,8 +146,17 @@ async function update(worker) {
         data = {stats:snapshot.status.stats, latest:snapshot.log.at(-1)};
       }
       const stats = data.stats;
+      if (data.control) {
+        const mode = data.control.mode;
+        t.el.querySelector('.badge').textContent = `${worker.name==='switch'?'SWITCH':worker.task || 'Emulator'} · ${{bot:'bot playing',manual:'manual control',stopped:'bot stopped'}[mode]}`;
+        t.el.querySelector('.stop-bot').disabled = busy || mode==='stopped';
+        t.el.querySelector('.take').disabled = mode==='manual';
+        if(!worker.managed && worker.name!=='switch' && data.control.can_shutdown) { t.el.querySelector('.stop').hidden=false; t.el.querySelector('.stop').disabled=busy; }
+      } else {
+        for(const button of t.el.querySelectorAll('.stop-bot,.take')) { button.disabled=true; button.title='Relaunch this older run to enable controls'; }
+      }
       t.fps = stats.fps;
-      t.el.querySelector('.metrics').textContent = `${stats.fps.toFixed(0)} fps · ${(stats.fps/59.7275).toFixed(1)}× · frame ${(stats.frame_id ?? 0).toLocaleString()}`;
+      t.el.querySelector('.metrics').textContent = worker.name==='switch' ? `Live capture · frame ${(stats.frame_id ?? 0).toLocaleString()}` : `${stats.fps.toFixed(0)} fps · ${(stats.fps/59.7275).toFixed(1)}× · frame ${(stats.frame_id ?? 0).toLocaleString()}`;
       t.el.querySelector('.latest').textContent = [stats.task_status ? `Task ${stats.task_status}.` : '', data.latest?.summary || ''].filter(Boolean).join(' ');
       t.el.querySelector('.picture span').textContent = '';
     } catch (_) { t.fps = 0; t.el.querySelector('.picture span').textContent = 'Telemetry unavailable · retrying'; }

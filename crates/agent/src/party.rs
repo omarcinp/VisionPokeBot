@@ -4,9 +4,7 @@
 use std::collections::BTreeMap;
 
 use pokebot_gamedata::GameData;
-use pokebot_state::{
-    BattleMenu, BattleObservation, GameEvent, GameState, Knowledge, MoveSlot, PartyMon,
-};
+use pokebot_state::{BattleMenu, BattleObservation, GameEvent, GameState, MoveSlot, PartyMon};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,24 +121,7 @@ impl Party {
 
 /// A newly obtained Pokémon, known from game data (default moves, full PP).
 pub fn starter_mon(data: &GameData, species: &str, level: u8) -> PartyMon {
-    let mut mon = PartyMon {
-        species: Knowledge::derived(species.to_owned(), 0),
-        level: Knowledge::derived(level, 0),
-        ..PartyMon::default()
-    };
-    for (i, mv) in data
-        .default_moves(species, level)
-        .into_iter()
-        .enumerate()
-        .take(4)
-    {
-        let max = data.move_(&mv).map_or(0, |m| m.pp);
-        mon.moves[i] = Some(MoveSlot {
-            mv: Knowledge::derived(mv, 0),
-            pp: Knowledge::derived((max, max), 0),
-        });
-    }
-    mon
+    pokebot_sense::obtained_mon(data, species, level)
 }
 
 /// Reject impossible HUD totals before they can overwrite the party belief.

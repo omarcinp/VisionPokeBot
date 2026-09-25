@@ -14,6 +14,8 @@ const LOG_CAPACITY: usize = 2000;
 pub enum LogKind {
     Action,
     Event,
+    /// A value in the state changed (see `pokebot_state::StateChange`).
+    Change,
     /// Planner/goal decisions and progress.
     Goal,
     Info,
@@ -69,6 +71,7 @@ pub(crate) struct FrameSnapshot {
 #[derive(Clone)]
 pub struct Telemetry {
     pub(crate) inner: Arc<Inner>,
+    pub(crate) control: Option<crate::GameControl>,
 }
 
 pub(crate) struct Inner {
@@ -106,6 +109,7 @@ impl Telemetry {
             ..Status::default()
         };
         Self {
+            control: None,
             inner: Arc::new(Inner {
                 started: Instant::now(),
                 frame: watch::Sender::new(None),
@@ -123,6 +127,27 @@ impl Telemetry {
                 publish_interval: Duration::ZERO,
             }),
         }
+    }
+
+    pub fn with_control(mut self, control: crate::GameControl) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    pub fn publish_preview(&self, frame_id: u64, image: RgbImage) {
+        self.inner.frame.send_replace(Some(FrameSnapshot {
+            frame_id,
+            image: Arc::new(image),
+        }));
+        self.inner.status.send_modify(|s| {
+            s.stats.frame_id = Some(frame_id);
+            s.stats.uptime_ms = self.elapsed_ms();
+            s.stats.frames_seen += 1;
+        });
+    }
+
+    pub fn clear_preview(&self) {
+        self.inner.frame.send_replace(None);
     }
 
     /// Sample previews/state before cloning or serializing them. Every bot

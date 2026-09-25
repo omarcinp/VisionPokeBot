@@ -25,15 +25,14 @@ use pokebot_gamedata::{printed_name, GameData};
 use pokebot_planner::evaluate::faint_probability;
 use pokebot_planner::Combatant;
 use pokebot_state::{
-    BattleMenu, BoxMon, GameEvent, GameState, Knowledge, Observation, Pocket, ScreenState,
-    ShinyReading, Status,
+    BattleMenu, GameEvent, GameState, Observation, Pocket, ScreenState, ShinyReading, Status,
 };
 
 use crate::bag::{
     by_item, is_cancel, item_key, pocket_from_title, pocket_index, read_rows, Rows, POCKETS,
 };
 use crate::battle::{choose_move, identify_opponent, step_toward, BattleMemory, BattlePolicy};
-use crate::party::{starter_mon, Member, Party};
+use crate::party::{Member, Party};
 use crate::stock::{ball_count, SHINY_RESERVE};
 use crate::{Action, Decision, Expectation};
 
@@ -500,16 +499,6 @@ impl CatchMemory {
             }
         }
     }
-
-    /// Events for the end of the battle: the catch, if there was one.
-    pub fn after_battle(&self, data: &GameData, state: &GameState) -> Vec<GameEvent> {
-        match (&self.caught, &self.foe) {
-            (Some(species), Some((_, level))) => {
-                caught_events(data, state, species, *level, self.box_index)
-            }
-            _ => Vec::new(),
-        }
-    }
 }
 
 /// Reads battle text into the battle's memory ([`CatchMemory::observe`]);
@@ -578,78 +567,10 @@ pub fn is_nickname_question(page: &str) -> bool {
     page.contains("Give a nickname to the")
 }
 
-/// The pages after the nickname question when the party is full: "X was
-/// transferred to Someone's PC." / "… to BOX “BOX2.”" / "BOX “BOX1” was
-/// full." / "It was placed in …". The game prints them while the YES/NO
-/// box of the nickname question is still drawn (flash-4: the battle step
-/// took the lingering box for a question it did not know and failed).
-pub fn is_pc_transfer_text(page: &str) -> bool {
-    page.contains("transferred to") || page.contains("placed in") || page.contains("was full")
-}
-
-/// "It was placed in BOX “BOX2.”" / "X was transferred to BOX “BOX2.”" →
-/// 1. The "BOX … was full." page names the full box, not the new one.
-pub fn box_from_text(page: &str) -> Option<u8> {
-    if page.contains("was full") || !(page.contains("placed in") || page.contains("transferred to"))
-    {
-        return None;
-    }
-    // The last "BOX" followed (within two characters) by a number.
-    page.match_indices("BOX")
-        .filter_map(|(at, _)| {
-            let digits: String = page[at + 3..]
-                .chars()
-                .skip_while(|c| !c.is_ascii_digit())
-                .take_while(char::is_ascii_digit)
-                .collect();
-            let gap = page[at + 3..]
-                .chars()
-                .take_while(|c| !c.is_ascii_digit())
-                .count();
-            (gap <= 2).then(|| digits.parse::<u8>().ok()).flatten()
-        })
-        .last()
-        .filter(|n| *n >= 1)
-        .map(|n| n - 1)
-}
-
-/// Events after a catch: `SpeciesCaught`, then `PartyMonDerived` into the
-/// next free party slot, or `SentToPc` when the party is full (or the text
-/// named a box). With an unknown party and no box, only `SpeciesCaught`.
-pub fn caught_events(
-    data: &GameData,
-    state: &GameState,
-    species: &str,
-    level: u8,
-    box_index: Option<u8>,
-) -> Vec<GameEvent> {
-    let mut events = vec![GameEvent::SpeciesCaught {
-        species: species.to_owned(),
-    }];
-    let party = state.party.value.as_ref().map(Vec::len);
-    if box_index.is_some() || party.is_some_and(|n| n >= 6) {
-        let slot = box_index
-            .and_then(|i| state.pc.boxes.get(usize::from(i)))
-            .and_then(|b| b.value.as_ref())
-            .and_then(|list| (0..30u8).find(|s| list.iter().all(|m| m.slot != *s)))
-            .unwrap_or(0);
-        events.push(GameEvent::SentToPc {
-            box_index,
-            mon: BoxMon {
-                slot,
-                species: Knowledge::derived(species.to_owned(), 0),
-                level: Knowledge::derived(level, 0),
-                nickname: Knowledge::unknown(),
-            },
-        });
-    } else if let Some(n) = party {
-        events.push(GameEvent::PartyMonDerived {
-            slot: n as u8,
-            mon: Box::new(starter_mon(data, species, level)),
-        });
-    }
-    events
-}
+/// The PC pages after a catch, which the game prints while the YES/NO box
+/// of the nickname question is still drawn (flash-4: the battle step took
+/// the lingering box for a question it did not know and failed).
+pub use pokebot_sense::text::{box_from_text, is_pc_transfer_text};
 
 fn log(detail: String) -> GameEvent {
     GameEvent::GoalProgress {
@@ -1794,96 +1715,6 @@ mod tests {
         ] {
             assert_eq!(foe_status_text(page, "PIDGEY"), None, "{page}");
         }
-    }
-
-    fn party_of(data: &GameData, n: u8) -> GameState {
-        let records: Vec<EventRecord> = (0..n)
-            .map(|slot| EventRecord {
-                frame_id: 1,
-                event: GameEvent::PartyMonDerived {
-                    slot,
-                    mon: Box::new(crate::party::starter_mon(data, "SPECIES_RATTATA", 5)),
-                },
-            })
-            .collect();
-        DefaultReducer.reduce(&GameState::default(), &records)
-    }
-
-    #[test]
-    fn full_party_sends_catch_to_pc() {
-        let Some(data) = data() else { return };
-        let state = party_of(&data, 6);
-        let events = caught_events(&data, &state, "SPECIES_PIDGEY", 6, Some(0));
-        assert_eq!(
-            events,
-            vec![
-                GameEvent::SpeciesCaught {
-                    species: "SPECIES_PIDGEY".into()
-                },
-                GameEvent::SentToPc {
-                    box_index: Some(0),
-                    mon: pokebot_state::BoxMon {
-                        slot: 0,
-                        species: pokebot_state::Knowledge::derived("SPECIES_PIDGEY".into(), 0),
-                        level: pokebot_state::Knowledge::derived(6, 0),
-                        nickname: pokebot_state::Knowledge::unknown(),
-                    }
-                }
-            ]
-        );
-        // Full, but the box went unread: still the PC, never a 7th slot.
-        let events = caught_events(&data, &state, "SPECIES_PIDGEY", 6, None);
-        assert!(matches!(
-            events.as_slice(),
-            [
-                GameEvent::SpeciesCaught { .. },
-                GameEvent::SentToPc {
-                    box_index: None,
-                    ..
-                }
-            ]
-        ));
-    }
-
-    #[test]
-    fn catch_joins_the_party() {
-        let Some(data) = data() else { return };
-        let state = party_of(&data, 1);
-        let events = caught_events(&data, &state, "SPECIES_PIDGEY", 6, None);
-        let [GameEvent::SpeciesCaught { species }, GameEvent::PartyMonDerived { slot, mon }] =
-            events.as_slice()
-        else {
-            panic!("{events:?}");
-        };
-        assert_eq!((species.as_str(), *slot), ("SPECIES_PIDGEY", 1));
-        assert_eq!(mon.species.value.as_deref(), Some("SPECIES_PIDGEY"));
-        assert_eq!(mon.species.source, pokebot_state::KnowledgeSource::Derived);
-        assert_eq!(mon.level.value, Some(6));
-        assert_eq!(mon.level.source, pokebot_state::KnowledgeSource::Derived);
-        let moves: Vec<(String, (u8, u8))> = mon
-            .moves
-            .iter()
-            .flatten()
-            .map(|m| (m.mv.value.clone().unwrap(), m.pp.value.unwrap()))
-            .collect();
-        let expected: Vec<(String, (u8, u8))> = data
-            .default_moves("SPECIES_PIDGEY", 6)
-            .into_iter()
-            .map(|m| {
-                let pp = data.move_(&m).unwrap().pp;
-                (m, (pp, pp))
-            })
-            .collect();
-        assert!(!expected.is_empty());
-        assert_eq!(moves, expected);
-        let state = DefaultReducer.reduce(
-            &state,
-            &events
-                .into_iter()
-                .map(|event| EventRecord { frame_id: 2, event })
-                .collect::<Vec<_>>(),
-        );
-        assert_eq!(state.party.value.as_ref().map(Vec::len), Some(2));
     }
 
     /// A wild battle frame: IVYSAUR Lv18 54/54 against PIDGEY Lv6.

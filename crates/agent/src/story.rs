@@ -823,7 +823,8 @@ impl Task for StoryTask {
                 {
                     self.talk_gained_item = true;
                 }
-                ctx.events.extend(tracked);
+                ctx.events
+                    .extend(tracked.into_iter().filter(crate::track::tool_emits));
                 // The executor doesn't show the task the frames while its A
                 // press is pending: a page advanced on its first ready frame
                 // is read once and its facts (money won, items) are lost.
@@ -950,11 +951,9 @@ impl Task for StoryTask {
         }
         if self.in_battle && o.player.is_some() {
             self.in_battle = false;
+            // Where a catch went (party or PC) is the runtime's sensor's to
+            // tell, from the same pages.
             ctx.events.push(GameEvent::BattleEnded);
-            if let Some(data) = &self.data {
-                ctx.events
-                    .extend(self.battle_memory.catch.after_battle(data, ctx.state));
-            }
         }
         // Battle screens without the battle HUD: the Pokédex page after a
         // first catch, and the battle bag during a throw (the frames around
@@ -2812,7 +2811,7 @@ mod tests {
     }
 
     #[test]
-    fn a_catch_becomes_a_party_member_when_the_battle_ends() {
+    fn a_catch_ends_the_battle_without_adding_it_twice() {
         let Some((mut task, state)) = battle_task() else {
             return;
         };
@@ -2855,16 +2854,18 @@ mod tests {
             cursor_y: 76,
         });
         assert_eq!(tick_events(&mut task, &ask, &state).0, "nickname: NO");
-        // Back in the overworld: the catch joins the party.
+        // Back in the overworld: the battle is over. The catch joining the
+        // party is the runtime's sensor's to emit, from the same pages
+        // (`pokebot_sense` tests), so the task must not add it again.
         let (_, events) = tick_events(&mut task, &located(8, "Route2", 7, 3), &state);
         assert!(events.contains(&GameEvent::BattleEnded), "{events:?}");
-        assert!(events.contains(&GameEvent::SpeciesCaught {
-            species: "SPECIES_PIDGEY".into()
-        }));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PartyMonDerived { slot: 1, mon } if mon.species.value.as_deref() == Some("SPECIES_PIDGEY")
-        )), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::PartyMonDerived { .. } | GameEvent::SentToPc { .. }
+            )),
+            "{events:?}"
+        );
     }
 
     /// Live (Route 3, every trainer won): "RED got ¥120 for winning!" was
@@ -2892,10 +2893,14 @@ mod tests {
             "{events:?}"
         );
         let (label, events) = tick_events(&mut task, &money(2), &state);
-        assert!(events.contains(&GameEvent::MoneyChanged {
-            delta: 120,
-            reason: "won a battle".into()
-        }));
+        // The runtime's sensor emits the money (it reads every frame); the
+        // task only waits for the second reading before advancing.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::MoneyChanged { .. })),
+            "{events:?}"
+        );
         assert_eq!(label, "advance text");
         // A page that keeps misreading is advanced after a bounded wait.
         let flicker = |f: u64| {
@@ -2961,11 +2966,7 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::MoneyChanged { .. })));
-        let (label, events) = tick_events(&mut task, &next(f + 1), &state);
-        assert!(events.contains(&GameEvent::MoneyChanged {
-            delta: 64,
-            reason: "won a battle".into()
-        }));
+        let (label, _) = tick_events(&mut task, &next(f + 1), &state);
         assert_eq!(label, "advance text");
     }
 
@@ -3045,8 +3046,12 @@ mod tests {
         tick_events(&mut task, &obtained(1), &state);
         let (label, events) = tick_events(&mut task, &obtained(2), &state);
         assert_eq!(label, "advance text");
+        // The item itself is the sensor's to count; the task still knows
+        // the talk gave it (below: the fossil's tile is free).
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::ItemsChanged { item, delta: 1, .. } if item == "ITEM_HELIX_FOSSIL")),
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemsChanged { .. })),
             "{events:?}"
         );
         let mut f = 3;

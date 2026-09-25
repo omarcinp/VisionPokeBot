@@ -10,6 +10,7 @@
 //! [`RULES_DIR`].
 
 mod belief;
+mod change;
 mod events;
 pub mod inference;
 mod inventory;
@@ -21,9 +22,11 @@ mod reduce_knowledge;
 mod reducer;
 mod screen;
 mod state;
+mod view;
 pub use observation::{PartyMenuObservation, SummaryObservation, SummaryPage};
 
 pub use belief::{Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
+pub use change::{diff, ChangeRecord, StateChange};
 pub use events::{EventExtractor, EventRecord, FrameArrival, FrameDropPolicy, GameEvent};
 pub use inference::{Condition, InferenceRule, InferenceRules};
 pub use inventory::{
@@ -33,13 +36,15 @@ pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BagObservation, BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction,
     FlyMapObservation, FrameMetrics, KeyboardFocus, MenuObservation, MoveListObservation,
-    NamingObservation, Observation, Observed, PlayerPose, PokedexListObservation, PoseObservation,
-    Region, ShinyReading, ShopObservation, TrainerCardObservation,
+    NamingObservation, Observation, Observed, PartyRowObservation, PlayerPose,
+    PokedexListObservation, PoseObservation, Region, ShinyReading, ShopObservation,
+    SpriteObservation, TrainerCardObservation,
 };
 pub use party::{MoveSlot, PartyMon, Status};
 pub use priors::{PriorRule, Priors};
 pub use reducer::{DefaultReducer, StateReducer};
 pub use screen::ScreenState;
+pub use view::{MenuView, OpponentView, ViewState, VisibleNpc};
 
 /// Where the rule files (`inference.json`, `priors.json`) live by default,
 /// relative to the repository root. The copies under `data/world/` are

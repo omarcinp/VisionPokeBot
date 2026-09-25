@@ -425,6 +425,7 @@ mod tests {
             gone: Gone::new(),
             syncer: None,
             blocked: Default::default(),
+            gates: Default::default(),
         };
         let at = |map: &str, x, y| PlayerPose {
             map: map.into(),

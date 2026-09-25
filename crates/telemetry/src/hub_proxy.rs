@@ -3,8 +3,8 @@
 //! Each instance (the physical Switch run, an emulator run) serves its own
 //! web UI on a loopback port. The hub maps `/<name>/…` onto that port with
 //! the prefix stripped, so the page, which only uses relative URLs, works the
-//! same behind the hub and standalone. `/` redirects to the first route
-//! (`/switch/`) and `/api/instances` lists what is running, from the JSON
+//! same behind the hub and standalone. `/` redirects to `/games/`, and
+//! `/api/instances` lists what is running, from the JSON
 //! files `tools/live-run.sh` writes.
 //!
 //! This is a plain TCP proxy, not an HTTP client: it reads the request head,
@@ -67,7 +67,9 @@ fn discover_routes(base: &[Route], dir: &Path) -> Vec<Route> {
             let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if !is_emulator_name(name) || base.iter().any(|r| r.name == name) {
+            if !(is_emulator_name(name) || name == "switch-device")
+                || base.iter().any(|r| r.name == name)
+            {
                 continue;
             }
             let Some(value) = std::fs::read(&path)
@@ -113,7 +115,7 @@ pub fn register_worker(path: &Path, label: &str, port: u16) -> std::io::Result<(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
-    if !is_emulator_name(name) {
+    if !is_emulator_name(name) && name != "switch-device" {
         return Err(std::io::Error::other("invalid emulator name"));
     }
     let pid = std::process::id();
@@ -149,7 +151,7 @@ impl Route {
     }
 }
 
-/// The Switch first: `/` redirects to it and the listing starts with it.
+/// Legacy detail routes; the instance listing starts with the Switch.
 pub fn default_routes() -> Vec<Route> {
     vec![
         Route::new("switch", "Switch", 18080),
@@ -364,7 +366,15 @@ async fn handle(
         None => (target, String::new()),
     };
 
-    if path == "/emulators" || path == "/emulators/" {
+    if path.ends_with("/controls.js") || path.ends_with("/controls.css") {
+        let (content_type, content) = if path.ends_with(".js") {
+            ("text/javascript", include_str!("../web/controls.js"))
+        } else {
+            ("text/css", include_str!("../web/controls.css"))
+        };
+        return respond(&mut client, head_only, "200 OK", "", content_type, content).await;
+    }
+    if matches!(path, "/emulators" | "/emulators/" | "/games" | "/games/") {
         return respond(
             &mut client,
             head_only,
@@ -478,7 +488,7 @@ async fn handle(
     }
 
     if path == "/" {
-        let home = routes.first().map_or_else(|| "/".to_owned(), Route::path);
+        let home = "/games/";
         let location = format!("Location: {home}\r\n");
         return respond(
             &mut client,
@@ -528,7 +538,7 @@ async fn handle(
 
     // Ephemeral ports can be reused after exit. Never forward a stale worker
     // route to whichever unrelated process happens to bind that port next.
-    if is_emulator_name(&route.name)
+    if (is_emulator_name(&route.name) || route.name == "switch-device")
         && list_instances_for(std::slice::from_ref(route), dir)[0]["alive"] != true
     {
         return respond(
@@ -542,7 +552,48 @@ async fn handle(
         .await;
     }
 
-    let backend = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(route.backend)).await;
+    // Switch video always comes from its device session. Detailed bot state
+    // and control remain on the bot while it is alive; fall back to the device
+    // session when there is no bot at all.
+    if route.name == "switch-device"
+        && stripped.starts_with("/api/control")
+        && list_instances_for(&default_routes()[..1], dir)[0]["alive"] == true
+    {
+        return respond(
+            &mut client,
+            false,
+            "409 Conflict",
+            "",
+            "application/json",
+            r#"{"error":"Use the active Switch instance to control its bot"}"#,
+        )
+        .await;
+    }
+    let backend_addr = if route.name == "switch" {
+        let device = routes
+            .iter()
+            .find(|r| r.name == "switch-device")
+            .filter(|r| {
+                let entry = &list_instances_for(std::slice::from_ref(r), dir)[0];
+                entry["alive"] == true
+            });
+        let video = matches!(
+            stripped.split('?').next(),
+            Some("/frame.png" | "/stream.mjpg")
+        );
+        let bot_alive = list_instances_for(std::slice::from_ref(route), dir)[0]["alive"] == true;
+        let ready = device.is_some_and(|r| {
+            list_instances_for(std::slice::from_ref(r), dir)[0]["video_ready"] == true
+        });
+        if (video && ready) || !bot_alive {
+            device.map_or(route.backend, |r| r.backend)
+        } else {
+            route.backend
+        }
+    } else {
+        route.backend
+    };
+    let backend = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(backend_addr)).await;
     let Ok(Ok(mut backend)) = backend else {
         let page = not_running_page(route, routes);
         return respond(

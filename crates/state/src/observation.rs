@@ -148,11 +148,47 @@ pub struct TrainerCardObservation {
     pub money: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PartyMenuObservation {
     pub count: u8,
     pub selected: Option<u8>,
     pub actions: bool,
+    /// The bottom-left prompt as read ("Choose a POKéMON.", "Teach which
+    /// POKéMON?"); empty when a message covers it.
+    #[serde(default)]
+    pub prompt: String,
+    /// The action window opened on a member, top to bottom as read, one
+    /// row at a time (field moves print in blue): `SUMMARY`, `CUT`, …,
+    /// `CANCEL`. Empty when it isn't open.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Row of the ▶ in `options`.
+    #[serde(default)]
+    pub option_cursor: Option<u8>,
+    /// Per slot, while a TM or HM is being taught: `ABLE!` (`Some(true)`),
+    /// `NOT ABLE!` (`Some(false)`), or not shown / unreadable (`None`).
+    #[serde(default)]
+    pub able: Vec<Option<bool>>,
+    /// Each panel's printed facts, index = party slot (`party_menu.c`
+    /// `DisplayPartyPokemonData`). Only what the panel shows readably:
+    /// the action window hides the lower panels' HP, teaching replaces HP
+    /// with ABLE!/NOT ABLE!, an ailment replaces the level with its icon.
+    #[serde(default)]
+    pub members: Vec<PartyRowObservation>,
+}
+
+/// One party menu panel as read; `None` where it didn't read (or isn't
+/// shown). Values are as printed: the sensor checks them for plausibility.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PartyRowObservation {
+    /// Nickname as read (`?` for unknown glyphs).
+    pub nickname: Option<String>,
+    pub level: Option<u8>,
+    /// Current and maximum HP (`64/ 75`).
+    pub hp: Option<(u16, u16)>,
+    /// The ailment icon printed instead of the level, `Healthy` when the
+    /// level is printed (no icon), `Fainted` for the FNT icon.
+    pub status: Option<crate::Status>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +220,9 @@ pub struct FlyMapObservation {
     pub lit: Vec<String>,
     /// Fly spots whose cell shows no icon.
     pub dark: Vec<String>,
+    /// The Kanto grid cell the map cursor's brackets frame, when found.
+    #[serde(default)]
+    pub cursor: Option<(u32, u32)>,
 }
 
 /// The Pokédex numerical list.
@@ -317,6 +356,30 @@ pub struct Observation {
     pub party_menu: Option<PartyMenuObservation>,
     #[serde(default)]
     pub summary: Option<SummaryObservation>,
+    /// The map name in the popup shown on entering a map ("ROUTE 3",
+    /// "MT. MOON"), as read while the box is fully down.
+    #[serde(default)]
+    pub map_popup: Option<String>,
+    /// Object sprites standing on tiles of the located map (only on
+    /// located frames).
+    #[serde(default)]
+    pub sprites: Vec<SpriteObservation>,
+    /// Local ids of the located map's objects whose every tile was on
+    /// screen, unoccluded and empty, with no unidentified sprite anywhere
+    /// in view (it could be one of them, moved by a script).
+    #[serde(default)]
+    pub objects_absent: Vec<u32>,
+}
+
+/// A sprite standing on a tile of the located map, and the map object
+/// it was matched to when only one could be there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpriteObservation {
+    pub x: i32,
+    pub y: i32,
+    /// The object's `local_id` in the map data.
+    pub local_id: Option<u32>,
+    pub facing: Option<Direction>,
 }
 
 impl DialogueObservation {
@@ -352,6 +415,9 @@ impl Observation {
             pokedex_list: None,
             party_menu: None,
             summary: None,
+            map_popup: None,
+            sprites: Vec::new(),
+            objects_absent: Vec::new(),
         }
     }
 }

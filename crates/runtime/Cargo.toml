@@ -13,6 +13,7 @@ pokebot-controller.workspace = true
 pokebot-core.workspace = true
 pokebot-replay.workspace = true
 pokebot-state.workspace = true
+pokebot-sense.workspace = true
 pokebot-telemetry.workspace = true
 pokebot-video.workspace = true
 pokebot-vision.workspace = true

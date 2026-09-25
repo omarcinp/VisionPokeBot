@@ -124,21 +124,21 @@ Endpoints: `/frame.png`, `/stream.mjpg`, `/api/snapshot`, `/api/stream` (server-
 
 `--instance-label <text>` names the run in `/api/snapshot` (default `Local`). The page only uses relative URLs, so it works standalone at `/` and behind the hub.
 
-### The hub on port 8080: Switch and Emulators
+### The hub on port 8080: Game instances
 
 `pokebot hub [--listen 0.0.0.0:8080] [--instances-dir /tmp/pokebot-instances]` is the one address for every run (the user's reverse proxy fronts port 8080):
 
-- `/` redirects to `/switch/`, the main page, which always shows the physical Switch;
-- `/emulators/` manages and shows a grid of concurrent bot/emulator runs;
+- `/` redirects to `/games/`; `/switch/` retains the physical Switch's detailed report;
+- `/games/` shows the connected Switch and concurrent emulator/bot runs (`/emulators/` remains an alias);
 - `/emu/` remains available for the legacy single emulator started with `live-run.sh`;
 - `/api/instances` lists the Switch, legacy emulator, and dynamically registered workers, with `alive` (`$POKEBOT_INSTANCES_DIR` overrides the directory).
 
-Each instance serves its own UI on a loopback port (Switch `127.0.0.1:18080`, emulator `127.0.0.1:18081`) and the hub forwards `/<name>/…` to it with the prefix stripped, piping the bytes so MJPEG and server-sent events stream through. The forwarded request always says `Connection: close`, so each request gets its own connection and its own path rewrite. A stopped instance gives a 503 page with links to the others. Navigation has exactly two tabs: **Switch** and **Emulators**. The Switch dashboard has no floating emulator video; all emulator previews live in the grid. The hub serves the dashboard HTML itself, so upgrading just the hub updates navigation even while an older Switch bot keeps running.
+Each instance serves its own UI on a loopback port (Switch `127.0.0.1:18080`, emulator `127.0.0.1:18081`) and the hub forwards `/<name>/…` to it with the prefix stripped, piping the bytes so MJPEG and server-sent events stream through. The forwarded request always says `Connection: close`, so each request gets its own connection and its own path rewrite. A stopped instance gives a 503 page with links to the others. The **Game instances** grid is the home page; every card links to its detailed report. The Switch appears while its capture card is connected, independently of whether its bot is enabled. The hub serves the dashboard HTML itself, so upgrading just the hub updates navigation even while an older Switch bot keeps running.
 
 `tools/live-run.sh [--instance switch|emu] <log> <pokebot args…>` starts the hub if needed and replaces only the same instance, so starting one never stops the other (`--instance` defaults to `switch` when an argument starts with `capture-card:`, else `emu`):
 
 ```sh
-# Switch (main page, http://<host>:8080/switch/): never stops (--restart)
+# Switch detail (http://<host>:8080/switch/): autonomous cycles until stopped
 tools/live-run.sh --instance switch /tmp/sw.log story --video capture-card:/dev/video0 --viewport 180,5,1560,1040 --card-controls switch --controller esp32:<ip> --continue --save-game --progress saves/switch/progress.json --until CrossMtMoon --restart --record /tmp/sw-<n>
 # Emulator (http://<host>:8080/emu/): in-process emulator on copies of the saves,
 # so it never touches roms/*.sav or saves/switch/
@@ -147,6 +147,40 @@ tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --sav
 
 Each process runs in its own systemd user unit (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`; `systemctl --user status <unit>`), so runs outlive the shell or agent session that started them. `sg video` gives the unit access to the capture card.
 
+### Capture and manual control
+
+The hub owns one capture session for the Switch (`--switch-device /dev/video0`).
+`tools/live-run.sh` saves the capture size, viewport, card controls and controller
+in the instance directory's `switch-config.json`; a hub-only upgrade recovers
+these settings from the existing Switch launch manifest. An independently started
+hub can use `--switch-controller esp32:<host>` for manual control without a bot.
+Restart the hub after changing its capture configuration.
+
+The capture adapter connects bot readers to this session over a local Unix socket.
+It transmits the newest raw RGB frame, preserving the capture sequence and timing;
+there is no encoded video in the bot's input path. Preview normalization and image
+encoding run independently. Slow browsers never hold the capture lock or queue old
+frames for the bot. The broker retries unplugged cards; the connected Switch card
+remains available without a bot process. Existing bots must be relaunched once to
+share the capture session and enable web controls.
+
+**Stop bot** cancels input and leaves the game and preview available. **Take
+control** also grants that browser exclusive keyboard/touch input. Short input
+leases release buttons after a lost connection; blur and closing the controls
+release them explicitly. The bot stays stopped until you choose **Resume bot**.
+Autonomy resumes by locating the player and auditing the current game before
+planning again. Other task types remain stopped; start a new task to run them again.
+Manual emulator play runs near console speed; autonomous runs remain uncapped.
+
+**Stop set** stops an emulator and its bot, retaining cartridge saves and logs.
+Checkboxes stop a selected group; the bulk action stops managed emulators only.
+The Switch has no emulator-stop action. Keep the ESP32's firmware keepalive enabled
+so stopping the bot does not make the physical console fall asleep.
+
+The per-instance `api/control` endpoint accepts JSON with `X-Pokebot-Control: 1`:
+`stop`, `take` (with an opaque `owner` token), `input` (owner, increasing `sequence`,
+and `buttons`), `release`, and `resume`. Only emulator instances support `shutdown`.
+
 ### Concurrent emulators
 
 Build the release binary, then start or upgrade the hub without restarting the Switch:
@@ -154,7 +188,7 @@ Build the release binary, then start or upgrade the hub without restarting the S
 ```sh
 cargo build --release -p pokebot-cli
 tools/live-run.sh --hub /tmp/pokebot-hub.log --max-emulators 16
-# Open http://<host>:8080/emulators/
+# Open http://<host>:8080/games/
 ```
 
 In the **Emulators** tab, choose an instance count and **Autonomous campaign**, **Start a new game**,
@@ -211,7 +245,7 @@ curl -H 'Content-Type: application/json' -H 'X-Pokebot-Control: 1' \
   -d '{}' http://localhost:8080/api/emulators/<name>/stop
 ```
 
-`POST /api/emulators/stop` stops all managed workers;
+`POST /api/emulators/stop` stops all managed workers, or just the workers listed in `{"names":["emu-…"]}`;
 `GET /api/emulators/<name>/log` reads its bounded log tail.
 Worker routes expose `/api/summary`, `/api/snapshot`, `/api/stream`, and
 `/frame.png`. Worker ports are OS-assigned loopback ports, discovered by the hub

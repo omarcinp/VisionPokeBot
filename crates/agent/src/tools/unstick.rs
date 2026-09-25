@@ -77,7 +77,8 @@ impl Tool for UnstickTool {
                 None,
                 None,
                 Vec::new(),
-            ),
+            )
+            .near(ctx.pose()),
         };
         let result = ctx
             .drive(&mut step)

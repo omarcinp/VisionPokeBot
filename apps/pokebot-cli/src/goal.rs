@@ -9,11 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use pokebot_agent::checkpoint;
 use pokebot_agent::goal::{self, GoalOptions, GoalReport, DEFAULT_MAX_REPLANS};
-use pokebot_agent::goal_session::{self, CycleEnd, MilestoneOptions, Runner, Session, Start};
+use pokebot_agent::goal_session::{self, CycleEnd, Runner, Session, Start};
 use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};
-use pokebot_agent::{
-    opening, Executor, ExecutorError, NewGameConfig, Progress, Starter, SyncerHandle,
-};
+use pokebot_agent::{Executor, ExecutorError, NewGameConfig, Progress, Starter};
 use pokebot_core::Error;
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
@@ -68,9 +66,10 @@ pub struct GoalArgs {
     /// Continue the saved game (title → CONTINUE) and restore its checkpoint
     #[arg(long, conflicts_with = "new_game")]
     pub r#continue: bool,
-    /// Start with a new game (soft reset, intro, names), play the opening
-    /// milestones (bedroom → Mom → Oak → starter → rival → parcel) through
-    /// the story, save, and only then run the goal. Overwrites the save.
+    /// Start with a new game (soft reset, intro, names) and run the goal
+    /// from the first overworld frame: the story's opening (Oak, the
+    /// starter, the parcel) is planned like everything else. Overwrites the
+    /// save.
     #[arg(long, requires = "save_game")]
     pub new_game: bool,
     #[arg(long, value_enum, default_value_t = GenderArg::Boy)]
@@ -81,11 +80,10 @@ pub struct GoalArgs {
     /// The rival's name (GREEN, GARY, KAZ, TORU from the list; else typed)
     #[arg(long, default_value = "GREEN")]
     pub rival: String,
+    /// The Pokémon preferred where the story offers a choice (the starter):
+    /// the planner prices the script paths giving another species higher
     #[arg(long, value_enum, default_value_t = Starter::Bulbasaur)]
     pub starter: Starter,
-    /// Tries per opening milestone; a failed attempt reloads the last save
-    #[arg(long, default_value_t = 5)]
-    pub attempts: u32,
     /// Never stop: when the goal run ends (satisfied or not) or fails, wait
     /// --restart-wait seconds (still observing), then soft reset, CONTINUE
     /// the last save and run the goal again. Keeps the Switch in use.
@@ -196,6 +194,7 @@ impl PlannerData {
             expensive_secs: args.expensive_secs,
             budget_s: args.plan_budget_secs,
             supported_probes: Some(Toolbox::supported_probes()),
+            prefer_species: vec![args.starter.species().to_owned()],
             ..PlanOptions::default()
         };
         Ok(PlannerData {
@@ -231,7 +230,7 @@ pub fn run(args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
     if args.dry_run {
         dry_run(&args, &goal, &pd)
     } else {
-        execute(&args, &goal, &pd, &stop)
+        execute(&args, &goal, &mut pd, &stop)
     }
 }
 
@@ -314,8 +313,8 @@ impl Tool for ProgressSave {
 fn execute(
     args: &GoalArgs,
     goal: &GoalPredicate,
-    pd: &PlannerData,
-    stop: &AtomicBool,
+    pd: &mut PlannerData,
+    stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     let progress_path = args.progress_path();
     let start = if args.new_game {
@@ -368,7 +367,8 @@ fn execute(
     let devices = devices::open(&args.devices)?;
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
-    let mut runtime = Runtime::with_perception(devices, perception);
+    let mut runtime = Runtime::with_perception(devices, perception)
+        .with_sensor(pokebot_sense::Sensor::new(Arc::clone(&pd.data)));
     let (telemetry, session_dir) =
         attach_outputs(&mut runtime, &args.output, &video_name, &controller_name)?;
     runtime.echo_events(true);
@@ -385,6 +385,11 @@ fn execute(
         frame_clock: args.devices.frame_clock(),
         ..Executor::default()
     };
+    let task_stop = runtime
+        .bot_stop_signal()
+        .unwrap_or_else(|| Arc::clone(stop));
+    let _ = crate::WEB_BOT_STOP.set(task_stop.clone());
+    pd.options.stop = Some(task_stop.clone());
     let mut runner = CliRunner {
         args,
         goal,
@@ -392,18 +397,36 @@ fn execute(
         runtime,
         executor,
         telemetry,
-        syncer,
         session_dir,
         state_path: args.state_path(),
         progress_path,
         new_game,
-        stop,
+        stop: &task_stop,
     };
     let session = Session {
         start,
         restart: args.restart.then(|| Duration::from_secs(args.restart_wait)),
     };
-    let report = goal_session::run(session, &mut runner);
+    let mut session = session;
+    let report = loop {
+        let report = goal_session::run(session, &mut runner);
+        if !runner.runtime.bot_stopped() || stop.load(Ordering::Relaxed) {
+            break report;
+        }
+        runner.runtime.allow_web_resume(true);
+        runner
+            .runtime
+            .info("Bot stopped; viewing and manual control remain available");
+        while runner.runtime.bot_stopped() && !stop.load(Ordering::Relaxed) {
+            runner.runtime.observe()?;
+        }
+        runner.runtime.allow_web_resume(false);
+        if stop.load(Ordering::Relaxed) {
+            break report;
+        }
+        runner.runtime.clear_pose_hint();
+        session.start = Start::AsIs;
+    };
     let CliRunner { mut runtime, .. } = runner;
     if args.hold && !stop.load(Ordering::Relaxed) {
         runtime.info("observing until Ctrl-C");
@@ -425,7 +448,7 @@ fn execute(
 }
 
 /// One goal cycle against the devices: bring the game to where the cycle
-/// starts (a new game and the opening milestones, CONTINUE, or as it
+/// starts (a new game's menus, CONTINUE, or as it
 /// stands), run the goal loop, save at the end.
 struct CliRunner<'a> {
     args: &'a GoalArgs,
@@ -434,7 +457,6 @@ struct CliRunner<'a> {
     runtime: Runtime,
     executor: Executor,
     telemetry: Option<Telemetry>,
-    syncer: SyncerHandle,
     session_dir: Option<PathBuf>,
     progress_path: PathBuf,
     state_path: PathBuf,
@@ -448,53 +470,17 @@ impl CliRunner<'_> {
         let snapshots = Some(Path::new(CONSOLE_SNAPSHOTS));
         match start {
             Start::NewGame => {
-                let mut progress = goal_session::start_new_game(
+                let progress = goal_session::start_new_game(
                     &mut self.runtime,
                     &self.executor,
                     &self.new_game,
                     self.args.starter,
-                    &self.pd.data,
+                    &self.pd.world,
                     self.stop,
                     snapshots,
                 )?;
-                let bundles = self.args.bundles.clone();
-                let mut on_failure = |runtime: &Runtime, milestone: &str, reason: &str| {
-                    runtime.error(format!("NOTIFY retry: {milestone}: {reason}"));
-                    match write_bundle(runtime, &bundles, milestone, reason) {
-                        Ok(dir) => runtime.error(format!("debug bundle: {}", dir.display())),
-                        Err(e) => runtime.error(format!("debug bundle: {e:#}")),
-                    }
-                };
-                let mut opts = MilestoneOptions {
-                    world: Arc::clone(&self.pd.world),
-                    data: Arc::clone(&self.pd.data),
-                    syncer: Arc::clone(&self.syncer),
-                    save_game: self.args.save_game,
-                    progress_path: &self.progress_path,
-                    attempts: self.args.attempts,
-                    console_snapshots: snapshots,
-                    on_failure: &mut on_failure,
-                };
-                self.runtime.info(format!(
-                    "new game done: playing the opening milestones ({}) before the goal",
-                    opening(self.args.starter)
-                        .iter()
-                        .map(|m| m.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                goal_session::play_milestones(
-                    &mut self.runtime,
-                    &self.executor,
-                    &mut opts,
-                    opening(self.args.starter),
-                    &mut progress,
-                    self.stop,
-                )?;
-                self.runtime.info(format!(
-                    "opening done ({}); handing over to the goal",
-                    progress.milestones.join(", ")
-                ));
+                self.runtime
+                    .info("new game done: the goal loop plays from the first overworld frame");
                 Ok(Some(progress))
             }
             Start::Continue => {
@@ -513,6 +499,10 @@ impl CliRunner<'_> {
                 Ok(Some(previous))
             }
             Start::AsIs => {
+                if self.runtime.frames_seen() > 0 {
+                    self.runtime.clear_pose_hint();
+                    return Ok(Progress::load(&self.progress_path).ok());
+                }
                 match checkpoint::load(&self.state_path) {
                     Ok(Some(c)) => {
                         if let Some(pose) = c.identity.as_ref().and_then(|i| i.saved_at.clone()) {
@@ -565,7 +555,13 @@ impl CliRunner<'_> {
             }));
         }
         ctx = ctx.with_toolbox(toolbox);
-        pokebot_agent::tools::probe::audit_core(&mut ctx)?;
+        if start == Start::NewGame {
+            // Nothing to read: a new game's party, bag and money are known
+            // (and there is no POKéMON entry in the Start menu yet).
+            ctx.scheduler.enabled = true;
+        } else {
+            pokebot_agent::tools::probe::audit_core(&mut ctx)?;
+        }
         let on_status = self.telemetry.clone().map(|t| {
             Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
         });
@@ -641,7 +637,7 @@ impl Runner for CliRunner<'_> {
                 CycleEnd::Unsatisfied(report.outcome)
             }
             Err(e) => {
-                if was_stopped(&e) || self.stop.load(Ordering::Relaxed) {
+                if was_stopped(&e) || self.stop.load(Ordering::Relaxed) || runtime.bot_stopped() {
                     runtime.info("Goal: stopped by user");
                     return CycleEnd::Stopped;
                 }
@@ -659,7 +655,7 @@ impl Runner for CliRunner<'_> {
     }
 
     fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+        self.stop.load(Ordering::Relaxed) || self.runtime.bot_stopped()
     }
 
     fn has_checkpoint(&self) -> bool {

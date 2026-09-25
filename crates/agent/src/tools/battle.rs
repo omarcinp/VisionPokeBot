@@ -45,6 +45,10 @@ pub struct BattleStep {
     unread_since: Option<u64>,
     /// Trainers the moves are valued against when learning.
     upcoming: Vec<String>,
+    /// The script fighting this battle goes on when it is lost (the
+    /// early rival battles: `trainerbattle_earlyrival`, whose trainer has a
+    /// victory line): a fainted lead is part of the story, not a failure.
+    loss_ok: bool,
 }
 
 impl BattleStep {
@@ -65,7 +69,14 @@ impl BattleStep {
             battle_text_frame: None,
             unread_since: None,
             upcoming: Vec::new(),
+            loss_ok: false,
         }
+    }
+
+    /// Losing doesn't end the story ([`loss_allowed`]).
+    pub fn loss_ok(mut self, loss_ok: bool) -> Self {
+        self.loss_ok = loss_ok;
+        self
     }
 
     /// The species caught in this battle, if one was.
@@ -152,7 +163,8 @@ impl ToolStep for BattleStep {
             let tracked = self
                 .tracker
                 .observe_page(&d.lines, &data, self.memory.last_slot);
-            ctx.events.extend(tracked);
+            ctx.events
+                .extend(tracked.into_iter().filter(crate::track::tool_emits));
             if d.ready_for_a() && o.menu.is_none() && !self.tracker.applied(&d.lines) {
                 let since = *self.unread_since.get_or_insert(o.frame_id);
                 if o.frame_id.saturating_sub(since) < PAGE_READ_WAIT_FRAMES {
@@ -199,7 +211,7 @@ impl ToolStep for BattleStep {
                 );
             }
             self.observe_battle_text(o, ctx.events);
-            if b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) {
+            if b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !self.loss_ok {
                 return Decision::Fail(format!(
                     "our Pokémon fainted ({})",
                     b.player_name.clone().unwrap_or_default()
@@ -257,9 +269,9 @@ impl ToolStep for BattleStep {
         }
         if self.in_battle && o.player.is_some() {
             self.in_battle = false;
+            // Where a catch went (party or PC) is the runtime's sensor's to
+            // tell, from the same pages.
             ctx.events.push(GameEvent::BattleEnded);
-            ctx.events
-                .extend(self.memory.catch.after_battle(&data, ctx.state));
             return Decision::Done(match self.caught() {
                 Some(species) => format!("battle over: caught {species}"),
                 None => "battle over".into(),
@@ -315,7 +327,52 @@ impl Tool for BattleTool {
         let Intent::Battle { policy } = intent else {
             return ToolOutcome::failed("not a Battle");
         };
-        let mut step = BattleStep::new(Arc::clone(&ctx.data), *policy, ctx.after_dialogue());
+        let loss_ok = loss_allowed(ctx);
+        if loss_ok {
+            ctx.info("battle: the script goes on if it is lost");
+        }
+        let mut step =
+            BattleStep::new(Arc::clone(&ctx.data), *policy, ctx.after_dialogue()).loss_ok(loss_ok);
         ctx.drive(&mut step).map(|_| ()).into()
     }
+}
+
+/// Whether the battle starting now belongs to a script that goes on when
+/// it is lost: the script being run, or an armed trigger under the player,
+/// with a battle whose trainer has a victory line (the decomp's
+/// `trainerbattle_earlyrival`: the rival wins, gloats, and the story goes
+/// on without a white-out).
+pub fn loss_allowed(ctx: &ToolContext<'_>) -> bool {
+    use pokebot_world::predicate::{BeliefView, Truth};
+    let Some(events) = ctx.world.events() else {
+        return false;
+    };
+    let belief = crate::belief_view::StateBelief(ctx.state());
+    let mut scripts: Vec<&str> = ctx.running_script.iter().map(String::as_str).collect();
+    if let Some(pose) = ctx.pose() {
+        for t in events
+            .triggers
+            .iter()
+            .filter(|t| t.map == pose.map && (t.x, t.y) == (pose.x, pose.y))
+        {
+            let armed = pokebot_world::route::requirement_of(&t.when)
+                .is_none_or(|req| !req.iter().any(|q| belief.eval(q) == Truth::False));
+            if let (true, Some(s)) = (armed, t.script.as_deref()) {
+                scripts.push(s);
+            }
+        }
+    }
+    scripts.iter().filter_map(|s| events.script(s)).any(|s| {
+        s.paths.iter().any(|p| {
+            p.does.iter().any(|e| {
+                matches!(
+                    e,
+                    pokebot_world::events::Effect::Battle {
+                        victory: Some(_),
+                        ..
+                    }
+                )
+            })
+        })
+    })
 }

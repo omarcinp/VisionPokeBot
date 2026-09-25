@@ -154,7 +154,104 @@ pub fn detect_spots(image: &RgbImage, spots: &[FlySpot]) -> Option<FlyMapObserva
             dark.push(spot.map.to_owned());
         }
     }
-    Some(FlyMapObservation { lit, dark })
+    Some(FlyMapObservation {
+        lit,
+        dark,
+        cursor: cursor_cell(image),
+    })
+}
+
+/// The map cursor (`cursor.png`): a 16×16 sprite centred on its cell
+/// (`spriteX = 8x + 36`), four white brackets 2 px thick that pulse
+/// between two frames: frame 0 spans sprite pixels 2..=13, frame 1
+/// 1..=14. The cell whose bracket pixels are (nearly) all white.
+const CURSOR_FRAMES: [[&str; 16]; 2] = [
+    [
+        "................",
+        "................",
+        "..#####..#####..",
+        "..#####..#####..",
+        "..##........##..",
+        "..##........##..",
+        "..##........##..",
+        "................",
+        "................",
+        "..##........##..",
+        "..##........##..",
+        "..##........##..",
+        "..#####..#####..",
+        "..#####..#####..",
+        "................",
+        "................",
+    ],
+    [
+        "................",
+        ".#####....#####.",
+        ".#####....#####.",
+        ".##..........##.",
+        ".##..........##.",
+        ".##..........##.",
+        "................",
+        "................",
+        "................",
+        "................",
+        ".##..........##.",
+        ".##..........##.",
+        ".##..........##.",
+        ".#####....#####.",
+        ".#####....#####.",
+        "................",
+    ],
+];
+const CURSOR_WHITE: Rgb = [255, 255, 255];
+/// Kanto's grid: 22 columns, 15 rows of cells hold map sections.
+const GRID_CELLS: (u32, u32) = (22, 15);
+
+pub fn cursor_cell(image: &RgbImage) -> Option<(u32, u32)> {
+    let mut best: Option<(u32, (u32, u32))> = None;
+    for cy in 0..GRID_CELLS.1 {
+        for cx in 0..GRID_CELLS.0 {
+            let x0 = GRID_ORIGIN.0 + CELL * cx - 4;
+            let y0 = GRID_ORIGIN.1 + CELL * cy - 4;
+            for frame in &CURSOR_FRAMES {
+                let (mut hit, mut total) = (0u32, 0u32);
+                for (r, row) in frame.iter().enumerate() {
+                    for (c, ch) in row.chars().enumerate() {
+                        if ch != '#' {
+                            continue;
+                        }
+                        let (x, y) = (x0 + c as u32, y0 + r as u32);
+                        total += 1;
+                        if x < image.width()
+                            && y < image.height()
+                            && near(px(image, x, y), CURSOR_WHITE, 8)
+                        {
+                            hit += 1;
+                        }
+                    }
+                }
+                // Other sprites (the player icon) may cover a bracket.
+                let score = hit * 1000 / total.max(1);
+                if score >= 850 && best.is_none_or(|(b, _)| score > b) {
+                    best = Some((score, (cx, cy)));
+                }
+            }
+        }
+    }
+    best.map(|(_, cell)| cell)
+}
+
+/// The fly spot drawn on `cell`, if any.
+pub fn spot_at(cell: (u32, u32)) -> Option<&'static FlySpot> {
+    KANTO_FLY_SPOTS.iter().find(|s| s.cell == cell)
+}
+
+/// The grid cell of `map`'s fly spot.
+pub fn spot_cell(map: &str) -> Option<(u32, u32)> {
+    KANTO_FLY_SPOTS
+        .iter()
+        .find(|s| s.map == map)
+        .map(|s| s.cell)
 }
 
 /// Sea, land and edge probes where the Kanto map is uniform (all 1000‰ on
@@ -341,6 +438,32 @@ mod tests {
         };
         let map = detect(&image).unwrap();
         assert_eq!(map.lit, vec!["PewterCity", "ViridianCity", "PalletTown"]);
+        assert_eq!(map.cursor, Some((4, 4)));
+    }
+
+    /// Both frames of the pulsing cursor are found on their cell; none on
+    /// the bare map.
+    #[test]
+    fn the_cursor_cell_is_found_in_both_frames() {
+        let Some(image) = region_map() else {
+            return;
+        };
+        assert_eq!(detect(&image).unwrap().cursor, None);
+        for (frame, cell) in [(0, (14, 3)), (1, (12, 12)), (0, (4, 14))] {
+            let mut drawn = image.clone();
+            let x0 = GRID_ORIGIN.0 + CELL * cell.0 - 4;
+            let y0 = GRID_ORIGIN.1 + CELL * cell.1 - 4;
+            for (r, row) in CURSOR_FRAMES[frame].iter().enumerate() {
+                for (c, ch) in row.chars().enumerate() {
+                    if ch == '#' {
+                        drawn.put_pixel(x0 + c as u32, y0 + r as u32, CURSOR_WHITE);
+                    }
+                }
+            }
+            assert_eq!(detect(&drawn).unwrap().cursor, Some(cell), "frame {frame}");
+        }
+        assert_eq!(spot_cell("CeruleanCity"), Some((14, 3)));
+        assert_eq!(spot_at((12, 12)).map(|s| s.map), Some("FuchsiaCity"));
     }
 
     #[test]

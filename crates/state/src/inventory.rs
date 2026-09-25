@@ -9,7 +9,7 @@ use crate::{Knowledge, PartyMon};
 /// PC boxes in FireRed.
 pub const BOXES: usize = 14;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Pocket {
     Items,
     KeyItems,
