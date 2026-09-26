@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use pokebot_gamedata::GameData;
 use pokebot_state::{GameEvent, GameState, Pocket};
-use pokebot_world::events::{Effect, Events, Val};
+use pokebot_world::events::{Condition, Effect, Events, Val};
 use pokebot_world::places::Places;
 use pokebot_world::predicate::{BeliefView, Truth};
 use pokebot_world::route::requirement_of;
@@ -311,6 +311,21 @@ pub fn path_events(
         return (out, log);
     };
     let script_map = events.script(script).and_then(|s| s.map.clone());
+    // The game took this path, so what it required of a trainer held: a
+    // path for talking to a beaten trainer proves the defeat even when the
+    // battle itself went unrecorded (the Cerulean grunt).
+    for c in &p.when {
+        if let Condition::Trainer {
+            trainer,
+            defeated: true,
+        } = c
+        {
+            out.push(GameEvent::FlagTracked {
+                flag: trainer.clone(),
+                value: true,
+            });
+        }
+    }
     for effect in &p.does {
         // `removeobject` sets the object's hide flag for good: the belief
         // keeps it, so navigation stops routing around a taken fossil after
@@ -403,6 +418,27 @@ mod tests {
         world.events()?;
         let data = GameData::load(dir.join("gamedata.json")).ok()?;
         Some((world, data))
+    }
+
+    /// Talking to the Cerulean grunt once beaten proves the defeat.
+    #[test]
+    fn a_path_for_a_beaten_trainer_tracks_the_defeat() {
+        let Some((world, data)) = world() else { return };
+        let events = world.events().unwrap();
+        let name = |id: &str| world.name_of(id).map(str::to_owned);
+        let (out, _) = path_events(
+            events,
+            "CeruleanCity_EventScript_Grunt",
+            1,
+            &GameState::default(),
+            &data,
+            world.places(),
+            &name,
+        );
+        assert!(out.contains(&GameEvent::FlagTracked {
+            flag: "TRAINER_TEAM_ROCKET_GRUNT_5".into(),
+            value: true
+        }));
     }
 
     /// Oak's trigger walks the player into the lab with its scene var at

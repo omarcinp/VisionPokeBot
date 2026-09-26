@@ -215,6 +215,28 @@ pub fn resolve_path_in(
     answered: &[bool],
     belief: Option<&dyn BeliefView>,
 ) -> Option<usize> {
+    resolve_path_with(script, labels, answered, belief, false)
+}
+
+/// [`resolve_path_in`], knowing whether a battle was fought during the
+/// conversation: then a path that fights wins a tie with one that doesn't
+/// (the Cerulean grunt's after-battle text is printed both by the path
+/// that fights him and by the one for talking to him once beaten; the
+/// lower index, the beaten one, was taken and his defeat never tracked).
+pub fn resolve_path_with(
+    script: &Script,
+    labels: &[String],
+    answered: &[bool],
+    belief: Option<&dyn BeliefView>,
+    battled: bool,
+) -> Option<usize> {
+    let fights = |i: usize| {
+        battled
+            && script.paths[i]
+                .does
+                .iter()
+                .any(|e| matches!(e, Effect::Battle { .. }))
+    };
     let possible = |p: &pokebot_world::events::ScriptPath| {
         let Some(belief) = belief else { return true };
         match requirement_of(&p.when) {
@@ -250,7 +272,11 @@ pub fn resolve_path_in(
     consistent
         .iter()
         .filter(|(_, score)| *score > 0)
-        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| fights(a.0).cmp(&fights(b.0)))
+                .then_with(|| b.0.cmp(&a.0))
+        })
         .map(|(i, _)| *i)
 }
 
@@ -290,6 +316,11 @@ pub struct Conversation {
     /// print the same text (the three tiles of one trigger, one map's
     /// scene and another's).
     pub near: Option<PlayerPose>,
+    /// How many events the running tool had learned when this
+    /// conversation began (its own start in `StepContext::learned`).
+    learned_at_start: Option<usize>,
+    /// A battle ended while it ran (a trainer's).
+    pub battled: bool,
 }
 
 impl Conversation {
@@ -320,6 +351,8 @@ impl Conversation {
             unknown: None,
             gained_item: false,
             near: None,
+            learned_at_start: None,
+            battled: false,
         }
     }
 
@@ -476,7 +509,8 @@ impl Conversation {
             return self.path.map(|p| (script, p));
         };
         let Some(planned) = self.path else {
-            let path = resolve_path_in(data, &self.recognised, &self.answered, belief)?;
+            let path =
+                resolve_path_with(data, &self.recognised, &self.answered, belief, self.battled)?;
             return Some((script, path));
         };
         // The plan's path, unless the text read is another path's: the
@@ -501,8 +535,10 @@ impl Conversation {
         }
         // What the belief rules out may be what it got wrong: without it
         // when nothing else prints the text.
-        let read = resolve_path_in(data, &self.recognised, &self.answered, belief)
-            .or_else(|| resolve_path_in(data, &self.recognised, &self.answered, None));
+        let read = resolve_path_with(data, &self.recognised, &self.answered, belief, self.battled)
+            .or_else(|| {
+                resolve_path_with(data, &self.recognised, &self.answered, None, self.battled)
+            });
         match read {
             Some(q) if score(q) > own => Some((script, q)),
             // None of the script's paths prints what was read.
@@ -514,6 +550,11 @@ impl Conversation {
 
 impl ToolStep for Conversation {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+        let start = *self.learned_at_start.get_or_insert(ctx.learned.len());
+        self.battled |= ctx
+            .learned
+            .get(start..)
+            .is_some_and(|l| l.iter().any(|e| matches!(e, GameEvent::BattleEnded)));
         let o = ctx.observation;
         let Some(d) = &o.dialogue else {
             if let Some(menu) = &o.menu {
@@ -1296,6 +1337,36 @@ mod tests {
             cond_choice(None, Some(0)),
         ];
         assert_eq!(question_branches(&when), vec![true, false, false]);
+    }
+
+    /// The Cerulean grunt's after-battle text: the path that fought him
+    /// when a battle was fought, else the one for him already beaten.
+    #[test]
+    fn a_battle_in_the_conversation_picks_the_path_that_fights() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let Some(script) = world
+            .events()
+            .and_then(|e| e.script("CeruleanCity_EventScript_Grunt"))
+        else {
+            return;
+        };
+        let labels = vec![
+            "CeruleanCity_Text_OkayIllReturnStolenTM".to_owned(),
+            "CeruleanCity_Text_RecoveredTM28FromGrunt".to_owned(),
+        ];
+        let without = resolve_path_with(script, &labels, &[], None, false).unwrap();
+        let with = resolve_path_with(script, &labels, &[], None, true).unwrap();
+        assert!(!script.paths[without]
+            .does
+            .iter()
+            .any(|e| matches!(e, Effect::Battle { .. })));
+        assert!(script.paths[with].does.iter().any(|e| matches!(
+            e,
+            Effect::Battle { battle, .. } if battle == "TRAINER_TEAM_ROCKET_GRUNT_5"
+        )));
     }
 
     #[test]

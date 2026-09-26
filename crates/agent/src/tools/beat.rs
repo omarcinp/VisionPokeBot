@@ -8,6 +8,7 @@
 
 use pokebot_gamedata::GameData;
 use pokebot_planner::intents::LEAD_HP_MIN;
+use pokebot_state::GameEvent;
 
 use super::{progress, Intent, Tool, ToolContext, ToolOutcome};
 use crate::battle::{choose_move, BattleMemory, BattlePolicy};
@@ -87,13 +88,35 @@ impl Tool for BeatTool {
                 return e.into();
             }
         }
-        ctx.invoke(&Intent::Talk {
+        let talked = ctx.invoke(&Intent::Talk {
             map: map.clone(),
             object: *object,
             answers: Vec::new(),
-        })
-        .result
-        .into()
+        });
+        if let Err(e) = talked.result {
+            return e.into();
+        }
+        // The battle tool reads "TEAM ROCKET GRUNT" off the screen, not
+        // which one: the Beat knows (the Cerulean grunt's defeat went
+        // untracked and the plan sent the bot back to a trainer gone for
+        // good).
+        let won = talked
+            .learned
+            .iter()
+            .any(|e| matches!(e, GameEvent::BattleEnded))
+            && !talked
+                .learned
+                .iter()
+                .any(|e| matches!(e, GameEvent::WhitedOut));
+        if won {
+            if let Err(e) = ctx.emit(GameEvent::FlagTracked {
+                flag: trainer.clone(),
+                value: true,
+            }) {
+                return e.into();
+            }
+        }
+        ToolOutcome::ok()
     }
 }
 
