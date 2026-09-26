@@ -25,6 +25,11 @@ use super::{progress, Intent, Tool, ToolContext, ToolError, ToolOutcome};
 
 /// Targets tried per `Explore` at most.
 const MAX_TARGETS: usize = 8;
+/// Frames watched for someone to show up when nothing is left to try: an
+/// unnamed sprite counts after 90 frames on its tile, and the player may
+/// just have walked up (on the emulator Bill, off his tiles, was on screen
+/// but not yet counted).
+const WATCH_FRAMES: u64 = 150;
 
 /// Something on the map to interact with.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,27 +147,44 @@ pub struct ExploreTool {
 }
 
 impl ExploreTool {
+    /// The targets not tried yet, around the player at `pose`: unnamed
+    /// sprites counted in the view or seen on the frame now.
+    fn fresh(&self, ctx: &ToolContext<'_>, pose: &PlayerPose) -> Vec<Target> {
+        let state = ctx.state();
+        let mut unnamed: Vec<(i32, i32)> = state
+            .view
+            .npcs
+            .iter()
+            .filter(|n| n.map == pose.map && n.local_id.is_none())
+            .map(|n| (n.x, n.y))
+            .collect();
+        let located = ctx
+            .observation()
+            .filter(|o| o.player.as_ref().is_some_and(|p| p.pose.map == pose.map));
+        for s in located.iter().flat_map(|o| &o.sprites) {
+            if s.local_id.is_none() && !unnamed.contains(&(s.x, s.y)) {
+                unnamed.push((s.x, s.y));
+            }
+        }
+        let shown = |id: u32| object_shown(&ctx.world, state, &pose.map, id);
+        targets(&ctx.world, pose, &unnamed, &shown)
+            .into_iter()
+            .filter(|t| !self.tried.contains(&(pose.map.clone(), t.clone())))
+            .take(MAX_TARGETS)
+            .collect()
+    }
+
     fn explore(&mut self, ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         let pose = ctx
             .pose()
             .ok_or_else(|| ToolError::Failed("explore: the position is unknown".into()))?;
-        let all = {
-            let state = ctx.state();
-            let unnamed: Vec<(i32, i32)> = state
-                .view
-                .npcs
-                .iter()
-                .filter(|n| n.map == pose.map && n.local_id.is_none())
-                .map(|n| (n.x, n.y))
-                .collect();
-            let shown = |id: u32| object_shown(&ctx.world, state, &pose.map, id);
-            targets(&ctx.world, &pose, &unnamed, &shown)
-        };
-        let fresh: Vec<Target> = all
-            .into_iter()
-            .filter(|t| !self.tried.contains(&(pose.map.clone(), t.clone())))
-            .take(MAX_TARGETS)
-            .collect();
+        let mut fresh = self.fresh(ctx, &pose);
+        if fresh.is_empty() {
+            // Nothing yet: watch a while for someone to show up.
+            let start = ctx.observation().map_or(0, |o| o.frame_id);
+            while ctx.observe()?.frame_id < start + WATCH_FRAMES {}
+            fresh = self.fresh(ctx, &pose);
+        }
         if fresh.is_empty() {
             return Err(ToolError::Failed(format!(
                 "explore: nothing left to try on {}",
