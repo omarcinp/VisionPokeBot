@@ -193,6 +193,24 @@ impl Ledger {
         }
     }
 
+    /// The player went from `from` to `to`: a straight step of a few
+    /// tiles on one map (frames the perception skipped) books the tiles
+    /// between; anything else just `to`.
+    pub fn walked_between(&mut self, from: &PlayerPose, to: &PlayerPose) {
+        let (dx, dy) = (to.x - from.x, to.y - from.y);
+        if from.map != to.map || (dx != 0 && dy != 0) || dx.abs().max(dy.abs()) > 8 {
+            return self.walked(to);
+        }
+        let n = dx.abs().max(dy.abs());
+        for k in 0..=n {
+            self.walked(&PlayerPose {
+                map: to.map.clone(),
+                x: from.x + dx.signum() * k,
+                y: from.y + dy.signum() * k,
+            });
+        }
+    }
+
     /// A target was on screen at `at`.
     pub fn seen(&mut self, map: &str, key: &str, at: (i32, i32)) {
         let log = self.maps.entry(map.to_owned()).or_default();
@@ -329,6 +347,22 @@ mod tests {
             l.freshness("M", "object:2", 7, false),
             Freshness::OtherAnswer(vec![false])
         );
+    }
+
+    #[test]
+    fn a_straight_step_books_the_tiles_between() {
+        let pose = |map: &str, x, y| PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        let mut l = Ledger::default();
+        l.walked_between(&pose("M", 9, 7), &pose("M", 9, 10));
+        l.walked_between(&pose("M", 9, 10), &pose("M", 11, 11));
+        l.walked_between(&pose("M", 11, 11), &pose("N", 1, 1));
+        let tiles: Vec<_> = l.maps["M"].tiles.iter().copied().collect();
+        assert_eq!(tiles, vec![(9, 7), (9, 8), (9, 9), (9, 10), (11, 11)]);
+        assert!(l.maps["N"].tiles.contains(&(1, 1)));
     }
 
     #[test]

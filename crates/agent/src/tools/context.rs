@@ -168,6 +168,9 @@ pub struct ToolContext<'a> {
     gates: std::cell::OnceCell<Arc<pokebot_world::gates::Gates>>,
     /// Facts the runtime's sensor read, not yet handed to the scheduler.
     perceived: Receiver<Notice>,
+    /// Every step and sighting the runtime saw (frames the executor reads
+    /// for a walk too), for the ledger.
+    walked: Receiver<Notice>,
 }
 
 /// Sensor facts a tool learns from (not the screen classification, the
@@ -200,8 +203,17 @@ impl<'a> ToolContext<'a> {
         let perceived = runtime.subscribe(|n| {
             matches!(n, Notice::Event { record, origin: Origin::Perception } if sensed(&record.event))
         });
+        let walked = runtime.subscribe(|n| {
+            matches!(n, Notice::Event { record, .. } if matches!(
+                record.event,
+                GameEvent::PlayerMoved { .. }
+                    | GameEvent::PlayerLocated { .. }
+                    | GameEvent::NpcSeen { .. }
+            ))
+        });
         Self {
             perceived,
+            walked,
             runtime,
             executor,
             world,
@@ -391,13 +403,26 @@ impl<'a> ToolContext<'a> {
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.ledger.entered(map);
             }
-            self.ledger.walked(&p.pose);
-            for s in &o.sprites {
-                if let Some(id) = s.local_id {
-                    self.ledger
-                        .seen(map, &crate::ledger::object_key(id), (s.x, s.y));
+            while let Ok(notice) = self.walked.try_recv() {
+                let Notice::Event { record, .. } = notice else {
+                    continue;
+                };
+                match record.event {
+                    GameEvent::PlayerMoved { from, to } => self.ledger.walked_between(&from, &to),
+                    GameEvent::PlayerLocated { pose } => self.ledger.walked(&pose),
+                    GameEvent::NpcSeen {
+                        map,
+                        local_id,
+                        x,
+                        y,
+                        ..
+                    } => self
+                        .ledger
+                        .seen(&map, &crate::ledger::object_key(local_id), (x, y)),
+                    _ => {}
                 }
             }
+            self.ledger.walked(&p.pose);
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
                 // What the last map showed is kept (a crash loses at most
