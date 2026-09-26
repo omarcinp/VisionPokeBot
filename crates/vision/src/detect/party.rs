@@ -96,10 +96,12 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
                 continue;
             }
             // PP prints dark, then yellow/orange/red as it runs low: the
-            // fixed dark mask first, any ink when it misses.
+            // fixed dark mask first, any ink when it misses, then any
+            // saturated ink (red 0/N on the Switch splits into clusters).
             let region = Region::new(205, 32 + 28 * i, 31, 13);
             let pp = pair(&font.read_dark(image, region).join(""))
                 .or_else(|| pair(&font.read(image, region, &[]).join("")))
+                .or_else(|| pair(&font.read_saturated(image, region).join("")))
                 .and_then(|(a, b)| Some((a.try_into().ok()?, b.try_into().ok()?)));
             moves.push((name, pp));
         }
@@ -456,6 +458,16 @@ mod tests {
                 let s = summary(&image, &font).unwrap();
                 assert_eq!(s.moves[3], ("VINE WHIP".into(), Some((5, 10))), "{name}");
             }
+        }
+        // A move out of PP prints 0/10 in red (live: the audit failed on it).
+        if let Ok(image) = load("switch-summary-moves-pp0.png") {
+            let s = summary(&image, &font).unwrap();
+            assert_eq!(
+                s.moves[3],
+                ("VINE WHIP".into(), Some((0, 10))),
+                "{:?}",
+                s.moves
+            );
         }
         if let Ok(image) = load("switch-summary-skills-27.png") {
             let s = summary(&image, &font).unwrap();

@@ -179,6 +179,24 @@ impl Font {
         .1
     }
 
+    /// Saturated or dark ink (some channel below 100) on a pale panel:
+    /// coloured numbers whose capture noise splits them across colour
+    /// clusters (PP 0 prints red over a pale yellow shadow).
+    pub fn read_saturated(&self, image: &RgbImage, region: Region) -> Vec<String> {
+        let bits = (region.y..region.y + region.height)
+            .flat_map(|y| {
+                (region.x..region.x + region.width)
+                    .map(move |x| image.pixel(x, y).iter().any(|c| *c < 100))
+            })
+            .collect();
+        self.read_mask(&Mask {
+            width: region.width as usize,
+            height: region.height as usize,
+            bits,
+        })
+        .1
+    }
+
     fn read_mask(&self, mask: &Mask) -> (i64, Vec<String>) {
         let mut score = 0;
         let mut lines = Vec::new();
