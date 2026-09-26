@@ -357,6 +357,8 @@ mod tests {
             moves: moves.iter().map(|m| m.to_string()).collect(),
             hp: None,
             pp_used: Default::default(),
+            read_stats: None,
+            ability: None,
         }
     }
 

@@ -200,6 +200,8 @@ mod tests {
                 .to_vec(),
                 hp: Some((54, 54)),
                 pp_used: [("MOVE_VINE_WHIP".to_owned(), 5)].into_iter().collect(),
+                read_stats: None,
+                ability: None,
             }],
         };
         let k = legacy_knowledge(&d, &party);

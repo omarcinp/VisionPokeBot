@@ -3,7 +3,10 @@
 //! fight for training), and repeat until the species is caught or the lead
 //! reaches the level. The battle is embedded rather than an interrupt so
 //! the step can read what was caught. A weakened lead heals at the nearest
-//! Pokémon Center and the hunt resumes.
+//! Pokémon Center and the hunt resumes. A catch hunt restocks Poké Balls at
+//! the nearest mart when fewer than [`HUNT_MIN_BALLS`] are held above the
+//! shiny reserve, and runs from the species hunted whenever it isn't
+//! catching it rather than faint it.
 
 use std::sync::Arc;
 
@@ -17,9 +20,10 @@ use super::{
     progress, BattlePlan, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
 };
-use crate::catch::CATCH_MIN_HP;
+use crate::catch::{ball_budget, CATCH_MIN_HP};
 use crate::nav::{nearest_reachable, Destination};
 use crate::party::Party;
+use crate::stock::ball_count;
 use crate::story::spin_sequence;
 use crate::{Action, Decision, Expectation, Outcome};
 
@@ -38,6 +42,12 @@ const TRAIN_HEAL_BELOW: u32 = 500;
 const MAX_HEALS: u32 = 3;
 /// How the step reports a lead that must heal before going on.
 const HEAL_FIRST: &str = "heal first";
+/// Balls above the shiny reserve a catch hunt needs to go on.
+pub const HUNT_MIN_BALLS: u16 = 3;
+/// Mart visits per hunt before it counts as not working.
+const MAX_BUYS: u32 = 2;
+/// How the step reports a hunt short of balls.
+const BUY_FIRST: &str = "buy balls first";
 /// How the step reports a catch on the way (another species than the
 /// target, or one while training): the hunt saves the game before it
 /// goes on (spec §8: a save after every belief-changing step; flash-4
@@ -193,7 +203,11 @@ impl ToolStep for HuntStep {
             return Decision::Done(done);
         }
         if o.battle.is_some() {
-            self.battle = Some(BattleStep::new(Arc::clone(&self.data), self.plan(), false));
+            let battle = BattleStep::new(Arc::clone(&self.data), self.plan(), false);
+            self.battle = Some(match &self.hunt {
+                Hunt::Species(species) => battle.sparing(species),
+                Hunt::Level(_) => battle,
+            });
             return Decision::Wait("a battle starts".into());
         }
         if let Some(lead) = party.lead() {
@@ -222,6 +236,17 @@ impl ToolStep for HuntStep {
                 {
                     return Decision::Fail(format!("{HEAL_FIRST}: the lead is {status:?}"));
                 }
+            }
+        }
+        // Too few balls to throw: restock before the grass (an unknown
+        // pocket goes on; the catch policy declines until it is read).
+        if matches!(self.hunt, Hunt::Species(_)) {
+            if let Some(n) =
+                ball_count(ctx.state).filter(|n| ball_budget(*n, false) < HUNT_MIN_BALLS)
+            {
+                return Decision::Fail(format!(
+                    "{BUY_FIRST}: {n} held, {HUNT_MIN_BALLS} above the shiny reserve needed"
+                ));
             }
         }
         if ctx.quiet_frames < SETTLE_FRAMES {
@@ -325,6 +350,7 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
 /// the context keeps a checkpoint (`--save-game`).
 fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), ToolError> {
     let mut heals = 0;
+    let mut buys = 0;
     let mut encounters = 0;
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
@@ -352,6 +378,29 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
                 }
                 ctx.emit(progress(step.phase(), format!("{reason}: healing")))?;
                 ctx.invoke(&Intent::Heal { center: None }).result?;
+            }
+            Err(ToolError::Failed(reason)) if reason.starts_with(BUY_FIRST) => {
+                buys += 1;
+                if buys > MAX_BUYS {
+                    return Err(ToolError::Failed(format!(
+                        "{reason}; went to a mart {MAX_BUYS} times already"
+                    )));
+                }
+                let before = ball_count(ctx.state());
+                ctx.emit(progress(step.phase(), format!("{reason}: to the mart")))?;
+                // Count 0: restock to the stock policy's target, keeping
+                // the Potion money.
+                ctx.invoke(&Intent::Buy {
+                    item: "ITEM_POKE_BALL".into(),
+                    count: 0,
+                })
+                .result?;
+                let after = ball_count(ctx.state());
+                if after <= before {
+                    return Err(ToolError::Failed(format!(
+                        "{reason}; the mart sold none ({before:?} → {after:?} balls)"
+                    )));
+                }
             }
             Err(e) => return Err(e),
         }

@@ -1,26 +1,25 @@
 //! Whether and how to catch a wild Pokémon (the pure decision).
 //!
 //! A shiny is always caught, with any ball including the reserve. Otherwise
-//! a species not caught yet is caught only when both hold: the probability
-//! that our lead faints during the whole attempt (weakening turns plus the
-//! expected throws, the foe using its most damaging move every turn) is at
-//! most [`RISK_LIMIT`], and the known ball stock exceeds the shiny reserve
-//! plus the expected throws. Weakening opens with a status move (sleep before
-//! paralysis), then uses only moves whose critical maximum roll cannot faint
-//! the foe at the lowest HP its bar allows, until the bar is below
-//! [`WEAKENED_PER_MILLE`]. Trainers' Pokémon are never caught, and unknown
+//! a species not caught yet is caught when balls above the shiny reserve
+//! are held and the odds ([`crate::catch_odds`]) are good: with those
+//! balls, the best mix of throws, a status move and attacks catches it
+//! with at least [`MIN_CATCH_CHANCE`], while our lead faints with at most
+//! [`RISK_LIMIT`]. Every turn the odds are solved again from the HUD and
+//! the best action taken: throw, sleep or paralyse it, an attack unlikely
+//! to faint it, or RUN. Trainers' Pokémon are never caught, and unknown
 //! facts (caught flag, ball stock) decline the catch rather than guess.
 //!
 //! The flow in battle: [`identify`] reads the wild opponent once (two
 //! agreeing command-menu frames), emits what the Pokédex learns and plans
-//! the catch; the battle decision then weakens and throws
-//! (`attempt_decision`, re-checking the risk each turn); [`Thrower`] goes
-//! through the battle bag; [`CatchMemory::observe`] reads the result, the
-//! foe's status and the PC box from battle text; [`caught_events`] records
-//! the catch when the battle ends.
+//! the catch; the battle decision then plays the odds' choice each turn
+//! (`attempt_decision`); [`Thrower`] goes through the battle bag;
+//! [`CatchMemory::observe`] reads the result, the foe's status and the PC
+//! box from battle text; [`caught_events`] records the catch when the
+//! battle ends.
 
 use pokebot_core::{Button, ControllerCommand};
-use pokebot_gamedata::mechanics::{ball_multiplier, catch_probability_status, damage, DamageRolls};
+use pokebot_gamedata::mechanics::ball_multiplier;
 use pokebot_gamedata::{printed_name, GameData};
 use pokebot_planner::evaluate::faint_probability;
 use pokebot_planner::Combatant;
@@ -31,18 +30,20 @@ use pokebot_state::{
 use crate::bag::{
     by_item, is_cancel, item_key, pocket_from_title, pocket_index, read_rows, Rows, POCKETS,
 };
-use crate::battle::{choose_move, identify_opponent, step_toward, BattleMemory, BattlePolicy};
+use crate::battle::{identify_opponent, step_toward, BattleMemory, BattlePolicy};
+use crate::catch_odds::{self, Choice, FoeView, Means, Odds, Weights};
 use crate::party::{Member, Party};
 use crate::stock::{ball_count, SHINY_RESERVE};
 use crate::{Action, Decision, Expectation};
 
 /// Largest accepted P(our lead faints during the attempt).
 pub const RISK_LIMIT: f64 = 0.02;
-/// Weakening stops once the foe's HP bar is below this (‰).
-pub const WEAKENED_PER_MILLE: u16 = 250;
-/// Caps on the estimates.
-const MAX_THROWS: u32 = 20;
-const MAX_WEAKENING_TURNS: u32 = 10;
+/// Smallest P(catch) a non-shiny attempt starts with.
+pub const MIN_CATCH_CHANCE: f64 = 0.2;
+/// A fainted lead costs this many catches; a shiny is worth far more
+/// than a fainted lead (the next Pokémon fights on).
+const LEAD_FAINT: Weights = Weights { lead_faint: 20.0 };
+const SHINY_LEAD_FAINT: Weights = Weights { lead_faint: 0.25 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoeStatus {
@@ -74,13 +75,20 @@ pub struct Lead<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchPlan {
     pub ball: String,
-    /// Opening status move (slot, move); `None` to weaken without it or to
-    /// throw at once.
-    pub status_move: Option<(u8, String)>,
-    pub expected_throws: u32,
-    /// P(our lead faints during the attempt).
-    pub risk: f64,
+    /// The first action and the odds of the whole attempt.
+    pub odds: Odds,
     pub shiny: bool,
+}
+
+impl CatchPlan {
+    /// "first Sleep Powder, P(catch) 0.95, P(KO) 0.03, ~1.3 balls, risk 0.0004".
+    pub fn summary(&self) -> String {
+        let o = &self.odds.outlook;
+        format!(
+            "first {}, P(catch) {:.2}, P(KO) {:.2}, ~{:.1} balls, risk {:.4}",
+            self.odds.choice, o.catch, o.foe_faints, o.balls, o.lead_faints
+        )
+    }
 }
 
 /// The Poké Balls pocket, `None` when unknown. A tracked list (e.g. after a
@@ -101,48 +109,14 @@ pub fn best_ball(data: &GameData, balls: &[(String, u16)]) -> Option<String> {
         .map(|(_, item)| item.clone())
 }
 
-/// The status move to open with (sleep before paralysis, then slot order),
-/// only with PP left and only on a foe without a status.
-pub fn status_move(data: &GameData, lead: &Member, foe: FoeStatus) -> Option<(u8, String)> {
-    if foe != FoeStatus::None {
-        return None;
+/// Balls an attempt may throw out of `count` held: all for a shiny, those
+/// above the shiny reserve otherwise.
+pub fn ball_budget(count: u16, shiny: bool) -> u16 {
+    if shiny {
+        count
+    } else {
+        count.saturating_sub(SHINY_RESERVE)
     }
-    lead.moves
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| lead.pp_left(data, m) > 0)
-        .filter_map(|(slot, m)| {
-            let rank = match data.move_(m)?.effect.as_deref()? {
-                "EFFECT_SLEEP" => 0,
-                "EFFECT_PARALYZE" => 1,
-                _ => return None,
-            };
-            Some((rank, slot, m))
-        })
-        .min()
-        .map(|(_, slot, m)| (slot as u8, m.clone()))
-}
-
-/// The attack that weakens the foe fastest without any risk of fainting it:
-/// its critical maximum roll (our iv 31 vs foe iv 0) stays below the lowest
-/// HP the bar allows. Ties: highest normal maximum, then move name.
-pub fn weakening_move(data: &GameData, lead: &Lead, foe: &Foe) -> Option<(u8, String)> {
-    let us = our_combatant(data, lead, 31)?;
-    let them = foe_combatant(data, foe, 0)?;
-    let floor = hp_floor(them.max_hp(), foe.hp_per_mille);
-    lead.member
-        .moves
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| lead.member.pp_left(data, m) > 0)
-        .filter_map(|(slot, m)| {
-            let rolls = rolls(data, m, &us, &them)?;
-            let crit = rolls.critical.iter().max().copied()?;
-            let normal = rolls.normal.iter().max().copied()?;
-            (crit < floor).then_some((normal, slot, m))
-        })
-        .max_by(|(na, _, a), (nb, _, b)| na.cmp(nb).then(b.cmp(a)))
-        .map(|(_, slot, m)| (slot as u8, m.clone()))
 }
 
 /// P(our lead faints within `turns` attacks of the foe's most damaging move),
@@ -162,6 +136,34 @@ pub const CATCH_MIN_HP: u32 = 750;
 /// The lead's status as known in the game state (from battle text).
 fn lead_status(state: &GameState) -> Option<Status> {
     state.party.value.as_ref()?.first()?.status.value
+}
+
+/// The odds with `means`; `asleep_for`: our actions since the foe was
+/// seen asleep.
+fn odds(data: &GameData, lead: &Lead, foe: &Foe, asleep_for: u8, means: &Means) -> Option<Odds> {
+    let view = FoeView {
+        species: &foe.species,
+        level: foe.level,
+        hp_per_mille: foe.hp_per_mille,
+        status: foe.status,
+        asleep_for,
+    };
+    let weights = if foe.shiny {
+        SHINY_LEAD_FAINT
+    } else {
+        LEAD_FAINT
+    };
+    catch_odds::best(data, lead, &view, means, weights)
+}
+
+/// What an attempt may do: throw `ball`, `balls` of them.
+fn means<'a>(ball: &str, balls: u16, status_allowed: bool, disabled: Option<&'a str>) -> Means<'a> {
+    Means {
+        ball: ball_multiplier(ball).unwrap_or(10),
+        balls,
+        status_allowed,
+        disabled,
+    }
 }
 
 /// Decide whether to catch `foe`, and how. `Err` carries the reason not to.
@@ -195,143 +197,48 @@ pub fn plan_catch(
         None if foe.shiny => "ITEM_POKE_BALL".to_owned(),
         None => return Err("ball count unknown (pocket not audited)".into()),
     };
-    let multiplier = ball_multiplier(&ball).unwrap_or(10);
-    let mut attempt = estimate(data, lead, foe, multiplier, true)?;
-    let mut risk_now = risk(data, lead, foe, attempt.turns + attempt.throws);
-    if foe.shiny {
-        if risk_now > RISK_LIMIT {
-            attempt = estimate(data, lead, foe, multiplier, false)?;
-            risk_now = risk(data, lead, foe, attempt.throws);
-        }
-    } else {
-        let count = ball_count(state).unwrap_or(0);
-        if u32::from(count) <= u32::from(SHINY_RESERVE) + attempt.throws {
+    // An unknown pocket (a shiny only): plan with a reserve's worth.
+    let count = ball_count(state).unwrap_or(SHINY_RESERVE);
+    let budget = ball_budget(count, foe.shiny);
+    if budget == 0 {
+        return Err(format!(
+            "{count} balls: none above the shiny reserve {SHINY_RESERVE}"
+        ));
+    }
+    let odds = odds(data, lead, foe, 0, &means(&ball, budget, true, None))
+        .ok_or_else(|| format!("{} unknown to the game data", foe.species))?;
+    let plan = CatchPlan {
+        ball,
+        odds,
+        shiny: foe.shiny,
+    };
+    if !foe.shiny {
+        let o = &plan.odds.outlook;
+        if plan.odds.choice == Choice::Run || o.catch < MIN_CATCH_CHANCE {
             return Err(format!(
-                "{count} balls: not above the reserve {SHINY_RESERVE} + {} throws",
-                attempt.throws
+                "P(catch) {:.2} with {budget} balls, below {MIN_CATCH_CHANCE} ({})",
+                o.catch,
+                plan.summary()
             ));
         }
-        if risk_now > RISK_LIMIT {
-            return Err(format!("risk {risk_now:.4} above {RISK_LIMIT}"));
+        if o.lead_faints > RISK_LIMIT {
+            return Err(format!(
+                "risk {:.4} above {RISK_LIMIT} ({})",
+                o.lead_faints,
+                plan.summary()
+            ));
         }
     }
-    Ok(CatchPlan {
-        ball,
-        status_move: attempt.status_move,
-        expected_throws: attempt.throws,
-        risk: risk_now,
-        shiny: foe.shiny,
-    })
+    Ok(plan)
 }
 
-/// The attempt's shape: opener, expected throws and weakening turns.
-struct Estimate {
-    status_move: Option<(u8, String)>,
-    throws: u32,
-    turns: u32,
-}
-
-/// Estimate an attempt with `ball` (×10); `weaken` false throws at once.
-fn estimate(
-    data: &GameData,
-    lead: &Lead,
-    foe: &Foe,
-    ball: u32,
-    weaken: bool,
-) -> Result<Estimate, String> {
-    let unknown = || format!("{} unknown to the game data", foe.species);
-    let species = data.species(&foe.species).ok_or_else(unknown)?;
-    let max = foe_combatant(data, foe, 0).ok_or_else(unknown)?.max_hp();
-    let hp_now = (max * u32::from(foe.hp_per_mille) / 1000).max(1);
-    let opener = weaken
-        .then(|| status_move(data, lead.member, foe.status))
-        .flatten();
-    let attack = weaken.then(|| weakening_move(data, lead, foe)).flatten();
-    let target = if attack.is_some() {
-        throw_hp(data, lead, foe, max).min(hp_now).max(1)
-    } else {
-        hp_now
-    };
-    let status_x10 = match opener.as_ref().map(|(_, m)| data.move_(m)) {
-        Some(Some(m)) if m.effect.as_deref() == Some("EFFECT_SLEEP") => 20,
-        Some(_) => 15,
-        None => match foe.status {
-            FoeStatus::Asleep => 20,
-            FoeStatus::Paralyzed => 15,
-            FoeStatus::None => 10,
-        },
-    };
-    let p = catch_probability_status(species.catch_rate, max, target, ball, status_x10);
-    let throws = if p > 0.0 {
-        ((1.0 / p).ceil() as u32).clamp(1, MAX_THROWS)
-    } else {
-        MAX_THROWS
-    };
-    let attack_turns = attack.map_or(0, |(_, m)| {
-        weakening_turns(data, lead, foe, &m, hp_now, target)
-    });
-    Ok(Estimate {
-        turns: u32::from(opener.is_some()) + attack_turns,
-        status_move: opener,
-        throws,
-    })
-}
-
-/// HP at which weakening stops: [`WEAKENED_PER_MILLE`] of `max`, or higher
-/// where even the least damaging attack with PP could faint the foe on a
-/// crit (its critical maximum + 1 + one bar pixel).
-fn throw_hp(data: &GameData, lead: &Lead, foe: &Foe, max: u32) -> u32 {
-    let weakened = max * u32::from(WEAKENED_PER_MILLE) / 1000;
-    let (Some(us), Some(them)) = (our_combatant(data, lead, 31), foe_combatant(data, foe, 0))
-    else {
-        return weakened;
-    };
-    let least_crit = lead
-        .member
-        .moves
-        .iter()
-        .filter(|m| lead.member.pp_left(data, m) > 0)
-        .filter_map(|m| rolls(data, m, &us, &them)?.critical.iter().max().copied())
-        .min();
-    least_crit.map_or(weakened, |c| weakened.max(c + 1 + max / 48))
-}
-
-/// Attacks of `mv` to bring the foe from `hp_now` down to `target`, with
-/// pessimistic mean damage (our iv 0 vs foe iv 31), capped.
-fn weakening_turns(
-    data: &GameData,
-    lead: &Lead,
-    foe: &Foe,
-    mv: &str,
-    hp_now: u32,
-    target: u32,
-) -> u32 {
-    let excess = hp_now.saturating_sub(target);
-    if excess == 0 {
-        return 0;
-    }
-    let mean = our_combatant(data, lead, 0)
-        .zip(foe_combatant(data, foe, 31))
-        .and_then(|(us, them)| rolls(data, mv, &us, &them))
-        .map_or(0.0, |r| {
-            r.hit_chance * r.normal.iter().map(|d| f64::from(*d)).sum::<f64>() / 16.0
-        });
-    if mean <= 0.0 {
-        return MAX_WEAKENING_TURNS;
-    }
-    ((f64::from(excess) / mean).ceil() as u32).min(MAX_WEAKENING_TURNS)
-}
-
-/// Lowest HP the bar allows: its fill minus one pixel (1/48), at least 1.
-fn hp_floor(max: u32, per_mille: u16) -> u32 {
-    (max * u32::from(per_mille) / 1000)
-        .saturating_sub(max / 48)
-        .max(1)
-}
-
+/// Our side: the summary's stats when they fit the level, else all at `iv`.
 fn our_combatant(data: &GameData, lead: &Lead, iv: u32) -> Option<Combatant> {
     let m = lead.member;
     let mut us = Combatant::new(data, &m.species, m.level, m.moves.clone(), iv)?;
+    if let Some(stats) = m.stats(data) {
+        us.stats = stats;
+    }
     us.hp = u32::from(lead.hp.0);
     Some(us)
 }
@@ -339,18 +246,6 @@ fn our_combatant(data: &GameData, lead: &Lead, iv: u32) -> Option<Combatant> {
 fn foe_combatant(data: &GameData, foe: &Foe, iv: u32) -> Option<Combatant> {
     let moves = data.default_moves(&foe.species, foe.level);
     Combatant::new(data, &foe.species, foe.level, moves, iv)
-}
-
-fn rolls(data: &GameData, mv: &str, from: &Combatant, to: &Combatant) -> Option<DamageRolls> {
-    damage(
-        data,
-        data.move_(mv)?,
-        &from.types,
-        from.level,
-        &from.stats,
-        &to.types,
-        &to.stats,
-    )
 }
 
 // ---- The catch in battle (flow) ----
@@ -384,7 +279,15 @@ pub struct Attempt {
     /// bag's own reading once a throw reads it. A non-shiny attempt stops
     /// at [`SHINY_RESERVE`].
     pub balls: Option<u16>,
+    /// Turns (command menus) the foe has been seen asleep, this one
+    /// included.
+    pub asleep_turns: u8,
 }
+
+/// What the odds of a turn were solved from: (our HP, the foe's bar, its
+/// status, turns asleep, balls to throw, status move allowed, disabled
+/// move).
+type OddsKey = ((u16, u16), u16, FoeStatus, u8, u16, bool, Option<String>);
 
 /// (species, level, caught icon, shiny reading) as read on the command menu.
 type Identity = (String, u8, bool, Option<ShinyReading>);
@@ -417,6 +320,10 @@ pub struct CatchMemory {
     hud: Option<(u64, HudReading)>,
     /// First frame of the current wait for the HUD.
     hud_waiting_since: Option<u64>,
+    /// This turn's command menu was counted (for the sleep turns).
+    turn_counted: bool,
+    /// The last odds solved and what from (solved once per reading).
+    odds: Option<(OddsKey, Odds)>,
     /// The last page read once (awaiting a second frame) and the last page
     /// applied.
     page: Option<(u64, String)>,
@@ -439,6 +346,7 @@ impl CatchMemory {
         // reading from before the turn.
         if o.battle.as_ref().is_some_and(|b| b.menu.is_none()) {
             self.hud = None;
+            self.turn_counted = false;
         }
         let Some(d) = &o.dialogue else {
             return None;
@@ -472,6 +380,9 @@ impl CatchMemory {
         }
         if let (Some(a), Some(species)) = (&mut self.attempt, &species) {
             if let Some(status) = foe_status_text(&page, &printed_name(species)) {
+                if status != FoeStatus::Asleep {
+                    a.asleep_turns = 0;
+                }
                 a.foe_status = status;
             }
         }
@@ -674,11 +585,9 @@ pub fn identify(
     match plan_catch(data, state, &lead, &foe, false) {
         Ok(plan) => {
             events.push(log(format!(
-                "catching {species} Lv{level}: {} ×{} expected, opener {:?}, risk {:.4}{}",
+                "catching {species} Lv{level} with {}: {}{}",
                 plan.ball,
-                plan.expected_throws,
-                plan.status_move.as_ref().map(|(_, m)| m),
-                plan.risk,
+                plan.summary(),
                 if plan.shiny { " (shiny)" } else { "" }
             )));
             c.attempt = Some(Attempt {
@@ -687,30 +596,21 @@ pub fn identify(
                 throws: 0,
                 foe_status: FoeStatus::None,
                 balls: ball_count(state),
+                asleep_turns: 0,
             });
         }
         Err(reason) => events.push(log(format!("not catching {species} Lv{level}: {reason}"))),
     }
 }
 
-/// Attacks of `mv` left to bring the foe from its bar down to where
-/// throwing starts (at least 1 while an attack is still wanted).
-fn weakening_left(data: &GameData, lead: &Lead, foe: &Foe, mv: &str) -> u32 {
-    let Some(max) = foe_combatant(data, foe, 0).map(|c| c.max_hp()) else {
-        return MAX_WEAKENING_TURNS;
-    };
-    let hp_now = (max * u32::from(foe.hp_per_mille) / 1000).max(1);
-    let target = throw_hp(data, lead, foe, max).min(hp_now).max(1);
-    weakening_turns(data, lead, foe, mv, hp_now, target).max(1)
-}
-
 /// The battle input during a catch attempt. `None` hands the menu back to
 /// the ordinary battle logic (the attempt was abandoned, or can't go on).
 ///
-/// Every decision uses HUD numbers that two frames agreed on. Each time the
-/// command menu shows, the risk of the rest of the attempt (opener, the
-/// weakening left and the throws left) is recomputed: above the limit a
-/// non-shiny attempt is abandoned for RUN, a shiny one throws at once.
+/// Every decision uses HUD numbers that two frames agreed on. Each turn
+/// the odds are solved again from them (our HP, the foe's bar and status,
+/// the balls left) and their choice is played: throw, the status move, an
+/// attack, or RUN. A non-shiny attempt is abandoned for RUN when the odds
+/// say RUN or put the lead's risk above the limit; a shiny one throws.
 pub(crate) fn attempt_decision(
     o: &Observation,
     policy: &BattlePolicy,
@@ -721,7 +621,7 @@ pub(crate) fn attempt_decision(
 ) -> Option<Decision> {
     let battle = o.battle.as_ref()?;
     let menu = battle.menu?;
-    let attempt = memory.catch.attempt.clone()?;
+    memory.catch.attempt.as_ref()?;
     let (species, level) = memory.catch.foe.clone()?;
     let member = party.lead()?;
     let command = matches!(menu, BattleMenu::Command { .. });
@@ -752,6 +652,16 @@ pub(crate) fn attempt_decision(
         return Some(Decision::Wait("confirming the HUD on a later frame".into()));
     };
     memory.catch.hud_waiting_since = None;
+    // A new turn: one more turn asleep.
+    if command && !memory.catch.turn_counted {
+        memory.catch.turn_counted = true;
+        if let Some(a) = memory.catch.attempt.as_mut() {
+            if a.foe_status == FoeStatus::Asleep {
+                a.asleep_turns = a.asleep_turns.saturating_add(1);
+            }
+        }
+    }
+    let attempt = memory.catch.attempt.clone()?;
     let plan = &attempt.plan;
     let lead = Lead { member, hp: us_hp };
     let foe = Foe {
@@ -786,46 +696,69 @@ pub(crate) fn attempt_decision(
             "{species}: {n} balls, at the shiny reserve {SHINY_RESERVE}: abandoning the catch"
         )));
         return None;
-    } else if choose_move(data, party, None, memory, policy).is_none() {
-        memory.catch.attempt = None;
-        events.push(log(format!(
-            "{species}: no damaging move has PP: abandoning the catch"
-        )));
-        return None;
     }
-    // The game refuses a disabled move: never choose it.
-    let usable = |(_, m): &(u8, String)| memory.disabled.as_ref() != Some(m);
-    let status = (!attempt.opened && plan.status_move.is_some())
-        .then(|| status_move(data, member, attempt.foe_status))
-        .flatten()
-        .filter(usable);
-    let attack = (foe_hp >= WEAKENED_PER_MILLE)
-        .then(|| weakening_move(data, &lead, &foe))
-        .flatten()
-        .filter(usable);
-    let throws_left = plan.expected_throws.saturating_sub(attempt.throws).max(1);
-    let turns = u32::from(status.is_some())
-        + attack
-            .as_ref()
-            .map_or(0, |(_, m)| weakening_left(data, &lead, &foe, m))
-        + throws_left;
-    let risk_now = risk(data, &lead, &foe, turns);
-    let (status, attack) = if risk_now <= RISK_LIMIT {
-        (status, attack)
-    } else if plan.shiny {
-        // Throw at once rather than risk the weakening.
-        (None, None)
-    } else {
+    let balls = ball_budget(attempt.balls.unwrap_or(SHINY_RESERVE), plan.shiny);
+    let asleep_for = attempt.asleep_turns.saturating_sub(1);
+    let key: OddsKey = (
+        us_hp,
+        foe_hp,
+        attempt.foe_status,
+        asleep_for,
+        balls,
+        !attempt.opened,
+        memory.disabled.clone(),
+    );
+    let odds = match &memory.catch.odds {
+        Some((k, odds)) if *k == key => odds.clone(),
+        _ => {
+            let means = means(
+                &plan.ball,
+                balls,
+                !attempt.opened,
+                memory.disabled.as_deref(),
+            );
+            let Some(odds) = odds(data, &lead, &foe, asleep_for, &means) else {
+                memory.catch.attempt = None;
+                events.push(log(format!(
+                    "{species}: no odds (unknown to the game data): abandoning the catch"
+                )));
+                return None;
+            };
+            let out = &odds.outlook;
+            events.push(log(format!(
+                "{species} at {foe_hp}‰, us {}/{}, {balls} balls: {} (P(catch) {:.2}, P(KO) {:.2}, risk {:.4})",
+                us_hp.0, us_hp.1, odds.choice, out.catch, out.foe_faints, out.lead_faints
+            )));
+            memory.catch.odds = Some((key, odds.clone()));
+            odds
+        }
+    };
+    let choice = if plan.shiny {
+        // A shiny is never run from: throw what there is.
+        match odds.choice {
+            Choice::Run if balls > 0 => Choice::Throw,
+            Choice::Run => return None,
+            c => c,
+        }
+    } else if odds.choice == Choice::Run || odds.outlook.lead_faints > RISK_LIMIT {
         memory.catch.attempt = None;
         memory.catch.flee = true;
         events.push(log(format!(
-            "{species}: risk {risk_now:.4} above {RISK_LIMIT} over {turns} turns: abandoning the catch"
+            "{species}: {} with risk {:.4} (limit {RISK_LIMIT}): abandoning the catch",
+            odds.choice, odds.outlook.lead_faints
         )));
         return None;
+    } else {
+        odds.choice
+    };
+    let fight = match &choice {
+        Choice::Status(slot, mv) => Some((*slot, mv.clone(), true)),
+        Choice::Attack(slot, mv) => Some((*slot, mv.clone(), false)),
+        Choice::Throw | Choice::Run => None,
     };
     Some(match menu {
         BattleMenu::Command { column, row } => {
-            if status.is_some() || attack.is_some() {
+            if fight.is_some() {
                 step_toward(
                     (column, row),
                     (0, 0),
@@ -847,7 +780,7 @@ pub(crate) fn attempt_decision(
             }
         }
         BattleMenu::Moves { column, row } => {
-            let Some((slot, mv)) = status.clone().or(attack) else {
+            let Some((slot, mv, status)) = fight else {
                 return Some(Decision::Act(Action::new(
                     "back to the command menu to throw",
                     vec![ControllerCommand::Press(Button::B)],
@@ -859,7 +792,7 @@ pub(crate) fn attempt_decision(
             memory.last_slot = Some((member.slot, slot));
             let target = (slot % 2, slot / 2);
             if (column, row) == target {
-                memory.catch.opener_chosen = status.is_some();
+                memory.catch.opener_chosen = status;
             }
             step_toward(
                 (column, row),
@@ -1258,7 +1191,6 @@ impl Thrower {
 mod tests {
     use std::path::Path;
 
-    use pokebot_gamedata::mechanics::{catch_probability_status, damage};
     use pokebot_gamedata::GameData;
     use pokebot_state::{BattleMenu, DefaultReducer, EventRecord, GameEvent, Pocket, StateReducer};
 
@@ -1313,14 +1245,46 @@ mod tests {
         let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
         let plan = plan_catch(&data, &state, &lead, &foe("SPECIES_PIDGEY", 6), false).unwrap();
         assert_eq!(plan.ball, "ITEM_POKE_BALL");
-        assert_eq!(plan.status_move, Some((1, "MOVE_SLEEP_POWDER".into())));
-        assert!(plan.risk <= RISK_LIMIT, "{plan:?}");
-        assert!(plan.expected_throws >= 1);
+        let o = plan.odds.outlook;
+        assert!(o.lead_faints <= RISK_LIMIT, "{plan:?}");
+        assert!(o.catch >= MIN_CATCH_CHANCE, "{plan:?}");
+        assert!(o.balls >= 1.0, "{plan:?}");
         assert!(!plan.shiny);
-        // Zubat has a safe weakening move: its turns count in the risk too.
         let plan = plan_catch(&data, &state, &lead, &foe("SPECIES_ZUBAT", 9), false).unwrap();
-        assert_eq!(plan.status_move, Some((1, "MOVE_SLEEP_POWDER".into())));
-        assert!(plan.risk <= RISK_LIMIT, "{plan:?}");
+        assert!(plan.odds.outlook.lead_faints <= RISK_LIMIT, "{plan:?}");
+    }
+
+    /// Live (Switch, Route 24): a Lv27 IVYSAUR refused every WEEDLE and
+    /// CATERPIE ("5 balls: not above the reserve 5 + 2 throws"), then
+    /// fainted them with one hit. With balls above the reserve it catches,
+    /// opening with a move unlikely to faint them (or a throw).
+    #[test]
+    fn a_strong_lead_catches_a_frail_foe_without_fainting_it() {
+        let Some(data) = data() else { return };
+        let mut member = Member::new(&data, "SPECIES_IVYSAUR", 27);
+        member.moves = [
+            "MOVE_TACKLE",
+            "MOVE_SLEEP_POWDER",
+            "MOVE_RAZOR_LEAF",
+            "MOVE_VINE_WHIP",
+        ]
+        .map(String::from)
+        .to_vec();
+        let lead = Lead {
+            member: &member,
+            hp: (71, 71),
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 8)]);
+        for species in ["SPECIES_WEEDLE", "SPECIES_CATERPIE", "SPECIES_PIDGEY"] {
+            let plan = plan_catch(&data, &state, &lead, &foe(species, 7), false).unwrap();
+            let o = plan.odds.outlook;
+            assert!(o.catch > 0.9, "{species}: {plan:?}");
+            assert!(o.foe_faints < 0.05, "{species}: {plan:?}");
+            assert!(
+                !matches!(&plan.odds.choice, Choice::Attack(_, m) if m == "MOVE_RAZOR_LEAF"),
+                "{species}: {plan:?}"
+            );
+        }
     }
 
     #[test]
@@ -1388,10 +1352,14 @@ mod tests {
             hp: (54, 54),
         };
         let pidgey = foe("SPECIES_PIDGEY", 6);
-        // 6 balls ≤ 5 reserve + at least one throw.
-        let state = with_balls(&[("ITEM_POKE_BALL", 6)]);
+        // 5 balls: all of them the shiny reserve.
+        let state = with_balls(&[("ITEM_POKE_BALL", 5)]);
         let err = plan_catch(&data, &state, &lead, &pidgey, false).unwrap_err();
         assert!(err.contains("reserve"), "{err}");
+        // 6: one ball to throw, and the odds with it decide.
+        let state = with_balls(&[("ITEM_POKE_BALL", 6)]);
+        let plan = plan_catch(&data, &state, &lead, &pidgey, false).unwrap();
+        assert!(plan.odds.outlook.balls <= 1.0 + 1e-9, "{plan:?}");
     }
 
     #[test]
@@ -1412,7 +1380,7 @@ mod tests {
         // Unknown pocket: still Ok, planned with a Poké Ball.
         let plan = plan_catch(&data, &GameState::default(), &lead, &pidgey, false).unwrap();
         assert_eq!(plan.ball, "ITEM_POKE_BALL");
-        assert!(plan.expected_throws >= 1);
+        assert!(plan.odds.outlook.balls >= 1.0);
         // No ball at all (only a Master Ball): Err even for a shiny.
         let state = with_balls(&[("ITEM_MASTER_BALL", 1)]);
         assert!(plan_catch(&data, &state, &lead, &pidgey, false).is_err());
@@ -1437,8 +1405,8 @@ mod tests {
             ..geodude
         };
         let plan = plan_catch(&data, &state, &lead, &shiny, false).unwrap();
-        assert_eq!(plan.status_move, None);
-        assert!(plan.risk > RISK_LIMIT);
+        assert!(plan.shiny);
+        assert!(plan.odds.outlook.catch > 0.0, "{plan:?}");
     }
 
     /// Live: catches in Mt. Moon (weakening turns, throws) wore the lead
@@ -1498,120 +1466,10 @@ mod tests {
         assert!(plan_catch(&data, &state, &lead, &pidgey, true).is_err());
     }
 
-    /// Crit maximum (our iv 31 vs foe iv 0) of `mv` and the foe's HP floor.
-    fn crit_max_and_floor(data: &GameData, mv: &str, foe: &Foe) -> (u32, u32) {
-        let us = Combatant::new(data, "SPECIES_IVYSAUR", 18, vec![], 31).unwrap();
-        let them = Combatant::new(data, &foe.species, foe.level, vec![], 0).unwrap();
-        let rolls = damage(
-            data,
-            data.move_(mv).unwrap(),
-            &us.types,
-            us.level,
-            &us.stats,
-            &them.types,
-            &them.stats,
-        )
-        .unwrap();
-        let max = them.max_hp();
-        let floor = (max * u32::from(foe.hp_per_mille) / 1000)
-            .saturating_sub(max / 48)
-            .max(1);
-        (rolls.critical[15], floor)
-    }
-
-    #[test]
-    fn weakening_move_is_safe_even_on_a_crit() {
-        let Some(data) = data() else { return };
-        let member = ivysaur(&data);
-        let lead = Lead {
-            member: &member,
-            hp: (54, 54),
-        };
-        // Zubat Lv9 at full HP: Vine Whip (resisted) can't KO even on a crit;
-        // Tackle could.
-        let zubat = foe("SPECIES_ZUBAT", 9);
-        let (slot, mv) = weakening_move(&data, &lead, &zubat).unwrap();
-        assert_eq!((slot, mv.as_str()), (3, "MOVE_VINE_WHIP"));
-        let (crit, floor) = crit_max_and_floor(&data, &mv, &zubat);
-        assert!(crit < floor, "{crit} vs {floor}");
-        let (tackle, _) = crit_max_and_floor(&data, "MOVE_TACKLE", &zubat);
-        assert!(tackle >= floor);
-        // Mankey Lv7 at 400‰: every move's crit could KO it — none is safe.
-        let mankey = Foe {
-            hp_per_mille: 400,
-            ..foe("SPECIES_MANKEY", 7)
-        };
-        for mv in ["MOVE_TACKLE", "MOVE_VINE_WHIP"] {
-            let (crit, floor) = crit_max_and_floor(&data, mv, &mankey);
-            assert!(crit >= floor, "{mv}: {crit} vs {floor}");
-        }
-        assert_eq!(weakening_move(&data, &lead, &mankey), None);
-        // Low HP: nothing is safe.
-        for f in [&zubat, &mankey] {
-            let low = Foe {
-                hp_per_mille: 60,
-                ..f.clone()
-            };
-            assert_eq!(weakening_move(&data, &lead, &low), None);
-        }
-    }
-
-    #[test]
-    fn throws_are_estimated_where_weakening_must_stop() {
-        let Some(data) = data() else { return };
-        let member = ivysaur(&data);
-        let lead = Lead {
-            member: &member,
-            hp: (54, 54),
-        };
-        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
-        let zubat = foe("SPECIES_ZUBAT", 9);
-        let plan = plan_catch(&data, &state, &lead, &zubat, false).unwrap();
-        // Oracle: the least damaging move stays crit-safe down to its crit
-        // max + 1 + one bar pixel; weakening can't go below that (nor 25 %).
-        let max = Combatant::new(&data, "SPECIES_ZUBAT", 9, vec![], 0)
-            .unwrap()
-            .max_hp();
-        let least_crit = ["MOVE_TACKLE", "MOVE_VINE_WHIP"]
-            .iter()
-            .map(|m| crit_max_and_floor(&data, m, &zubat).0)
-            .min()
-            .unwrap();
-        let throw_hp = (max * 250 / 1000).max(least_crit + 1 + max / 48);
-        assert!(throw_hp > max / 4, "{throw_hp} vs {max}");
-        let rate = data.species("SPECIES_ZUBAT").unwrap().catch_rate;
-        // Sleep Powder opener: status ×2.
-        let p = catch_probability_status(rate, max, throw_hp, 10, 20);
-        let expected = ((1.0 / p).ceil() as u32).clamp(1, 20);
-        assert_eq!(plan.expected_throws, expected, "p {p} at {throw_hp}/{max}");
-        // Already paralysed (×1.5, no opener): at 25 % one throw would do,
-        // at the real stopping HP it takes more.
-        let paralyzed = Foe {
-            status: FoeStatus::Paralyzed,
-            ..zubat
-        };
-        let plan = plan_catch(&data, &state, &lead, &paralyzed, false).unwrap();
-        let p = catch_probability_status(rate, max, throw_hp, 10, 15);
-        let expected = ((1.0 / p).ceil() as u32).clamp(1, 20);
-        assert_eq!(catch_probability_status(rate, max, max / 4, 10, 15), 1.0);
-        assert!(expected > 1, "p {p}");
-        assert_eq!(plan.expected_throws, expected, "p {p} at {throw_hp}/{max}");
-    }
-
     #[test]
     fn asleep_foe_gets_no_status_move() {
         let Some(data) = data() else { return };
         let member = ivysaur(&data);
-        assert_eq!(
-            status_move(&data, &member, FoeStatus::None),
-            Some((1, "MOVE_SLEEP_POWDER".into()))
-        );
-        assert_eq!(status_move(&data, &member, FoeStatus::Asleep), None);
-        assert_eq!(status_move(&data, &member, FoeStatus::Paralyzed), None);
-        // Without PP left, no status move.
-        let mut tired = member.clone();
-        tired.pp_used.insert("MOVE_SLEEP_POWDER".into(), 15);
-        assert_eq!(status_move(&data, &tired, FoeStatus::None), None);
         let lead = Lead {
             member: &member,
             hp: (54, 54),
@@ -1622,7 +1480,16 @@ mod tests {
             ..foe("SPECIES_PIDGEY", 6)
         };
         let plan = plan_catch(&data, &state, &lead, &asleep, false).unwrap();
-        assert_eq!(plan.status_move, None);
+        assert!(!matches!(plan.odds.choice, Choice::Status(..)), "{plan:?}");
+        // Without PP left, no status move either.
+        let mut tired = member.clone();
+        tired.pp_used.insert("MOVE_SLEEP_POWDER".into(), 15);
+        let lead = Lead {
+            member: &tired,
+            hp: (54, 54),
+        };
+        let plan = plan_catch(&data, &state, &lead, &foe("SPECIES_PIDGEY", 6), false).unwrap();
+        assert!(!matches!(plan.odds.choice, Choice::Status(..)), "{plan:?}");
     }
 
     #[test]
@@ -1817,27 +1684,31 @@ mod tests {
             })
         );
         assert!(memory.catch.attempt.is_some(), "{events:?}");
-        // Sleep Powder first.
-        assert_eq!(
-            decide_on(&data, &party, &mut memory, &wild(3, command, 1000)),
-            "choose FIGHT"
-        );
-        let label = decide_on(&data, &party, &mut memory, &wild(5, moves, 1000));
-        assert!(label.contains("SLEEP_POWDER"), "{label}");
-        // Asleep at full HP: IVYSAUR Lv18 has no move whose crit can't KO a
-        // Lv6 PIDGEY (Vine Whip's crit max is 43 against 20 HP): throw.
+        // The first action is the plan's: a move through FIGHT, or BAG.
+        let first = memory
+            .catch
+            .attempt
+            .as_ref()
+            .unwrap()
+            .plan
+            .odds
+            .choice
+            .clone();
+        let label = decide_on(&data, &party, &mut memory, &wild(3, command, 1000));
+        match &first {
+            Choice::Status(..) | Choice::Attack(..) => {
+                assert_eq!(label, "choose FIGHT");
+                let label = decide_on(&data, &party, &mut memory, &wild(5, moves, 1000));
+                assert!(label.contains(&first.to_string()), "{label} vs {first}");
+            }
+            Choice::Throw => assert!(label.contains("BAG"), "{label}"),
+            Choice::Run => panic!("an attempt that runs"),
+        }
+        // Asleep at full HP: IVYSAUR Lv18's attacks would likely faint a
+        // Lv6 PIDGEY (20 HP): throw.
         let attempt = memory.catch.attempt.as_mut().unwrap();
         attempt.opened = true;
         attempt.foe_status = FoeStatus::Asleep;
-        let lead = Lead {
-            member: &party.members[0],
-            hp: (54, 54),
-        };
-        let asleep = Foe {
-            status: FoeStatus::Asleep,
-            ..foe("SPECIES_PIDGEY", 6)
-        };
-        assert_eq!(weakening_move(&data, &lead, &asleep), None);
         let label = decide_on(&data, &party, &mut memory, &wild(7, command, 1000));
         assert!(label.contains("BAG"), "{label}");
         // Weakened (200‰): BAG.
@@ -1855,11 +1726,13 @@ mod tests {
         assert!(memory.catch.thrower.is_some());
     }
 
+    /// The moves menu goes to the odds' move; the status move counts as
+    /// used once chosen; a disabled move is never chosen; a sleeping foe
+    /// at a low bar is thrown at.
     #[test]
-    fn a_safe_attack_weakens_a_sleeping_foe() {
+    fn the_odds_choice_is_played_on_the_moves_menu() {
         let Some(data) = data() else { return };
-        // BULBASAUR Lv12: Vine Whip's crit max (19) is below PIDGEY Lv6's
-        // 20 HP; Tackle's (22) is not.
+        // BULBASAUR Lv12 against a Lv6 PIDGEY (20 HP).
         let mut member = Member::new(&data, "SPECIES_BULBASAUR", 12);
         member.moves = [
             "MOVE_TACKLE",
@@ -1887,18 +1760,37 @@ mod tests {
                 &mut events,
             );
         }
-        assert!(memory.catch.attempt.is_some(), "{events:?}");
+        let plan = memory
+            .catch
+            .attempt
+            .as_ref()
+            .expect("an attempt")
+            .plan
+            .clone();
+        let (Choice::Status(slot, mv) | Choice::Attack(slot, mv)) = plan.odds.choice.clone() else {
+            panic!("expected a move first: {plan:?}");
+        };
         let label = decide_on(&data, &party, &mut memory, &wild(3, moves, 1000));
-        assert_eq!(label, "cursor to move 2 (SLEEP_POWDER): Right");
-        // Moving the cursor is not using it.
+        assert!(label.contains(mv.trim_start_matches("MOVE_")), "{label}");
+        // Moving the cursor is not using it; on the move, A chooses it.
         memory.catch.on_move_confirmed();
         assert!(!memory.catch.attempt.as_ref().unwrap().opened);
-        let on_it = BattleMenu::Moves { column: 1, row: 0 };
+        let on_it = BattleMenu::Moves {
+            column: slot % 2,
+            row: slot / 2,
+        };
         let label = decide_on(&data, &party, &mut memory, &wild(3, on_it, 1000));
-        assert_eq!(label, "choose move 2 (SLEEP_POWDER)");
-        // The opener is used once its choice is confirmed.
+        assert_eq!(
+            label,
+            format!(
+                "choose move {} ({})",
+                slot + 1,
+                mv.trim_start_matches("MOVE_")
+            )
+        );
         memory.catch.on_move_confirmed();
-        assert!(memory.catch.attempt.as_ref().unwrap().opened);
+        let is_status = matches!(plan.odds.choice, Choice::Status(..));
+        assert_eq!(memory.catch.attempt.as_ref().unwrap().opened, is_status);
         // "Wild PIDGEY fell asleep!" on two frames.
         let mut text = wild(5, command, 1000);
         text.battle.as_mut().unwrap().menu = None;
@@ -1910,20 +1802,18 @@ mod tests {
             memory.catch.attempt.as_ref().unwrap().foe_status,
             FoeStatus::Asleep
         );
-        assert_eq!(
-            decide_on(&data, &party, &mut memory, &wild(7, command, 1000)),
-            "choose FIGHT"
-        );
-        let label = decide_on(&data, &party, &mut memory, &wild(9, moves, 1000));
-        assert_eq!(label, "cursor to move 4 (VINE_WHIP): Down");
-        assert_eq!(memory.last_slot, Some((0, 3)));
-        // VINE WHIP under DISABLE (live: Route 3, the bot chose a disabled
-        // move forever): no safe attack is left, so throw instead.
-        memory.disabled = Some("MOVE_VINE_WHIP".into());
-        let label = decide_on(&data, &party, &mut memory, &wild(10, moves, 1000));
-        assert_eq!(label, "back to the command menu to throw");
+        // Under DISABLE (live: Route 3, the bot chose a disabled move
+        // forever) that move is never chosen.
+        for disabled in ["MOVE_VINE_WHIP", "MOVE_TACKLE"] {
+            memory.disabled = Some(disabled.into());
+            let label = decide_on(&data, &party, &mut memory, &wild(10, moves, 1000));
+            assert!(
+                !label.contains(disabled.trim_start_matches("MOVE_")),
+                "{disabled}: {label}"
+            );
+        }
         memory.disabled = None;
-        // Weakened (200‰): BAG.
+        // Asleep and weakened (200‰): BAG.
         let label = decide_on(&data, &party, &mut memory, &wild(11, command, 200));
         assert_eq!(label, "cursor to BAG: Right");
     }
@@ -2112,15 +2002,17 @@ mod tests {
         memory.attempt = Some(Attempt {
             plan: CatchPlan {
                 ball: "ITEM_POKE_BALL".into(),
-                status_move: None,
-                expected_throws: 1,
-                risk: 0.0,
+                odds: Odds {
+                    choice: Choice::Throw,
+                    outlook: Default::default(),
+                },
                 shiny: false,
             },
             opened: true,
             throws: 0,
             foe_status: FoeStatus::None,
             balls: Some(10),
+            asleep_turns: 0,
         });
         let mut events = Vec::new();
         let empty = |f| bag_frame(f, "POKé BALLS", &[("CANCEL", None)], Some(0), None);
@@ -2174,15 +2066,17 @@ mod tests {
             attempt: Some(Attempt {
                 plan: CatchPlan {
                     ball: "ITEM_POKE_BALL".into(),
-                    status_move: None,
-                    expected_throws: 2,
-                    risk: 0.0,
+                    odds: Odds {
+                        choice: Choice::Throw,
+                        outlook: Default::default(),
+                    },
                     shiny: false,
                 },
                 opened: true,
                 throws: 0,
                 foe_status: FoeStatus::None,
                 balls: Some(10),
+                asleep_turns: 0,
             }),
             ..CatchMemory::default()
         };
@@ -2353,9 +2247,10 @@ mod tests {
         let Some(data) = data() else { return };
         let plan = |shiny: bool| CatchPlan {
             ball: "ITEM_POKE_BALL".into(),
-            status_move: None,
-            expected_throws: 1,
-            risk: 0.0,
+            odds: Odds {
+                choice: Choice::Throw,
+                outlook: Default::default(),
+            },
             shiny,
         };
         let memory_for = |shiny: bool| CatchMemory {
@@ -2367,6 +2262,7 @@ mod tests {
                 foe_status: FoeStatus::None,
                 // The tracked count said 8 (stale).
                 balls: Some(8),
+                asleep_turns: 0,
             }),
             ..CatchMemory::default()
         };
@@ -2431,7 +2327,8 @@ mod tests {
         }));
         assert!(memory.catch.attempt.as_ref().is_some_and(|a| a.plan.shiny));
         // HP 40/54 (above the flee line): the rest of the attempt is over
-        // the risk limit, so throw at once rather than RUN.
+        // the risk limit, yet a shiny is never run from: the odds' best
+        // action (a throw or a move) instead.
         let lead = Lead {
             member: &party.members[0],
             hp: (40, 54),
@@ -2444,9 +2341,10 @@ mod tests {
             risk(&data, &lead, &spearow, 1) > RISK_LIMIT
                 || risk(&data, &lead, &spearow, 3) > RISK_LIMIT
         );
-        assert_eq!(
-            decide_on(&data, &party, &mut memory, &shiny(3, (40, 54))),
-            "cursor to BAG: Right"
+        let label = decide_on(&data, &party, &mut memory, &shiny(3, (40, 54)));
+        assert!(
+            label == "cursor to BAG: Right" || label == "choose FIGHT",
+            "{label}"
         );
         assert!(memory.catch.attempt.is_some());
         assert!(!memory.catch.flee);

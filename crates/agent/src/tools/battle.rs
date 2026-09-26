@@ -49,6 +49,9 @@ pub struct BattleStep {
     /// early rival battles: `trainerbattle_earlyrival`, whose trainer has a
     /// victory line): a fainted lead is part of the story, not a failure.
     loss_ok: bool,
+    /// A species hunted for: when it isn't being caught (declined, or the
+    /// attempt given up), RUN rather than faint it.
+    spare: Option<String>,
 }
 
 impl BattleStep {
@@ -70,7 +73,14 @@ impl BattleStep {
             unread_since: None,
             upcoming: Vec::new(),
             loss_ok: false,
+            spare: None,
         }
+    }
+
+    /// RUN from `species` whenever it isn't being caught ([`Self::spare`]).
+    pub fn sparing(mut self, species: &str) -> Self {
+        self.spare = Some(species.to_owned());
+        self
     }
 
     /// Losing doesn't end the story ([`loss_allowed`]).
@@ -211,6 +221,22 @@ impl ToolStep for BattleStep {
                 );
             }
             self.observe_battle_text(o, ctx.events);
+            let c = &self.memory.catch;
+            let spared = c.decided
+                && c.attempt.is_none()
+                && c.caught.is_none()
+                && !c.flee
+                && c.foe.as_ref().map(|(s, _)| s) == self.spare.as_ref();
+            if spared {
+                self.memory.catch.flee = true;
+                ctx.events.push(super::progress(
+                    "Catch",
+                    format!(
+                        "not catching {} now: running rather than fainting it",
+                        self.spare.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
             if b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !self.loss_ok {
                 return Decision::Fail(format!(
                     "our Pokémon fainted ({})",
