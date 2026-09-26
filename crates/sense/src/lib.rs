@@ -149,6 +149,9 @@ pub struct Sensor {
     view: Confirm<ViewState>,
     /// Sprites on the field, confirmed across frames.
     field: field::Field,
+    /// The script paths the belief had recorded on the last frame: absence
+    /// seen before a path ran is no evidence against it.
+    paths_run: Option<(usize, Option<(String, usize)>)>,
     /// The party slot the battle HUD shows (the move menu is its moves).
     active_slot: Option<u8>,
     /// The party menu's ▶ when it was last seen: whose summary opens.
@@ -195,6 +198,7 @@ impl Sensor {
             learning: None,
             view: Confirm::default(),
             field: field::Field::default(),
+            paths_run: None,
             active_slot: None,
             party_selected: None,
             party_screens: false,
@@ -255,6 +259,15 @@ impl Sensor {
                     .iter()
                     .map(|map| GameEvent::MapVisited { map: map.clone() }),
             );
+        }
+        // A path just recorded (or a checkpoint restored): what was seen
+        // absent before it counts again only once seen after it (the Cell
+        // Separator puts Bill back as himself, then he walks out).
+        let paths = &state.world.paths_run;
+        let marker = Some((paths.len(), paths.last().cloned()));
+        if self.paths_run != marker {
+            self.paths_run = marker;
+            self.field.forget_absence();
         }
         events.extend(self.field.observe(o, state));
         if let (Some(world), Some((map, absent))) = (&self.world, self.field.absent()) {

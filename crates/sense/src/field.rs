@@ -222,6 +222,11 @@ impl Field {
         events
     }
 
+    /// Starts the absence evidence over.
+    pub fn forget_absence(&mut self) {
+        self.empty.clear();
+    }
+
     /// The map and the objects whose reach has stayed empty long enough to
     /// count as absent, as of the last located frame.
     pub fn absent(&self) -> Option<(&str, Vec<u32>)> {

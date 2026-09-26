@@ -187,3 +187,19 @@ fn switch_sea_cottage_shows_bill_as_a_clefairy_only() {
     assert!(sprites.contains(&(10, 6, Some(2))), "{sprites:?}");
     assert_eq!(absent, [1]);
 }
+
+/// Switch, Bill's Sea Cottage right after the Cell Separator: Bill walked
+/// out of the teleporter to (7, 6), below the player on his spawn tile.
+/// No object's tiles hold (7, 6), so the sprite is unnamed (`Explore`
+/// talks to such sprites and lets the text say who it was).
+#[test]
+fn switch_bill_walked_out_of_the_teleporter_is_unnamed() {
+    let Some((sprites, _)) = scan(
+        "switch-sea-cottage-bill-walked-out",
+        "Route25_SeaCottage",
+        (7, 5),
+    ) else {
+        return;
+    };
+    assert_eq!(sprites, [(7, 6, None)]);
+}

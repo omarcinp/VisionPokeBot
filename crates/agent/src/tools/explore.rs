@@ -7,8 +7,11 @@
 //! paths resolved from the text read (on the Switch the plan went to
 //! Bill's PC before talking to Bill, and nothing tried Bill himself).
 //!
-//! Trainers are left alone (talking to one starts a battle the plan did
-//! not price), and so are objects known to be gone.
+//! Someone on screen no map object can be (a script walked them off
+//! their tiles: Bill once out of the teleporter) is talked to first, and
+//! the text read tells which script it was. Trainers are left alone
+//! (talking to one starts a battle the plan did not price), and so are
+//! objects known to be gone.
 
 use std::collections::BTreeSet;
 
@@ -26,6 +29,11 @@ const MAX_TARGETS: usize = 8;
 /// Something on the map to interact with.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Target {
+    /// A sprite on screen no object's tiles explain.
+    Sprite {
+        x: i32,
+        y: i32,
+    },
     Object {
         local_id: u32,
     },
@@ -37,12 +45,14 @@ pub enum Target {
     },
 }
 
-/// The map's people and signs worth trying, in order: on screen first,
-/// then the nearest; trainers, objects known gone and scriptless ones left
-/// out. `shown(local_id)` is [`object_shown`].
+/// The map's people and signs worth trying, in order: on screen first
+/// (`unnamed` sprites, then objects), then the nearest; trainers, objects
+/// known gone and scriptless ones left out. `shown(local_id)` is
+/// [`object_shown`].
 pub fn targets(
     world: &World,
     pose: &PlayerPose,
+    unnamed: &[(i32, i32)],
     shown: &dyn Fn(u32) -> Option<bool>,
 ) -> Vec<Target> {
     let Some(map) = world.map(&pose.map) else {
@@ -59,7 +69,10 @@ pub fn targets(
             })
     };
     let dist = |x: i32, y: i32| (x - pose.x).abs() + (y - pose.y).abs();
-    let mut out: Vec<(u8, i32, Target)> = Vec::new();
+    let mut out: Vec<(u8, i32, Target)> = unnamed
+        .iter()
+        .map(|&(x, y)| (0, dist(x, y), Target::Sprite { x, y }))
+        .collect();
     for o in &map.objects {
         let Some(script) = o.script.as_deref().filter(|s| !s.is_empty() && *s != "0") else {
             continue;
@@ -134,8 +147,16 @@ impl ExploreTool {
             .pose()
             .ok_or_else(|| ToolError::Failed("explore: the position is unknown".into()))?;
         let all = {
-            let shown = |id: u32| object_shown(&ctx.world, ctx.state(), &pose.map, id);
-            targets(&ctx.world, &pose, &shown)
+            let state = ctx.state();
+            let unnamed: Vec<(i32, i32)> = state
+                .view
+                .npcs
+                .iter()
+                .filter(|n| n.map == pose.map && n.local_id.is_none())
+                .map(|n| (n.x, n.y))
+                .collect();
+            let shown = |id: u32| object_shown(&ctx.world, state, &pose.map, id);
+            targets(&ctx.world, &pose, &unnamed, &shown)
         };
         let fresh: Vec<Target> = all
             .into_iter()
@@ -156,6 +177,13 @@ impl ExploreTool {
                 format!("{}: trying {target:?}", pose.map),
             ))?;
             let result = match &target {
+                Target::Sprite { x, y } => {
+                    let mut step =
+                        TalkStep::toward(ctx, &pose.map, (*x, *y), None, None, Vec::new())
+                            .with_scene();
+                    ctx.drive(&mut step)
+                        .and_then(|_| finish(ctx, step.conversation()))
+                }
                 Target::Object { local_id } => {
                     talk(ctx, &pose.map, *local_id, Vec::new()).map(|_| ())
                 }
@@ -240,7 +268,7 @@ mod tests {
             2 => Some(true),
             _ => None,
         };
-        let t = targets(&world, &pose, &shown);
+        let t = targets(&world, &pose, &[], &shown);
         assert_eq!(t.first(), Some(&Target::Object { local_id: 2 }), "{t:?}");
         assert!(!t.contains(&Target::Object { local_id: 1 }));
         assert!(t.iter().any(|t| matches!(
@@ -265,7 +293,7 @@ mod tests {
             y: 60,
         };
         let map = world.map(&pose.map).unwrap();
-        let t = targets(&world, &pose, &|_| None);
+        let t = targets(&world, &pose, &[], &|_| None);
         for target in &t {
             if let Target::Object { local_id } = target {
                 let o = map
@@ -283,5 +311,26 @@ mod tests {
             .objects
             .iter()
             .any(|o| o.trainer_type.as_deref() == Some("TRAINER_TYPE_NORMAL")));
+    }
+
+    /// After the Cell Separator Bill walks out of the teleporter to a tile
+    /// his map object can't stand on (live: (7, 6), unnamed): he is tried
+    /// first, before the PC.
+    #[test]
+    fn someone_no_object_explains_is_tried_first() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        if world.events().is_none() {
+            return;
+        }
+        let pose = PlayerPose {
+            map: "Route25_SeaCottage".into(),
+            x: 7,
+            y: 5,
+        };
+        let t = targets(&world, &pose, &[(7, 6)], &|_| Some(false));
+        assert_eq!(t.first(), Some(&Target::Sprite { x: 7, y: 6 }), "{t:?}");
     }
 }

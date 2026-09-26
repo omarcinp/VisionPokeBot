@@ -1049,8 +1049,8 @@ fn visible_party_reordering_keeps_the_history_with_the_named_member() {
 /// The Switch run recorded Bill's PC's Cell Separator path when the PC
 /// only showed its idle message: the belief had Bill back as himself
 /// (his hide flag tracked clear) and Bill helped. Bill staying away from
-/// every tile he can stand on retracts the path, also when that belief
-/// arrives with a checkpoint after his absence was first seen.
+/// every tile he can stand on after the path was recorded retracts it,
+/// also when that belief arrives with a checkpoint.
 #[test]
 fn an_absent_object_retracts_the_path_that_showed_it() {
     let (Some(d), Some(w)) = (data(), world()) else {
@@ -1082,7 +1082,12 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
     // Observed elsewhere: not the path's to take away.
     flags.insert("FLAG_GOT_OAKS_PARCEL".into(), Knowledge::observed(true, 1));
     state.world.record_path(pc, 7);
+    // Absence seen before the path was recorded is no evidence against it
+    // (on the Switch the real Cell Separator was retracted this way).
     let (state, _) = run(&mut s, state, (100..110).map(frame));
+    assert_eq!(state.world.paths_run.len(), 1);
+    // Seen absent for long enough after it: the path goes.
+    let (state, _) = run(&mut s, state, (110..200).map(frame));
     let flag = |name: &str| state.world.flags.get(name).cloned();
     assert_eq!(flag("FLAG_HELPED_BILL_IN_SEA_COTTAGE"), None);
     assert_eq!(
