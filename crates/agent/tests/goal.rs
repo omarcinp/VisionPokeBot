@@ -608,7 +608,8 @@ fn the_same_failure_twice_marks_the_intent_infeasible_and_the_planner_avoids_it(
     let seen = planner.infeasible_seen.lock().unwrap();
     assert!(seen[0].is_empty() && seen[1].is_empty());
     assert!(seen[2].contains(&key));
-    assert_eq!(h.seen_names(), vec!["Buy", "Buy", "Catch"]);
+    // Stuck: the map is explored before the replan.
+    assert_eq!(h.seen_names(), vec!["Buy", "Buy", "Explore", "Catch"]);
 }
 
 #[test]
@@ -711,20 +712,28 @@ fn the_loop_gives_up_after_max_replans_with_the_last_plan() {
         return;
     };
     let planner = FakePlanner::new(vec![plan(vec![step(go("Route4")), step(catch())])]);
-    let h = Harness::new(vec![(
-        "Go",
-        vec![
-            Err("a".into()),
-            Err("b".into()),
-            Err("c".into()),
-            Err("d".into()),
-        ],
-    )]);
+    let h = Harness::new(vec![
+        (
+            "Go",
+            vec![
+                Err("a".into()),
+                Err("b".into()),
+                Err("c".into()),
+                Err("d".into()),
+            ],
+        ),
+        ("Explore", vec![Err("explore: nothing new".into())]),
+    ]);
     let opts = GoalOptions {
         max_replans: 2,
         ..GoalOptions::default()
     };
     let (report, _) = h.run(&d, frame, &planner, opts, vec![]);
+    // The map was explored once, to no avail.
+    assert_eq!(
+        h.seen_names().iter().filter(|n| **n == "Explore").count(),
+        1
+    );
     assert!(!report.satisfied);
     assert!(
         report.outcome.starts_with("out of replans"),
@@ -995,4 +1004,30 @@ fn a_faint_ends_the_run_for_the_session_to_reload() {
     assert!(infeasible.is_empty());
     assert_eq!(h.seen_names(), vec!["Go"]);
     assert_eq!(planner.calls(), 1);
+}
+
+/// With the replans spent, exploring the map that learns something earns
+/// one more plan; the map is explored once per run.
+#[test]
+fn exploring_that_learns_something_earns_one_more_plan() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = FakePlanner::new(vec![plan(vec![step(go("Route4")), step(catch())])]);
+    let h = Harness::new(vec![
+        ("Go", vec![Err("a".into()), Err("b".into())]),
+        ("Explore", vec![Ok(vec![])]),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let opts = GoalOptions {
+        max_replans: 1,
+        ..GoalOptions::default()
+    };
+    let (report, _) = h.run(&d, frame, &planner, opts, vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(planner.calls(), 3, "two plans, then one after exploring");
+    assert_eq!(
+        h.seen_names().iter().filter(|n| **n == "Explore").count(),
+        1
+    );
 }

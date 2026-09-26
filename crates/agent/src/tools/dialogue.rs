@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, MenuObservation, Observation, PlayerPose, ScreenState};
+use pokebot_state::{GameEvent, GameState, MenuObservation, Observation, PlayerPose, ScreenState};
 use pokebot_world::dialogue::Dialogue;
 use pokebot_world::events::{Condition, Effect, Script, Val};
 use pokebot_world::predicate::{BeliefView, Truth};
@@ -752,6 +752,30 @@ pub fn start_of(world: &World, script: &str, pose: Option<&PlayerPose>) -> Optio
     start_of_in(world, script, pose, &|_, _| None)
 }
 
+/// Whether object `id` of `map` is there: seen on screen now, else the
+/// belief's word on it, else on its hide flag. `None`: nothing known.
+pub fn object_shown(world: &World, state: &GameState, map: &str, id: u32) -> Option<bool> {
+    let seen = state
+        .view
+        .npcs
+        .iter()
+        .any(|n| n.map == map && n.local_id == Some(id));
+    if seen {
+        return Some(true);
+    }
+    if let Some(present) = state.world.npc(map, id).and_then(|n| n.present.value) {
+        return Some(present);
+    }
+    let flag = world
+        .map(map)?
+        .objects
+        .iter()
+        .find(|o| o.local_id == id)?
+        .flag
+        .clone()?;
+    state.world.flags.get(&flag)?.value.map(|hidden| !hidden)
+}
+
 /// [`start_of`], with `shown(map, local_id)` telling which objects are
 /// there (seen, `Some(true)`) or gone (`Some(false)`): a script two objects
 /// share (Bill, as himself or as a Clefairy) is started at the one there.
@@ -913,29 +937,7 @@ fn run_script(
     .near(pose.clone());
     let on_screen = ctx.observation().is_some_and(|o| o.dialogue.is_some());
     let start = {
-        let state = ctx.state();
-        let shown = |map: &str, id: u32| -> Option<bool> {
-            let seen = state
-                .view
-                .npcs
-                .iter()
-                .any(|n| n.map == map && n.local_id == Some(id));
-            if seen {
-                return Some(true);
-            }
-            if let Some(present) = state.world.npc(map, id).and_then(|n| n.present.value) {
-                return Some(present);
-            }
-            let flag = ctx
-                .world
-                .map(map)?
-                .objects
-                .iter()
-                .find(|o| o.local_id == id)?
-                .flag
-                .clone()?;
-            state.world.flags.get(&flag)?.value.map(|hidden| !hidden)
-        };
+        let shown = |map: &str, id: u32| object_shown(&ctx.world, ctx.state(), map, id);
         start_of_in(&ctx.world, script, pose.as_ref(), &shown)
     };
     if on_screen || start.is_none() {

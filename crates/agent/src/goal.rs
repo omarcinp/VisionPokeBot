@@ -155,6 +155,8 @@ struct Run<'g, 'p> {
     last_failure: Option<(String, String)>,
     /// Intent names that failed at each pose since the last success.
     failed_at: Vec<(PlayerPose, String)>,
+    /// Maps explored as a last resort in this run.
+    explored: BTreeSet<String>,
 }
 
 /// Runs `goal` to completion or until the replans run out (spec §8).
@@ -191,6 +193,7 @@ pub fn run(
         },
         last_failure: None,
         failed_at: Vec::new(),
+        explored: BTreeSet::new(),
     };
     let outcome = run.main(ctx);
     let stopped = matches!(outcome, Err(ToolError::Stopped));
@@ -204,6 +207,10 @@ impl Run<'_, '_> {
         let mut reason = "start".to_string();
         let mut plan_no = 0u32;
         loop {
+            if plan_no > self.opts.max_replans && self.explore(ctx)? {
+                // What the map showed is worth one more plan.
+                plan_no -= 1;
+            }
             if plan_no > self.opts.max_replans {
                 self.report.outcome = format!(
                     "out of replans ({} made, {} allowed)",
@@ -237,6 +244,10 @@ impl Run<'_, '_> {
             self.set_status("planning", plan_reason.clone(), 0, None, ctx);
             let plan = match self.planner.plan(goal, &knowledge, pose.clone()) {
                 Ok(plan) => plan,
+                Err(e) if self.explore(ctx)? => {
+                    reason = format!("no plan ({e}); explored the map");
+                    continue;
+                }
                 Err(e) => {
                     self.report.outcome = format!("no plan: {e}");
                     self.set_status("given up", e.to_string(), 0, None, ctx);
@@ -481,6 +492,7 @@ impl Run<'_, '_> {
             );
             self.report.infeasible.push(key.clone());
             self.last_failure = None;
+            self.explore(ctx)?;
         } else {
             self.last_failure = Some((key.clone(), reason.to_owned()));
         }
@@ -497,6 +509,35 @@ impl Run<'_, '_> {
             }
         }
         Ok(why)
+    }
+
+    /// The last resort of a plan stuck on a map (an intent failed twice,
+    /// no plan, the replans spent): talk to the map's people and read its
+    /// signs until the belief learns something ([`Intent::Explore`]), once
+    /// per map and run. Whether something was learnt.
+    fn explore(&mut self, ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> {
+        let Some(pose) = ctx.pose() else {
+            return Ok(false);
+        };
+        if !self.explored.insert(pose.map.clone()) {
+            return Ok(false);
+        }
+        ctx.emit(progress(
+            GOAL,
+            format!("stuck on {}: exploring it", pose.map),
+        ))?;
+        ctx.runtime
+            .explain("explore", &serde_json::json!({ "map": pose.map }));
+        let outcome = ctx.invoke(&Intent::Explore);
+        self.report.learned.extend(outcome.learned.iter().cloned());
+        match outcome.result {
+            Ok(()) => Ok(true),
+            Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
+            Err(e) => {
+                ctx.emit(progress(GOAL, format!("explore: {e}")))?;
+                Ok(false)
+            }
+        }
     }
 
     /// Re-localisation after repeated failures at one pose: observe afresh
