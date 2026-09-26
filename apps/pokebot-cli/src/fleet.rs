@@ -348,6 +348,12 @@ impl State {
                     // Starters in turn: parallel new games play different
                     // games (and meet different edge cases).
                     let starter = ["bulbasaur", "charmander", "squirtle"][(self.next % 3) as usize];
+                    // The stepped emulator is deterministic: the same inputs
+                    // play the same game. A name typed differently shifts
+                    // the frames the game's random numbers advance by.
+                    let player = ["RED", "LEAF", "ASH", "KRIS", "GOLD", "JADE", "BLUE", "ROSE"]
+                        [(self.next % 8) as usize];
+                    let gender = if self.next % 2 == 0 { "boy" } else { "girl" };
                     command
                         .args([
                             "flag FLAG_SYS_GAME_CLEAR",
@@ -358,6 +364,10 @@ impl State {
                             "--restart",
                             "--starter",
                             starter,
+                            "--player",
+                            player,
+                            "--gender",
+                            gender,
                             "--dev-snapshots",
                         ])
                         .arg(&self.args.scenario_library);
