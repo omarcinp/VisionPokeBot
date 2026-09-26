@@ -16,7 +16,7 @@ Full design: [`docs/spec.md`](docs/spec.md). Current wiring: [`docs/architecture
 # Rust toolchain (once)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Emulator: downloads the mGBA libretro core into emulator/ (gitignored)
+# Emulator: downloads the mGBA and gpSP libretro cores into emulator/ (gitignored)
 tools/fetch-emulator.sh
 
 # Build and test (ROM-backed tests skip themselves if no ROM/core is present)
@@ -45,6 +45,11 @@ tools/setup-virtual-camera.sh
 ```
 
 Watch the stream with any V4L2 client too, e.g. `ffplay /dev/video10`.
+
+Two emulators can be linked for trades, like two consoles on a Wireless
+Adapter: run both with `--core emulator/gpsp_libretro.so`, one with
+`--link-listen 127.0.0.1:7400` and the other with `--link-connect
+127.0.0.1:7400` (each needs its own `--video-out`, `--serial` and ports).
 
 ### Start a new game
 

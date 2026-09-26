@@ -55,6 +55,9 @@ pub fn serve(args: ServeArgs, stop: Arc<AtomicBool>) -> Result<()> {
         "emulator: {} {} @ {:.4} fps",
         info.library_name, info.library_version, info.fps
     );
+    if let Some(addr) = info.link_addr {
+        eprintln!("link:       listening on {addr} -> --link-connect {addr}");
+    }
 
     let mut sink = V4l2Sink::open(
         &args.video_out,

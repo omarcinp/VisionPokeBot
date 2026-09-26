@@ -2,6 +2,7 @@
 //! is the only place that knows adapters exist; everything downstream sees
 //! `dyn VideoSource` and `dyn Controller`.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,7 @@ use pokebot_agent::{Syncer, SyncerHandle};
 use pokebot_capture_card::CaptureCardConfig;
 use pokebot_controller::NullController;
 use pokebot_core::{Controller, GbaOnSwitch, PressProfile, VideoSource};
-use pokebot_emulator_libretro::{launch, ClockMode, EmulatorConfig};
+use pokebot_emulator_libretro::{launch, ClockMode, EmulatorConfig, LinkRole};
 use pokebot_esp32_wifi::{Esp32WifiConfig, Esp32WifiController};
 use pokebot_pabotbase::{PabotBaseConfig, PabotBaseController};
 use pokebot_replay::Session;
@@ -158,6 +159,13 @@ pub struct EmulatorArgs {
     /// Do not load or write a cartridge save
     #[arg(long)]
     pub no_save: bool,
+    /// Link port, host side: wait for another emulator on this address
+    /// (e.g. 127.0.0.1:7400). Needs --core emulator/gpsp_libretro.so.
+    #[arg(long, conflicts_with = "link_connect")]
+    pub link_listen: Option<SocketAddr>,
+    /// Link port, guest side: connect to the emulator listening at HOST:PORT
+    #[arg(long)]
+    pub link_connect: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -394,6 +402,11 @@ pub fn emulator_config(args: &EmulatorArgs) -> Result<EmulatorConfig> {
         (_, true) => None,
         (Some(save), false) => Some(save.clone()),
         (None, false) => Some(rom.with_extension("sav")),
+    };
+    config.link = match (args.link_listen, &args.link_connect) {
+        (Some(listen), _) => Some(LinkRole::Host { listen }),
+        (None, Some(host)) => Some(LinkRole::Join { host: host.clone() }),
+        (None, None) => None,
     };
     Ok(config)
 }

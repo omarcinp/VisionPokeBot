@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
+use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -18,6 +20,7 @@ use pokebot_core::{
 use crate::cartridge::BatterySave;
 use crate::ffi::*;
 use crate::host;
+use crate::link_port::{LinkPort, LinkRole};
 
 /// How emulated time advances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +44,9 @@ pub struct EmulatorConfig {
     pub battery_save: Option<PathBuf>,
     pub clock: ClockMode,
     pub press_profile: PressProfile,
+    /// Link port to another emulator, for trades and battles. Needs a core
+    /// that exposes one (gpSP).
+    pub link: Option<LinkRole>,
 }
 
 impl EmulatorConfig {
@@ -51,6 +57,7 @@ impl EmulatorConfig {
             battery_save: None,
             clock: ClockMode::default(),
             press_profile: PressProfile::default(),
+            link: None,
         }
     }
 }
@@ -63,12 +70,15 @@ pub struct CoreInfo {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    /// Where a link host listens.
+    pub link_addr: Option<SocketAddr>,
 }
 
 /// Starts the emulator and returns its two device faces. The emulator stops
 /// (and flushes the battery save) once both handles are dropped.
 ///
-/// Libretro cores are process-global, so only one emulator may run at a time.
+/// A libretro core is process-global, so each core file runs one emulator
+/// at a time; two emulators in one process need two copies of the core.
 pub fn launch(
     config: EmulatorConfig,
 ) -> Result<(EmulatorVideoSource, EmulatorController, CoreInfo)> {
@@ -421,13 +431,16 @@ fn frame_rate(fps: f64) -> FrameRate {
     }
 }
 
-static CORE_IN_USE: AtomicBool = AtomicBool::new(false);
+/// Core files (device, inode) with a running emulator. The dynamic loader
+/// shares one instance per file, whatever path names it.
+static CORES_IN_USE: Mutex<Option<HashSet<(u64, u64)>>> = Mutex::new(None);
 
 /// A loaded core with a running game. Lives on the emulator thread only.
 struct Core {
     api: CoreApi,
     info: CoreInfo,
     battery: Option<BatterySave>,
+    file: (u64, u64),
     // Kept alive for cores that reference the buffers after load.
     _rom: Vec<u8>,
     _rom_path: CString,
@@ -435,15 +448,21 @@ struct Core {
 
 impl Core {
     fn open(config: &EmulatorConfig) -> Result<Self> {
-        if CORE_IN_USE.swap(true, Ordering::SeqCst) {
-            return Err(Error::Device(
-                "an emulator core is already running in this process".into(),
-            ));
+        let meta =
+            std::fs::metadata(&config.core_path).map_err(|e| Error::io(&config.core_path, e))?;
+        let file = (meta.dev(), meta.ino());
+        if !cores_in_use(|cores| cores.insert(file)) {
+            return Err(Error::Device(format!(
+                "core {} is already running in this process (copy the file to run a second one)",
+                config.core_path.display()
+            )));
         }
-        Self::open_exclusive(config).inspect_err(|_| CORE_IN_USE.store(false, Ordering::SeqCst))
+        Self::open_exclusive(config, file).inspect_err(|_| {
+            cores_in_use(|cores| cores.remove(&file));
+        })
     }
 
-    fn open_exclusive(config: &EmulatorConfig) -> Result<Self> {
+    fn open_exclusive(config: &EmulatorConfig, file: (u64, u64)) -> Result<Self> {
         let rom = std::fs::read(&config.rom_path).map_err(|e| Error::io(&config.rom_path, e))?;
         let rom_path = path_cstring(&config.rom_path)?;
         let core_dir = config.core_path.parent().unwrap_or(Path::new("."));
@@ -500,26 +519,50 @@ impl Core {
                 width: av.geometry.base_width,
                 height: av.geometry.base_height,
                 fps: av.timing.fps,
+                link_addr: None,
             }
+        };
+        // SAFETY: the game was loaded above on this thread.
+        let unload = || unsafe {
+            (api.unload_game)();
+            (api.deinit)();
         };
         let battery = match &config.battery_save {
             Some(path) => match BatterySave::attach(api.library(), path) {
                 Ok(save) => Some(save),
                 Err(e) => {
-                    // SAFETY: game loaded above on this thread.
-                    unsafe {
-                        (api.unload_game)();
-                        (api.deinit)();
-                    }
+                    unload();
                     return Err(e);
                 }
             },
             None => None,
         };
+        let mut info = info;
+        if let Some(role) = &config.link {
+            let port = host::link_protocol()
+                .ok_or_else(|| {
+                    Error::Device(format!(
+                        "core {} has no link port (use gpSP: tools/fetch-emulator.sh)",
+                        info.library_name
+                    ))
+                })
+                .and_then(|protocol| LinkPort::open(role, &protocol));
+            match port {
+                Ok(port) => {
+                    info.link_addr = port.local_addr();
+                    host::attach_link(port);
+                }
+                Err(e) => {
+                    unload();
+                    return Err(e);
+                }
+            }
+        }
         Ok(Self {
             api,
             info,
             battery,
+            file,
             _rom: rom,
             _rom_path: rom_path,
         })
@@ -527,8 +570,10 @@ impl Core {
 
     fn run_frame(&mut self, buttons: ButtonSet) -> RgbImage {
         host::set_buttons(buttons);
+        host::link_before_frame();
         // SAFETY: game is loaded; called on the thread that loaded it.
         unsafe { (self.api.run)() };
+        host::link_after_frame();
         host::latest_frame().unwrap_or_else(|| {
             RgbImage::filled(self.info.width.max(1), self.info.height.max(1), [0, 0, 0])
         })
@@ -542,13 +587,19 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         let _ = self.store_save();
+        host::detach_link();
         // SAFETY: reverse of the start-up sequence, on the same thread.
         unsafe {
             (self.api.unload_game)();
             (self.api.deinit)();
         }
-        CORE_IN_USE.store(false, Ordering::SeqCst);
+        cores_in_use(|cores| cores.remove(&self.file));
     }
+}
+
+fn cores_in_use<T>(f: impl FnOnce(&mut HashSet<(u64, u64)>) -> T) -> T {
+    let mut cores = CORES_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    f(cores.get_or_insert_with(HashSet::new))
 }
 
 fn path_cstring(path: &Path) -> Result<CString> {

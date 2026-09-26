@@ -1,7 +1,7 @@
 //! Minimal libretro ABI: only the entry points needed to run a game, receive
-//! video, and supply joypad input.
+//! video, supply joypad input, and carry link-port packets.
 
-use std::os::raw::{c_char, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::path::Path;
 
 use libloading::Library;
@@ -30,10 +30,35 @@ pub const RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: c_uint = 17;
 pub const RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY: c_uint = 31;
 pub const RETRO_ENVIRONMENT_SET_CONTROLLER_INFO: c_uint = 35;
 pub const RETRO_ENVIRONMENT_SET_GEOMETRY: c_uint = 37;
+pub const RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE: c_uint = 78;
 
 pub const RETRO_PIXEL_FORMAT_0RGB1555: c_uint = 0;
 pub const RETRO_PIXEL_FORMAT_XRGB8888: c_uint = 1;
 pub const RETRO_PIXEL_FORMAT_RGB565: c_uint = 2;
+
+/// Frontend function the core calls to send a packet to other players.
+pub type NetpacketSendFn =
+    unsafe extern "C" fn(flags: c_int, buf: *const c_void, len: usize, client_id: u16);
+/// Frontend function the core may call to receive packets mid-frame.
+pub type NetpacketPollReceiveFn = unsafe extern "C" fn();
+
+/// `struct retro_netpacket_callback`: how a core exchanges packets with the
+/// cores of other players (for GBA cores, the link port).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RetroNetpacketCallback {
+    pub start: unsafe extern "C" fn(
+        client_id: u16,
+        send: NetpacketSendFn,
+        poll_receive: NetpacketPollReceiveFn,
+    ),
+    pub receive: unsafe extern "C" fn(buf: *const c_void, len: usize, client_id: u16),
+    pub stop: Option<unsafe extern "C" fn()>,
+    pub poll: Option<unsafe extern "C" fn()>,
+    pub connected: Option<unsafe extern "C" fn(client_id: u16) -> bool>,
+    pub disconnected: Option<unsafe extern "C" fn(client_id: u16)>,
+    pub protocol_version: *const c_char,
+}
 
 #[repr(C)]
 pub struct RetroGameInfo {

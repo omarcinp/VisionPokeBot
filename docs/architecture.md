@@ -240,12 +240,16 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 ## Devices
 
 **Emulator (`adapters/emulator-libretro`)**
-- Hosts the mGBA libretro core on its own thread and binds only the run, video, input and lifecycle entry points.
+- Hosts a libretro core on its own thread (mGBA by default; gpSP to link two emulators) and binds only the run, video, input, lifecycle and link-port entry points.
 - Two clocks:
   - *Stepped:* one frame per read. Deterministic; tested bit-for-bit.
   - *Real-time:* runs at 59.7275 Hz; readers get the newest frame.
 - `InputSchedule` turns commands into per-frame button states and tracks which commands have completed.
 - Battery saves: `cartridge.rs` is the only code that touches core memory, and only save RAM, copied opaquely. A guard test fails the build otherwise.
+- Link port (`link_port.rs`, `--link-listen ADDR` / `--link-connect HOST:PORT`): plugs two emulators together for trades and battles, like two consoles on a Wireless Adapter. The core's libretro netpacket traffic travels as opaque packets over TCP; the bot never sees it. Only gpSP has a link port. For FireRed/LeafGreen it emulates the Wireless Adapter, so games meet in the Pokémon Center's Wireless Club (Direct Corner: leader + join group), not the Cable Club.
+  - Frame lockstep: linked consoles share a clock, and gpSP's adapter holds only four packets and gives up on a reply within a frame. So each emulator reports every finished frame, and neither starts frame n+1 before its peer has finished frame n. A peer stalled for 250 ms is not waited for again until it moves. Without it, the stepped trade test failed 2 of 6 runs with "Communication error" (gpSP logged dropped packets); with it, 17 of 17 passed.
+  - Two emulators in one process need two copies of the core file (a core is process-global; the loader shares one instance per file).
+  - `tests/link_trade.rs` (ignored; `--ignored`) walks two FireRed saves to the Direct Corner and trades GEODUDE for ZUBAT, checked on screen; `VPB_LINK_CLOCK=realtime` runs it at console speed.
 
 **Capture card (`adapters/capture-card`)**
 - V4L2 mmap streaming on a background thread that keeps only the newest frame.

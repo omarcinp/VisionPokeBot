@@ -310,6 +310,8 @@ impl State {
             rom: self.args.emulator_rom.clone(),
             save: None,
             no_save: true,
+            link_listen: None,
+            link_connect: None,
         })?;
         let core = config.core_path.canonicalize().context("emulator core")?;
         let rom = config.rom_path.canonicalize().context("ROM")?;

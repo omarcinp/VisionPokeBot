@@ -4,10 +4,12 @@
 use std::cell::RefCell;
 use std::ffi::{c_char, CString};
 use std::os::raw::{c_uint, c_void};
+use std::time::Duration;
 
 use pokebot_core::{Button, ButtonSet, RgbImage};
 
 use crate::ffi::*;
+use crate::link_port::{LinkEvent, LinkPort};
 
 struct HostState {
     pixel_format: c_uint,
@@ -15,6 +17,24 @@ struct HostState {
     frame: Option<RgbImage>,
     system_dir: CString,
     save_dir: CString,
+    /// The core's link-port interface, if it has one.
+    netpacket: Option<RetroNetpacketCallback>,
+    link: Option<LinkPort>,
+    session: LinkSession,
+}
+
+#[derive(Default)]
+struct LinkSession {
+    /// The core has been told a session started (and not yet that it ended).
+    started: bool,
+    /// A peer is connected.
+    connected: bool,
+    /// Frames this side finished since the peer connected.
+    frames: u32,
+    /// Frames the peer reported finished.
+    peer_frames: u32,
+    /// The peer's count when this side stopped waiting for it.
+    stalled_at: Option<u32>,
 }
 
 thread_local! {
@@ -24,6 +44,15 @@ thread_local! {
         frame: None,
         system_dir: CString::default(),
         save_dir: CString::default(),
+        netpacket: None,
+        link: None,
+        session: LinkSession {
+            started: false,
+            connected: false,
+            frames: 0,
+            peer_frames: 0,
+            stalled_at: None,
+        },
     });
 }
 
@@ -34,6 +63,9 @@ pub fn reset(system_dir: CString, save_dir: CString) {
         host.frame = None;
         host.system_dir = system_dir;
         host.save_dir = save_dir;
+        host.netpacket = None;
+        host.link = None;
+        host.session = LinkSession::default();
     });
 }
 
@@ -82,6 +114,13 @@ pub unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
             });
             true
         }
+        RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE if !data.is_null() => {
+            // SAFETY: libretro passes a retro_netpacket_callback*; it is
+            // copied, so the core's pointer need not outlive this call.
+            let callback = unsafe { *(data as *const RetroNetpacketCallback) };
+            HOST.with_borrow_mut(|host| host.netpacket = Some(callback));
+            true
+        }
         RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE if !data.is_null() => {
             // SAFETY: libretro passes a bool* for this command.
             unsafe { *(data as *mut bool) = false };
@@ -94,6 +133,236 @@ pub unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
         // Everything else (core options, logging, rumble, sensors, ...) is
         // declined so the core falls back to its defaults.
         _ => false,
+    }
+}
+
+/// The protocol name of the core's link port, if it has one.
+pub fn link_protocol() -> Option<String> {
+    HOST.with_borrow(|host| {
+        let callback = host.netpacket?;
+        let name = if callback.protocol_version.is_null() {
+            String::new()
+        } else {
+            // SAFETY: a static NUL-terminated string owned by the core.
+            unsafe { std::ffi::CStr::from_ptr(callback.protocol_version) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        Some(name)
+    })
+}
+
+/// How many frames an emulator may run ahead of its link peer. At 0 both
+/// still emulate the same frame in parallel; 1 let gpSP drop packets.
+const LOCKSTEP_SLACK: u32 = 0;
+/// How long to wait for the peer's next frame before running on alone.
+const LOCKSTEP_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// libretro client ids: the host is 0, the (single) guest 1.
+const HOST_CLIENT_ID: u16 = 0;
+const GUEST_CLIENT_ID: u16 = 1;
+
+/// Plugs the cable into the core. A host's session starts now (it waits
+/// for players); a guest's starts once it reaches the host.
+pub fn attach_link(port: LinkPort) {
+    let host_side = port.is_host();
+    let callback = HOST.with_borrow_mut(|host| {
+        host.link = Some(port);
+        host.netpacket
+    });
+    if let (true, Some(callback)) = (host_side, callback) {
+        start_session(&callback, HOST_CLIENT_ID);
+    }
+}
+
+/// Unplugs the cable, ending the core's session.
+pub fn detach_link() {
+    let (callback, started) = HOST.with_borrow_mut(|host| {
+        let started = std::mem::take(&mut host.session.started);
+        (host.netpacket, started)
+    });
+    if let (Some(callback), true) = (callback, started) {
+        if let Some(stop) = callback.stop {
+            // SAFETY: session started on this thread; the core is loaded.
+            unsafe { stop() };
+        }
+    }
+    // Dropping the port closes the connection and joins its thread.
+    let port = HOST.with_borrow_mut(|host| host.link.take());
+    drop(port);
+}
+
+/// Before each frame: delivers what arrived on the link port and holds this
+/// emulator until its peer is at most [`LOCKSTEP_SLACK`] frames behind, as
+/// if both consoles shared a clock. A peer that stops for longer than
+/// [`LOCKSTEP_TIMEOUT`] is not waited for again until it moves.
+pub fn link_before_frame() {
+    let Some(callback) = link_callback() else {
+        return;
+    };
+    drain_link(&callback);
+    loop {
+        let behind = HOST.with_borrow(|host| {
+            let s = &host.session;
+            s.connected
+                && s.peer_frames.saturating_add(LOCKSTEP_SLACK) < s.frames
+                && s.stalled_at != Some(s.peer_frames)
+        });
+        if !behind {
+            break;
+        }
+        let event = HOST.with_borrow(|host| {
+            host.link
+                .as_ref()
+                .and_then(|port| port.wait_event(LOCKSTEP_TIMEOUT))
+        });
+        match event {
+            Some(event) => dispatch(&callback, event),
+            None => {
+                HOST.with_borrow_mut(|host| {
+                    let s = &mut host.session;
+                    eprintln!(
+                        "link: peer stalled {} frames behind; running on alone until it moves",
+                        s.frames - s.peer_frames
+                    );
+                    s.stalled_at = Some(s.peer_frames);
+                });
+                break;
+            }
+        }
+    }
+    if HOST.with_borrow(|host| host.session.started) {
+        if let Some(poll) = callback.poll {
+            // SAFETY: the session was started on this thread.
+            unsafe { poll() };
+        }
+    }
+}
+
+/// After each frame: reports it to the peer.
+pub fn link_after_frame() {
+    HOST.with_borrow_mut(|host| {
+        let s = &mut host.session;
+        if s.connected {
+            s.frames = s.frames.saturating_add(1);
+            if let Some(port) = &host.link {
+                port.frames_done(s.frames);
+            }
+        }
+    });
+}
+
+fn link_callback() -> Option<RetroNetpacketCallback> {
+    HOST.with_borrow(|host| host.netpacket.filter(|_| host.link.is_some()))
+}
+
+/// Delivers everything that has arrived, without waiting.
+fn drain_link(callback: &RetroNetpacketCallback) {
+    // One event at a time, without holding the borrow: the core answers
+    // packets by sending (which borrows the state) from inside `receive`.
+    while let Some(event) =
+        HOST.with_borrow(|host| host.link.as_ref().and_then(LinkPort::try_event))
+    {
+        dispatch(callback, event);
+    }
+}
+
+fn dispatch(callback: &RetroNetpacketCallback, event: LinkEvent) {
+    let host_side = HOST.with_borrow(|host| host.link.as_ref().is_some_and(LinkPort::is_host));
+    let peer = if host_side {
+        GUEST_CLIENT_ID
+    } else {
+        HOST_CLIENT_ID
+    };
+    match event {
+        LinkEvent::Connected => {
+            HOST.with_borrow_mut(|host| {
+                host.session = LinkSession {
+                    started: host.session.started,
+                    connected: true,
+                    ..LinkSession::default()
+                };
+            });
+            if !host_side {
+                start_session(callback, GUEST_CLIENT_ID);
+                return;
+            }
+            // SAFETY: the host's session was started on this thread.
+            let accepted = callback.connected.is_none_or(|f| unsafe { f(peer) });
+            if !accepted {
+                HOST.with_borrow_mut(|host| host.session.connected = false);
+                with_port(LinkPort::hang_up);
+            }
+        }
+        LinkEvent::Packet(packet) => {
+            if HOST.with_borrow(|host| host.session.started) {
+                // SAFETY: the buffer outlives the call; session started.
+                unsafe { (callback.receive)(packet.as_ptr().cast(), packet.len(), peer) };
+            }
+        }
+        LinkEvent::PeerFrames(frames) => {
+            HOST.with_borrow_mut(|host| host.session.peer_frames = frames);
+        }
+        LinkEvent::Disconnected => {
+            let (was_connected, guest_started) = HOST.with_borrow_mut(|host| {
+                let s = &mut host.session;
+                let was_connected = std::mem::take(&mut s.connected);
+                (was_connected, !host_side && std::mem::take(&mut s.started))
+            });
+            if host_side && was_connected {
+                if let Some(disconnected) = callback.disconnected {
+                    // SAFETY: the session was started on this thread.
+                    unsafe { disconnected(peer) };
+                }
+            }
+            if guest_started {
+                if let Some(stop) = callback.stop {
+                    // SAFETY: as above.
+                    unsafe { stop() };
+                }
+            }
+        }
+    }
+}
+
+fn start_session(callback: &RetroNetpacketCallback, client_id: u16) {
+    HOST.with_borrow_mut(|host| host.session.started = true);
+    // SAFETY: the core is loaded on this thread; the functions handed over
+    // stay valid until `stop`.
+    unsafe { (callback.start)(client_id, netpacket_send, netpacket_poll_receive) };
+}
+
+fn with_port(f: impl FnOnce(&LinkPort)) {
+    HOST.with_borrow(|host| {
+        if let Some(port) = &host.link {
+            f(port);
+        }
+    });
+}
+
+unsafe extern "C" fn netpacket_send(
+    _flags: std::os::raw::c_int,
+    buf: *const c_void,
+    len: usize,
+    _client_id: u16,
+) {
+    if buf.is_null() && len > 0 {
+        return;
+    }
+    // Two players: whether broadcast or addressed, it goes to the peer.
+    let payload = if len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the core passes `len` readable bytes.
+        unsafe { std::slice::from_raw_parts(buf as *const u8, len) }
+    };
+    with_port(|port| port.send(payload));
+}
+
+/// The core waits for data mid-frame: deliver what has arrived.
+unsafe extern "C" fn netpacket_poll_receive() {
+    if let Some(callback) = link_callback() {
+        drain_link(&callback);
     }
 }
 
