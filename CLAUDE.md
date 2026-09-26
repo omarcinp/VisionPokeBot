@@ -4,7 +4,30 @@ The target is the physical Nintendo Switch (HDMI capture card + ESP32-S3
 controller); the emulator is only the fast development loop. Background and
 commands: `docs/HANDOFF.md`, `docs/architecture.md`, `README.md`.
 
-## 1. Switch capture stays available
+## 1. Work only in this folder
+
+The repository, the live bots and their data are all in one folder:
+`/home/omar/repositories/github/omarcinp/VisionPokeBot`. The `pokebot-hub`,
+`pokebot-switch` and `pokebot-disk-guard` units run from it, and it holds
+the live `saves/` (Switch progress, `saves/web-control/` pause flags),
+`roms/`, `emulator/` and `data/world/`.
+
+- **Read, edit, build and run only inside this folder.** Don't create git
+  worktrees, clones or copies of the repository, whether next to it, in
+  `/tmp`, or under `.claude/worktrees/`. Don't give agents
+  `isolation: "worktree"`. On 2026-09-26, 17 stray worktrees had to be
+  cleaned up; the uncommitted work in some of them was lost, and a deploy
+  briefly ran against stale saves in an old copy.
+- **Other agent sessions share this folder.** Stay on `main`, don't switch
+  branches, and commit or push only your own files (`git commit <paths>`).
+  Never revert, stash, reset, `checkout --` or `git clean` changes you didn't
+  make. If you need a branch, create it, merge it into `main` and delete it
+  (local and remote) in the same task.
+- `target/release/pokebot` is shared too, and `tools/live-run.sh` deploys
+  whatever it holds. Don't deploy a build that contains another session's
+  uncommitted changes. When deploying, say which commit you built.
+
+## 2. Switch capture stays available
 
 An idle Switch dims after 5 minutes and sleeps after its Auto-Sleep time
 (TV mode: 1 hour or more). Once asleep, the capture goes black, the
@@ -41,7 +64,7 @@ console can wake it. So:
 - When monitoring a run, look for stuck moments and unhandled situations.
   Fix them, then relaunch (still `--restart`).
 
-## 2. Disk: keep track, delete what has been analyzed
+## 3. Disk: keep track, delete what has been analyzed
 
 Recordings (`--record`) grow about 2 GB per hour of Switch play. `/tmp` once
 filled the whole 581 GB disk.
@@ -61,7 +84,7 @@ filled the whole 581 GB disk.
   bot, or anything outside what the bot and you produced.
 - Use a new `--record` directory for every run.
 
-## 3. Working agreements
+## 4. Working agreements
 
 - Every run shows on the LAN web UI: `tools/live-run.sh [--instance
   switch|emu] <log> <pokebot args…>`. The Switch is `/switch/`, the emulator
