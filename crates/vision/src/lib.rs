@@ -150,6 +150,9 @@ impl PerceptionSystem for FireRedPerception {
             if matches!(b.menu, Some(BattleMenu::Moves { .. })) {
                 b.move_pp = read_fraction(&font.read(image, detect::battle::MOVE_PP, &[]).join(""));
             }
+            if detect::battle::is_level_up_panel(image) {
+                b.level_up_stats = detect::battle::level_up_stats(image, font);
+            }
         }
         if let (Some(b), Some(small)) = (&mut battle, &self.small_font) {
             if matches!(b.menu, Some(BattleMenu::Moves { .. })) {
@@ -1556,6 +1559,31 @@ mod tests {
             ScreenState::BattleText,
             "battle-text-box",
         )]);
+    }
+
+    /// Switch goal run (frames 2621200 / 2621240): BULBASAUR grew to Lv 11.
+    /// The window's first page shows the gains ("+ 2"), its second the new
+    /// stats; only the second is read (HP, Atk, Def, Spe, SpA, SpD).
+    #[test]
+    fn the_level_up_window_reads_the_new_stats_not_the_gains() {
+        let (Some(mut p), Some(gains), Some(totals)) = (
+            reading_perception(),
+            fixture("switch-level-up-stats-gains.png"),
+            fixture("switch-level-up-stats-totals.png"),
+        ) else {
+            return;
+        };
+        let o = p.observe(&frame(0, gains));
+        assert_eq!(o.battle.unwrap().level_up_stats, None);
+        let o = p.observe(&frame(1, totals));
+        assert_eq!(
+            o.dialogue.unwrap().lines,
+            vec!["BULBASAUR grew to", "LV. 11!"]
+        );
+        assert_eq!(
+            o.battle.unwrap().level_up_stats,
+            Some([32, 17, 17, 18, 22, 22])
+        );
     }
 
     /// Switch goal run: with the level-up stats window over the text box's

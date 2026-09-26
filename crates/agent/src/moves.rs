@@ -97,6 +97,8 @@ mod tests {
             pp_used: Default::default(),
             read_stats: None,
             ability: None,
+            ivs: None,
+            stats_evs: [0; 6],
         }
     }
 

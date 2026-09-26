@@ -115,7 +115,7 @@ pub enum GameEvent {
     /// Stable details read on a member's Info / Skills summary pages.
     PartyDetailsObserved {
         slot: u8,
-        details: crate::SummaryDetails,
+        details: Box<crate::SummaryDetails>,
     },
     /// The SAVE panel gives a total, not individual badge identities.
     BadgeCountObserved {
@@ -166,6 +166,27 @@ pub enum GameEvent {
         slot: u8,
         species: String,
     },
+    /// "X gained N EXP. Points!": the member gained the EVs of the foe
+    /// that fainted (`ev_yield` of `species`; `None` when the foe wasn't
+    /// read). The game adds them before the experience, so a level-up it
+    /// causes computes the stats with them.
+    EffortGained {
+        slot: u8,
+        species: Option<String>,
+        level: Option<u8>,
+        ev_yield: Option<[u8; 6]>,
+        exp: u32,
+    },
+    /// The level-up window's new stats (HP, Atk, Def, Spe, SpA, SpD).
+    LevelUpStatsObserved {
+        slot: u8,
+        stats: [u16; 6],
+    },
+    /// The IVs and nature a member's stat readings allow.
+    IvsEstimated {
+        slot: u8,
+        estimate: crate::IvEstimate,
+    },
     /// The nurse restored the party.
     Healed,
     /// Items gained (+) or spent (−) as told by text or a confirmed action.
@@ -206,7 +227,7 @@ pub enum GameEvent {
     /// A caught Pokémon went to the PC ("transferred to BILL's PC").
     SentToPc {
         box_index: Option<u8>,
-        mon: BoxMon,
+        mon: Box<BoxMon>,
     },
     MonDeposited {
         party_slot: u8,

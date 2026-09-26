@@ -55,6 +55,7 @@ fn hud(frame: u64, name: &str, level: u8, hp: (u16, u16)) -> Observation {
         move_names: Vec::new(),
         opponent_caught: Some(false),
         opponent_shiny: None,
+        level_up_stats: None,
     });
     o
 }
@@ -1098,4 +1099,107 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
     );
     assert!(flag("FLAG_GOT_OAKS_PARCEL").is_some());
     assert!(state.world.paths_run.is_empty());
+}
+
+/// The battle end as the Switch showed it (switch-goal run, frames
+/// 2611960–2621240): the foe faints, the member gains its experience (and
+/// EVs), grows a level, and the level-up window shows the new stats,
+/// which were computed with that defeat's EVs.
+#[test]
+fn a_defeat_gives_its_evs_and_the_level_up_stats_are_a_sample() {
+    let Some(d) = data() else { return };
+    let mon = PartyMon {
+        species: Knowledge::observed("SPECIES_BULBASAUR".into(), 1),
+        nickname: Knowledge::observed("BULBASAUR".into(), 1),
+        level: Knowledge::observed(10, 1),
+        hp: Knowledge::observed((23, 30), 1),
+        training: pokebot_state::Training::obtained(10),
+        ..PartyMon::default()
+    };
+    let state = GameState {
+        party: Knowledge::observed(vec![mon], 1),
+        ..GameState::default()
+    };
+    let window = |f: u64, stats: Option<[u16; 6]>| {
+        let mut o = page(f, "BULBASAUR grew to\nLV. 11!");
+        o.battle = Some(BattleObservation {
+            menu: None,
+            player_name: None,
+            player_level: None,
+            player_hp_numbers: None,
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: None,
+            opponent_hp: None,
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: stats,
+        });
+        o
+    };
+    let frames = (10..30)
+        .map(|f| hud(f, "BULBASAUR", 10, (23, 30)))
+        .chain((30..40).map(|f| page(f, "Wild PIDGEY\nfainted!")))
+        .chain((40..50).map(|f| page(f, "BULBASAUR gained\n23 EXP. Points!")))
+        // The page again (read differently in between): still one award.
+        .chain((50..52).map(|f| page(f, "BULBASAUR gained\n23 EXP. Point?!")))
+        .chain((52..60).map(|f| page(f, "BULBASAUR gained\n23 EXP. Points!")))
+        // The gains page reads as nothing; then the new stats.
+        .chain((60..70).map(|f| window(f, None)))
+        .chain((70..90).map(|f| window(f, Some([32, 17, 17, 18, 22, 22]))))
+        // The next frame solves the new sample.
+        .chain(std::iter::once(bare(90, ScreenState::Overworld)));
+    let (state, _) = run(&mut Sensor::new(d), state, frames);
+    let m = &state.party.value.unwrap()[0];
+    let t = &m.training;
+    assert_eq!(t.evs, [0, 0, 0, 1, 0, 0], "a Pidgey yields one Speed EV");
+    assert_eq!(t.defeats, 1);
+    assert_eq!(t.recent[0].species.as_deref(), Some("SPECIES_PIDGEY"));
+    assert_eq!(t.recent[0].level, Some(3));
+    assert_eq!(m.level.value, Some(11));
+    let sample = t.samples.iter().find(|s| s.level == 11).unwrap();
+    assert_eq!(sample.stats, [32, 17, 17, 18, 22, 22].map(Some));
+    assert_eq!(sample.evs.low, [0, 0, 0, 1, 0, 0]);
+    assert_eq!(sample.evs.high, [0, 0, 0, 1, 0, 0]);
+    assert_eq!(m.details.attack.value, Some(17));
+    // Max HP 30 → 32 raises the current HP by as much.
+    assert_eq!(m.hp.value, Some((25, 32)));
+    let e = t.estimate.as_ref().expect("solved");
+    assert!(e.consistent && e.exact_evs);
+    assert_eq!(e.revision, t.revision);
+    for (lo, hi) in e.ivs {
+        assert!(lo <= hi && hi <= 31);
+    }
+}
+
+/// A Trainer's second Pokémon: the HUD shows a new foe, so a missed
+/// fainting page doesn't give the first one's EVs again; a foe that can't
+/// yield the experience read isn't taken as the one defeated.
+#[test]
+fn a_new_foe_replaces_the_defeated_one() {
+    let Some(d) = data() else { return };
+    let mut state = with_party();
+    state.party.value.as_mut().unwrap()[0].training = pokebot_state::Training::obtained(11);
+    let mut geodude = hud(1, "BULBASAUR", 11, (30, 30));
+    let b = geodude.battle.as_mut().unwrap();
+    b.opponent_name = Some("GEODUDE".into());
+    b.opponent_level = Some(10);
+    let frames = (10..30)
+        .map(|f| hud(f, "BULBASAUR", 11, (30, 30)))
+        .chain((30..40).map(|f| page(f, "Foe PIDGEY\nfainted!")))
+        .chain((40..50).map(|f| page(f, "BULBASAUR gained\n34 EXP. Points!")))
+        .chain((50..70).map(|f| Observation {
+            frame_id: f,
+            ..geodude.clone()
+        }))
+        // Its fainting page went unread; 999 is more than a Lv 10 GEODUDE gives.
+        .chain((70..80).map(|f| page(f, "BULBASAUR gained\n999 EXP. Points!")));
+    let (state, _) = run(&mut Sensor::new(d), state, frames);
+    let t = &state.party.value.unwrap()[0].training;
+    assert_eq!(t.defeats, 2);
+    assert_eq!(t.recent[1].species, None);
+    assert_eq!(t.evs, [0, 0, 0, 1, 0, 0]);
+    assert_eq!(t.unseen, [3; 6]);
 }

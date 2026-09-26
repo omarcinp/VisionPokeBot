@@ -41,6 +41,9 @@ pub struct PartyMon {
     /// Last 512 changes read on the summary pages; saved with the member.
     #[serde(default)]
     pub history: Vec<PartyDetailChange>,
+    /// EVs counted from its battles, stat readings and the IVs they give.
+    #[serde(default)]
+    pub training: crate::Training,
 }
 
 /// Fields visible on the Info and Skills pages. Missing OCR is not a zero.
@@ -57,6 +60,8 @@ pub struct SummaryDetails {
     pub exp_points: Option<u32>,
     pub next_level: Option<u32>,
     pub ability: Option<String>,
+    /// From the Info page's TRAINER MEMO ("LAX nature.").
+    pub nature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -72,6 +77,7 @@ pub struct PokemonDetails {
     pub exp_points: Knowledge<u32>,
     pub next_level: Knowledge<u32>,
     pub ability: Knowledge<String>,
+    pub nature: Knowledge<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +102,7 @@ impl PokemonDetails {
             exp_points: self.exp_points.value,
             next_level: self.next_level.value,
             ability: self.ability.value.clone(),
+            nature: self.nature.value.clone(),
         }
     }
 }
@@ -113,6 +120,7 @@ impl SummaryDetails {
             ("exp_points", self.exp_points.map(|v| v.to_string())),
             ("next_level", self.next_level.map(|v| v.to_string())),
             ("ability", self.ability.clone()),
+            ("nature", self.nature.clone()),
         ]
     }
 }
@@ -145,6 +153,7 @@ impl PartyMon {
         observe!(exp_points);
         observe!(next_level);
         observe!(ability);
+        observe!(nature);
         if self.history.len() > 512 {
             self.history.drain(..self.history.len() - 512);
         }

@@ -23,6 +23,7 @@ mod reduce_knowledge;
 mod reducer;
 mod screen;
 mod state;
+mod training;
 mod view;
 pub use observation::{PartyMenuObservation, SummaryObservation, SummaryPage};
 
@@ -45,6 +46,7 @@ pub use party::{MoveSlot, PartyDetailChange, PartyMon, PokemonDetails, Status, S
 pub use priors::{PriorRule, Priors};
 pub use reducer::{DefaultReducer, StateReducer};
 pub use screen::ScreenState;
+pub use training::{Defeat, EvRange, IvEstimate, StatSample, Training};
 pub use view::{MenuView, OpponentView, ViewState, VisibleNpc};
 
 /// Where the rule files (`inference.json`, `priors.json`) live by default,

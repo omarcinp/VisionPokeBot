@@ -1780,6 +1780,7 @@ mod tests {
                 BattleMenu::Command { .. } => Some(pokebot_state::ShinyReading::Normal),
                 BattleMenu::Moves { .. } => None,
             },
+            level_up_stats: None,
         });
         o
     }

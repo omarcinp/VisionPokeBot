@@ -202,6 +202,8 @@ mod tests {
                 pp_used: [("MOVE_VINE_WHIP".to_owned(), 5)].into_iter().collect(),
                 read_stats: None,
                 ability: None,
+                ivs: None,
+                stats_evs: [0; 6],
             }],
         };
         let k = legacy_knowledge(&d, &party);

@@ -152,6 +152,29 @@ pub fn mon_facts(page: &str) -> Vec<MonFact> {
     out
 }
 
+/// "BULBASAUR gained 66 EXP. Points!" (or "gained a boosted 99 EXP.
+/// Points!" for a traded Pokémon) → (`BULBASAUR`, 66). Only the whole
+/// page: each one is one defeated foe's EVs for the Pokémon it names.
+pub fn exp_gained(page: &str) -> Option<(String, u32)> {
+    let at = page.find(" gained ")?;
+    let name = page[..at].rsplit(' ').next()?.to_owned();
+    let rest = &page[at + " gained ".len()..];
+    let rest = rest.strip_prefix("a boosted ").unwrap_or(rest);
+    let (digits, rest) = rest.split_once(' ')?;
+    let exp = digits.replace(',', "").parse().ok()?;
+    (rest.starts_with("EXP. Points!") && !name.is_empty() && !name.contains('?'))
+        .then_some((name, exp))
+}
+
+/// "Wild PIDGEY fainted!" / "Foe GEODUDE fainted!" → the foe's name.
+pub fn foe_fainted(page: &str) -> Option<String> {
+    let at = page.find(" fainted!")?;
+    let mut words = page[..at].rsplit(' ');
+    let name = words.next()?;
+    (matches!(words.next(), Some("Wild" | "Foe")) && !name.is_empty() && !name.contains('?'))
+        .then(|| name.to_owned())
+}
+
 /// "RED got ¥1,200 for winning!" → 1200.
 fn money_won(page: &str) -> Option<u32> {
     let rest = &page[page.find(" got ¥")? + " got ¥".len()..];
@@ -383,6 +406,25 @@ mod tests {
             }]
         );
         assert!(mon_facts("Foe PIDGEY fainted!").is_empty());
+        assert_eq!(
+            foe_fainted("Foe PIDGEY fainted!").as_deref(),
+            Some("PIDGEY")
+        );
+        assert_eq!(
+            foe_fainted("Wild RATTATA fainted!").as_deref(),
+            Some("RATTATA")
+        );
+        assert_eq!(foe_fainted("BULBASAUR fainted!"), None);
+        assert_eq!(
+            exp_gained("BULBASAUR gained 66 EXP. Points!"),
+            Some(("BULBASAUR".into(), 66))
+        );
+        assert_eq!(
+            exp_gained("ABRA gained a boosted 1,203 EXP. Points!"),
+            Some(("ABRA".into(), 1203))
+        );
+        // Half-printed: not yet the page.
+        assert_eq!(exp_gained("BULBASAUR gained 67 EXP."), None);
         assert!(mon_facts("Wild PIDGEY fainted!").is_empty());
     }
 }

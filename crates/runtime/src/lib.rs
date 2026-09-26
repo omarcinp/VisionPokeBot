@@ -764,6 +764,36 @@ fn summarize(event: &GameEvent) -> String {
             format!("Party {slot} move {move_slot} has no PP")
         }
         GameEvent::Evolved { slot, species } => format!("Party {slot} evolved into {species}"),
+        GameEvent::EffortGained {
+            slot,
+            species,
+            level,
+            ev_yield,
+            exp,
+        } => format!(
+            "Party {slot} gained {exp} exp and EVs {} for {} Lv{}",
+            ev_yield.map_or("? (foe unread)".into(), |y| format!("{y:?}")),
+            species.as_deref().unwrap_or("?"),
+            level.map_or("?".into(), |l| l.to_string())
+        ),
+        GameEvent::LevelUpStatsObserved { slot, stats } => {
+            format!("Party {slot} level-up stats {stats:?} (HP/Atk/Def/Spe/SpA/SpD)")
+        }
+        GameEvent::IvsEstimated { slot, estimate } => format!(
+            "Party {slot} IVs {:?} natures {} ({}{})",
+            estimate.ivs,
+            estimate.natures.join("/"),
+            if estimate.exact_evs {
+                "EVs counted"
+            } else {
+                "EVs partly unknown"
+            },
+            if estimate.consistent {
+                ""
+            } else {
+                ", readings disagree"
+            }
+        ),
         GameEvent::Healed => "Healed (party restored)".into(),
         GameEvent::ItemsChanged {
             item,

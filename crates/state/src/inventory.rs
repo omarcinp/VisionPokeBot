@@ -66,6 +66,10 @@ pub struct BoxMon {
     pub species: Knowledge<String>,
     pub level: Knowledge<u8>,
     pub nickname: Knowledge<String>,
+    /// EVs and stat readings, kept from the party (unknown for a
+    /// Pokémon only ever seen in the box).
+    #[serde(default)]
+    pub training: crate::Training,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

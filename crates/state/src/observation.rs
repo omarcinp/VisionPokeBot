@@ -288,6 +288,10 @@ pub struct BattleObservation {
     /// species and the sprite is fully on screen (the HP bar shows).
     #[serde(default)]
     pub opponent_shiny: Option<ShinyReading>,
+    /// The level-up window's new stats (HP, Atk, Def, Spe, SpA, SpD), read
+    /// on its second page only (the first shows the gains).
+    #[serde(default)]
+    pub level_up_stats: Option<[u16; 6]>,
 }
 
 /// Whether a sprite's colours match the species' normal or shiny palette.

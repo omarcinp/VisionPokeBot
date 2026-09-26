@@ -2769,6 +2769,7 @@ mod tests {
             move_names: Vec::new(),
             opponent_caught: Some(false),
             opponent_shiny: menu.map(|_| pokebot_state::ShinyReading::Normal),
+            level_up_stats: None,
         });
         if !text.is_empty() {
             o.dialogue = Some(DialogueObservation {

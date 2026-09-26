@@ -4,8 +4,11 @@
 use std::collections::BTreeMap;
 
 use pokebot_gamedata::mechanics::Stats;
+use pokebot_gamedata::training::{nature_named, stat};
 use pokebot_gamedata::GameData;
-use pokebot_state::{BattleMenu, BattleObservation, GameEvent, GameState, MoveSlot, PartyMon};
+use pokebot_state::{
+    BattleMenu, BattleObservation, GameEvent, GameState, IvEstimate, MoveSlot, PartyMon,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +32,13 @@ pub struct Member {
     /// Ability as the summary prints it (`OVERGROW`).
     #[serde(default)]
     pub ability: Option<String>,
+    /// IVs and nature its stat readings allow.
+    #[serde(default)]
+    pub ivs: Option<IvEstimate>,
+    /// EVs counted when its stats were last computed (HP, Atk, Def, Spe,
+    /// SpA, SpD; at least these).
+    #[serde(default)]
+    pub stats_evs: [u16; 6],
 }
 
 impl Member {
@@ -43,15 +53,22 @@ impl Member {
             pp_used: BTreeMap::new(),
             read_stats: None,
             ability: None,
+            ivs: None,
+            stats_evs: [0; 6],
         }
     }
 
     /// Battle stats (HP, Atk, Def, Spe, SpA, SpD) from the summary's
     /// reading and the maximum HP, when all are known and plausible at the
     /// current level: each within what IVs 0–31, any EVs and a nature
-    /// allow. A reading from before a level-up falls out of the range and
-    /// counts as unknown.
+    /// allow. A reading from before a level-up falls out of the range; the
+    /// stats are then computed from the IV estimate, if there is one.
     pub fn stats(&self, data: &GameData) -> Option<Stats> {
+        self.read_stats(data).or_else(|| self.estimated_stats(data))
+    }
+
+    /// The summary's reading, when plausible at the current level.
+    fn read_stats(&self, data: &GameData) -> Option<Stats> {
         let read = self.read_stats?;
         let (_, max_hp) = self.hp?;
         let base = data.species(&self.species)?.base;
@@ -67,6 +84,33 @@ impl Member {
             let [a, d, s, sa, sd] = read.map(u32::from);
             Stats([u32::from(max_hp), a, d, s, sa, sd])
         })
+    }
+
+    /// Stats at the current level from the IV estimate (each IV in the
+    /// middle of its range), the EVs counted and the nature (neutral while
+    /// several fit), when no reading is current. The HP read wins.
+    fn estimated_stats(&self, data: &GameData) -> Option<Stats> {
+        let e = self.ivs.as_ref().filter(|e| e.consistent)?;
+        let base = data.species(&self.species)?.base;
+        let nature = match e.natures.as_slice() {
+            [one] => nature_named(one)?,
+            _ => 0,
+        };
+        let mut s: [u32; 6] = std::array::from_fn(|i| {
+            let (lo, hi) = e.ivs[i];
+            u32::from(stat(
+                base[i],
+                i,
+                self.level,
+                (lo + hi) / 2,
+                self.stats_evs[i],
+                nature,
+            ))
+        });
+        if let Some((_, max)) = self.hp {
+            s[0] = u32::from(max);
+        }
+        Some(Stats(s))
     }
 
     /// Name as the game prints it (`SPECIES_BULBASAUR` → `BULBASAUR`).
@@ -156,6 +200,8 @@ impl Party {
                         ])
                     })(),
                     ability: m.details.ability.value.clone(),
+                    ivs: m.training.estimate.clone(),
+                    stats_evs: m.training.stats_evs.low,
                 })
             })
             .collect();
@@ -336,6 +382,7 @@ mod tests {
             ],
             opponent_caught: None,
             opponent_shiny: None,
+            level_up_stats: None,
         }
     }
 
@@ -355,6 +402,31 @@ mod tests {
             ]
         );
         assert_eq!(lead.pp_left(&d, "MOVE_TACKLE"), 35);
+    }
+
+    #[test]
+    fn a_stale_reading_gives_way_to_the_iv_estimate() {
+        let Some(d) = data() else { return };
+        let mut m = Member::new(&d, "SPECIES_BULBASAUR", 20);
+        m.hp = Some((50, 52));
+        m.read_stats = Some([9, 9, 9, 9, 9]);
+        assert_eq!(m.stats(&d), None);
+        m.ivs = Some(IvEstimate {
+            revision: 1,
+            nature_read: Some("MODEST".into()),
+            natures: vec!["MODEST".into()],
+            ivs: [(20, 22), (0, 2), (31, 31), (10, 10), (30, 31), (5, 9)],
+            consistent: true,
+            exact_evs: true,
+        });
+        m.stats_evs = [0, 0, 0, 12, 0, 0];
+        // Bulbasaur 45/49/49/45/65/65 at Lv 20, MODEST (+SpA −Atk).
+        let s = m.stats(&d).unwrap();
+        assert_eq!(s.hp(), 52);
+        assert_eq!(s.attack(), ((98 + 1) * 20 / 100 + 5) * 90 / 100);
+        assert_eq!(s.defense(), (98 + 31) * 20 / 100 + 5);
+        assert_eq!(s.speed(), (90 + 10 + 3) * 20 / 100 + 5);
+        assert_eq!(s.sp_attack(), ((130 + 30) * 20 / 100 + 5) * 110 / 100);
     }
 
     #[test]

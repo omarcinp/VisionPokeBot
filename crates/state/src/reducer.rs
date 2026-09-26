@@ -118,6 +118,9 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::MoveReplaced { .. }
                 | GameEvent::MoveOutOfPp { .. }
                 | GameEvent::Evolved { .. }
+                | GameEvent::EffortGained { .. }
+                | GameEvent::LevelUpStatsObserved { .. }
+                | GameEvent::IvsEstimated { .. }
                 | GameEvent::Healed
                 | GameEvent::ItemsChanged { .. }
                 | GameEvent::PocketObserved { .. }

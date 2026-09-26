@@ -625,8 +625,32 @@ const DETAIL_FIELDS = [
   ['trainer_id', 'IDNo.'], ['original_trainer', 'OT'],
   ['attack', 'Attack'], ['defense', 'Defense'], ['sp_attack', 'Sp. Atk'],
   ['sp_defense', 'Sp. Def'], ['speed', 'Speed'], ['exp_points', 'Exp. Points'],
-  ['next_level', 'Next level'], ['ability', 'Ability'],
+  ['next_level', 'Next level'], ['ability', 'Ability'], ['nature', 'Nature'],
 ];
+const STAT_NAMES = ['HP', 'Attack', 'Defense', 'Speed', 'Sp. Atk', 'Sp. Def'];
+// EVs counted from the defeats seen (+ up to the unseen ones) and the IV
+// range the stat readings allow, per stat.
+function renderTraining(t) {
+  if (!t) return '';
+  const e = t.estimate, unseen = t.unseen || [];
+  const rows = STAT_NAMES.map((name, i) => {
+    const ev = t.evs?.[i] ?? 0, extra = unseen[i] ?? 0;
+    const evText = extra >= 255 ? `≥ ${ev}` : extra ? `${ev}–${Math.min(255, ev + extra)}` : `${ev}`;
+    const iv = e?.ivs?.[i];
+    const ivText = !iv ? '—' : iv[0] === iv[1] ? `${iv[0]}` : `${iv[0]}–${iv[1]}`;
+    return `<tr><td>${name}</td><td>${esc(evText)}</td><td>${esc(ivText)}</td></tr>`;
+  }).join('');
+  const natures = e?.natures?.length ? (e.natures.length > 4 ? `${e.natures.length} possible` : e.natures.join(' / ')) : '—';
+  const notes = [
+    `${t.defeats ?? 0} defeats counted`,
+    `${(t.samples || []).length} stat readings`,
+    unseen.some(u => u >= 255) ? 'history before tracking unknown' : unseen.some(u => u) ? 'some defeats unread' : 'every EV counted',
+    e && !e.consistent ? 'readings disagree with the counted EVs' : null,
+  ].filter(Boolean).join(' · ');
+  return `<details class="mon-history"><summary>EVs &amp; IVs · nature ${esc(natures)}</summary>
+    <table><thead><tr><th>Stat</th><th>EVs</th><th>IV</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="mon-note">${esc(notes)}</p></details>`;
+}
 function renderMonDetails(m) {
   const facts = m.details || {}, history = m.history || [];
   const labels = Object.fromEntries(DETAIL_FIELDS);
@@ -635,7 +659,7 @@ function renderMonDetails(m) {
   return `<div class="mon-details"><dl class="mon-facts">${DETAIL_FIELDS.map(([field, label]) => `<div><dt>${label}</dt><dd>${esc(val(facts[field]) ?? '—')} ${dot(facts[field])}</dd></div>`).join('')}</dl>
     <details class="mon-history" data-member="${key}"><summary>Stat history · ${history.length} changes</summary>
     ${rows ? `<div class="history-scroll"><table><thead><tr><th>Field</th><th>Change</th><th>Lv</th><th>Frame</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="mon-note">Open the Pokémon’s Info and Skills pages to start recording its details.</p>'}
-    <p class="mon-note">Last 512 observed changes, retained with the saved checkpoint. “Next level” is Exp. Points remaining.</p></details></div>`;
+    <p class="mon-note">Last 512 observed changes, retained with the saved checkpoint. “Next level” is Exp. Points remaining.</p></details>${renderTraining(m.training)}</div>`;
 }
 
 function renderMon(m, i) {

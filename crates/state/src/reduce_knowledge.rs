@@ -17,13 +17,25 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 .map(|mon| {
                     let mut mon = mon.clone();
                     let matches: Vec<_> = old.iter().filter(|m| m.matches_member(&mon)).collect();
+                    let reading = mon.details.reading();
                     if matches.len() == 1
                         && members.iter().filter(|m| m.matches_member(&mon)).count() == 1
                     {
-                        let reading = mon.details.reading();
-                        mon.details = matches[0].details.clone();
-                        mon.history = matches[0].history.clone();
+                        let old = matches[0];
+                        mon.details = old.details.clone();
+                        mon.history = old.history.clone();
+                        mon.training = old.training.clone();
                         mon.observe_details(&reading, frame);
+                        if let Some(level) = mon.level.value {
+                            mon.training.level_seen(level);
+                        }
+                        if mon.species.value != old.species.value {
+                            mon.training.recalculated();
+                        }
+                    }
+                    observe_summary_stats(&mut mon, &reading, frame);
+                    if let Some((_, max)) = mon.hp.value {
+                        observe_stat(&mut mon, 0, max, frame);
                     }
                     mon
                 })
@@ -31,7 +43,9 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             state.party = Knowledge::observed(roster, frame);
         }
         GameEvent::PartyDetailsObserved { slot, details } => {
-            member(state, *slot, KnowledgeSource::Observed, frame).observe_details(details, frame);
+            let m = member(state, *slot, KnowledgeSource::Observed, frame);
+            m.observe_details(details, frame);
+            observe_summary_stats(m, details, frame);
         }
         GameEvent::BadgeCountObserved { count } => {
             crate::badges::observe_count(state, *count, frame);
@@ -68,10 +82,12 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 m.nickname = Knowledge::observed(v.clone(), frame);
             }
             if let Some(v) = level {
+                m.training.level_seen(*v);
                 m.level = Knowledge::observed(*v, frame);
             }
             if let Some(v) = hp {
                 m.hp = Knowledge::observed(*v, frame);
+                observe_stat(m, 0, v.1, frame);
             }
             if let Some(v) = status {
                 m.status = Knowledge::observed(*v, frame);
@@ -142,8 +158,52 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             }
         }
         GameEvent::Evolved { slot, species } => {
-            member(state, *slot, KnowledgeSource::Observed, frame).species =
-                Knowledge::observed(species.clone(), frame);
+            let m = member(state, *slot, KnowledgeSource::Observed, frame);
+            if m.species.value.as_ref() != Some(species) {
+                m.training.recalculated();
+            }
+            m.species = Knowledge::observed(species.clone(), frame);
+        }
+        GameEvent::EffortGained {
+            slot,
+            species,
+            level,
+            ev_yield,
+            exp,
+        } => {
+            let m = member(state, *slot, KnowledgeSource::Observed, frame);
+            let macho_brace =
+                m.held_item.value.as_ref().and_then(Option::as_deref) == Some("ITEM_MACHO_BRACE");
+            m.training
+                .award(frame, species.clone(), *level, *ev_yield, *exp, macho_brace);
+        }
+        GameEvent::LevelUpStatsObserved { slot, stats } => {
+            let m = member(state, *slot, KnowledgeSource::Observed, frame);
+            for (i, v) in stats.iter().enumerate() {
+                observe_stat(m, i, *v, frame);
+            }
+            let [_, attack, defense, speed, sp_attack, sp_defense] = stats.map(Some);
+            m.observe_details(
+                &crate::SummaryDetails {
+                    attack,
+                    defense,
+                    speed,
+                    sp_attack,
+                    sp_defense,
+                    ..Default::default()
+                },
+                frame,
+            );
+            // The game adds the maximum HP's gain to the current HP.
+            if let Some((cur, max)) = m.hp.value {
+                let cur = (cur + stats[0].saturating_sub(max)).min(stats[0]);
+                m.hp = Knowledge::tracked((cur, stats[0]), m.hp.last_verified_frame);
+            }
+        }
+        GameEvent::IvsEstimated { slot, estimate } => {
+            member(state, *slot, KnowledgeSource::Derived, frame)
+                .training
+                .estimate = Some(estimate.clone());
         }
         GameEvent::Healed => {
             for m in state.party.value.iter_mut().flatten() {
@@ -211,7 +271,20 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         }
         GameEvent::BoxObserved { box_index, mons } => {
             if let Some(b) = state.pc.boxes.get_mut(usize::from(*box_index)) {
-                *b = Knowledge::observed(mons.clone(), frame);
+                // The same Pokémon in the same place keeps what was known.
+                let mut mons = mons.clone();
+                for m in &mut mons {
+                    let same = b.value.iter().flatten().find(|o| {
+                        o.slot == m.slot
+                            && o.species.value == m.species.value
+                            && o.level.value == m.level.value
+                            && o.nickname.value == m.nickname.value
+                    });
+                    if let Some(old) = same {
+                        m.training = old.training.clone();
+                    }
+                }
+                *b = Knowledge::observed(mons, frame);
             }
         }
         GameEvent::PcItemsObserved { items } => {
@@ -224,7 +297,7 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             if let Some(b) = state.pc.boxes.get_mut(usize::from(*i)) {
                 if let Some(list) = &b.value {
                     let mut list = list.clone();
-                    list.push(mon.clone());
+                    list.push((**mon).clone());
                     *b = Knowledge::tracked(list, b.last_verified_frame);
                 }
             }
@@ -254,6 +327,7 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                         species: mon.species,
                         level: mon.level,
                         nickname: mon.nickname,
+                        training: mon.training,
                     });
                     *b = Knowledge::tracked(list, b.last_verified_frame);
                 }
@@ -280,6 +354,10 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 m.species = mon.species;
                 m.level = mon.level;
                 m.nickname = mon.nickname;
+                // Withdrawing computes the stats from the EVs it has.
+                m.training = mon.training;
+                m.training.level_evs = m.training.evs;
+                m.training.recalculated();
             }
         }
         GameEvent::SpeciesSeen { species } => {
@@ -454,6 +532,38 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
 
 /// The party member in `slot`, creating unknown members up to it. The party
 /// list's provenance becomes `source` when the list itself was unknown.
+/// The level the member's stats were computed at: the highest seen.
+fn stats_level(m: &PartyMon) -> Option<u8> {
+    m.training.level.or(m.level.value)
+}
+
+/// A stat read at the member's current level (index in the game's order).
+fn observe_stat(m: &mut PartyMon, index: usize, value: u16, frame: u64) {
+    if let (Some(species), Some(level)) = (m.species.value.clone(), stats_level(m)) {
+        let mut stats = [None; 6];
+        stats[index] = Some(value);
+        m.training.observe_stats(frame, &species, level, stats);
+    }
+}
+
+/// The Skills page's stats and experience, for the member's training.
+fn observe_summary_stats(m: &mut PartyMon, d: &crate::SummaryDetails, frame: u64) {
+    if let (Some(species), Some(level)) = (m.species.value.clone(), stats_level(m)) {
+        let stats = [
+            None,
+            d.attack,
+            d.defense,
+            d.speed,
+            d.sp_attack,
+            d.sp_defense,
+        ];
+        m.training.observe_stats(frame, &species, level, stats);
+    }
+    if let Some(exp) = d.exp_points {
+        m.training.observe_exp(exp);
+    }
+}
+
 fn member(state: &mut GameState, slot: u8, source: KnowledgeSource, frame: u64) -> &mut PartyMon {
     if state.party.value.is_none() {
         state.party = Knowledge {
@@ -687,6 +797,7 @@ mod tests {
             species: Knowledge::observed(species.into(), 1),
             level: Knowledge::observed(5, 1),
             nickname: Knowledge::unknown(),
+            training: Default::default(),
         }
     }
 
@@ -714,7 +825,7 @@ mod tests {
             },
             GameEvent::SentToPc {
                 box_index: Some(0),
-                mon: boxed(0, "SPECIES_RATTATA"),
+                mon: Box::new(boxed(0, "SPECIES_RATTATA")),
             },
             GameEvent::SpeciesCaught {
                 species: "SPECIES_RATTATA".into(),

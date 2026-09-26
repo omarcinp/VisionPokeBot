@@ -55,6 +55,12 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
         details.trainer_id =
             (id.len() == 5 && id.bytes().all(|c| c.is_ascii_digit()) && id.parse::<u16>().is_ok())
                 .then_some(id);
+        // TRAINER MEMO: "LAX nature." then where it was met.
+        let memo = read(image, font, 4, 114, 232, 14);
+        details.nature = memo
+            .strip_suffix(" nature.")
+            .filter(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_uppercase()))
+            .map(str::to_owned);
     } else if page == SummaryPage::Skills {
         let number = |x: u32, y: u32, w: u32| -> Option<u32> {
             let text = font
@@ -391,6 +397,13 @@ mod tests {
         assert_eq!(s.level, Some(18));
         assert_eq!(s.details.trainer_id.as_deref(), Some("62540"));
         assert_eq!(s.details.original_trainer.as_deref(), Some("RED"));
+        assert_eq!(s.details.nature.as_deref(), Some("LAX"));
+        // Switch goal run, frame 2594860: the memo on the capture card.
+        if let Ok(info) = load("switch-summary-info-hasty.png") {
+            let s = summary(&info, &font).unwrap();
+            assert_eq!(s.level, Some(10));
+            assert_eq!(s.details.nature.as_deref(), Some("HASTY"));
+        }
         assert_eq!(s.status, Some(Status::Healthy));
         let s = summary(&load("emu-summary-skills.png").unwrap(), &font).unwrap();
         assert_eq!(s.hp, Some((54, 54)));

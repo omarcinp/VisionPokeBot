@@ -144,6 +144,32 @@ pub fn is_level_up_panel(image: &RgbImage) -> bool {
         && share(image, Region::new(150, 62, 2, 90), WHITE, 1) >= 800
 }
 
+/// The level-up window's second page, the new MAX. HP, ATTACK, DEFENSE,
+/// SP. ATK, SP. DEF and SPEED, in the game's stat order (HP, Atk, Def,
+/// Spe, SpA, SpD). Its first page shows the gains ("+ 2"), whose `+` is
+/// drawn at x 209..=213, left of where a three-digit total starts (x 214):
+/// ink there is the gains page and reads as nothing. Rows are 15 pixels
+/// apart from y 64, digits right-aligned to x 232 (switch-goal frames
+/// 2621200 / 2621240).
+pub fn level_up_stats(image: &RgbImage, font: &crate::text::Font) -> Option<[u16; 6]> {
+    let dark = |x: u32, y: u32| image.pixel(x, y).iter().all(|c| *c < 128);
+    let mut values = [0u16; 6];
+    for (i, value) in values.iter_mut().enumerate() {
+        let y = 64 + 15 * i as u32;
+        if (y..y + 13).any(|y| (204..=213).any(|x| dark(x, y))) {
+            return None;
+        }
+        let text = font.read_dark(image, Region::new(214, y, 19, 13)).join("");
+        if text.is_empty() || !text.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        *value = text.parse().ok().filter(|n| (1..=999).contains(n))?;
+    }
+    // The window lists Sp. Atk and Sp. Def before Speed.
+    let [hp, atk, def, spa, spd, spe] = values;
+    Some([hp, atk, def, spe, spa, spd])
+}
+
 pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
     let menu = find_cursor(image, PANEL_TOP + 4..image.height()).map(|(x, y)| {
         let row = u8::from(y >= 132);
@@ -186,6 +212,7 @@ pub fn detect(image: &RgbImage) -> Option<BattleObservation> {
         move_names: Vec::new(),
         opponent_caught,
         opponent_shiny: None,
+        level_up_stats: None,
     })
 }
 

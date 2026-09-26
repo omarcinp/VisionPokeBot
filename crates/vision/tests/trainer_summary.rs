@@ -50,7 +50,17 @@ fn visible_details_and_badges_reach_the_state_and_checkpoint() {
     assert_eq!(mon.details.exp_points.value, Some(3878));
     assert_eq!(mon.details.next_level.value, Some(697));
     assert_eq!(mon.details.ability.value.as_deref(), Some("OVERGROW"));
-    assert_eq!(mon.history.len(), 10);
+    assert_eq!(mon.details.nature.value.as_deref(), Some("LAX"));
+    assert_eq!(mon.history.len(), 11);
+    // Its EVs are unknown (not seen obtained), so the Skills page bounds
+    // the IVs from above; the nature is the one read.
+    let estimate = mon
+        .training
+        .estimate
+        .as_ref()
+        .expect("solved from the Skills page");
+    assert_eq!(estimate.natures, vec!["LAX".to_owned()]);
+    assert!(estimate.consistent && !estimate.exact_evs);
     assert_eq!(
         state.progression.badges.value,
         Some(vec!["BOULDERBADGE".into()])

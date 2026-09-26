@@ -847,9 +847,12 @@ fn story(
                         party: Party::default(),
                     };
                     if runtime.state().party.value.is_none() {
+                        let mut mon = party::starter_mon(&data, progress.starter.species(), 5);
+                        // Assumed, not seen received: its battles are unknown.
+                        mon.training = Default::default();
                         runtime.emit(GameEvent::PartyMonDerived {
                             slot: 0,
-                            mon: Box::new(party::starter_mon(&data, progress.starter.species(), 5)),
+                            mon: Box::new(mon),
                         })?;
                     }
                     progress

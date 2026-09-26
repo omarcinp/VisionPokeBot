@@ -478,6 +478,7 @@ mod tests {
                 move_names: Vec::new(),
                 opponent_caught: Some(true),
                 opponent_shiny: None,
+                level_up_stats: None,
             });
             o
         };
@@ -604,6 +605,7 @@ mod tests {
             move_names: Vec::new(),
             opponent_caught: None,
             opponent_shiny: None,
+            level_up_stats: None,
         });
         let mut events = Vec::new();
         match decide(&o, &policy, &mut memory, &party, &data, &mut events) {

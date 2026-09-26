@@ -10,12 +10,14 @@
 //!
 //! | Screen | Facts |
 //! |---|---|
-//! | message / battle text | money won, items found/received/obtained, balls thrown, badges, heal, catches (and where the catch went: party or PC box), level-ups, evolutions, fainting, status |
+//! | message / battle text | money won, items found/received/obtained, balls thrown, badges, heal, catches (and where the catch went: party or PC box), level-ups, evolutions, fainting, status, each defeated foe's EVs for the members that gained experience |
+//! | level-up window | the member's new stats |
 //! | battle HUD | our active member's level and HP (and evolution), the opponent species seen / already caught |
 //! | battle move menu | the active member's moves and the PP of the move under the ▶ |
 //! | KNOWN MOVES list | the moves of the member the page before named ("X is trying to learn Y.") |
 //! | party menu | party size; each panel's nickname, level, HP and status |
-//! | summary pages | species, nickname, level, HP, status, held item, moves and PP |
+//! | summary pages | species, nickname, level, HP, status, held item, moves and PP, stats, experience, nature |
+//! | (the state) | each member's IVs and nature, from its stat readings and EVs |
 //! | bag (field and battle) | a pocket's items, whole or the rows on screen |
 //! | mart | money |
 //! | Trainer Card | badges, Pokédex caught count, money |
@@ -28,6 +30,7 @@
 mod field;
 pub mod names;
 pub mod text;
+pub mod training;
 
 use std::sync::Arc;
 
@@ -161,6 +164,16 @@ pub struct Sensor {
     party_screens: bool,
     /// The opponent's level as last confirmed on its HUD.
     opponent_level: Option<u8>,
+    /// The foe on the opponent HUD (species, level), and the one whose
+    /// fainting page was read last: the EVs of the "gained EXP" pages.
+    foe: Option<(String, Option<u8>)>,
+    defeated: Option<(String, Option<u8>)>,
+    /// Members already given the EVs of the foe that fainted last.
+    awarded: Vec<u8>,
+    /// The member the last "X grew to LV. N!" page named: the level-up
+    /// window is its.
+    grew: Option<u8>,
+    level_up: Confirm<[u16; 6]>,
     /// A catch whose destination is settled when the battle is over.
     catch: Option<Catch>,
 }
@@ -203,6 +216,11 @@ impl Sensor {
             party_selected: None,
             party_screens: false,
             opponent_level: None,
+            foe: None,
+            defeated: None,
+            awarded: Vec::new(),
+            grew: None,
+            level_up: Confirm::default(),
             catch: None,
         }
     }
@@ -277,6 +295,7 @@ impl Sensor {
                 events.extend(contradicted_paths(world, state, map, &absent));
             }
         }
+        events.extend(training::estimates(&self.data, state));
         let view = self.view_of(o, state);
         if let Some(view) = self.view.update(f, Some(view), VIEW_FRAMES) {
             if view != state.view {
@@ -399,10 +418,12 @@ impl Sensor {
         if let Some((name, _)) = text::trying_to_learn(&page) {
             self.learning = names::member(state, &self.data, &name).map(|m| m.slot);
         }
+        self.effort(&page, state, events);
         for fact in text::mon_facts(&page) {
             match fact {
                 text::MonFact::GrewTo { name, level } => {
                     if let Some(m) = names::member(state, &self.data, &name) {
+                        self.grew = Some(m.slot);
                         events.push(party_observed(m.slot, |e| e.level = Some(level)));
                     }
                 }
@@ -431,6 +452,59 @@ impl Sensor {
                 events.push(party_observed(m.slot, |e| e.status = Some(status)));
             }
         }
+    }
+
+    /// A foe's fainting page, then one "X gained N EXP. Points!" page per
+    /// member that gained experience for it: each gets the foe's EVs
+    /// (the game gives them with the message). The foe is the one the
+    /// fainting page named, else the one on the opponent HUD; a foe that
+    /// can't yield that much experience wasn't it.
+    fn effort(&mut self, page: &str, state: &GameState, events: &mut Vec<GameEvent>) {
+        if let Some(name) = text::foe_fainted(page) {
+            self.defeated = self.data.species_named(&name).map(|species| {
+                let level = self
+                    .foe
+                    .as_ref()
+                    .filter(|(s, _)| s == species)
+                    .and_then(|(_, l)| *l);
+                (species.to_owned(), level)
+            });
+            self.awarded.clear();
+        }
+        let Some((name, exp)) = text::exp_gained(page) else {
+            return;
+        };
+        let Some(m) = names::member(state, &self.data, &name) else {
+            return;
+        };
+        if self.awarded.contains(&m.slot) {
+            return;
+        }
+        self.awarded.push(m.slot);
+        let foe = self
+            .defeated
+            .clone()
+            .or_else(|| self.foe.clone())
+            .filter(|(s, level)| {
+                // Base yield × level / 7, ×1.5 each for a trainer's Pokémon,
+                // a Lucky Egg and a traded Pokémon.
+                let most = self.data.species(s).map_or(0, |d| {
+                    u32::from(d.exp_yield) * u32::from(level.unwrap_or(100)) / 7 * 27 / 8 + 1
+                });
+                exp <= most
+            });
+        let ev_yield = foe
+            .as_ref()
+            .and_then(|(s, _)| self.data.species(s))
+            .map(|d| d.ev_yield);
+        let (species, level) = foe.map_or((None, None), |(s, l)| (Some(s), l));
+        events.push(GameEvent::EffortGained {
+            slot: m.slot,
+            species,
+            level,
+            ev_yield,
+            exp,
+        });
     }
 
     /// The HUDs and the move menu.
@@ -488,10 +562,30 @@ impl Sensor {
             self.opponent_level = level.or(self.opponent_level);
             if let Some(species) = self.data.species_named(&name) {
                 let species = species.to_owned();
+                // A new foe: the last one's awards are over.
+                let foe = Some((species.clone(), level));
+                if self.foe != foe {
+                    self.foe = foe;
+                    self.defeated = None;
+                    self.awarded.clear();
+                }
                 events.push(match caught {
                     Some(true) => GameEvent::SpeciesCaught { species },
                     _ => GameEvent::SpeciesSeen { species },
                 });
+            }
+        }
+        let stats = b.and_then(|b| b.level_up_stats);
+        if let (Some(stats), Some(slot)) =
+            (self.level_up.update(f, stats, MOVE_MENU_FRAMES), self.grew)
+        {
+            let level = state
+                .party
+                .value
+                .as_ref()
+                .and_then(|p| p.get(usize::from(slot))?.level.value);
+            if level.is_none_or(|l| stats[0] >= u16::from(l) + 10 || stats[0] == 1) {
+                events.push(GameEvent::LevelUpStatsObserved { slot, stats });
             }
         }
         let menu = b.and_then(|b| match b.menu {
@@ -670,10 +764,14 @@ impl Sensor {
                 }
             }
         }
-        if s.details != Default::default() {
+        let mut details = s.details.clone();
+        details.nature = details
+            .nature
+            .filter(|n| pokebot_gamedata::training::nature_named(n).is_some());
+        if details != Default::default() {
             events.push(GameEvent::PartyDetailsObserved {
                 slot,
-                details: s.details.clone(),
+                details: Box::new(details),
             });
         }
         events
@@ -998,6 +1096,8 @@ pub fn obtained_mon(data: &GameData, species: &str, level: u8) -> PartyMon {
     let mut mon = PartyMon {
         species: Knowledge::derived(species.to_owned(), 0),
         level: Knowledge::derived(level, 0),
+        // Every Pokémon is created with no EVs.
+        training: pokebot_state::Training::obtained(level),
         ..PartyMon::default()
     };
     for (i, mv) in data
@@ -1033,12 +1133,13 @@ fn caught_events(data: &GameData, state: &GameState, catch: &Catch) -> Vec<GameE
             .unwrap_or(0);
         vec![GameEvent::SentToPc {
             box_index: catch.box_index,
-            mon: BoxMon {
+            mon: Box::new(BoxMon {
                 slot,
                 species: Knowledge::derived(catch.species.clone(), 0),
                 level: Knowledge::derived(level, 0),
                 nickname: Knowledge::unknown(),
-            },
+                training: pokebot_state::Training::obtained(level),
+            }),
         }]
     } else if let Some(n) = party {
         vec![GameEvent::PartyMonDerived {
