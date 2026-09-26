@@ -49,8 +49,10 @@ pub struct BattleStep {
     /// early rival battles: `trainerbattle_earlyrival`, whose trainer has a
     /// victory line): a fainted lead is part of the story, not a failure.
     loss_ok: bool,
-    /// A species hunted for: when it isn't being caught (declined, or the
-    /// attempt given up), RUN rather than faint it.
+    /// A species hunted for: the catch policy takes it whenever our lead
+    /// is safe ([`crate::catch::plan_catch_wanted`]); when the lead isn't
+    /// (the catch declined or given up for its risk), RUN rather than
+    /// faint it.
     spare: Option<String>,
 }
 
@@ -109,6 +111,7 @@ impl BattleStep {
             trainer: self.trainer,
             ..BattleMemory::default()
         };
+        self.memory.catch.wanted = self.spare.clone();
         match self.plan {
             BattlePlan::Auto => {}
             // No identification, no catch: fight (or flee) on the HUD.

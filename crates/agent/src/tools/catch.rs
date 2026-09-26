@@ -5,13 +5,13 @@
 //! the step can read what was caught. A weakened lead heals at the nearest
 //! Pokémon Center and the hunt resumes. A catch hunt restocks Poké Balls at
 //! the nearest mart when fewer than [`HUNT_MIN_BALLS`] are held above the
-//! shiny reserve, and runs from the species hunted whenever it isn't
-//! catching it rather than faint it.
+//! shiny reserve (hunting on with what is held when the mart sells none),
+//! and throws at the species hunted whenever the lead is safe: it runs
+//! from it only when the lead is at risk, rather than faint it.
 
 use std::sync::Arc;
 
 use pokebot_core::ControllerCommand;
-use pokebot_state::Status;
 
 use super::battle::BattleStep;
 use super::go::{GoStep, NavParts};
@@ -20,7 +20,7 @@ use super::{
     progress, BattlePlan, Expects, Intent, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
     ToolStep, SETTLE_FRAMES,
 };
-use crate::catch::{ball_budget, CATCH_MIN_HP};
+use crate::catch::ball_budget;
 use crate::nav::{nearest_reachable, Destination};
 use crate::party::Party;
 use crate::stock::ball_count;
@@ -38,11 +38,11 @@ const MAX_TRAIN_ENCOUNTERS: u32 = 150;
 /// Route 22: 1666 training battles, every one run from, the hunt restarted
 /// by each replan).
 const MAX_FLED_IN_A_ROW: u32 = 8;
-/// A training lead heals below this share of its HP (per mille); a
-/// catching lead below the catch policy's own bar ([`CATCH_MIN_HP`]),
-/// since under it every encounter of the target is refused (flash-1: a
-/// SPEAROW passed up at 39/60 HP while the hunt went on).
-const TRAIN_HEAL_BELOW: u32 = 500;
+/// A hunting lead heals below this share of its HP (per mille). The hunted
+/// species is attempted at any HP the risk limit allows, so a catch hunt
+/// no longer heals at the catch policy's bar for extras (`CATCH_MIN_HP`;
+/// flash-1 passed up a SPEAROW at 39/60 HP before that).
+const HEAL_BELOW: u32 = 500;
 /// Heals per hunt before it counts as not working.
 const MAX_HEALS: u32 = 3;
 /// How the step reports a lead that must heal before going on.
@@ -71,6 +71,9 @@ pub enum Hunt {
 
 pub struct HuntStep {
     hunt: Hunt,
+    /// Restock balls when short ([`BUY_FIRST`]); off once a mart sold none
+    /// while some are held: the hunted species throws the reserve too.
+    restock: bool,
     /// The map to hunt on (the current one when `None`).
     map: Option<String>,
     data: Arc<pokebot_gamedata::GameData>,
@@ -83,20 +86,11 @@ pub struct HuntStep {
     nav: NavParts,
 }
 
-impl Hunt {
-    /// Share of max HP (per mille) under which the lead heals first.
-    fn heal_below(&self) -> u32 {
-        match self {
-            Hunt::Species(_) => CATCH_MIN_HP,
-            Hunt::Level(_) => TRAIN_HEAL_BELOW,
-        }
-    }
-}
-
 impl HuntStep {
     pub fn new(ctx: &ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Self {
         Self {
             hunt,
+            restock: true,
             map: map.map(str::to_owned),
             data: Arc::clone(&ctx.data),
             battle: None,
@@ -230,36 +224,20 @@ impl ToolStep for HuntStep {
             return Decision::Wait("a battle starts".into());
         }
         if let Some(lead) = party.lead() {
-            let heal_below = self.hunt.heal_below();
             if lead
                 .hp
-                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * heal_below)
+                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
             {
                 return Decision::Fail(format!(
                     "{HEAL_FIRST}: the lead is at {}/{} HP, below {:.0} %",
                     lead.hp.map_or(0, |h| h.0),
                     lead.hp.map_or(0, |h| h.1),
-                    f64::from(heal_below) / 10.0
+                    f64::from(HEAL_BELOW) / 10.0
                 ));
             }
-            // The catch policy refuses a lead with a status condition too.
-            if matches!(self.hunt, Hunt::Species(_)) {
-                if let Some(status) = ctx
-                    .state
-                    .party
-                    .value
-                    .as_ref()
-                    .and_then(|p| p.first())
-                    .and_then(|m| m.status.value)
-                    .filter(|s| !matches!(s, Status::Healthy))
-                {
-                    return Decision::Fail(format!("{HEAL_FIRST}: the lead is {status:?}"));
-                }
-            }
         }
-        // Too few balls to throw: restock before the grass (an unknown
-        // pocket goes on; the catch policy declines until it is read).
-        if matches!(self.hunt, Hunt::Species(_)) {
+        // Few balls: restock before the grass (an unknown pocket goes on).
+        if self.restock && matches!(self.hunt, Hunt::Species(_)) {
             if let Some(n) =
                 ball_count(ctx.state).filter(|n| ball_budget(*n, false) < HUNT_MIN_BALLS)
             {
@@ -372,8 +350,10 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
     let mut buys = 0;
     let mut encounters = 0;
     let mut fled_in_a_row = 0;
+    let mut restock = true;
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
+        step.restock = restock;
         step.encounters = encounters;
         step.fled_in_a_row = fled_in_a_row;
         let result = ctx.drive(&mut step);
@@ -418,7 +398,14 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
                 })
                 .result?;
                 let after = ball_count(ctx.state());
-                if after <= before {
+                if after <= before && after.is_some_and(|n| n > 0) {
+                    // The hunted species throws the reserve too: hunt on
+                    // with what is held rather than give the hunt up.
+                    ctx.info(format!(
+                        "{reason}; the mart sold none: hunting on with {after:?} balls"
+                    ));
+                    restock = false;
+                } else if after <= before {
                     return Err(ToolError::Failed(format!(
                         "{reason}; the mart sold none ({before:?} → {after:?} balls)"
                     )));
@@ -477,15 +464,6 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
-
-    #[test]
-    fn a_catching_lead_heals_at_the_catch_policys_bar() {
-        assert_eq!(
-            Hunt::Species("SPECIES_SPEAROW".into()).heal_below(),
-            CATCH_MIN_HP
-        );
-        assert_eq!(Hunt::Level(22).heal_below(), TRAIN_HEAL_BELOW);
-    }
 
     #[test]
     fn route_4_grass_is_out_of_reach_from_its_west_part() {

@@ -17,6 +17,12 @@
 //! [`CatchMemory::observe`] reads the result, the foe's status and the PC
 //! box from battle text; [`caught_events`] records the catch when the
 //! battle ends.
+//!
+//! The species a hunt is after ([`CatchMemory::wanted`]) is the goal, not
+//! an extra: running from it throws the encounter away, so only our lead's
+//! risk declines it. It may throw the shiny reserve too (the hunt restocks
+//! afterwards), and neither a low chance, a worn lead nor an unread caught
+//! icon or pocket stops the attempt.
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::mechanics::ball_multiplier;
@@ -44,6 +50,9 @@ pub const MIN_CATCH_CHANCE: f64 = 0.2;
 /// than a fainted lead (the next Pokémon fights on).
 const LEAD_FAINT: Weights = Weights { lead_faint: 20.0 };
 const SHINY_LEAD_FAINT: Weights = Weights { lead_faint: 0.25 };
+/// The species a hunt is after is worth half a fainted lead: a low chance
+/// is still taken while the lead is safe ([`RISK_LIMIT`] caps it).
+const WANTED_LEAD_FAINT: Weights = Weights { lead_faint: 2.0 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoeStatus {
@@ -78,6 +87,8 @@ pub struct CatchPlan {
     /// The first action and the odds of the whole attempt.
     pub odds: Odds,
     pub shiny: bool,
+    /// The species a hunt is after ([`plan_catch_wanted`]).
+    pub wanted: bool,
 }
 
 impl CatchPlan {
@@ -139,8 +150,15 @@ fn lead_status(state: &GameState) -> Option<Status> {
 }
 
 /// The odds with `means`; `asleep_for`: our actions since the foe was
-/// seen asleep.
-fn odds(data: &GameData, lead: &Lead, foe: &Foe, asleep_for: u8, means: &Means) -> Option<Odds> {
+/// seen asleep; `wanted`: the species a hunt is after.
+fn odds(
+    data: &GameData,
+    lead: &Lead,
+    foe: &Foe,
+    asleep_for: u8,
+    means: &Means,
+    wanted: bool,
+) -> Option<Odds> {
     let view = FoeView {
         species: &foe.species,
         level: foe.level,
@@ -150,6 +168,8 @@ fn odds(data: &GameData, lead: &Lead, foe: &Foe, asleep_for: u8, means: &Means) 
     };
     let weights = if foe.shiny {
         SHINY_LEAD_FAINT
+    } else if wanted {
+        WANTED_LEAD_FAINT
     } else {
         LEAD_FAINT
     };
@@ -174,16 +194,37 @@ pub fn plan_catch(
     foe: &Foe,
     trainer: bool,
 ) -> Result<CatchPlan, String> {
+    plan_catch_wanted(data, state, lead, foe, trainer, false)
+}
+
+/// [`plan_catch`] for the species a hunt is after (`wanted`): declined
+/// only when it is caught already, no ball is held, or the attempt puts
+/// our lead's risk above [`RISK_LIMIT`]. Switch, Route 24: a hunt ran from
+/// every WEEDLE it met, the catch declined for the reserve or the odds.
+pub fn plan_catch_wanted(
+    data: &GameData,
+    state: &GameState,
+    lead: &Lead,
+    foe: &Foe,
+    trainer: bool,
+    wanted: bool,
+) -> Result<CatchPlan, String> {
     if trainer {
         return Err("a trainer's Pokémon can't be caught".into());
     }
-    if !foe.shiny && foe.caught != Some(false) {
+    // The hunt ends once its species is marked caught: an unread icon on
+    // the wanted one is not a reason to let it go.
+    let caught_ok = foe.caught == Some(false) || (wanted && foe.caught != Some(true));
+    if !foe.shiny && !caught_ok {
         return Err(format!("{}: caught flag {:?}", foe.species, foe.caught));
     }
+    // Throwing all balls (the reserve too): a shiny, or the hunt's species.
+    let any_ball = foe.shiny || wanted;
     // A catch costs the lead HP (weakening turns, throws): only a healthy
     // lead tries for a non-shiny, so the story's battles aren't fought
-    // worn down.
-    if !foe.shiny {
+    // worn down. The wanted species is the goal: the risk limit alone
+    // guards the lead.
+    if !any_ball {
         let (hp, max) = lead.hp;
         if u32::from(hp) * 1000 < u32::from(max) * CATCH_MIN_HP {
             return Err(format!("the lead is at {hp}/{max} HP, below 75 %"));
@@ -194,27 +235,47 @@ pub fn plan_catch(
     }
     let ball = match balls_held(state) {
         Some(balls) => best_ball(data, &balls).ok_or("no usable ball held")?,
-        None if foe.shiny => "ITEM_POKE_BALL".to_owned(),
+        None if any_ball => "ITEM_POKE_BALL".to_owned(),
         None => return Err("ball count unknown (pocket not audited)".into()),
     };
-    // An unknown pocket (a shiny only): plan with a reserve's worth.
+    // An unknown pocket (a shiny or the wanted species): plan with a
+    // reserve's worth.
     let count = ball_count(state).unwrap_or(SHINY_RESERVE);
-    let budget = ball_budget(count, foe.shiny);
+    let budget = ball_budget(count, any_ball);
     if budget == 0 {
-        return Err(format!(
-            "{count} balls: none above the shiny reserve {SHINY_RESERVE}"
-        ));
+        return Err(if any_ball {
+            "no ball held".into()
+        } else {
+            format!("{count} balls: none above the shiny reserve {SHINY_RESERVE}")
+        });
     }
-    let odds = odds(data, lead, foe, 0, &means(&ball, budget, true, None))
-        .ok_or_else(|| format!("{} unknown to the game data", foe.species))?;
+    let odds = odds(
+        data,
+        lead,
+        foe,
+        0,
+        &means(&ball, budget, true, None),
+        wanted,
+    )
+    .ok_or_else(|| format!("{} unknown to the game data", foe.species))?;
     let plan = CatchPlan {
         ball,
         odds,
         shiny: foe.shiny,
+        wanted,
     };
     if !foe.shiny {
         let o = &plan.odds.outlook;
-        if plan.odds.choice == Choice::Run || o.catch < MIN_CATCH_CHANCE {
+        // Any chance at the wanted species beats running from it, unless
+        // the odds say RUN: every attempt risks the lead more than the
+        // catch is worth.
+        if wanted && plan.odds.choice == Choice::Run {
+            return Err(format!(
+                "the odds say RUN: the lead's risk outweighs the catch ({})",
+                plan.summary()
+            ));
+        }
+        if !wanted && (plan.odds.choice == Choice::Run || o.catch < MIN_CATCH_CHANCE) {
             return Err(format!(
                 "P(catch) {:.2} with {budget} balls, below {MIN_CATCH_CHANCE} ({})",
                 o.catch,
@@ -309,6 +370,8 @@ pub struct CatchMemory {
     pub box_index: Option<u8>,
     /// An attempt was abandoned for its risk: RUN.
     pub flee: bool,
+    /// The species the hunt is after: caught unless our lead is at risk.
+    pub wanted: Option<String>,
     /// "The TRAINER blocked the BALL!": this is a trainer battle.
     pub blocked: bool,
     /// The current throw through the battle bag.
@@ -582,13 +645,15 @@ pub fn identify(
         shiny: shiny == Some(ShinyReading::Shiny),
         caught: Some(caught),
     };
-    match plan_catch(data, state, &lead, &foe, false) {
+    let wanted = c.wanted.as_deref() == Some(species.as_str());
+    match plan_catch_wanted(data, state, &lead, &foe, false, wanted) {
         Ok(plan) => {
             events.push(log(format!(
-                "catching {species} Lv{level} with {}: {}{}",
+                "catching {species} Lv{level} with {}: {}{}{}",
                 plan.ball,
                 plan.summary(),
-                if plan.shiny { " (shiny)" } else { "" }
+                if plan.shiny { " (shiny)" } else { "" },
+                if plan.wanted { " (hunted)" } else { "" }
             )));
             c.attempt = Some(Attempt {
                 plan,
@@ -687,7 +752,10 @@ pub(crate) fn attempt_decision(
                 Expectation::ScreenIsNot(ScreenState::BattleCommand),
             ));
         }
-    } else if let Some(n) = attempt.balls.filter(|n| *n <= SHINY_RESERVE) {
+    } else if let Some(n) = attempt
+        .balls
+        .filter(|n| !plan.wanted && *n <= SHINY_RESERVE)
+    {
         // Only a shiny may throw the reserve: RUN (in a wild battle, when
         // allowed), or fight on.
         memory.catch.attempt = None;
@@ -697,7 +765,10 @@ pub(crate) fn attempt_decision(
         )));
         return None;
     }
-    let balls = ball_budget(attempt.balls.unwrap_or(SHINY_RESERVE), plan.shiny);
+    let balls = ball_budget(
+        attempt.balls.unwrap_or(SHINY_RESERVE),
+        plan.shiny || plan.wanted,
+    );
     let asleep_for = attempt.asleep_turns.saturating_sub(1);
     let key: OddsKey = (
         us_hp,
@@ -717,7 +788,7 @@ pub(crate) fn attempt_decision(
                 !attempt.opened,
                 memory.disabled.as_deref(),
             );
-            let Some(odds) = odds(data, &lead, &foe, asleep_for, &means) else {
+            let Some(odds) = odds(data, &lead, &foe, asleep_for, &means, plan.wanted) else {
                 memory.catch.attempt = None;
                 events.push(log(format!(
                     "{species}: no odds (unknown to the game data): abandoning the catch"
@@ -768,7 +839,8 @@ pub(crate) fn attempt_decision(
                 )
             } else {
                 if (column, row) == (1, 0) {
-                    memory.catch.thrower = Some(Thrower::new().keeping_reserve(!plan.shiny));
+                    memory.catch.thrower =
+                        Some(Thrower::new().keeping_reserve(!(plan.shiny || plan.wanted)));
                 }
                 step_toward(
                     (column, row),
@@ -1409,6 +1481,74 @@ mod tests {
         assert!(plan.odds.outlook.catch > 0.0, "{plan:?}");
     }
 
+    /// The species a hunt is after is the goal: the reserve, a worn lead,
+    /// an unread caught icon or pocket and a low chance don't let it go;
+    /// only the lead's risk does (then the hunt runs, heals and comes
+    /// back). Switch, Route 24: the hunt ran from every WEEDLE it met.
+    #[test]
+    fn the_hunted_species_is_declined_only_for_the_leads_risk() {
+        let Some(data) = data() else { return };
+        let member = ivysaur(&data);
+        let wanted = |state: &GameState, hp: u16, foe: &Foe| {
+            let lead = Lead {
+                member: &member,
+                hp: (hp, 60),
+            };
+            plan_catch_wanted(&data, state, &lead, foe, false, true)
+        };
+        let pidgey = foe("SPECIES_PIDGEY", 6);
+        // 5 balls, all the shiny reserve: thrown for the hunted species.
+        let reserve = with_balls(&[("ITEM_POKE_BALL", 5)]);
+        let plan = wanted(&reserve, 60, &pidgey).unwrap();
+        assert!(plan.wanted && !plan.shiny);
+        // A worn or paralyzed lead, still safe against it.
+        assert!(wanted(&reserve, 30, &pidgey).is_ok());
+        let paralyzed = DefaultReducer.reduce(
+            &reserve,
+            &[EventRecord {
+                frame_id: 2,
+                event: GameEvent::PartyObserved {
+                    slot: 0,
+                    species: None,
+                    nickname: None,
+                    level: None,
+                    hp: None,
+                    status: Some(Status::Paralyzed),
+                    held_item: None,
+                },
+            }],
+        );
+        assert!(wanted(&paralyzed, 60, &pidgey).is_ok());
+        // An unread caught icon, an unread pocket.
+        let unread = Foe {
+            caught: None,
+            ..pidgey.clone()
+        };
+        assert!(wanted(&reserve, 60, &unread).is_ok());
+        assert!(wanted(&GameState::default(), 60, &pidgey).is_ok());
+        // One ball: a low chance still beats running from it.
+        let one = with_balls(&[("ITEM_POKE_BALL", 1)]);
+        let abra = foe("SPECIES_ABRA", 12);
+        assert!(wanted(&one, 60, &abra).is_ok());
+        // Declined: caught already, no ball, or the lead at risk.
+        let caught = Foe {
+            caught: Some(true),
+            ..pidgey.clone()
+        };
+        assert!(wanted(&reserve, 60, &caught).is_err());
+        let none = with_balls(&[("ITEM_POKE_BALL", 0)]);
+        assert!(wanted(&none, 60, &pidgey).is_err());
+        let geodude = foe("SPECIES_GEODUDE", 9);
+        let err = wanted(&reserve, 3, &geodude).unwrap_err();
+        assert!(err.contains("risk"), "{err}");
+        // The same encounters as extras are still declined.
+        let lead = Lead {
+            member: &member,
+            hp: (60, 60),
+        };
+        assert!(plan_catch(&data, &reserve, &lead, &pidgey, false).is_err());
+    }
+
     /// Live: catches in Mt. Moon (weakening turns, throws) wore the lead
     /// down to 14/60 and PAR before Miguel. A non-shiny catch starts only
     /// with the lead at 75 % HP or more and no major status.
@@ -2007,6 +2147,7 @@ mod tests {
                     outlook: Default::default(),
                 },
                 shiny: false,
+                wanted: false,
             },
             opened: true,
             throws: 0,
@@ -2071,6 +2212,7 @@ mod tests {
                         outlook: Default::default(),
                     },
                     shiny: false,
+                    wanted: false,
                 },
                 opened: true,
                 throws: 0,
@@ -2252,6 +2394,7 @@ mod tests {
                 outlook: Default::default(),
             },
             shiny,
+            wanted: false,
         };
         let memory_for = |shiny: bool| CatchMemory {
             thrower: Some(Thrower::new().keeping_reserve(!shiny)),
