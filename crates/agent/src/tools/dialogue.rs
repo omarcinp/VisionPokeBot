@@ -167,29 +167,34 @@ fn gives(does: &[Effect]) -> bool {
 /// The branch policy for a YES/NO the plan didn't expect (§7.4 step 2):
 /// among the paths of `script` consistent with the answers given so far,
 /// look at what YES does: NO when it would spend money or items, YES when
-/// it heals or gives something for free, NO otherwise. Without a script:
-/// NO.
+/// it heals or gives something for free that NO doesn't, NO otherwise.
+/// Without a script: NO. (A starter's ball gives the Pokémon before
+/// "Give it a nickname?", on both answers: YES there only opens the
+/// naming keyboard.)
 pub fn policy_answer(script: Option<&Script>, answered: &[bool]) -> Answer {
     let Some(script) = script else {
         return Answer::No;
     };
     let k = answered.len();
-    let yes_branches: Vec<&[Effect]> = script
-        .paths
-        .iter()
-        .filter_map(|p| {
-            let branches = question_branches(&p.when);
-            (branches.len() > k && branches[..k] == *answered && branches[k])
-                .then_some(p.does.as_slice())
-        })
-        .collect();
+    let branches = |yes: bool| -> Vec<&[Effect]> {
+        script
+            .paths
+            .iter()
+            .filter_map(|p| {
+                let branches = question_branches(&p.when);
+                (branches.len() > k && branches[..k] == *answered && branches[k] == yes)
+                    .then_some(p.does.as_slice())
+            })
+            .collect()
+    };
+    let yes_branches = branches(true);
     if yes_branches.is_empty() {
         return Answer::No;
     }
     if yes_branches.iter().any(|d| spends(d)) {
         return Answer::No;
     }
-    if yes_branches.iter().any(|d| gives(d)) {
+    if yes_branches.iter().any(|d| gives(d)) && !branches(false).iter().any(|d| gives(d)) {
         return Answer::Yes;
     }
     Answer::No
@@ -1346,6 +1351,25 @@ mod tests {
         ]);
         assert_eq!(policy_answer(Some(&two), &[true]), Answer::Yes);
         assert_eq!(policy_answer(Some(&two), &[false]), Answer::No);
+        // "Give it a nickname?" after the gift: both answers give the
+        // Pokémon (on the emulator YES opened the naming keyboard).
+        let mon = || Effect::GiveMon {
+            givemon: Val::Int(1),
+            level: Val::Int(5),
+        };
+        let ball = script(vec![
+            (
+                vec![cond_choice(Some(0), None), cond_choice(Some(0), None)],
+                vec![mon(), say("NAMING")],
+            ),
+            (
+                vec![cond_choice(Some(0), None), cond_choice(None, Some(0))],
+                vec![mon()],
+            ),
+            (vec![cond_choice(None, Some(0))], vec![]),
+        ]);
+        assert_eq!(policy_answer(Some(&ball), &[]), Answer::Yes);
+        assert_eq!(policy_answer(Some(&ball), &[true]), Answer::No);
     }
 
     #[test]

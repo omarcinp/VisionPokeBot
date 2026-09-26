@@ -526,7 +526,10 @@ impl<'a> ToolContext<'a> {
         }
         let dialogue = o.dialogue.is_some() && !expects.dialogue;
         let menu = o.menu.is_some() && o.dialogue.is_none() && !expects.menu;
-        if dialogue || menu {
+        // No step expects a naming keyboard (the new game's own task runs
+        // outside the tools): one on screen came from a stray YES.
+        let naming = o.naming.is_some();
+        if dialogue || menu || naming {
             let outcome = self.invoke(&Intent::Unstick);
             return outcome.result.map(|()| true);
         }

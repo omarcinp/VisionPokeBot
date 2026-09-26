@@ -29,6 +29,20 @@ impl ToolStep for UnstickStep {
                 120,
             ));
         }
+        if o.naming.is_some() {
+            // A naming keyboard nobody asked for (a nickname YES): START
+            // puts the cursor on OK, A keeps the default name. B only
+            // deletes letters.
+            return Decision::Act(Action::new(
+                "leave the naming keyboard (START, A)",
+                vec![
+                    ControllerCommand::Press(Button::Start),
+                    ControllerCommand::Press(Button::A),
+                ],
+                Expectation::NamingClosed,
+                120,
+            ));
+        }
         if o.dialogue.is_none() && o.menu.is_none() {
             if o.bag.is_some() || o.shop.is_some() {
                 return Decision::Act(Action::new(
