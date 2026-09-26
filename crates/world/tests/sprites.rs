@@ -171,3 +171,19 @@ fn switch_facings_from_the_faces() {
     let facings: Vec<Option<Direction>> = gym.sprites.iter().map(|s| s.facing).collect();
     assert_eq!(facings, [Some(Direction::Down), Some(Direction::Right)]);
 }
+
+/// Switch, Bill's Sea Cottage before he is helped, the player at the PC:
+/// Bill as a Clefairy is named on his tile and Bill as himself is absent
+/// (the run had wrongly recorded him back; his absence retracts that).
+#[test]
+fn switch_sea_cottage_shows_bill_as_a_clefairy_only() {
+    let Some((sprites, absent)) = scan(
+        "switch-sea-cottage-clefairy-bill",
+        "Route25_SeaCottage",
+        (4, 6),
+    ) else {
+        return;
+    };
+    assert!(sprites.contains(&(10, 6, Some(2))), "{sprites:?}");
+    assert_eq!(absent, [1]);
+}

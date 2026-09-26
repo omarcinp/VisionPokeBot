@@ -256,7 +256,14 @@ impl Sensor {
                     .map(|map| GameEvent::MapVisited { map: map.clone() }),
             );
         }
-        events.extend(self.field.observe(o, state));
+        let field = self.field.observe(o, state);
+        if let Some(world) = &self.world {
+            let contradicted = contradicted_paths(world, state, &field);
+            events.extend(field);
+            events.extend(contradicted);
+        } else {
+            events.extend(field);
+        }
         let view = self.view_of(o, state);
         if let Some(view) = self.view.update(f, Some(view), VIEW_FRAMES) {
             if view != state.view {
@@ -763,6 +770,115 @@ impl Sensor {
 }
 
 /// `PartyObserved` for `slot` with the fields `fill` sets.
+/// Paths the screen contradicts: an object stays away from every tile it
+/// can stand on while the belief, on the word of a path it recorded, has
+/// it shown (its hide flag tracked clear). The latest such path is
+/// retracted with what it changed, and the flag becomes what is seen. On
+/// the Switch the PC's Cell Separator path was recorded when the PC only
+/// showed its idle message: it put Bill back as himself, who wasn't there.
+fn contradicted_paths(
+    world: &pokebot_world::World,
+    state: &GameState,
+    field: &[GameEvent],
+) -> Vec<GameEvent> {
+    use pokebot_state::KnowledgeSource;
+    use pokebot_world::events::Effect;
+    let Some(events) = world.events() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in field {
+        let GameEvent::NpcAbsent { map, local_id } = e else {
+            continue;
+        };
+        let Some(flag) = world
+            .map(map)
+            .and_then(|m| m.objects.iter().find(|o| o.local_id == *local_id))
+            .and_then(|o| o.flag.clone())
+            .filter(|f| !pokebot_world::gates::is_local_flag(f))
+        else {
+            continue;
+        };
+        let shown = state
+            .world
+            .flags
+            .get(&flag)
+            .is_some_and(|k| k.source == KnowledgeSource::Tracked && k.value == Some(false));
+        if !shown {
+            continue;
+        }
+        // The flag an object effect of `script` touches.
+        let object_flag =
+            |script_map: Option<&str>, id: &pokebot_world::events::Val, on: &Option<String>| {
+                let id = u32::try_from(id.as_int()?).ok()?;
+                let name = match on {
+                    Some(m) => world.name_of(m).unwrap_or(m.as_str()),
+                    None => script_map?,
+                };
+                world
+                    .map(name)?
+                    .objects
+                    .iter()
+                    .find(|o| o.local_id == id)?
+                    .flag
+                    .clone()
+            };
+        let culprit = state
+            .world
+            .paths_run
+            .iter()
+            .rev()
+            .find_map(|(script, path)| {
+                let s = events.script(script)?;
+                let p = s.paths.get(*path)?;
+                let script_map = s.map.as_deref();
+                let clears = p.does.iter().any(|d| match d {
+                    Effect::Clear { clear } => *clear == flag,
+                    Effect::AddObject { add_object, map } => {
+                        object_flag(script_map, add_object, map).as_deref() == Some(flag.as_str())
+                    }
+                    _ => false,
+                });
+                if !clears {
+                    return None;
+                }
+                let mut flags = Vec::new();
+                let mut vars = Vec::new();
+                for d in &p.does {
+                    let f = match d {
+                        Effect::Set { set } => Some(set.clone()),
+                        Effect::Clear { clear } => Some(clear.clone()),
+                        Effect::AddObject { add_object, map } => {
+                            object_flag(script_map, add_object, map)
+                        }
+                        Effect::RemoveObject { remove_object, map } => {
+                            object_flag(script_map, remove_object, map)
+                        }
+                        Effect::Var { var, .. } => {
+                            if !vars.contains(var) {
+                                vars.push(var.clone());
+                            }
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(f) = f.filter(|f| !flags.contains(f)) {
+                        flags.push(f);
+                    }
+                }
+                Some(GameEvent::ScriptPathRetracted {
+                    script: script.clone(),
+                    path: *path,
+                    flags,
+                    vars,
+                })
+            });
+        out.extend(culprit);
+        out.push(GameEvent::FlagObserved { flag, value: true });
+    }
+    out
+}
+
 fn party_observed(slot: u8, fill: impl FnOnce(&mut Fields)) -> GameEvent {
     let mut e = Fields::default();
     fill(&mut e);

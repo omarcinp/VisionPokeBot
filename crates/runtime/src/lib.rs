@@ -825,6 +825,9 @@ fn summarize(event: &GameEvent) -> String {
         },
         GameEvent::NpcAbsent { map, local_id } => format!("NPC {map}#{local_id} absent"),
         GameEvent::ScriptPathRun { script, path } => format!("Ran {script} path {path}"),
+        GameEvent::ScriptPathRetracted { script, path, .. } => {
+            format!("Retracted {script} path {path}: the screen contradicts it")
+        }
         GameEvent::IntentInfeasible { intent } => format!("Intent {intent} infeasible"),
         GameEvent::TileBlocked { map, x, y } => format!("Tile {map} ({x}, {y}) blocked (learnt)"),
         GameEvent::WhitedOut => "Whited out: the lead fainted (HP 0)".into(),

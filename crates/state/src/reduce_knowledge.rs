@@ -410,6 +410,32 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             state.world.npc_mut(map, *local_id).present = Knowledge::observed(false, frame);
         }
         GameEvent::ScriptPathRun { script, path } => state.world.record_path(script, *path),
+        GameEvent::ScriptPathRetracted {
+            script,
+            path,
+            flags,
+            vars,
+        } => {
+            let w = &mut state.world;
+            if let Some(i) = w
+                .paths_run
+                .iter()
+                .rposition(|(s, p)| s == script && p == path)
+            {
+                w.paths_run.remove(i);
+            }
+            let tracked = |source: KnowledgeSource| source == KnowledgeSource::Tracked;
+            for flag in flags {
+                if w.flags.get(flag).is_some_and(|k| tracked(k.source)) {
+                    w.flags.remove(flag);
+                }
+            }
+            for var in vars {
+                if w.vars.get(var).is_some_and(|k| tracked(k.source)) {
+                    w.vars.remove(var);
+                }
+            }
+        }
         GameEvent::IntentInfeasible { intent } => {
             state.world.infeasible.insert(intent.clone());
         }

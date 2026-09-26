@@ -1071,3 +1071,57 @@ fn the_starter_comes_from_a_ball_on_the_table_by_preference() {
         }
     }
 }
+
+/// In Bill's Sea Cottage before helping him (the Switch checkpoint): the
+/// PC's Cell Separator path needs `FLAG_TEMP_2`, which only talking to
+/// Bill sets, and only for this visit. The plan talks to Bill, runs the PC
+/// right after, then takes the S.S. Ticket.
+#[test]
+fn bill_is_asked_for_help_before_his_pc_runs() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 60.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, pose) = checkpoint("sea_cottage_state.json");
+    let goal = parse_goal("flag FLAG_GOT_SS_TICKET").unwrap();
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 20);
+    let events = f.world.events().unwrap();
+    let sets = |script: &str, path: usize, flag: &str| {
+        events.script(script).unwrap().paths[path]
+            .does
+            .iter()
+            .any(|e| matches!(e, pokebot_world::events::Effect::Set { set } if set == flag))
+    };
+    let scripts: Vec<(&str, usize)> = plan
+        .intents
+        .iter()
+        .filter_map(|s| match &s.intent {
+            Intent::RunScript { script, path, .. } => Some((script.as_str(), *path)),
+            _ => None,
+        })
+        .collect();
+    let bill = "Route25_SeaCottage_EventScript_Bill";
+    let pc = "Route25_SeaCottage_EventScript_Computer";
+    let separator = scripts
+        .iter()
+        .position(|&(s, p)| s == pc && sets(s, p, "FLAG_HELPED_BILL_IN_SEA_COTTAGE"))
+        .expect("the Cell Separator runs");
+    assert!(separator > 0, "{scripts:?}");
+    let (before, p) = scripts[separator - 1];
+    assert!(
+        before == bill && sets(before, p, "FLAG_TEMP_2"),
+        "{scripts:?}"
+    );
+    // Nothing between asking Bill and the PC: the flag lasts the visit.
+    let at = |pred: &dyn Fn(&Intent) -> bool| position(&plan, pred);
+    let ask = at(
+        &|i| matches!(i, Intent::RunScript { script, path, .. } if script == bill && *path == p),
+    );
+    let run = at(&|i| matches!(i, Intent::RunScript { script, .. } if script == pc));
+    assert_eq!(ask + 1, run);
+    assert!(scripts[separator + 1..]
+        .iter()
+        .any(|&(s, p)| s == bill && sets(s, p, "FLAG_GOT_SS_TICKET")));
+}

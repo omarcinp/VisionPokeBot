@@ -1045,3 +1045,48 @@ fn visible_party_reordering_keeps_the_history_with_the_named_member() {
     assert_eq!(party[1].nickname.value.as_deref(), Some("BULBASAUR"));
     assert_eq!(party[1].details.attack.value, Some(20));
 }
+
+/// The Switch run recorded Bill's PC's Cell Separator path when the PC
+/// only showed its idle message: the belief had Bill back as himself
+/// (his hide flag tracked clear) and Bill helped. Bill staying away from
+/// every tile he can stand on retracts the path, once per visit even with
+/// his absence already in the checkpoint.
+#[test]
+fn an_absent_object_retracts_the_path_that_showed_it() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    if w.events().is_none() {
+        return;
+    }
+    let pc = "Route25_SeaCottage_EventScript_Computer";
+    let mut state = GameState::default();
+    let flags = &mut state.world.flags;
+    flags.insert(
+        "FLAG_HELPED_BILL_IN_SEA_COTTAGE".into(),
+        Knowledge::tracked(true, None),
+    );
+    flags.insert(
+        "FLAG_HIDE_BILL_HUMAN_SEA_COTTAGE".into(),
+        Knowledge::tracked(false, None),
+    );
+    // Observed elsewhere: not the path's to take away.
+    flags.insert("FLAG_GOT_OAKS_PARCEL".into(), Knowledge::observed(true, 1));
+    state.world.record_path(pc, 7);
+    state.world.npc_mut("Route25_SeaCottage", 1).present = Knowledge::observed(false, 1);
+    let mut s = Sensor::new(d).with_world(w);
+    let frame = |f: u64| {
+        let mut o = field(f, (4, 6), &[], &[1]);
+        o.player.as_mut().unwrap().pose.map = "Route25_SeaCottage".into();
+        o
+    };
+    let (state, _) = run(&mut s, state, (0..100).map(frame));
+    let flag = |name: &str| state.world.flags.get(name).cloned();
+    assert_eq!(flag("FLAG_HELPED_BILL_IN_SEA_COTTAGE"), None);
+    assert_eq!(
+        flag("FLAG_HIDE_BILL_HUMAN_SEA_COTTAGE").and_then(|k| k.value),
+        Some(true)
+    );
+    assert!(flag("FLAG_GOT_OAKS_PARCEL").is_some());
+    assert!(state.world.paths_run.is_empty());
+}

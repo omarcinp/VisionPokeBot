@@ -80,6 +80,12 @@ const FEET_ROW_IN_GRASS: usize = 6;
 /// Differing pixels allowed on the tile's last row (a sprite on its way
 /// down fills it).
 const LAST_ROW_MAX: u32 = 3;
+/// The same for a 16×16 sprite standing on its tile (its top rows clear):
+/// its feet are on the last row (a Clefairy from behind showed 4 on a
+/// Switch frame; one mid-step down shows its whole width there).
+const SMALL_LAST_ROW_MAX: u32 = 6;
+/// Rows at the tile's top a 16×16 sprite leaves clear.
+const SMALL_TOP_ROWS: usize = 3;
 /// How far the difference's left and right edges may be off centre, in
 /// pixels (|left + right − 15|; sprite frames measure 0–2).
 const CENTRE_SLACK: i32 = 3;
@@ -533,9 +539,14 @@ fn looks_like_sprite(c: &Cell, grass: bool) -> bool {
         return top >= BODY_MIN / 2 && d.centred(0..8);
     }
     let feet = if grass { FEET_ROW_IN_GRASS } else { FEET_ROW };
+    let last_row_max = if d.count(0..SMALL_TOP_ROWS) == 0 {
+        SMALL_LAST_ROW_MAX
+    } else {
+        LAST_ROW_MAX
+    };
     d.count(0..16) >= BODY_MIN
         && top >= TOP_MIN
-        && d.count(15..16) <= LAST_ROW_MAX
+        && d.count(15..16) <= last_row_max
         && d.lowest().is_some_and(|r| r >= feet)
         && d.centred(0..15)
 }

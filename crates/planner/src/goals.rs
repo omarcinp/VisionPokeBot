@@ -4080,7 +4080,107 @@ impl<'p, 'a> Session<'p, 'a> {
                     }
                 }
             }
+            // A flag of the map visit (`FLAG_TEMP_*`) the path needs set is
+            // set by another path on the same map, and gone once the player
+            // leaves: that path runs right before this one (Bill goes into
+            // the teleporter, then the PC runs the Cell Separator).
+            for e in self.local_enablers(map, path, ctx).into_iter().rev() {
+                c.cost += e.cost;
+                for pre in e.preconditions {
+                    if !c.preconditions.contains(&pre) {
+                        c.preconditions.push(pre);
+                    }
+                }
+                c.steps
+                    .insert(0, e.steps.into_iter().next().expect("single"));
+            }
             out.push(c);
+        }
+        out
+    }
+
+    /// For each flag of the map visit `path` tests set before it tests it
+    /// clear, the cheapest path on `map` that sets it, as a one-step
+    /// candidate with its start conditions. A flag nothing on the map sets
+    /// (a map script's, on entry) is left to the script.
+    fn local_enablers(
+        &self,
+        map: &str,
+        path: &pokebot_world::events::ScriptPath,
+        ctx: &PlanContext<'_>,
+    ) -> Vec<Candidate> {
+        let Some(events) = self.planner.world.events() else {
+            return Vec::new();
+        };
+        let mut tested = BTreeSet::new();
+        let mut out = Vec::new();
+        for c in &path.when {
+            let Condition::Flag { flag, is } = c else {
+                continue;
+            };
+            if !is_local_flag(flag) || !tested.insert(flag.clone()) || !*is || flag == "0" {
+                continue;
+            }
+            let sets = |p: &pokebot_world::events::ScriptPath| {
+                p.does
+                    .iter()
+                    .any(|e| matches!(e, ScriptEffect::Set { set } if set == flag))
+                    && !p
+                        .when
+                        .iter()
+                        .any(|w| matches!(w, Condition::Flag { flag: f, is: true } if f == flag))
+            };
+            let best = events
+                .scripts
+                .iter()
+                .filter(|(_, s)| s.map.as_deref() == Some(map))
+                .flat_map(|(label, s)| {
+                    s.paths
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| sets(p))
+                        .map(move |(i, p)| (label, s, i, p))
+                })
+                .filter_map(|(label, s, i, p)| {
+                    let start = self.planner.start_conditions(s, label, map)?;
+                    let intent = Intent::RunScript {
+                        script: label.clone(),
+                        path: i,
+                        answers: path_answers(p),
+                        map: map.to_string(),
+                    };
+                    let cost = intent.cost_s(ctx);
+                    let mut e = Candidate::single(intent, ctx, cost);
+                    // An object that takes itself away is there until then.
+                    let own_hide: Vec<GoalPredicate> = e
+                        .effects()
+                        .into_iter()
+                        .filter_map(|q| q.negation())
+                        .collect();
+                    for pre in start {
+                        if !(s.kind == "object" && own_hide.contains(&pre))
+                            && !e.preconditions.contains(&pre)
+                        {
+                            e.preconditions.push(pre);
+                        }
+                    }
+                    Some(e)
+                })
+                // The fewest needs, then the fewest refusals.
+                .min_by_key(|e| {
+                    let refusals = e
+                        .steps
+                        .iter()
+                        .map(|s| match &s.planned.intent {
+                            Intent::RunScript { answers, .. } => {
+                                answers.iter().filter(|a| *a == "no").count()
+                            }
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                    (e.preconditions.len(), refusals, e.sort_key())
+                });
+            out.extend(best);
         }
         out
     }

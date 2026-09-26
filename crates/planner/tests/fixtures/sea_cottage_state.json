@@ -1,0 +1,711 @@
+{
+ "identity": {
+  "milestones": [
+   "LeaveBedroom",
+   "TalkToMom",
+   "LeaveHouse",
+   "MeetOak",
+   "ChooseStarter",
+   "RivalBattle",
+   "HealAtHome",
+   "GetParcel",
+   "DeliverParcel"
+  ],
+  "saved_at": {
+   "map": "Route25_SeaCottage",
+   "x": 4,
+   "y": 6
+  }
+ },
+ "progression": {
+  "gender": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "player_name": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "rival_name": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "in_control": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "badges": {
+   "value": [
+    "BOULDERBADGE",
+    "CASCADEBADGE"
+   ],
+   "source": "Observed",
+   "last_verified_frame": 705239
+  },
+  "badge_count": {
+   "value": 2,
+   "source": "Observed",
+   "last_verified_frame": 709954
+  },
+  "badge_inference": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  }
+ },
+ "party": {
+  "value": [
+   {
+    "species": {
+     "value": "SPECIES_IVYSAUR",
+     "source": "Observed",
+     "last_verified_frame": 704150
+    },
+    "nickname": {
+     "value": "IVYSAUR",
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "level": {
+     "value": 31,
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "hp": {
+     "value": [
+      81,
+      81
+     ],
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "status": {
+     "value": "Healthy",
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "moves": [
+     {
+      "mv": {
+       "value": "MOVE_TACKLE",
+       "source": "Observed",
+       "last_verified_frame": 704245
+      },
+      "pp": {
+       "value": [
+        35,
+        35
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704245
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_SLEEP_POWDER",
+       "source": "Observed",
+       "last_verified_frame": 704245
+      },
+      "pp": {
+       "value": [
+        15,
+        15
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704245
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_RAZOR_LEAF",
+       "source": "Observed",
+       "last_verified_frame": 704245
+      },
+      "pp": {
+       "value": [
+        25,
+        25
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704245
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_VINE_WHIP",
+       "source": "Observed",
+       "last_verified_frame": 704245
+      },
+      "pp": {
+       "value": [
+        9,
+        10
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704245
+      }
+     }
+    ],
+    "held_item": {
+     "value": null,
+     "source": "Observed",
+     "last_verified_frame": 704150
+    },
+    "shiny": {
+     "value": null,
+     "source": "Unknown",
+     "last_verified_frame": null
+    },
+    "details": {
+     "trainer_id": {
+      "value": "17902",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "original_trainer": {
+      "value": "RED",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "attack": {
+      "value": 41,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "defense": {
+      "value": 50,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "sp_attack": {
+      "value": 59,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "sp_defense": {
+      "value": 63,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "speed": {
+      "value": 51,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "exp_points": {
+      "value": 25184,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "next_level": {
+      "value": 1837,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "ability": {
+      "value": "OVERGROW",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     }
+    },
+    "history": [
+     {
+      "frame_id": 704149,
+      "level": 31,
+      "field": "trainer_id",
+      "from": null,
+      "to": "17902"
+     },
+     {
+      "frame_id": 704149,
+      "level": 31,
+      "field": "original_trainer",
+      "from": null,
+      "to": "RED"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "attack",
+      "from": null,
+      "to": "41"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "defense",
+      "from": null,
+      "to": "50"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "sp_attack",
+      "from": null,
+      "to": "59"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "sp_defense",
+      "from": null,
+      "to": "63"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "speed",
+      "from": null,
+      "to": "51"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "exp_points",
+      "from": null,
+      "to": "25184"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "next_level",
+      "from": null,
+      "to": "1837"
+     },
+     {
+      "frame_id": 704196,
+      "level": 31,
+      "field": "ability",
+      "from": null,
+      "to": "OVERGROW"
+     }
+    ]
+   },
+   {
+    "species": {
+     "value": "SPECIES_CATERPIE",
+     "source": "Observed",
+     "last_verified_frame": 704592
+    },
+    "nickname": {
+     "value": "GOO",
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "level": {
+     "value": 7,
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "hp": {
+     "value": [
+      23,
+      23
+     ],
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "status": {
+     "value": "Healthy",
+     "source": "Observed",
+     "last_verified_frame": 704878
+    },
+    "moves": [
+     {
+      "mv": {
+       "value": "MOVE_TACKLE",
+       "source": "Observed",
+       "last_verified_frame": 704686
+      },
+      "pp": {
+       "value": [
+        35,
+        35
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704686
+      }
+     },
+     {
+      "mv": {
+       "value": "MOVE_STRING_SHOT",
+       "source": "Observed",
+       "last_verified_frame": 704686
+      },
+      "pp": {
+       "value": [
+        40,
+        40
+       ],
+       "source": "Observed",
+       "last_verified_frame": 704686
+      }
+     },
+     null,
+     null
+    ],
+    "held_item": {
+     "value": null,
+     "source": "Observed",
+     "last_verified_frame": 704592
+    },
+    "shiny": {
+     "value": null,
+     "source": "Unknown",
+     "last_verified_frame": null
+    },
+    "details": {
+     "trainer_id": {
+      "value": "17902",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "original_trainer": {
+      "value": "RED",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "attack": {
+      "value": 9,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "defense": {
+      "value": 11,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "sp_attack": {
+      "value": 7,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "sp_defense": {
+      "value": 7,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "speed": {
+      "value": 13,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "exp_points": {
+      "value": 343,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "next_level": {
+      "value": 169,
+      "source": "Observed",
+      "last_verified_frame": 706955
+     },
+     "ability": {
+      "value": "SHIELD DUST",
+      "source": "Observed",
+      "last_verified_frame": 706955
+     }
+    },
+    "history": [
+     {
+      "frame_id": 704589,
+      "level": 7,
+      "field": "trainer_id",
+      "from": null,
+      "to": "17902"
+     },
+     {
+      "frame_id": 704589,
+      "level": 7,
+      "field": "original_trainer",
+      "from": null,
+      "to": "RED"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "attack",
+      "from": null,
+      "to": "9"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "defense",
+      "from": null,
+      "to": "11"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "sp_attack",
+      "from": null,
+      "to": "7"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "sp_defense",
+      "from": null,
+      "to": "7"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "speed",
+      "from": null,
+      "to": "13"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "exp_points",
+      "from": null,
+      "to": "343"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "next_level",
+      "from": null,
+      "to": "169"
+     },
+     {
+      "frame_id": 704639,
+      "level": 7,
+      "field": "ability",
+      "from": null,
+      "to": "SHIELD DUST"
+     }
+    ]
+   }
+  ],
+  "source": "Observed",
+  "last_verified_frame": 706955
+ },
+ "bag": {
+  "pockets": {
+   "Items": {
+    "value": [
+     [
+      "ITEM_NUGGET",
+      1
+     ]
+    ],
+    "source": "Observed",
+    "last_verified_frame": 705851
+   },
+   "KeyItems": {
+    "value": [
+     [
+      "ITEM_TEACHY_TV",
+      1
+     ],
+     [
+      "ITEM_TM_CASE",
+      1
+     ],
+     [
+      "ITEM_DOME_FOSSIL",
+      1
+     ],
+     [
+      "ITEM_FAME_CHECKER",
+      1
+     ]
+    ],
+    "source": "Observed",
+    "last_verified_frame": 706764
+   },
+   "PokeBalls": {
+    "value": [
+     [
+      "ITEM_POKE_BALL",
+      4
+     ]
+    ],
+    "source": "Observed",
+    "last_verified_frame": 706556
+   },
+   "TmCase": {
+    "value": [
+     [
+      "ITEM_TM03",
+      1
+     ],
+     [
+      "ITEM_TM39",
+      1
+     ]
+    ],
+    "source": "Observed",
+    "last_verified_frame": 706706
+   },
+   "BerryPouch": {
+    "value": [],
+    "source": "Observed",
+    "last_verified_frame": 706955
+   }
+  }
+ },
+ "money": {
+  "value": 15252,
+  "source": "Observed",
+  "last_verified_frame": 705239
+ },
+ "pc": {
+  "boxes": [
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   },
+   {
+    "value": null,
+    "source": "Unknown",
+    "last_verified_frame": null
+   }
+  ],
+  "items": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  }
+ },
+ "pokedex": {
+  "caught": {},
+  "seen": {},
+  "counts": {
+   "value": {
+    "seen": null,
+    "caught": 3
+   },
+   "source": "Observed",
+   "last_verified_frame": 705239
+  }
+ },
+ "world": {
+  "flags": {
+   "FLAG_BADGE01_GET": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE02_GET": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE03_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE04_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE05_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE06_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE07_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   },
+   "FLAG_BADGE08_GET": {
+    "value": false,
+    "source": "Observed",
+    "last_verified_frame": 705239
+   }
+  },
+  "vars": {},
+  "visited": {
+   "Route25_SeaCottage": {
+    "value": true,
+    "source": "Observed",
+    "last_verified_frame": 703794
+   }
+  },
+  "respawn": {
+   "value": null,
+   "source": "Unknown",
+   "last_verified_frame": null
+  },
+  "npcs": {},
+  "infeasible": [],
+  "paths_run": []
+ }
+}

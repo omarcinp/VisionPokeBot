@@ -6,7 +6,7 @@
 //! become `NpcSeen` when they come to stand on a tile or turn, and
 //! `NpcAbsent` when their whole reach stayed empty.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pokebot_state::{Direction, GameEvent, GameState, Observation, VisibleNpc};
 
@@ -100,6 +100,10 @@ pub struct Field {
     map: Option<String>,
     tracks: Vec<Track>,
     empty: BTreeMap<u32, Empty>,
+    /// Objects reported absent on this visit: each is reported once per
+    /// visit even when the belief already holds it (what a checkpoint
+    /// brought is checked against the screen again).
+    absent_reported: BTreeSet<u32>,
 }
 
 impl Field {
@@ -121,6 +125,7 @@ impl Field {
             self.map = Some(map.clone());
             self.tracks.clear();
             self.empty.clear();
+            self.absent_reported.clear();
         }
         let (px, py) = (player.pose.x, player.pose.y);
         self.tracks
@@ -209,7 +214,8 @@ impl Field {
             e.sightings += 1;
             let sustained = e.sightings >= ABSENT_SIGHTINGS && f - e.since >= ABSENT_FRAMES;
             let known = state.world.npc(map, id).and_then(|n| n.present.value);
-            if sustained && known != Some(false) {
+            if sustained && (known != Some(false) || !self.absent_reported.contains(&id)) {
+                self.absent_reported.insert(id);
                 events.push(GameEvent::NpcAbsent {
                     map: map.clone(),
                     local_id: id,

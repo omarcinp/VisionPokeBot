@@ -144,6 +144,7 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::NpcSeen { .. }
                 | GameEvent::NpcAbsent { .. }
                 | GameEvent::ScriptPathRun { .. }
+                | GameEvent::ScriptPathRetracted { .. }
                 | GameEvent::IntentInfeasible { .. }
                 | GameEvent::TileBlocked { .. }
                 | GameEvent::TileUnblocked { .. }

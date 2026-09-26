@@ -292,6 +292,16 @@ pub enum GameEvent {
         script: String,
         path: usize,
     },
+    /// A path recorded as run that the screen contradicts (an object it
+    /// shows stays away): it is forgotten, and so is what it was the only
+    /// word on. `flags` and `vars` are what the path changes; the tracked
+    /// ones become unknown.
+    ScriptPathRetracted {
+        script: String,
+        path: usize,
+        flags: Vec<String>,
+        vars: Vec<String>,
+    },
     /// An intent failed in a way that replanning it would repeat; forgotten
     /// on `CheckpointRestored`.
     IntentInfeasible {

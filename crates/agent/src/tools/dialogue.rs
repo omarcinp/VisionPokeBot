@@ -441,12 +441,43 @@ impl Conversation {
         belief: Option<&dyn BeliefView>,
     ) -> Option<(String, usize)> {
         let script = self.resolved_script(index)?;
-        if let Some(p) = self.path {
-            return Some((script, p));
+        let Some(data) = self.world.events().and_then(|e| e.script(&script)) else {
+            return self.path.map(|p| (script, p));
+        };
+        let Some(planned) = self.path else {
+            let path = resolve_path_in(data, &self.recognised, &self.answered, belief)?;
+            return Some((script, path));
+        };
+        // The plan's path, unless the text read is another path's: the
+        // game took the branch it prints, whatever the plan expected (the
+        // PC before Bill went into the teleporter shows the idle message,
+        // not the Cell Separator's).
+        if self.recognised.is_empty() {
+            return Some((script, planned));
         }
-        let data = self.world.events()?.script(&script)?;
-        let path = resolve_path_in(data, &self.recognised, &self.answered, belief)?;
-        Some((script, path))
+        let score = |i: usize| {
+            data.paths.get(i).map_or(0, |p| {
+                let printed = path_labels(&p.does);
+                self.recognised
+                    .iter()
+                    .filter(|l| printed.contains(&l.as_str()))
+                    .count()
+            })
+        };
+        let own = score(planned);
+        if own == self.recognised.len() {
+            return Some((script, planned));
+        }
+        // What the belief rules out may be what it got wrong: without it
+        // when nothing else prints the text.
+        let read = resolve_path_in(data, &self.recognised, &self.answered, belief)
+            .or_else(|| resolve_path_in(data, &self.recognised, &self.answered, None));
+        match read {
+            Some(q) if score(q) > own => Some((script, q)),
+            // None of the script's paths prints what was read.
+            _ if own == 0 => None,
+            _ => Some((script, planned)),
+        }
     }
 }
 
@@ -565,10 +596,46 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
                     conversation.recognised
                 ),
             ))?;
+            // The plan's path didn't run: what it would have done didn't
+            // happen.
+            if let Some(planned) = conversation.path {
+                return Err(ToolError::Replan(format!(
+                    "{}[{planned}] did not run: read {:?}",
+                    conversation.script.as_deref().unwrap_or("?"),
+                    conversation.recognised
+                )));
+            }
         }
         return Ok(());
     };
-    record_path(ctx, &script, path)
+    let diverged = conversation
+        .path
+        .filter(|&planned| planned != path && !same_effects(events, &script, planned, path));
+    record_path(ctx, &script, path)?;
+    match diverged {
+        Some(planned) => Err(ToolError::Replan(format!(
+            "{script}: the game took path {path}, not the planned {planned}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Whether two paths of `script` change the same things (they differ only
+/// in what they print: the player's gender, the way they faced).
+fn same_effects(events: &pokebot_world::events::Events, script: &str, a: usize, b: usize) -> bool {
+    let Some(s) = events.script(script) else {
+        return false;
+    };
+    let changes = |i: usize| -> Option<Vec<&Effect>> {
+        let p = s.paths.get(i)?;
+        Some(
+            p.does
+                .iter()
+                .filter(|e| !matches!(e, Effect::Say { .. }))
+                .collect(),
+        )
+    };
+    matches!((changes(a), changes(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Records that path `path` of `script` ran, with its effects, and then
@@ -682,6 +749,18 @@ pub enum Start {
 /// How `script` is started, from the world data; `None` for scripts no
 /// map places (shared helpers).
 pub fn start_of(world: &World, script: &str, pose: Option<&PlayerPose>) -> Option<Start> {
+    start_of_in(world, script, pose, &|_, _| None)
+}
+
+/// [`start_of`], with `shown(map, local_id)` telling which objects are
+/// there (seen, `Some(true)`) or gone (`Some(false)`): a script two objects
+/// share (Bill, as himself or as a Clefairy) is started at the one there.
+pub fn start_of_in(
+    world: &World,
+    script: &str,
+    pose: Option<&PlayerPose>,
+    shown: &dyn Fn(&str, u32) -> Option<bool>,
+) -> Option<Start> {
     let events = world.events()?;
     let s = events.script(script)?;
     let map = s.map.clone()?;
@@ -690,10 +769,28 @@ pub fn start_of(world: &World, script: &str, pose: Option<&PlayerPose>) -> Optio
             .map_or(0, |p| (p.x - x).abs() + (p.y - y).abs())
     };
     match s.kind.as_str() {
-        "object" => Some(Start::Object {
-            map,
-            object: s.local_id?,
-        }),
+        "object" => {
+            if let Some(object) = s.local_id {
+                return Some(Start::Object { map, object });
+            }
+            let object = events
+                .objects
+                .iter()
+                .filter(|o| o.map == map && o.script.as_deref() == Some(script))
+                .min_by_key(|o| {
+                    let there = match shown(&map, o.local_id) {
+                        Some(true) => 0,
+                        None => 1,
+                        Some(false) => 2,
+                    };
+                    let at = (o.x.unwrap_or(0), o.y.unwrap_or(0));
+                    (there, dist(at), o.local_id)
+                })?;
+            Some(Start::Object {
+                map,
+                object: object.local_id,
+            })
+        }
         "sign" => {
             let m = world.map(&map)?;
             let sign = m
@@ -815,7 +912,32 @@ fn run_script(
     )
     .near(pose.clone());
     let on_screen = ctx.observation().is_some_and(|o| o.dialogue.is_some());
-    let start = start_of(&ctx.world, script, pose.as_ref());
+    let start = {
+        let state = ctx.state();
+        let shown = |map: &str, id: u32| -> Option<bool> {
+            let seen = state
+                .view
+                .npcs
+                .iter()
+                .any(|n| n.map == map && n.local_id == Some(id));
+            if seen {
+                return Some(true);
+            }
+            if let Some(present) = state.world.npc(map, id).and_then(|n| n.present.value) {
+                return Some(present);
+            }
+            let flag = ctx
+                .world
+                .map(map)?
+                .objects
+                .iter()
+                .find(|o| o.local_id == id)?
+                .flag
+                .clone()?;
+            state.world.flags.get(&flag)?.value.map(|hidden| !hidden)
+        };
+        start_of_in(&ctx.world, script, pose.as_ref(), &shown)
+    };
     if on_screen || start.is_none() {
         let mut scene = SceneStep::new(conversation);
         ctx.drive(&mut scene)?;
@@ -1246,5 +1368,68 @@ mod tests {
         assert_eq!(resolve_path(&s, &l(&["Welcome"]), &[true]), Some(0));
         assert_eq!(resolve_path(&s, &l(&["Welcome"]), &[false]), Some(1));
         assert_eq!(resolve_path(&s, &l(&["Welcome", "Healed"]), &[]), Some(0));
+    }
+
+    /// On the Switch the plan ran Bill's PC before Bill went into the
+    /// teleporter: the PC printed its idle message, and the plan's Cell
+    /// Separator path must not be recorded (it would set
+    /// `FLAG_HELPED_BILL_IN_SEA_COTTAGE`).
+    #[test]
+    fn the_text_read_outranks_the_planned_path() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let script = "Route25_SeaCottage_EventScript_Computer";
+        let events = world.events().unwrap();
+        let s = events.script(script).unwrap();
+        let prints = |i: usize, label: &str| path_labels(&s.paths[i].does).contains(&label);
+        let idle = "Route25_SeaCottage_Text_TeleporterIsDisplayed";
+        let separator = "Route25_SeaCottage_Text_InitiatedTeleportersCellSeparator";
+        let planned = (0..s.paths.len()).find(|&i| prints(i, separator)).unwrap();
+        let ran = (0..s.paths.len()).find(|&i| prints(i, idle)).unwrap();
+        let mut c = Conversation::new(
+            Arc::clone(&world),
+            data,
+            Some(script.into()),
+            Some(planned),
+            Vec::new(),
+        );
+        c.recognised = vec![idle.into()];
+        let index = LabelIndex::build_for(events, &c.recognised);
+        assert_eq!(c.resolved(&index), Some((script.into(), ran)));
+        assert!(!same_effects(events, script, planned, ran));
+        // The planned path's own text: the plan stands.
+        c.recognised = vec![separator.into()];
+        let index = LabelIndex::build_for(events, &c.recognised);
+        assert_eq!(c.resolved(&index), Some((script.into(), planned)));
+        // Text none of its paths print: nothing of it ran.
+        c.recognised = vec!["PalletTown_Text_OakDontGoOut".into()];
+        let index = LabelIndex::build_for(events, &c.recognised);
+        assert_eq!(c.resolved(&index), None);
+    }
+
+    /// Bill's script belongs to him and to the Clefairy he turned into:
+    /// it starts at whichever of the two is there (on the Switch the tool
+    /// waited for a scene without talking to either).
+    #[test]
+    fn a_shared_script_starts_at_the_object_that_is_there() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let bill = "Route25_SeaCottage_EventScript_Bill";
+        let map = "Route25_SeaCottage";
+        let at = |shown: &dyn Fn(&str, u32) -> Option<bool>| match start_of_in(
+            &world, bill, None, shown,
+        ) {
+            Some(Start::Object { object, .. }) => object,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(at(&|_, id| Some(id == 2)), 2);
+        assert_eq!(at(&|_, id| (id == 1).then_some(false)), 2);
+        assert_eq!(at(&|_, id| (id == 1).then_some(true)), 1);
+        assert!(matches!(
+            start_of(&world, bill, None),
+            Some(Start::Object { map: m, .. }) if m == map
+        ));
     }
 }

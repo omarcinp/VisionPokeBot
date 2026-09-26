@@ -302,6 +302,7 @@ impl<'a> ToolContext<'a> {
             GameEvent::FlagTracked { .. }
                 | GameEvent::FlagObserved { .. }
                 | GameEvent::ScriptPathRun { .. }
+                | GameEvent::ScriptPathRetracted { .. }
                 | GameEvent::CheckpointRestored { .. }
         ) {
             let known = crate::nav::belief_gone(&self.world, self.runtime.state());
