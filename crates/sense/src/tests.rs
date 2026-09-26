@@ -1049,8 +1049,8 @@ fn visible_party_reordering_keeps_the_history_with_the_named_member() {
 /// The Switch run recorded Bill's PC's Cell Separator path when the PC
 /// only showed its idle message: the belief had Bill back as himself
 /// (his hide flag tracked clear) and Bill helped. Bill staying away from
-/// every tile he can stand on retracts the path, once per visit even with
-/// his absence already in the checkpoint.
+/// every tile he can stand on retracts the path, also when that belief
+/// arrives with a checkpoint after his absence was first seen.
 #[test]
 fn an_absent_object_retracts_the_path_that_showed_it() {
     let (Some(d), Some(w)) = (data(), world()) else {
@@ -1060,7 +1060,16 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
         return;
     }
     let pc = "Route25_SeaCottage_EventScript_Computer";
-    let mut state = GameState::default();
+    let mut s = Sensor::new(d).with_world(w);
+    let frame = |f: u64| {
+        let mut o = field(f, (4, 6), &[], &[1]);
+        o.player.as_mut().unwrap().pose.map = "Route25_SeaCottage".into();
+        o
+    };
+    // Bill is seen gone before the belief knows anything.
+    let (mut state, _) = run(&mut s, GameState::default(), (0..100).map(frame));
+    assert!(state.world.flags.is_empty());
+    // Then the checkpoint's word comes in.
     let flags = &mut state.world.flags;
     flags.insert(
         "FLAG_HELPED_BILL_IN_SEA_COTTAGE".into(),
@@ -1073,14 +1082,7 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
     // Observed elsewhere: not the path's to take away.
     flags.insert("FLAG_GOT_OAKS_PARCEL".into(), Knowledge::observed(true, 1));
     state.world.record_path(pc, 7);
-    state.world.npc_mut("Route25_SeaCottage", 1).present = Knowledge::observed(false, 1);
-    let mut s = Sensor::new(d).with_world(w);
-    let frame = |f: u64| {
-        let mut o = field(f, (4, 6), &[], &[1]);
-        o.player.as_mut().unwrap().pose.map = "Route25_SeaCottage".into();
-        o
-    };
-    let (state, _) = run(&mut s, state, (0..100).map(frame));
+    let (state, _) = run(&mut s, state, (100..110).map(frame));
     let flag = |name: &str| state.world.flags.get(name).cloned();
     assert_eq!(flag("FLAG_HELPED_BILL_IN_SEA_COTTAGE"), None);
     assert_eq!(

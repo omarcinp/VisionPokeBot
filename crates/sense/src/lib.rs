@@ -256,13 +256,11 @@ impl Sensor {
                     .map(|map| GameEvent::MapVisited { map: map.clone() }),
             );
         }
-        let field = self.field.observe(o, state);
-        if let Some(world) = &self.world {
-            let contradicted = contradicted_paths(world, state, &field);
-            events.extend(field);
-            events.extend(contradicted);
-        } else {
-            events.extend(field);
+        events.extend(self.field.observe(o, state));
+        if let (Some(world), Some((map, absent))) = (&self.world, self.field.absent()) {
+            if o.player.is_some() {
+                events.extend(contradicted_paths(world, state, map, &absent));
+            }
         }
         let view = self.view_of(o, state);
         if let Some(view) = self.view.update(f, Some(view), VIEW_FRAMES) {
@@ -771,15 +769,18 @@ impl Sensor {
 
 /// `PartyObserved` for `slot` with the fields `fill` sets.
 /// Paths the screen contradicts: an object stays away from every tile it
-/// can stand on while the belief, on the word of a path it recorded, has
-/// it shown (its hide flag tracked clear). The latest such path is
+/// can stand on (`absent` on `map`, now) while the belief, on the word of
+/// a path it recorded, has it shown (its hide flag tracked clear). Checked
+/// against the belief as it is, so a checkpoint restored later is checked
+/// too. The latest such path is
 /// retracted with what it changed, and the flag becomes what is seen. On
 /// the Switch the PC's Cell Separator path was recorded when the PC only
 /// showed its idle message: it put Bill back as himself, who wasn't there.
 fn contradicted_paths(
     world: &pokebot_world::World,
     state: &GameState,
-    field: &[GameEvent],
+    map: &str,
+    absent: &[u32],
 ) -> Vec<GameEvent> {
     use pokebot_state::KnowledgeSource;
     use pokebot_world::events::Effect;
@@ -787,10 +788,7 @@ fn contradicted_paths(
         return Vec::new();
     };
     let mut out = Vec::new();
-    for e in field {
-        let GameEvent::NpcAbsent { map, local_id } = e else {
-            continue;
-        };
+    for local_id in absent {
         let Some(flag) = world
             .map(map)
             .and_then(|m| m.objects.iter().find(|o| o.local_id == *local_id))

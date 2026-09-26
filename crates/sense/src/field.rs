@@ -6,7 +6,7 @@
 //! become `NpcSeen` when they come to stand on a tile or turn, and
 //! `NpcAbsent` when their whole reach stayed empty.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use pokebot_state::{Direction, GameEvent, GameState, Observation, VisibleNpc};
 
@@ -100,10 +100,8 @@ pub struct Field {
     map: Option<String>,
     tracks: Vec<Track>,
     empty: BTreeMap<u32, Empty>,
-    /// Objects reported absent on this visit: each is reported once per
-    /// visit even when the belief already holds it (what a checkpoint
-    /// brought is checked against the screen again).
-    absent_reported: BTreeSet<u32>,
+    /// The last located frame.
+    last: Option<u64>,
 }
 
 impl Field {
@@ -125,8 +123,8 @@ impl Field {
             self.map = Some(map.clone());
             self.tracks.clear();
             self.empty.clear();
-            self.absent_reported.clear();
         }
+        self.last = Some(f);
         let (px, py) = (player.pose.x, player.pose.y);
         self.tracks
             .retain(|t| (t.x - px).abs() <= VISIBLE_X && (t.y - py).abs() <= VISIBLE_Y);
@@ -214,8 +212,7 @@ impl Field {
             e.sightings += 1;
             let sustained = e.sightings >= ABSENT_SIGHTINGS && f - e.since >= ABSENT_FRAMES;
             let known = state.world.npc(map, id).and_then(|n| n.present.value);
-            if sustained && (known != Some(false) || !self.absent_reported.contains(&id)) {
-                self.absent_reported.insert(id);
+            if sustained && known != Some(false) {
                 events.push(GameEvent::NpcAbsent {
                     map: map.clone(),
                     local_id: id,
@@ -223,6 +220,20 @@ impl Field {
             }
         }
         events
+    }
+
+    /// The map and the objects whose reach has stayed empty long enough to
+    /// count as absent, as of the last located frame.
+    pub fn absent(&self) -> Option<(&str, Vec<u32>)> {
+        let map = self.map.as_deref()?;
+        let ids = self
+            .empty
+            .iter()
+            .filter(|(_, e)| e.sightings >= ABSENT_SIGHTINGS)
+            .filter(|(_, e)| self.last.is_some_and(|f| f - e.since >= ABSENT_FRAMES))
+            .map(|(&id, _)| id)
+            .collect();
+        Some((map, ids))
     }
 
     /// The confirmed sprites, top to bottom, left to right.
