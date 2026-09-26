@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use pokebot_gamedata::mechanics::Stats;
 use pokebot_gamedata::GameData;
 use pokebot_state::{BattleMenu, BattleObservation, GameEvent, GameState, MoveSlot, PartyMon};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,13 @@ pub struct Member {
     /// PP spent per move since the last full heal.
     #[serde(default)]
     pub pp_used: BTreeMap<String, u8>,
+    /// Attack, Defense, Speed, Sp. Atk, Sp. Def as read on the summary's
+    /// Skills page (perhaps at an earlier level: see [`Member::stats`]).
+    #[serde(default)]
+    pub read_stats: Option<[u16; 5]>,
+    /// Ability as the summary prints it (`OVERGROW`).
+    #[serde(default)]
+    pub ability: Option<String>,
 }
 
 impl Member {
@@ -33,7 +41,32 @@ impl Member {
             moves: data.default_moves(species, level),
             hp: None,
             pp_used: BTreeMap::new(),
+            read_stats: None,
+            ability: None,
         }
+    }
+
+    /// Battle stats (HP, Atk, Def, Spe, SpA, SpD) from the summary's
+    /// reading and the maximum HP, when all are known and plausible at the
+    /// current level: each within what IVs 0–31, any EVs and a nature
+    /// allow. A reading from before a level-up falls out of the range and
+    /// counts as unknown.
+    pub fn stats(&self, data: &GameData) -> Option<Stats> {
+        let read = self.read_stats?;
+        let (_, max_hp) = self.hp?;
+        let base = data.species(&self.species)?.base;
+        let level = u32::from(self.level);
+        // Order of `read`: Atk, Def, Spe, SpA, SpD (base indices 1..=5).
+        let plausible = read.iter().enumerate().all(|(i, v)| {
+            let b = u32::from(base[i + 1]);
+            let low = ((2 * b) * level / 100 + 5) * 9 / 10;
+            let high = ((2 * b + 31 + 63) * level / 100 + 5) * 11 / 10;
+            (low..=high).contains(&u32::from(*v))
+        });
+        plausible.then(|| {
+            let [a, d, s, sa, sd] = read.map(u32::from);
+            Stats([u32::from(max_hp), a, d, s, sa, sd])
+        })
     }
 
     /// Name as the game prints it (`SPECIES_BULBASAUR` → `BULBASAUR`).
@@ -112,6 +145,17 @@ impl Party {
                         .filter_map(|s| Some((s.mv.value.clone()?, s.pp.value?)))
                         .map(|(mv, (cur, max))| (mv, max.saturating_sub(cur)))
                         .collect(),
+                    read_stats: (|| {
+                        let d = &m.details;
+                        Some([
+                            d.attack.value?,
+                            d.defense.value?,
+                            d.speed.value?,
+                            d.sp_attack.value?,
+                            d.sp_defense.value?,
+                        ])
+                    })(),
+                    ability: m.details.ability.value.clone(),
                 })
             })
             .collect();

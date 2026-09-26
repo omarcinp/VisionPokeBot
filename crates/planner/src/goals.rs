@@ -4938,11 +4938,13 @@ impl<'p, 'a> Session<'p, 'a> {
                     ..
                 } => (
                     map.clone(),
+                    // The readiness plan counts throws; the bag must also
+                    // keep the shiny reserve, which the catch never throws.
                     Intent::Catch {
                         species: species.clone(),
                         map: map.clone(),
                         slot: "land".to_string(),
-                        balls: *balls,
+                        balls: *balls + self.planner.params.ball_reserve,
                     },
                     *minutes,
                 ),

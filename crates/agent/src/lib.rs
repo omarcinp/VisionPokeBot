@@ -11,6 +11,7 @@ pub mod bag;
 pub mod battle;
 pub mod belief_view;
 pub mod catch;
+pub mod catch_odds;
 pub mod checkpoint;
 pub mod console;
 mod executor;
