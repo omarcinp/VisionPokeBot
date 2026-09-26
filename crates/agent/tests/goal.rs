@@ -414,6 +414,19 @@ impl Harness {
         self.seen.lock().unwrap().iter().map(Intent::name).collect()
     }
 
+    /// The maps `Explore` was sent to, in order.
+    fn explored(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|i| match i {
+                Intent::Explore { map } => Some(map.clone().unwrap_or_default()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Runs the loop with the fake tools; the report and the state's
     /// infeasible set.
     fn run(
@@ -722,18 +735,23 @@ fn the_loop_gives_up_after_max_replans_with_the_last_plan() {
                 Err("d".into()),
             ],
         ),
-        ("Explore", vec![Err("explore: nothing new".into())]),
+        (
+            "Explore",
+            (0..8).map(|_| Err("explore: nothing new".into())).collect(),
+        ),
     ]);
     let opts = GoalOptions {
         max_replans: 2,
         ..GoalOptions::default()
     };
     let (report, _) = h.run(&d, frame, &planner, opts, vec![]);
-    // The map was explored once, to no avail.
-    assert_eq!(
-        h.seen_names().iter().filter(|n| **n == "Explore").count(),
-        1
-    );
+    // The recourses were tried to no avail: the stuck map first, then
+    // others, each once, no more than one stall's worth.
+    let maps = h.explored();
+    assert!((1..=6).contains(&maps.len()), "{maps:?}");
+    assert_eq!(maps[0], "ViridianCity_PokemonCenter_1F");
+    let distinct: BTreeSet<_> = maps.iter().collect();
+    assert_eq!(distinct.len(), maps.len(), "{maps:?}");
     assert!(!report.satisfied);
     assert!(
         report.outcome.starts_with("out of replans"),
@@ -1035,9 +1053,9 @@ fn exploring_that_learns_something_earns_one_more_plan() {
 /// Exploring that learnt something may run again on the same map when the
 /// plan is stuck anew (on the emulator, Bill's PC was read first; Bill,
 /// walked off his tiles, was only reachable by a second exploration); one
-/// that found nothing is not repeated.
+/// that found nothing makes the next recourse the next map out.
 #[test]
-fn a_map_is_explored_again_after_exploring_it_paid_off() {
+fn a_map_is_explored_again_after_it_paid_off_and_a_fruitless_one_widens() {
     let (Some(d), Some(frame)) = (data(), overworld()) else {
         return;
     };
@@ -1050,20 +1068,19 @@ fn a_map_is_explored_again_after_exploring_it_paid_off() {
                 Err("x".into()),
                 Err("y".into()),
                 Err("y".into()),
-                Err("z".into()),
-                Err("z".into()),
             ],
         ),
         (
             "Explore",
-            vec![Ok(vec![]), Err("explore: nothing new".into())],
+            vec![Ok(vec![]), Err("explore: nothing new".into()), Ok(vec![])],
         ),
+        ("Catch", vec![Ok(vec![caught()])]),
     ]);
-    let opts = GoalOptions {
-        max_replans: 8,
-        ..GoalOptions::default()
-    };
-    let _ = h.run(&d, frame, &planner, opts, vec![]);
-    let explores = h.seen_names().iter().filter(|n| **n == "Explore").count();
-    assert_eq!(explores, 2, "{:?}", h.seen_names());
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    let maps = h.explored();
+    assert_eq!(maps.len(), 3, "{:?}", h.seen_names());
+    assert_eq!(maps[0], "ViridianCity_PokemonCenter_1F");
+    assert_eq!(maps[1], maps[0], "explored again after it paid off");
+    assert_ne!(maps[2], maps[1], "a fruitless map widens the search");
 }

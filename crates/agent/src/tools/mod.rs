@@ -196,9 +196,13 @@ pub enum Intent {
     Save,
     /// Get out of an unrecognised screen (§7.4).
     Unstick,
-    /// Talk to the map's people and read its signs until something new is
-    /// learnt: the last resort of a plan stuck on the map.
-    Explore,
+    /// Talk to the people and read the signs of `map` (the current map
+    /// when `None`, else walking there first) until something new is
+    /// learnt: the last resort of a stuck plan ([`crate::recourse`]).
+    Explore {
+        #[serde(default)]
+        map: Option<String>,
+    },
     /// Find out which of several lookalike maps the player is on (the
     /// state's `player.candidates`), by walking out to one that names
     /// itself.
@@ -240,7 +244,7 @@ impl Intent {
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
-            Intent::Explore => "Explore",
+            Intent::Explore { .. } => "Explore",
             Intent::ConfirmLocation => "ConfirmLocation",
             Intent::Teach { .. } => "Teach",
             Intent::FieldMove { .. } => "FieldMove",
@@ -417,7 +421,8 @@ impl std::fmt::Display for Intent {
             Intent::Probe { fact } => write!(f, "Probe {fact:?}"),
             Intent::Save => write!(f, "Save"),
             Intent::Unstick => write!(f, "Unstick"),
-            Intent::Explore => write!(f, "Explore"),
+            Intent::Explore { map: None } => write!(f, "Explore"),
+            Intent::Explore { map: Some(map) } => write!(f, "Explore {map}"),
             Intent::ConfirmLocation => write!(f, "ConfirmLocation"),
             Intent::Teach { item, member } => write!(f, "Teach {item} to {member}"),
             Intent::FieldMove { mv, at, push } => {
@@ -546,7 +551,7 @@ impl Default for Toolbox {
             Box::new(field::FieldMoveTool),
             Box::new(save::SaveTool),
             Box::new(UnstickTool),
-            Box::new(explore::ExploreTool::default()),
+            Box::new(explore::ExploreTool),
         ])
     }
 }

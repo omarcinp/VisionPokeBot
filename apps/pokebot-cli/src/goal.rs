@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use pokebot_agent::checkpoint;
 use pokebot_agent::goal::{self, GoalOptions, GoalReport, DEFAULT_MAX_REPLANS};
 use pokebot_agent::goal_session::{self, CycleEnd, Runner, Session, Start};
+use pokebot_agent::ledger::Ledger;
 use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};
 use pokebot_agent::{Executor, ExecutorError, NewGameConfig, Progress, Starter};
 use pokebot_core::Error;
@@ -556,6 +557,15 @@ impl CliRunner<'_> {
             }));
         }
         ctx = ctx.with_toolbox(toolbox);
+        // What was tried and seen outlives the cycle and the process.
+        let ledger_path = Ledger::path_for(&self.state_path);
+        match Ledger::load(&ledger_path) {
+            Ok(ledger) => ctx = ctx.with_ledger(ledger),
+            Err(e) => ctx.info(format!(
+                "ledger {}: {e}; starting empty",
+                ledger_path.display()
+            )),
+        }
         if start == Start::NewGame {
             // Nothing to read: a new game's party, bag and money are known
             // (and there is no POKéMON entry in the Start menu yet).
@@ -573,7 +583,11 @@ impl CliRunner<'_> {
             on_status,
         };
         ctx.info(format!("goal: {}", self.goal));
-        let report = goal::run(self.goal, &mut ctx, &planner, opts)?;
+        let report = goal::run(self.goal, &mut ctx, &planner, opts);
+        if let Err(e) = ctx.ledger.store() {
+            ctx.info(format!("ledger: {e}"));
+        }
+        let report = report?;
         // The end state is the checkpoint, whether or not the last step
         // changed anything.
         if self.args.save_game

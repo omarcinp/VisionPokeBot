@@ -149,6 +149,9 @@ pub struct ToolContext<'a> {
     /// The compiled script `RunScript` is following, if any (a battle it
     /// starts is its battle).
     pub running_script: Option<String>,
+    /// Tiles walked, people seen and talked to, recourse outcomes
+    /// ([`crate::ledger`]); in memory only unless given a file.
+    pub ledger: crate::ledger::Ledger,
     next_need_check: u64,
     toolbox: Toolbox,
     expects: Expects,
@@ -211,6 +214,7 @@ impl<'a> ToolContext<'a> {
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
             scheduler: crate::scheduler::Scheduler::default(),
             running_script: None,
+            ledger: crate::ledger::Ledger::default(),
             next_need_check: 0,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
@@ -246,6 +250,11 @@ impl<'a> ToolContext<'a> {
 
     pub fn with_checkpoint(mut self, path: PathBuf, identity: checkpoint::Identity) -> Self {
         self.checkpoint = Some((path, identity));
+        self
+    }
+
+    pub fn with_ledger(mut self, ledger: crate::ledger::Ledger) -> Self {
+        self.ledger = ledger;
         self
     }
 
@@ -380,7 +389,22 @@ impl<'a> ToolContext<'a> {
         if let Some(p) = &o.player {
             let map = &p.pose.map;
             if self.last_map.as_deref() != Some(map.as_str()) {
+                self.ledger.entered(map);
+            }
+            self.ledger.walked(&p.pose);
+            for s in &o.sprites {
+                if let Some(id) = s.local_id {
+                    self.ledger
+                        .seen(map, &crate::ledger::object_key(id), (s.x, s.y));
+                }
+            }
+            if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
+                // What the last map showed is kept (a crash loses at most
+                // one map's worth).
+                if let Err(e) = self.ledger.store() {
+                    self.runtime.error(format!("ledger: {e}"));
+                }
                 // NPCs are back at their data positions on re-entry, and cut
                 // trees and smashed rocks have grown back.
                 self.blocked

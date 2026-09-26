@@ -127,6 +127,32 @@ fn spends(does: &[Effect]) -> bool {
     })
 }
 
+/// Whether YES to the first question of `script` is safe to try when no
+/// plan asks for it (a recourse trying the other answer): no path taking
+/// YES spends money, items or coins, fights, or does something the
+/// compiled scripts don't model (a trade is such a special).
+pub fn yes_is_safe(script: &Script) -> bool {
+    let mut yes = script
+        .paths
+        .iter()
+        .filter(|p| question_branches(&p.when).first() == Some(&true))
+        .map(|p| p.does.as_slice())
+        .peekable();
+    yes.peek().is_some()
+        && yes.all(|does| {
+            !spends(does)
+                && !does.iter().any(|e| {
+                    matches!(
+                        e,
+                        Effect::Battle { .. }
+                            | Effect::Wild { .. }
+                            | Effect::Coins { .. }
+                            | Effect::Other(_)
+                    )
+                })
+        })
+}
+
 /// Whether the branch heals or gives something for free.
 fn gives(does: &[Effect]) -> bool {
     does.iter().any(|e| match e {

@@ -8,6 +8,11 @@
 //! re-localisation and probes of the plan's assumptions; a leg that loops
 //! on a tile fails in the `Go` tool (`MAX_TILE_VISITS`).
 //!
+//! Stuck (an intent infeasible, one reason failing twice across intents,
+//! no plan, the replans spent): the ranked recourses of
+//! [`crate::recourse`] are tried best first until one changes the belief,
+//! which is worth another plan.
+//!
 //! Every plan and replan is written to `plan.jsonl` in the session
 //! directory (with its reason) and logged through `Runtime::explain`.
 
@@ -23,6 +28,8 @@ use pokebot_state::{GameEvent, KnowledgeSource, PlayerPose, SavedKnowledge, Scre
 use pokebot_world::predicate::{Predicate, Truth};
 use serde::Serialize;
 
+use crate::ledger::fingerprint;
+use crate::recourse::{self, Recourse, Stall};
 use crate::tools::{progress, Intent, ToolContext, ToolError};
 
 /// Replans allowed before the loop gives up (`--max-replans`).
@@ -31,6 +38,10 @@ pub const DEFAULT_MAX_REPLANS: u32 = 8;
 const RELOCALISE_AFTER: usize = 3;
 /// The name under which the loop logs `GoalProgress` events.
 const GOAL: &str = "Goal";
+/// Recourses one goal run may try in all.
+const MAX_RECOURSES: u32 = 24;
+/// Recourses tried for one stall before the loop replans or gives up.
+const RECOURSES_PER_STALL: usize = 6;
 
 /// What the loop plans with: the goal planner, or a scripted stand-in in
 /// tests.
@@ -155,8 +166,13 @@ struct Run<'g, 'p> {
     last_failure: Option<(String, String)>,
     /// Intent names that failed at each pose since the last success.
     failed_at: Vec<(PlayerPose, String)>,
-    /// Maps where exploring as a last resort found nothing new in this run.
-    explored: BTreeSet<String>,
+    /// The last failure's reason, whatever the intent (a plan retrying
+    /// one script by its paths fails the same way under other names).
+    last_reason: Option<String>,
+    /// Recourses tried in this run.
+    recourses_run: u32,
+    /// Probes a recourse has run in this run.
+    probed: BTreeSet<ProbeFact>,
 }
 
 /// Runs `goal` to completion or until the replans run out (spec §8).
@@ -193,7 +209,9 @@ pub fn run(
         },
         last_failure: None,
         failed_at: Vec::new(),
-        explored: BTreeSet::new(),
+        last_reason: None,
+        recourses_run: 0,
+        probed: BTreeSet::new(),
     };
     let outcome = run.main(ctx);
     let stopped = matches!(outcome, Err(ToolError::Stopped));
@@ -207,7 +225,7 @@ impl Run<'_, '_> {
         let mut reason = "start".to_string();
         let mut plan_no = 0u32;
         loop {
-            if plan_no > self.opts.max_replans && self.explore(ctx)? {
+            if plan_no > self.opts.max_replans && self.recover(ctx)? {
                 // What the map showed is worth one more plan.
                 plan_no -= 1;
             }
@@ -244,8 +262,8 @@ impl Run<'_, '_> {
             self.set_status("planning", plan_reason.clone(), 0, None, ctx);
             let plan = match self.planner.plan(goal, &knowledge, pose.clone()) {
                 Ok(plan) => plan,
-                Err(e) if self.explore(ctx)? => {
-                    reason = format!("no plan ({e}); explored the map");
+                Err(e) if self.recover(ctx)? => {
+                    reason = format!("no plan ({e}); a recourse changed the belief");
                     continue;
                 }
                 Err(e) => {
@@ -375,6 +393,7 @@ impl Run<'_, '_> {
                 Ok(()) => {
                     self.report.steps_run += 1;
                     self.last_failure = None;
+                    self.last_reason = None;
                     self.failed_at.clear();
                     if self.opts.save_game && outcome.learned.iter().any(changes_save) {
                         let saved = ctx.invoke(&Intent::Save);
@@ -473,6 +492,8 @@ impl Run<'_, '_> {
         // routes around; marking the whole destination infeasible cut the
         // only way to Mt. Moon B2F for the session (flash-6).
         let again = self.last_failure.as_ref() == Some(&(key.clone(), reason.to_owned()));
+        let same_reason = self.last_reason.as_deref() == Some(reason);
+        self.last_reason = Some(reason.to_owned());
         if again && step.intent.name() == "Go" {
             let blocked = ctx.blocked.lock().unwrap_or_else(|e| e.into_inner()).all();
             ctx.emit(progress(
@@ -492,9 +513,18 @@ impl Run<'_, '_> {
             );
             self.report.infeasible.push(key.clone());
             self.last_failure = None;
-            self.explore(ctx)?;
+            self.recover(ctx)?;
         } else {
             self.last_failure = Some((key.clone(), reason.to_owned()));
+            if same_reason && step.intent.name() != "Go" {
+                // Another intent, the same failure (`RunScript(Bill[9])`,
+                // then `Bill[30]`, `Bill[5]`, …): the plan is going round.
+                ctx.emit(progress(
+                    GOAL,
+                    format!("{reason}: failed again under another intent"),
+                ))?;
+                self.recover(ctx)?;
+            }
         }
         // Different intents failing at one pose: the position may be wrong.
         if let Some(pose) = ctx.pose() {
@@ -511,35 +541,166 @@ impl Run<'_, '_> {
         Ok(why)
     }
 
-    /// The last resort of a plan stuck on a map (an intent failed twice,
-    /// no plan, the replans spent): talk to the map's people and read its
-    /// signs until the belief learns something ([`Intent::Explore`]).
-    /// Again after it learnt something (reading Bill's PC puts Bill back as
-    /// himself, off his tiles: he is tried next), until a map yields
-    /// nothing; each target is tried once per session. Whether something
-    /// was learnt.
-    fn explore(&mut self, ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> {
-        let Some(pose) = ctx.pose() else {
-            return Ok(false);
-        };
-        if self.explored.contains(&pose.map) {
-            return Ok(false);
+    /// The last resort of a stuck plan (an intent failed twice, one
+    /// reason failed under two intents, no plan, the replans spent): the
+    /// recourses on offer ([`recourse::offers`]) are tried best first until
+    /// one changes what the belief knows, at most [`RECOURSES_PER_STALL`]
+    /// (and [`MAX_RECOURSES`] per run). Each outcome is booked in the
+    /// ledger, which is what the next ranking is computed from. Whether
+    /// the belief changed.
+    fn recover(&mut self, ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> {
+        let stall = self.stall(ctx);
+        let world = std::sync::Arc::clone(&ctx.world);
+        ctx.scheduler
+            .graph
+            .get_or_insert_with(|| crate::scheduler::graph(&world));
+        let mut tried: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..RECOURSES_PER_STALL {
+            if self.recourses_run >= MAX_RECOURSES {
+                ctx.emit(progress(
+                    GOAL,
+                    format!("stuck: the {MAX_RECOURSES} recourses of this run are spent"),
+                ))?;
+                return Ok(false);
+            }
+            let Some(pose) = ctx.pose() else {
+                return Ok(false);
+            };
+            let offers: Vec<_> = recourse::offers(
+                &ctx.world,
+                ctx.scheduler.graph.as_ref(),
+                &ctx.ledger,
+                ctx.state(),
+                &pose,
+                &stall,
+            )
+            .into_iter()
+            .filter(|o| !tried.contains(&o.recourse.to_string()))
+            .collect();
+            ctx.runtime.explain(
+                "recourse",
+                &serde_json::json!({
+                    "pose": pose,
+                    "offers": offers.iter().take(6).map(|o| serde_json::json!({
+                        "recourse": o.recourse.to_string(),
+                        "chance": o.chance,
+                        "cost_s": o.cost_s,
+                        "priority": o.priority(),
+                        "why": o.why,
+                    })).collect::<Vec<_>>(),
+                }),
+            );
+            let Some(best) = offers.into_iter().next() else {
+                ctx.emit(progress(
+                    GOAL,
+                    format!("stuck on {}: no recourse left", pose.map),
+                ))?;
+                return Ok(false);
+            };
+            tried.insert(best.recourse.to_string());
+            self.recourses_run += 1;
+            ctx.emit(progress(
+                GOAL,
+                format!(
+                    "stuck on {}: {} ({:.0}% in {:.0} s: {})",
+                    pose.map,
+                    best.recourse,
+                    best.chance * 100.0,
+                    best.cost_s,
+                    best.why
+                ),
+            ))?;
+            let before = fingerprint(ctx.state());
+            let started = Instant::now();
+            let result = self.run_recourse(ctx, &best.recourse);
+            // `Explore` succeeds only once the belief changed.
+            let unblocked = matches!(
+                (&best.recourse, &result),
+                (Recourse::Explore { .. }, Ok(()))
+            ) || fingerprint(ctx.state()) != before;
+            ctx.ledger.tried(
+                best.recourse.kind(),
+                unblocked,
+                started.elapsed().as_secs_f64(),
+            );
+            if let Err(e) = ctx.ledger.store() {
+                ctx.info(format!("ledger: {e}"));
+            }
+            match result {
+                Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                Err(e) => ctx.emit(progress(GOAL, format!("{}: {e}", best.recourse)))?,
+                Ok(()) => {}
+            }
+            if unblocked {
+                return Ok(true);
+            }
         }
-        ctx.emit(progress(
-            GOAL,
-            format!("stuck on {}: exploring it", pose.map),
-        ))?;
-        ctx.runtime
-            .explain("explore", &serde_json::json!({ "map": pose.map }));
-        let outcome = ctx.invoke(&Intent::Explore);
-        self.report.learned.extend(outcome.learned.iter().cloned());
-        match outcome.result {
-            Ok(()) => Ok(true),
-            Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
-            Err(e) => {
-                self.explored.insert(pose.map.clone());
-                ctx.emit(progress(GOAL, format!("explore: {e}")))?;
-                Ok(false)
+        Ok(false)
+    }
+
+    /// What the last plan says about the stall: the maps it goes to or
+    /// acts on, and the probes settling its assumptions that were not
+    /// observed (nor probed by a recourse already).
+    fn stall(&self, ctx: &ToolContext<'_>) -> Stall {
+        let Some(plan) = self.report.last_plan() else {
+            return Stall::default();
+        };
+        let relevant = plan
+            .intents
+            .iter()
+            .filter_map(|p| Intent::from_planned(&p.intent, Some(&ctx.world)).ok())
+            .filter_map(|i| intent_map(&i).map(str::to_owned))
+            .collect();
+        let knowledge = ctx.state().saved_knowledge();
+        let mut probes: Vec<ProbeFact> = Vec::new();
+        for p in &plan.assumes {
+            if provenance(&knowledge, p) == KnowledgeSource::Observed {
+                continue;
+            }
+            let Some(fact) = ProbeFact::for_predicate(p, &ctx.data) else {
+                continue;
+            };
+            let planned = pokebot_planner::Intent::Probe { fact: fact.clone() };
+            if self.probed.contains(&fact)
+                || probes.contains(&fact)
+                || Intent::from_planned(&planned, None).is_err()
+            {
+                continue;
+            }
+            probes.push(fact);
+        }
+        Stall { relevant, probes }
+    }
+
+    fn run_recourse(
+        &mut self,
+        ctx: &mut ToolContext<'_>,
+        recourse: &Recourse,
+    ) -> Result<(), ToolError> {
+        match recourse {
+            Recourse::Explore { map } => {
+                let outcome = ctx.invoke(&Intent::Explore {
+                    map: Some(map.clone()),
+                });
+                self.report.learned.extend(outcome.learned.iter().cloned());
+                outcome.result
+            }
+            Recourse::Probe { facts } => {
+                for fact in facts {
+                    self.probed.insert(fact.clone());
+                    let planned = pokebot_planner::Intent::Probe { fact: fact.clone() };
+                    let Ok(intent) = Intent::from_planned(&planned, Some(&ctx.world)) else {
+                        continue;
+                    };
+                    let outcome = ctx.invoke(&intent);
+                    self.report.learned.extend(outcome.learned.iter().cloned());
+                    match outcome.result {
+                        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                        Err(e) => ctx.info(format!("recourse {intent}: {e}")),
+                        Ok(()) => {}
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -774,6 +935,19 @@ fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
         x,
         y,
     })
+}
+
+/// The map an intent walks to or acts on.
+fn intent_map(intent: &Intent) -> Option<&str> {
+    match intent {
+        Intent::Go { dest } => Some(dest.map()),
+        Intent::Talk { map, .. } | Intent::Beat { map, .. } | Intent::Train { map, .. } => {
+            Some(map)
+        }
+        Intent::Catch { map, .. } | Intent::Explore { map } => map.as_deref(),
+        Intent::Heal { center } => center.as_deref(),
+        _ => None,
+    }
 }
 
 fn frame_id(ctx: &ToolContext<'_>) -> u64 {

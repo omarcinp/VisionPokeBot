@@ -12,19 +12,27 @@
 //! the text read tells which script it was. Trainers are left alone
 //! (talking to one starts a battle the plan did not price), and so are
 //! objects known to be gone.
-
-use std::collections::BTreeSet;
+//!
+//! What is worth trying comes from the [`crate::ledger`]: a target never
+//! talked to, or last talked to before the belief changed, or whose
+//! question can still get its other answer (YES only where
+//! [`yes_is_safe`]). Every talk is logged there with what was said and
+//! answered, so a restart doesn't repeat what already taught nothing.
+//! `Explore { map }` walks to `map` first: the recourse ladder
+//! ([`crate::recourse`]) widens the search from the stuck map outward.
 
 use pokebot_state::{Direction, GameState, PlayerPose};
 use pokebot_world::events::Effect;
 use pokebot_world::World;
 
-use super::dialogue::{finish, object_shown};
+use super::dialogue::{finish, object_shown, yes_is_safe, Conversation};
+use super::effects::LabelIndex;
 use super::talk::{talk, TalkStep};
-use super::{progress, Intent, Tool, ToolContext, ToolError, ToolOutcome};
+use super::{progress, Answer, Dest, Intent, Tool, ToolContext, ToolError, ToolOutcome};
+use crate::ledger::{self, fingerprint, Freshness, Ledger, Talk};
 
 /// Targets tried per `Explore` at most.
-const MAX_TARGETS: usize = 8;
+pub const MAX_TARGETS: usize = 8;
 /// Frames watched for someone to show up when nothing is left to try: an
 /// unnamed sprite counts after 90 frames on its tile, and the player may
 /// just have walked up (on the emulator Bill, off his tiles, was on screen
@@ -48,6 +56,51 @@ pub enum Target {
         facing: Option<Direction>,
         script: String,
     },
+}
+
+impl Target {
+    /// Its key in the [`Ledger`].
+    pub fn key(&self) -> String {
+        match self {
+            Target::Sprite { x, y } => format!("sprite:{x},{y}"),
+            Target::Object { local_id } => ledger::object_key(*local_id),
+            Target::Sign { x, y, .. } => format!("sign:{x},{y}"),
+        }
+    }
+
+    /// The compiled script it runs, when the map data says.
+    fn script(&self, world: &World, map: &str) -> Option<String> {
+        match self {
+            Target::Sprite { .. } => None,
+            Target::Object { local_id } => super::lookup::object_script(world, map, *local_id),
+            Target::Sign { script, .. } => Some(script.clone()),
+        }
+    }
+}
+
+/// `targets` of `map` with what the ledger says of each under the belief
+/// `state`, the spent ones left out.
+pub fn fresh(
+    world: &World,
+    ledger: &Ledger,
+    state: &GameState,
+    pose: &PlayerPose,
+    unnamed: &[(i32, i32)],
+) -> Vec<(Target, Freshness)> {
+    let knowledge = fingerprint(state);
+    let shown = |id: u32| object_shown(world, state, &pose.map, id);
+    targets(world, pose, unnamed, &shown)
+        .into_iter()
+        .map(|t| {
+            let yes_safe = t
+                .script(world, &pose.map)
+                .and_then(|s| world.events()?.script(&s).map(yes_is_safe))
+                .unwrap_or(false);
+            let f = ledger.freshness(&pose.map, &t.key(), knowledge, yes_safe);
+            (t, f)
+        })
+        .filter(|(_, f)| f.is_fresh())
+        .collect()
 }
 
 /// The map's people and signs worth trying, in order: on screen first
@@ -130,26 +183,13 @@ pub fn targets(
     out.into_iter().map(|(_, _, t)| t).collect()
 }
 
-/// What the belief holds that a conversation can change.
-fn learnt(state: &GameState) -> impl PartialEq {
-    (
-        state.world.flags.clone(),
-        state.world.vars.clone(),
-        state.world.paths_run.len(),
-        state.bag.clone(),
-    )
-}
-
 #[derive(Default)]
-pub struct ExploreTool {
-    /// Targets already tried this session, by map.
-    tried: BTreeSet<(String, Target)>,
-}
+pub struct ExploreTool;
 
 impl ExploreTool {
-    /// The targets not tried yet, around the player at `pose`: unnamed
-    /// sprites counted in the view or seen on the frame now.
-    fn fresh(&self, ctx: &ToolContext<'_>, pose: &PlayerPose) -> Vec<Target> {
+    /// The fresh targets around the player at `pose`: unnamed sprites
+    /// counted in the view or seen on the frame now.
+    fn fresh(&self, ctx: &ToolContext<'_>, pose: &PlayerPose) -> Vec<(Target, Freshness)> {
         let state = ctx.state();
         let mut unnamed: Vec<(i32, i32)> = state
             .view
@@ -166,15 +206,22 @@ impl ExploreTool {
                 unnamed.push((s.x, s.y));
             }
         }
-        let shown = |id: u32| object_shown(&ctx.world, state, &pose.map, id);
-        targets(&ctx.world, pose, &unnamed, &shown)
+        fresh(&ctx.world, &ctx.ledger, state, pose, &unnamed)
             .into_iter()
-            .filter(|t| !self.tried.contains(&(pose.map.clone(), t.clone())))
             .take(MAX_TARGETS)
             .collect()
     }
 
-    fn explore(&mut self, ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    fn explore(&mut self, map: Option<&str>, ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+        if let Some(map) = map.filter(|m| ctx.pose().is_none_or(|p| p.map != *m)) {
+            ctx.emit(progress("Explore", format!("going to {map}")))?;
+            ctx.invoke(&Intent::Go {
+                dest: Dest::Map {
+                    map: map.to_owned(),
+                },
+            })
+            .result?;
+        }
         let pose = ctx
             .pose()
             .ok_or_else(|| ToolError::Failed("explore: the position is unknown".into()))?;
@@ -191,49 +238,49 @@ impl ExploreTool {
                 pose.map
             )));
         }
-        let before = learnt(ctx.state());
-        for target in fresh {
-            self.tried.insert((pose.map.clone(), target.clone()));
+        let before = fingerprint(ctx.state());
+        for (target, freshness) in fresh {
+            let answers: Vec<Answer> = match &freshness {
+                Freshness::OtherAnswer(a) => a
+                    .iter()
+                    .map(|&yes| if yes { Answer::Yes } else { Answer::No })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let knowledge = fingerprint(ctx.state());
             ctx.emit(progress(
                 "Explore",
-                format!("{}: trying {target:?}", pose.map),
+                format!("{}: trying {target:?} ({freshness:?})", pose.map),
             ))?;
-            let result = match &target {
-                Target::Sprite { x, y } => {
-                    let mut step =
-                        TalkStep::toward(ctx, &pose.map, (*x, *y), None, None, Vec::new())
-                            .with_scene();
-                    ctx.drive(&mut step)
-                        .and_then(|_| finish(ctx, step.conversation()))
-                }
-                Target::Object { local_id } => {
-                    talk(ctx, &pose.map, *local_id, Vec::new()).map(|_| ())
-                }
-                Target::Sign {
-                    x,
-                    y,
-                    facing,
-                    script,
-                } => {
-                    let mut step = TalkStep::toward(
-                        ctx,
-                        &pose.map,
-                        (*x, *y),
-                        *facing,
-                        Some(script.clone()),
-                        Vec::new(),
-                    )
-                    .with_scene();
-                    ctx.drive(&mut step)
-                        .and_then(|_| finish(ctx, step.conversation()))
-                }
-            };
-            match result {
+            let result = self.interact(ctx, &pose.map, &target, answers);
+            let (conversation, error) = match result {
                 Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
-                Err(e) => ctx.emit(progress("Explore", format!("{target:?}: {e}")))?,
-                Ok(()) => {}
+                Err(e) => {
+                    ctx.emit(progress("Explore", format!("{target:?}: {e}")))?;
+                    (None, Some(e.to_string()))
+                }
+                Ok(c) => (Some(c), None),
+            };
+            let changed = fingerprint(ctx.state()) != before;
+            let talk = Talk {
+                knowledge,
+                script: conversation.as_ref().and_then(|c| script_of(ctx, c)),
+                said: conversation
+                    .as_ref()
+                    .map(|c| c.recognised.clone())
+                    .unwrap_or_default(),
+                answered: conversation
+                    .as_ref()
+                    .map(|c| c.answered.clone())
+                    .unwrap_or_default(),
+                learnt: changed,
+                error,
+            };
+            ctx.ledger.talked(&pose.map, &target.key(), talk);
+            if let Err(e) = ctx.ledger.store() {
+                ctx.info(format!("ledger: {e}"));
             }
-            if learnt(ctx.state()) != before {
+            if changed {
                 ctx.emit(progress(
                     "Explore",
                     format!("{target:?} changed what is known: replanning"),
@@ -246,6 +293,38 @@ impl ExploreTool {
             pose.map
         )))
     }
+
+    /// Talks to or reads `target`; the conversation followed.
+    fn interact(
+        &mut self,
+        ctx: &mut ToolContext<'_>,
+        map: &str,
+        target: &Target,
+        answers: Vec<Answer>,
+    ) -> Result<Conversation, ToolError> {
+        let (at, facing, script) = match target {
+            Target::Object { local_id } => return talk(ctx, map, *local_id, answers),
+            Target::Sprite { x, y } => ((*x, *y), None, None),
+            Target::Sign {
+                x,
+                y,
+                facing,
+                script,
+            } => ((*x, *y), *facing, Some(script.clone())),
+        };
+        let mut step = TalkStep::toward(ctx, map, at, facing, script, answers).with_scene();
+        ctx.drive(&mut step)?;
+        finish(ctx, step.conversation())?;
+        Ok(step.into_conversation())
+    }
+}
+
+/// The compiled script a conversation was, when it can be told.
+fn script_of(ctx: &ToolContext<'_>, c: &Conversation) -> Option<String> {
+    c.script.clone().or_else(|| {
+        let events = ctx.world.events()?;
+        c.resolved_script(&LabelIndex::build_for(events, &c.recognised))
+    })
 }
 
 impl Tool for ExploreTool {
@@ -254,14 +333,14 @@ impl Tool for ExploreTool {
     }
 
     fn serves(&self, intent: &Intent) -> bool {
-        matches!(intent, Intent::Explore)
+        matches!(intent, Intent::Explore { .. })
     }
 
     fn run(&mut self, intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
-        if !matches!(intent, Intent::Explore) {
+        let Intent::Explore { map } = intent else {
             return ToolOutcome::failed("not an Explore");
-        }
-        self.explore(ctx).into()
+        };
+        self.explore(map.as_deref(), ctx).into()
     }
 }
 

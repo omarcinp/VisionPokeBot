@@ -130,6 +130,10 @@ impl TalkStep {
         &self.scene.conversation
     }
 
+    pub fn into_conversation(self) -> Conversation {
+        self.scene.conversation
+    }
+
     /// Where to walk: next to the target, or on the one tile it is read
     /// from.
     fn approach(&self) -> Destination {
