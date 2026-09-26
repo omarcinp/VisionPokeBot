@@ -395,6 +395,15 @@ pub struct CatchMemory {
 }
 
 impl CatchMemory {
+    /// The attempt's current choice: the last odds solved, else the plan's
+    /// first action.
+    fn choice(&self) -> Option<&Choice> {
+        self.odds
+            .as_ref()
+            .map(|(_, odds)| &odds.choice)
+            .or_else(|| self.attempt.as_ref().map(|a| &a.plan.odds.choice))
+    }
+
     /// Reads battle text on every battle frame: the throw's result, the
     /// foe's status, the nickname question (a catch) and the PC box. A page
     /// counts once two frames read the same text, and only once; that page
@@ -908,6 +917,20 @@ pub fn in_bag(
         .as_ref()
         .map(|a| a.plan.ball.clone())
         .unwrap_or_default();
+    // The attempt chose to throw, but the bag opened before the cursor was
+    // seen on BAG (Switch, Route 1: the command menu read as battle text
+    // after "cursor to BAG", its A opened the bag, and the bag was closed
+    // as unexpected, over and over with 20 balls held): throw from it.
+    if memory.thrower.is_none() && o.bag.is_some() {
+        if let Some(plan) = memory
+            .attempt
+            .as_ref()
+            .map(|a| &a.plan)
+            .filter(|_| memory.choice() == Some(&Choice::Throw))
+        {
+            memory.thrower = Some(Thrower::new().keeping_reserve(!(plan.shiny || plan.wanted)));
+        }
+    }
     let Some(thrower) = &mut memory.thrower else {
         // A bag we didn't open: leave it.
         if o.bag.is_some() {
@@ -2434,6 +2457,52 @@ mod tests {
         };
         assert_eq!(select.label, "throw POKE_BALL: select it");
         assert!(!memory.flee);
+    }
+
+    /// Switch, Route 1: hunting PIDGEY with 20 balls, the attempt chose to
+    /// throw, but the command menu read as battle text after "cursor to
+    /// BAG"; its A opened the bag before a thrower was armed, and the bag
+    /// was closed as unexpected, again and again. A bag opened while the
+    /// attempt throws is thrown from; any other is still closed.
+    #[test]
+    fn a_bag_opened_while_the_attempt_throws_is_thrown_from() {
+        let Some(data) = data() else { return };
+        let memory_for = |choice: Choice| CatchMemory {
+            attempt: Some(Attempt {
+                plan: CatchPlan {
+                    ball: "ITEM_POKE_BALL".into(),
+                    odds: Odds {
+                        choice,
+                        outlook: Default::default(),
+                    },
+                    shiny: false,
+                    wanted: true,
+                },
+                opened: true,
+                throws: 0,
+                foe_status: FoeStatus::None,
+                balls: Some(20),
+                asleep_turns: 0,
+            }),
+            ..CatchMemory::default()
+        };
+        let balls = [("POKé BALL", Some(20)), ("CANCEL", None)];
+        let list = |f| bag_frame(f, "POKé BALLS", &balls, Some(0), None);
+        let mut events = Vec::new();
+        let mut memory = memory_for(Choice::Throw);
+        in_bag(&list(1), &data, &mut memory, &mut events);
+        let crate::Decision::Act(select) = in_bag(&list(2), &data, &mut memory, &mut events) else {
+            panic!("expected A");
+        };
+        assert_eq!(select.label, "throw POKE_BALL: select it");
+        // The attempt's turn is a move, or no attempt: not ours to use.
+        for mut memory in [memory_for(Choice::Run), CatchMemory::default()] {
+            let crate::Decision::Act(close) = in_bag(&list(1), &data, &mut memory, &mut events)
+            else {
+                panic!("expected B");
+            };
+            assert_eq!(close.label, "close an unexpected battle bag");
+        }
     }
 
     #[test]

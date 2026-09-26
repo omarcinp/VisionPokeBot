@@ -217,7 +217,15 @@ pub fn caught_icon(image: &RgbImage) -> bool {
 
 /// Top-left of the first battle ▶ whose top row is in `rows`.
 pub fn find_cursor(image: &RgbImage, rows: std::ops::Range<u32>) -> Option<(u32, u32)> {
-    let dark = |x: u32, y: u32| near(px(image, x, y), CURSOR, TOLERANCE);
+    // Compression only darkens the cursor's edges (Switch, the tip at BAG
+    // read (19, 27, 24), 25 off): a neutral grey darker than it counts too.
+    // The shape keeps letters (grey 63..85) and black screens out.
+    let dark = |x: u32, y: u32| {
+        let p = px(image, x, y);
+        near(p, CURSOR, TOLERANCE)
+            || (p.iter().zip(CURSOR).all(|(a, b)| *a <= b)
+                && p.iter().max().unwrap() - p.iter().min().unwrap() <= 16)
+    };
     let last = rows.end.min(image.height() - CURSOR_WIDTHS.len() as u32);
     for y in rows.start..last {
         for x in 1..image.width() - 8 {

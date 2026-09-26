@@ -1103,6 +1103,21 @@ mod tests {
         assert_eq!(o.dialogue.unwrap().kind, DialogueKind::MessageBox);
     }
 
+    /// Switch, Route 1: the command menu with the cursor on BAG read as
+    /// battle text (one cursor pixel 25 off the colour), so the catch's A
+    /// opened the bag unarmed and closed it again, over and over.
+    #[test]
+    fn switch_command_menu_cursor_on_bag_is_seen() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(image) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-battle-command-bag.png"))
+        else {
+            return;
+        };
+        let b = detect::battle::detect(&image).unwrap();
+        assert_eq!(b.menu, Some(BattleMenu::Command { column: 1, row: 0 }));
+    }
+
     #[test]
     fn switch_battle_hud_is_read_despite_jpeg_noise() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
