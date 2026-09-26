@@ -37,6 +37,10 @@ pub struct FleetArgs {
     /// ROM for managed emulators [env: VPB_ROM]
     #[arg(long)]
     emulator_rom: Option<PathBuf>,
+    /// Scenario library autonomy workers record development snapshots
+    /// into (`goal --dev-snapshots`), shared by all of them
+    #[arg(long, default_value = crate::scenario::DEFAULT_DIR)]
+    scenario_library: PathBuf,
 }
 
 pub struct Fleet {
@@ -178,6 +182,7 @@ impl Fleet {
         args.emulator_dir = args.emulator_dir.canonicalize()?;
         // Assets are checked on launch so the Switch hub still works without a ROM.
         args.emulator_data = std::path::absolute(&args.emulator_data)?;
+        args.scenario_library = std::path::absolute(&args.scenario_library)?;
         let cpus = std::thread::available_parallelism().map_or(1, usize::from);
         let automatic = cpus
             .saturating_sub(1)
@@ -340,14 +345,22 @@ impl State {
                     _ => task,
                 });
                 if task == "autonomy" {
-                    command.args([
-                        "flag FLAG_SYS_GAME_CLEAR",
-                        "--plan-budget-secs",
-                        "240",
-                        "--max-replans",
-                        "8",
-                        "--restart",
-                    ]);
+                    // Starters in turn: parallel new games play different
+                    // games (and meet different edge cases).
+                    let starter = ["bulbasaur", "charmander", "squirtle"][(self.next % 3) as usize];
+                    command
+                        .args([
+                            "flag FLAG_SYS_GAME_CLEAR",
+                            "--plan-budget-secs",
+                            "240",
+                            "--max-replans",
+                            "8",
+                            "--restart",
+                            "--starter",
+                            starter,
+                            "--dev-snapshots",
+                        ])
+                        .arg(&self.args.scenario_library);
                 }
                 command
                     .args(["--core"])
@@ -567,6 +580,7 @@ mod tests {
                 emulator_data: root.join("data"),
                 emulator_core: Some(root.join("core.so")),
                 emulator_rom: Some(root.join("game.gba")),
+                scenario_library: root.join("scenarios"),
             },
             root.join("registry"),
         )
