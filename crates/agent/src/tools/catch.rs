@@ -33,6 +33,11 @@ const SPIN_TURNS: usize = 24;
 const MAX_CATCH_ENCOUNTERS: u32 = 40;
 /// Battles before a training hunt is given up.
 const MAX_TRAIN_ENCOUNTERS: u32 = 150;
+/// Battles run from in a row before a hunt counts as making no progress:
+/// a fled battle gives no experience and catches nothing (Switch goal run,
+/// Route 22: 1666 training battles, every one run from, the hunt restarted
+/// by each replan).
+const MAX_FLED_IN_A_ROW: u32 = 8;
 /// A training lead heals below this share of its HP (per mille); a
 /// catching lead below the catch policy's own bar ([`CATCH_MIN_HP`]),
 /// since under it every encounter of the target is refused (flash-1: a
@@ -73,6 +78,8 @@ pub struct HuntStep {
     go: Option<GoStep>,
     spin_at: Option<(i32, i32)>,
     encounters: u32,
+    /// Battles run from since the last one fought to its end.
+    fled_in_a_row: u32,
     nav: NavParts,
 }
 
@@ -96,6 +103,7 @@ impl HuntStep {
             go: None,
             spin_at: None,
             encounters: 0,
+            fled_in_a_row: 0,
             nav: NavParts::of(ctx),
         }
     }
@@ -174,6 +182,11 @@ impl ToolStep for HuntStep {
             if let Decision::Done(summary) = &decision {
                 self.encounters += 1;
                 let caught = battle.caught().map(str::to_owned);
+                self.fled_in_a_row = if battle.ran() && caught.is_none() {
+                    self.fled_in_a_row + 1
+                } else {
+                    0
+                };
                 ctx.events.push(progress(
                     self.phase(),
                     format!("{summary} ({}/{})", self.encounters, self.max_encounters()),
@@ -184,6 +197,12 @@ impl ToolStep for HuntStep {
                 // last events; the caught species is read from the battle.
                 if let Some(done) = self.reached(&party, caught.as_deref(), ctx.state) {
                     return Decision::Done(done);
+                }
+                if self.fled_in_a_row >= MAX_FLED_IN_A_ROW {
+                    return Decision::Fail(format!(
+                        "{:?}: ran from the last {} battles, no progress",
+                        self.hunt, self.fled_in_a_row
+                    ));
                 }
                 if self.encounters >= self.max_encounters() {
                     return Decision::Fail(format!(
@@ -352,11 +371,14 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
     let mut heals = 0;
     let mut buys = 0;
     let mut encounters = 0;
+    let mut fled_in_a_row = 0;
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.encounters = encounters;
+        step.fled_in_a_row = fled_in_a_row;
         let result = ctx.drive(&mut step);
         encounters = step.encounters;
+        fled_in_a_row = step.fled_in_a_row;
         match result {
             Ok(summary) if summary.starts_with(SAVE_FIRST) => {
                 if ctx.checkpoint.is_some() {

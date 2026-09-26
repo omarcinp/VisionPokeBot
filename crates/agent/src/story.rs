@@ -2653,12 +2653,12 @@ mod tests {
         assert_eq!(task.current(), Some(&go));
         tick(&mut task, &located(3, "PewterCity", 17, 26), &state);
         assert_eq!(task.current(), Some(&go));
-        // Enough balls: no buy at all.
+        // A ball above the shiny reserve: no buy at all.
         let Some((world, data)) = story_fixture() else {
             return;
         };
         let mut task = one_milestone(world, data, vec![go.clone()]);
-        tick(&mut task, &located(1, "PewterCity", 17, 26), &with_balls(5));
+        tick(&mut task, &located(1, "PewterCity", 17, 26), &with_balls(6));
         assert_eq!(task.current(), Some(&go));
     }
 

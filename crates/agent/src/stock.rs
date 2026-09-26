@@ -48,9 +48,12 @@ pub fn affordable(data: &GameData, item: &str, money: u32) -> u16 {
     u16::try_from(budget / price).unwrap_or(u16::MAX)
 }
 
-/// The stock is known to be below the shiny reserve: buy before going on.
+/// The stock is known to hold no ball above the shiny reserve, so the catch
+/// policy can't throw one: buy before going on. At exactly the reserve
+/// nothing is ever thrown, so the count never drops below it (Switch, 5
+/// balls: every catch declined, never restocked).
 pub fn must_buy(stock: Option<u16>) -> bool {
-    stock.is_some_and(|n| n < SHINY_RESERVE)
+    stock.is_some_and(|n| n <= SHINY_RESERVE)
 }
 
 /// Worth buying at a mart: stock unknown or below the target.
@@ -70,6 +73,14 @@ mod tests {
     fn data() -> Option<GameData> {
         GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))
             .ok()
+    }
+
+    #[test]
+    fn a_stock_at_the_reserve_must_be_restocked() {
+        assert!(must_buy(Some(SHINY_RESERVE)));
+        assert!(must_buy(Some(0)));
+        assert!(!must_buy(Some(SHINY_RESERVE + 1)));
+        assert!(!must_buy(None));
     }
 
     #[test]
@@ -140,8 +151,6 @@ mod tests {
     #[test]
     fn buying_rules() {
         assert!(must_buy(Some(4)));
-        assert!(!must_buy(Some(SHINY_RESERVE)));
-        assert!(!must_buy(None));
         assert!(should_buy(None));
         assert!(should_buy(Some(14)));
         assert!(!should_buy(Some(15)));

@@ -89,6 +89,11 @@ impl BattleStep {
         self
     }
 
+    /// Whether RUN was chosen in this battle (an escape, or its attempt).
+    pub fn ran(&self) -> bool {
+        self.memory.run_attempts > 0
+    }
+
     /// The species caught in this battle, if one was.
     pub fn caught(&self) -> Option<&str> {
         self.memory.catch.caught.as_deref()
@@ -221,20 +226,11 @@ impl ToolStep for BattleStep {
                 );
             }
             self.observe_battle_text(o, ctx.events);
-            let c = &self.memory.catch;
-            let spared = c.decided
-                && c.attempt.is_none()
-                && c.caught.is_none()
-                && !c.flee
-                && c.foe.as_ref().map(|(s, _)| s) == self.spare.as_ref();
-            if spared {
+            if let Some(species) = spares(self.spare.as_deref(), &self.memory.catch) {
                 self.memory.catch.flee = true;
                 ctx.events.push(super::progress(
                     "Catch",
-                    format!(
-                        "not catching {} now: running rather than fainting it",
-                        self.spare.as_deref().unwrap_or_default()
-                    ),
+                    format!("not catching {species} now: running rather than fainting it"),
                 ));
             }
             if b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !self.loss_ok {
@@ -363,6 +359,18 @@ impl Tool for BattleTool {
     }
 }
 
+/// The hunted species to RUN from: the foe is `spare`, and the catch was
+/// decided against (declined, or the attempt given up). No species hunted
+/// spares nothing, and neither does a foe never identified (Switch goal
+/// run, Route 22: a `Train` hunt fights without identifying, so an unknown
+/// foe equalled "no species hunted" and all 1666 battles were run from).
+fn spares<'a>(spare: Option<&'a str>, c: &crate::catch::CatchMemory) -> Option<&'a str> {
+    let spare = spare?;
+    let foe = c.foe.as_ref().map(|(s, _)| s.as_str())?;
+    (c.decided && c.attempt.is_none() && c.caught.is_none() && !c.flee && foe == spare)
+        .then_some(spare)
+}
+
 /// Whether the battle starting now belongs to a script that goes on when
 /// it is lost: the script being run, or an armed trigger under the player,
 /// with a battle whose trainer has a victory line (the decomp's
@@ -401,4 +409,40 @@ pub fn loss_allowed(ctx: &ToolContext<'_>) -> bool {
             })
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catch::CatchMemory;
+
+    fn decided(foe: Option<&str>) -> CatchMemory {
+        let mut c = CatchMemory::default();
+        c.decided = true;
+        c.foe = foe.map(|s| (s.to_owned(), 4));
+        c
+    }
+
+    #[test]
+    fn only_the_hunted_species_is_run_from() {
+        let pidgey = Some("SPECIES_PIDGEY");
+        assert_eq!(spares(pidgey, &decided(pidgey)), pidgey);
+        assert_eq!(spares(pidgey, &decided(Some("SPECIES_RATTATA"))), None);
+        // Not identified (yet): nothing to spare.
+        assert_eq!(spares(pidgey, &decided(None)), None);
+        // Being caught, or already fleeing: nothing more to do.
+        let mut fleeing = decided(pidgey);
+        fleeing.flee = true;
+        assert_eq!(spares(pidgey, &fleeing), None);
+    }
+
+    /// Switch goal run, Route 22: `Train(BULBASAUR to Lv10)` fights with
+    /// `BattlePlan::Fight`, which never identifies the foe and hunts no
+    /// species; `None == None` made every wild battle a RUN ("not catching
+    /// now: running rather than fainting it", 1666 times, no experience).
+    #[test]
+    fn a_training_battle_spares_nothing() {
+        assert_eq!(spares(None, &decided(None)), None);
+        assert_eq!(spares(None, &decided(Some("SPECIES_RATTATA"))), None);
+    }
 }
