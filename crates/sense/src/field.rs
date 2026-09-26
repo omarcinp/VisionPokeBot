@@ -227,15 +227,17 @@ impl Field {
         self.empty.clear();
     }
 
-    /// The map and the objects whose reach has stayed empty long enough to
-    /// count as absent, as of the last located frame.
-    pub fn absent(&self) -> Option<(&str, Vec<u32>)> {
+    /// The map and the objects whose reach has stayed empty for `frames`
+    /// (at least as long as counts as absent), as of the last located
+    /// frame.
+    pub fn absent_for(&self, frames: u64) -> Option<(&str, Vec<u32>)> {
+        let frames = frames.max(ABSENT_FRAMES);
         let map = self.map.as_deref()?;
         let ids = self
             .empty
             .iter()
             .filter(|(_, e)| e.sightings >= ABSENT_SIGHTINGS)
-            .filter(|(_, e)| self.last.is_some_and(|f| f - e.since >= ABSENT_FRAMES))
+            .filter(|(_, e)| self.last.is_some_and(|f| f - e.since >= frames))
             .map(|(&id, _)| id)
             .collect();
         Some((map, ids))

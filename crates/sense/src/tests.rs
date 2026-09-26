@@ -1087,7 +1087,9 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
     let (state, _) = run(&mut s, state, (100..110).map(frame));
     assert_eq!(state.world.paths_run.len(), 1);
     // Seen absent for long enough after it: the path goes.
-    let (state, _) = run(&mut s, state, (110..200).map(frame));
+    let (state, _) = run(&mut s, state, (110..1000).map(frame));
+    assert_eq!(state.world.paths_run.len(), 1, "not for a scene's time");
+    let (state, _) = run(&mut s, state, (1000..1400).map(frame));
     let flag = |name: &str| state.world.flags.get(name).cloned();
     assert_eq!(flag("FLAG_HELPED_BILL_IN_SEA_COTTAGE"), None);
     assert_eq!(

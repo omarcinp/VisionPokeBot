@@ -270,7 +270,9 @@ impl Sensor {
             self.field.forget_absence();
         }
         events.extend(self.field.observe(o, state));
-        if let (Some(world), Some((map, absent))) = (&self.world, self.field.absent()) {
+        if let (Some(world), Some((map, absent))) =
+            (&self.world, self.field.absent_for(RETRACT_ABSENT_FRAMES))
+        {
             if o.player.is_some() {
                 events.extend(contradicted_paths(world, state, map, &absent));
             }
@@ -781,6 +783,14 @@ impl Sensor {
 }
 
 /// `PartyObserved` for `slot` with the fields `fill` sets.
+/// Frames an object must stay absent without a break before it
+/// contradicts a path: a scene can pan the camera off the player for a
+/// while, and the localizer then puts the player elsewhere (emulator, the
+/// Cell Separator: its beeps look like the scene is over, and Bill's tile,
+/// seen from the wrong spot, empty). 20 s outlasts such scenes; a belief
+/// wrong for good stays wrong for minutes.
+const RETRACT_ABSENT_FRAMES: u64 = 1200;
+
 /// Paths the screen contradicts: an object stays away from every tile it
 /// can stand on (`absent` on `map`, now) while the belief, on the word of
 /// a path it recorded, has it shown (its hide flag tracked clear). Checked
