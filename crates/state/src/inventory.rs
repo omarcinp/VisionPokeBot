@@ -107,6 +107,8 @@ pub struct Pokedex {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedKnowledge {
+    #[serde(default)]
+    pub progression: crate::Progression,
     pub party: Knowledge<Vec<PartyMon>>,
     pub bag: Bag,
     pub money: Knowledge<u32>,

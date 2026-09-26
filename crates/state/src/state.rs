@@ -34,9 +34,14 @@ pub struct Progression {
     pub rival_name: Knowledge<String>,
     /// The player has been seen in control of the character.
     pub in_control: Knowledge<bool>,
-    /// Gym badges earned, in the order they were received.
+    /// Known earned badges, in Trainer Card order.
     #[serde(default)]
     pub badges: Knowledge<Vec<String>>,
+    #[serde(default)]
+    pub badge_count: Knowledge<u8>,
+    /// Count-based hypotheses, kept separate from observed badge flags.
+    #[serde(default)]
+    pub badge_inference: Knowledge<Vec<String>>,
 }
 
 /// The goal the bot is pursuing and where it is in it.
@@ -93,6 +98,10 @@ impl GameState {
     /// The part of the state that belongs to the save file.
     pub fn saved_knowledge(&self) -> crate::SavedKnowledge {
         crate::SavedKnowledge {
+            progression: Progression {
+                in_control: Knowledge::unknown(),
+                ..self.progression.clone()
+            },
             party: self.party.clone(),
             bag: self.bag.clone(),
             money: self.money.clone(),

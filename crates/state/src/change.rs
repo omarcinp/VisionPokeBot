@@ -108,6 +108,16 @@ pub enum StateChange {
         from: Option<Option<String>>,
         to: Option<Option<String>>,
     },
+    PartyDetailChanged {
+        slot: u8,
+        field: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    BadgeCountChanged {
+        from: Option<u8>,
+        to: Option<u8>,
+    },
     PartyShinyChanged {
         slot: u8,
         from: Option<bool>,
@@ -312,6 +322,12 @@ fn pose(out: &mut Vec<StateChange>, old: &Knowledge<PlayerPose>, new: &Knowledge
 }
 
 fn progression(out: &mut Vec<StateChange>, old: &GameState, new: &GameState) {
+    if old.progression.badge_count.value != new.progression.badge_count.value {
+        out.push(StateChange::BadgeCountChanged {
+            from: old.progression.badge_count.value,
+            to: new.progression.badge_count.value,
+        });
+    }
     let (o, n) = (&old.progression, &new.progression);
     if let (None, Some(gender)) = (o.gender.value, n.gender.value) {
         out.push(StateChange::GenderKnown { gender });
@@ -399,6 +415,24 @@ fn member(out: &mut Vec<StateChange>, slot: u8, a: &PartyMon, b: &PartyMon) {
     field!(status, PartyStatusChanged);
     field!(held_item, PartyHeldItemChanged);
     field!(shiny, PartyShinyChanged);
+    if a.details != b.details {
+        for ((field, from), (_, to)) in a
+            .details
+            .reading()
+            .values()
+            .into_iter()
+            .zip(b.details.reading().values())
+        {
+            if from != to {
+                out.push(StateChange::PartyDetailChanged {
+                    slot,
+                    field: field.into(),
+                    from,
+                    to,
+                });
+            }
+        }
+    }
     for (i, (x, y)) in a.moves.iter().zip(&b.moves).enumerate() {
         let mv = |s: &Option<crate::MoveSlot>| s.as_ref().and_then(|s| s.mv.value.clone());
         let pp = |s: &Option<crate::MoveSlot>| s.as_ref().and_then(|s| s.pp.value);
