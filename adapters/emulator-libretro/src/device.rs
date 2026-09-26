@@ -21,6 +21,7 @@ use crate::cartridge::BatterySave;
 use crate::ffi::*;
 use crate::host;
 use crate::link_port::{LinkPort, LinkRole};
+use crate::snapshot::DevSnapshots;
 
 /// How emulated time advances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +48,11 @@ pub struct EmulatorConfig {
     /// Link port to another emulator, for trades and battles. Needs a core
     /// that exposes one (gpSP).
     pub link: Option<LinkRole>,
+    /// Development snapshots ([`crate::snapshot`]): never for the bot, off
+    /// by default.
+    pub dev_snapshots: bool,
+    /// A development snapshot to start from (needs `dev_snapshots`).
+    pub dev_snapshot_restore: Option<PathBuf>,
 }
 
 impl EmulatorConfig {
@@ -58,6 +64,8 @@ impl EmulatorConfig {
             clock: ClockMode::default(),
             press_profile: PressProfile::default(),
             link: None,
+            dev_snapshots: false,
+            dev_snapshot_restore: None,
         }
     }
 }
@@ -236,6 +244,12 @@ impl EmulatorController {
     pub fn flush_battery_save(&self) -> Result<()> {
         self.link.request(|reply| Request::FlushSave { reply })
     }
+
+    /// The core's whole state, opaque, for development tooling only
+    /// ([`crate::snapshot`]); an error unless the config enabled them.
+    pub fn dev_snapshot(&self) -> Result<Vec<u8>> {
+        self.link.request(|reply| Request::DevSnapshot { reply })
+    }
 }
 
 impl Controller for EmulatorController {
@@ -287,6 +301,9 @@ enum Request {
     FlushSave {
         reply: Sender<Result<()>>,
     },
+    DevSnapshot {
+        reply: Sender<Result<Vec<u8>>>,
+    },
     Shutdown,
 }
 
@@ -299,7 +316,7 @@ struct Link {
 }
 
 impl Link {
-    fn request(&self, make: impl FnOnce(Sender<Result<()>>) -> Request) -> Result<()> {
+    fn request<T>(&self, make: impl FnOnce(Sender<Result<T>>) -> Request) -> Result<T> {
         let (reply, response) = mpsc::channel();
         let disconnected = || Error::Disconnected("emulator thread has stopped".into());
         self.requests
@@ -368,6 +385,9 @@ fn run_stepped(core: &mut Core, shared: &Shared, requests: &Receiver<Request>) -
             Request::FlushSave { reply } => {
                 let _ = reply.send(core.store_save());
             }
+            Request::DevSnapshot { reply } => {
+                let _ = reply.send(core.dev_snapshot());
+            }
             Request::Shutdown => break,
         }
     }
@@ -388,6 +408,10 @@ fn run_realtime(
             Ok(Request::Shutdown) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
             Ok(Request::FlushSave { reply }) => {
                 let _ = reply.send(core.store_save());
+                continue;
+            }
+            Ok(Request::DevSnapshot { reply }) => {
+                let _ = reply.send(core.dev_snapshot());
                 continue;
             }
             // Only the stepped source sends steps.
@@ -440,6 +464,7 @@ struct Core {
     api: CoreApi,
     info: CoreInfo,
     battery: Option<BatterySave>,
+    snapshots: Option<DevSnapshots>,
     file: (u64, u64),
     // Kept alive for cores that reference the buffers after load.
     _rom: Vec<u8>,
@@ -537,6 +562,29 @@ impl Core {
             },
             None => None,
         };
+        let snapshots = if config.dev_snapshots {
+            let restored = DevSnapshots::attach(api.library()).and_then(|s| {
+                if let Some(path) = &config.dev_snapshot_restore {
+                    let bytes = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+                    s.restore(&bytes)?;
+                }
+                Ok(s)
+            });
+            match restored {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    unload();
+                    return Err(e);
+                }
+            }
+        } else if config.dev_snapshot_restore.is_some() {
+            unload();
+            return Err(Error::Device(
+                "a snapshot to restore needs development snapshots on".into(),
+            ));
+        } else {
+            None
+        };
         let mut info = info;
         if let Some(role) = &config.link {
             let port = host::link_protocol()
@@ -562,6 +610,7 @@ impl Core {
             api,
             info,
             battery,
+            snapshots,
             file,
             _rom: rom,
             _rom_path: rom_path,
@@ -581,6 +630,13 @@ impl Core {
 
     fn store_save(&mut self) -> Result<()> {
         self.battery.as_mut().map_or(Ok(()), BatterySave::store)
+    }
+
+    fn dev_snapshot(&self) -> Result<Vec<u8>> {
+        self.snapshots
+            .as_ref()
+            .ok_or_else(|| Error::Device("development snapshots are off".into()))?
+            .take()
     }
 }
 

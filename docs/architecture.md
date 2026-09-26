@@ -117,6 +117,8 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 - The keyboard layout is static knowledge from the decompilation (upper-case page: `ABCDEF .` / `GHIJKL ,` / `MNOPQRS ` / `TUVWXYZ `).
 - **Not yet covered:** the main menu shown when a save file exists. The task handles it (it picks row 1, NEW GAME), but that path hasn't been exercised yet. Lower-case and symbol names aren't supported either.
 
+**Getting unstuck** (`agent::recourse`, `agent::ledger`): a stalled goal tries ranked recourses (probes, then talking to everyone reachable, nearest first), priced by chance per second from a persistent ledger of tiles walked, NPCs seen and talks. See [`development-strategy.md`](development-strategy.md), which also covers the development-only scenario library (`goal --dev-snapshots`, `pokebot scenario`, `goal --scenario`).
+
 ## World model, localization and navigation (`crates/world`, `agent::nav`)
 
 - `tools/world/build.sh` pulls the map, layout and tileset data from pret/pokefirered, then `extract_world.py` renders every map. This happens offline and the output stays local and gitignored.

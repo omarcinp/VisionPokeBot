@@ -4,6 +4,7 @@ mod fleet;
 mod goal;
 mod hub;
 mod plan;
+mod scenario;
 mod script;
 mod serve;
 mod switch_device;
@@ -195,6 +196,8 @@ enum Command {
     /// checkpoint (`--dry-run` prints them; execution arrives with the goal
     /// loop).
     Goal(goal::GoalArgs),
+    /// The development scenario library (`goal --dev-snapshots`)
+    Scenario(scenario::ScenarioArgs),
     /// Serve every instance's web UI under one address: /switch/, /emu/.
     Hub(hub::HubArgs),
     /// Run the emulator as a stand-alone virtual console.
@@ -365,6 +368,7 @@ fn main() -> Result<()> {
         }
         Command::Plan(args) => plan::run(args),
         Command::Goal(args) => goal::run(args, Arc::clone(&stop)),
+        Command::Scenario(args) => scenario::run(args),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {
             command: EmulatorCommand::Serve(args),

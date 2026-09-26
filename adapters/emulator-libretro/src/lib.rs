@@ -11,15 +11,18 @@
 //! traffic is opaque packets between the two cores; the bot never sees it.
 //!
 //! The core's memory, save-state, cheat and debug entry points are never bound
-//! or called. The single exception is opaque battery-save persistence in
-//! [`cartridge`], which is what a physical cartridge does on its own; its bytes
-//! only ever travel between the core and a `.sav` file.
+//! or called on the bot's behalf. Two exceptions, both opaque: battery-save
+//! persistence in [`cartridge`], which is what a physical cartridge does on
+//! its own (its bytes only travel between the core and a `.sav` file), and
+//! development snapshots in [`snapshot`], off unless a development tool turns
+//! them on, never used by the bot to make progress.
 
 mod cartridge;
 mod device;
 mod ffi;
 mod host;
 mod link_port;
+mod snapshot;
 
 pub use device::{
     launch, ClockMode, CoreInfo, EmulatorConfig, EmulatorController, EmulatorVideoSource,

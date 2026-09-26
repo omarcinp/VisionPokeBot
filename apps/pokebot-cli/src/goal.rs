@@ -28,6 +28,7 @@ use pokebot_world::route::{PlaceGraph, RouteParams};
 use pokebot_world::World;
 
 use crate::devices::{self, DeviceArgs};
+use crate::scenario;
 use crate::{
     attach_outputs, pause, sprite_palettes, write_bundle, GenderArg, OutputArgs, TimingKeeper,
     CONSOLE_SNAPSHOTS,
@@ -106,6 +107,19 @@ pub struct GoalArgs {
     /// Where debug bundles of failed runs go
     #[arg(long, default_value = "captures/stuck")]
     pub bundles: PathBuf,
+    /// Development: record an emulator snapshot with the checkpoint after
+    /// every in-game save and when the goal is met, into this scenario
+    /// library (default saves/scenarios). Emulator only; the bot never
+    /// uses them.
+    #[arg(long, num_args = 0..=1, default_missing_value = scenario::DEFAULT_DIR)]
+    pub dev_snapshots: Option<PathBuf>,
+    /// Development: start from a recorded scenario (an id in
+    /// --scenario-library, or its directory), copied to a scratch directory
+    /// with its save and checkpoint. Emulator only.
+    #[arg(long, conflicts_with_all = ["new_game", "continue"])]
+    pub scenario: Option<String>,
+    #[arg(long, default_value = scenario::DEFAULT_DIR)]
+    pub scenario_library: PathBuf,
 }
 
 impl GoalArgs {
@@ -222,8 +236,27 @@ impl PlannerData {
     }
 }
 
-pub fn run(args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
+pub fn run(mut args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
     let goal = parse_goal(&args.goal).map_err(|e| anyhow::anyhow!(e))?;
+    let mut restore = None;
+    if let Some(id) = &args.scenario {
+        if args.dry_run {
+            bail!("--scenario runs the emulator; plan from its state.json with --state instead");
+        }
+        let prepared = scenario::prepare(id, &args.scenario_library)?;
+        eprintln!(
+            "scenario {id}: running from a copy in {}",
+            prepared
+                .state
+                .parent()
+                .map_or("?".into(), |p| p.display().to_string())
+        );
+        args.devices.emulator.save = Some(prepared.sav);
+        args.devices.emulator.no_save = false;
+        args.state = prepared.state;
+        args.progress = Some(prepared.progress);
+        restore = Some(prepared.snapshot);
+    }
     let mut pd = PlannerData::load(&args)?;
     // SIGINT and SIGTERM set the process's stop flag; the planner polls it
     // at every node, so a signal during planning ends the search promptly.
@@ -231,7 +264,9 @@ pub fn run(args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
     if args.dry_run {
         dry_run(&args, &goal, &pd)
     } else {
-        execute(&args, &goal, &mut pd, &stop)
+        let dev = (args.dev_snapshots.is_some() || restore.is_some())
+            .then_some(devices::DevSnapshots { restore });
+        execute(&args, &goal, &mut pd, &stop, dev)
     }
 }
 
@@ -273,6 +308,9 @@ fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()
 struct ProgressSave {
     progress: Progress,
     path: PathBuf,
+    /// Development snapshots to record after each save, and the checkpoint
+    /// beside it.
+    snapshots: Option<(Arc<scenario::Store>, PathBuf)>,
 }
 
 impl Tool for ProgressSave {
@@ -302,6 +340,9 @@ impl Tool for ProgressSave {
                 Err(e) => result = Err(e.into()),
             }
         }
+        if let (Ok(()), Some((store, state))) = (&result, &self.snapshots) {
+            record(ctx, store, "saved", state, &self.path);
+        }
         ToolOutcome {
             result,
             // Already emitted by the inner tool.
@@ -311,11 +352,31 @@ impl Tool for ProgressSave {
     }
 }
 
+/// Records a development snapshot; a failure is logged, never fatal.
+fn record(
+    ctx: &ToolContext<'_>,
+    store: &scenario::Store,
+    trigger: &str,
+    state: &Path,
+    progress: &Path,
+) {
+    let step = store.step.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let trigger = match step {
+        Some(step) => format!("{trigger} after {step}"),
+        None => trigger.to_owned(),
+    };
+    match store.record(ctx, &trigger, state, progress) {
+        Ok(dir) => ctx.info(format!("dev snapshot: {}", dir.display())),
+        Err(e) => ctx.runtime.error(format!("dev snapshot: {e:#}")),
+    }
+}
+
 fn execute(
     args: &GoalArgs,
     goal: &GoalPredicate,
     pd: &mut PlannerData,
     stop: &Arc<AtomicBool>,
+    dev: Option<devices::DevSnapshots>,
 ) -> Result<()> {
     let progress_path = args.progress_path();
     let start = if args.new_game {
@@ -365,7 +426,18 @@ fn execute(
         // Without CONTINUE or a new game the player is wherever the game
         // was left.
         .with_global_search(start == Start::AsIs);
-    let devices = devices::open(&args.devices)?;
+    let (devices, snapshotter) = devices::open_with(&args.devices, dev)?;
+    let snapshots = match (snapshotter, &args.dev_snapshots) {
+        (Some(take), Some(dir)) => Some(Arc::new(scenario::Store {
+            dir: dir.clone(),
+            take,
+            sav: devices::emulator_config(&args.devices.emulator)?.battery_save,
+            goal: goal.to_string(),
+            commit: scenario::commit(),
+            step: Arc::default(),
+        })),
+        _ => None,
+    };
     let (video_name, controller_name) =
         (devices.video_name.clone(), devices.controller_name.clone());
     let mut runtime = Runtime::with_perception(devices, perception).with_sensor(
@@ -404,6 +476,7 @@ fn execute(
         progress_path,
         new_game,
         stop: &task_stop,
+        snapshots,
     };
     let session = Session {
         start,
@@ -464,6 +537,7 @@ struct CliRunner<'a> {
     state_path: PathBuf,
     new_game: NewGameConfig,
     stop: &'a AtomicBool,
+    snapshots: Option<Arc<scenario::Store>>,
 }
 
 impl CliRunner<'_> {
@@ -554,6 +628,7 @@ impl CliRunner<'_> {
             toolbox.prepend(Box::new(ProgressSave {
                 progress: previous,
                 path: self.progress_path.clone(),
+                snapshots: self.snapshots.clone().map(|s| (s, self.state_path.clone())),
             }));
         }
         ctx = ctx.with_toolbox(toolbox);
@@ -573,8 +648,17 @@ impl CliRunner<'_> {
         } else {
             pokebot_agent::tools::probe::audit_core(&mut ctx)?;
         }
-        let on_status = self.telemetry.clone().map(|t| {
-            Box::new(move |status: &goal::GoalStatus| t.publish_plan(status)) as goal::StatusSink
+        let telemetry = self.telemetry.clone();
+        let step = self.snapshots.as_ref().map(|s| Arc::clone(&s.step));
+        let on_status = (telemetry.is_some() || step.is_some()).then(|| {
+            Box::new(move |status: &goal::GoalStatus| {
+                if let Some(t) = &telemetry {
+                    t.publish_plan(status);
+                }
+                if let Some(step) = &step {
+                    *step.lock().unwrap_or_else(|e| e.into_inner()) = status.intent.clone();
+                }
+            }) as goal::StatusSink
         });
         let opts = GoalOptions {
             max_replans: self.args.max_replans,
@@ -596,6 +680,17 @@ impl CliRunner<'_> {
             && !self.stop.load(Ordering::Relaxed)
         {
             ctx.invoke(&Intent::Save).result?;
+        }
+        if report.satisfied {
+            if let Some(store) = &self.snapshots {
+                record(
+                    &ctx,
+                    store,
+                    &format!("goal satisfied: {}", report.goal),
+                    &self.state_path,
+                    &self.progress_path,
+                );
+            }
         }
         Ok(report)
     }

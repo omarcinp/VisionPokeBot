@@ -1,9 +1,12 @@
 //! Architectural guard: the bot may only see video and press buttons.
 //!
 //! Scans every Rust source in the workspace for libretro entry points that
-//! expose emulator internals (memory, save states, cheats). The one allowed
-//! exception is opaque battery-save persistence in `cartridge.rs`, which may
-//! only reference the save-RAM region.
+//! expose emulator internals (memory, save states, cheats). Two opaque
+//! exceptions: battery-save persistence in `cartridge.rs`, which may only
+//! reference the save-RAM region, and development snapshots in
+//! `snapshot.rs` (save states for a scenario library), which the bot's
+//! crates may not name: they are a development tool, never a way for the
+//! bot to make progress.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,9 @@ const FORBIDDEN: &[&str] = &[
 ];
 
 const CARTRIDGE: &str = "adapters/emulator-libretro/src/cartridge.rs";
+const SNAPSHOT: &str = "adapters/emulator-libretro/src/snapshot.rs";
+/// What development snapshots are called outside the adapter.
+const DEV_SNAPSHOT: &[&str] = &["dev_snapshot", "DevSnapshot"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -66,7 +72,8 @@ fn no_emulator_internals_are_referenced() {
         }
         let text = std::fs::read_to_string(file).unwrap();
         for token in FORBIDDEN {
-            let allowed = relative == CARTRIDGE && token.starts_with("retro_get_memory_");
+            let allowed = (relative == CARTRIDGE && token.starts_with("retro_get_memory_"))
+                || (relative == SNAPSHOT && token.contains("serialize"));
             if text.contains(token) && !allowed {
                 violations.push(format!("{relative}: {token}"));
             }
@@ -77,6 +84,29 @@ fn no_emulator_internals_are_referenced() {
         "privileged emulator access found:\n{}",
         violations.join("\n")
     );
+}
+
+/// The bot (every crate under `crates/`) never names development
+/// snapshots: only the adapter and the command line's development tooling
+/// do.
+#[test]
+fn the_bot_never_names_development_snapshots() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    assert!(files.len() > 10, "source scan looks broken: {files:?}");
+    let violations: Vec<String> = files
+        .iter()
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            DEV_SNAPSHOT
+                .iter()
+                .filter(|t| text.contains(**t))
+                .map(|t| format!("{}: {t}", file.display()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 #[test]

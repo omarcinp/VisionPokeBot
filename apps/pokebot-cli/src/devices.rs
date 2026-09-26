@@ -271,6 +271,26 @@ impl DeviceArgs {
 }
 
 pub fn open(args: &DeviceArgs) -> Result<Devices> {
+    open_with(args, None).map(|(devices, _)| devices)
+}
+
+/// Development snapshots for an emulator run ([`crate::scenario`]).
+#[derive(Debug, Clone, Default)]
+pub struct DevSnapshots {
+    /// A snapshot to start from.
+    pub restore: Option<PathBuf>,
+}
+
+/// [`open`], with development snapshots on when `dev` is given: the
+/// in-process emulator only (a console run never takes them); the handle
+/// that takes one.
+pub fn open_with(
+    args: &DeviceArgs,
+    dev: Option<DevSnapshots>,
+) -> Result<(Devices, Option<crate::scenario::Snapshotter>)> {
+    if dev.is_some() && !matches!(args.video, VideoSpec::Emulator) {
+        bail!("development snapshots are for the in-process emulator only (--video emulator); a console run never takes them");
+    }
     let normalizer = Normalizer::new(match args.viewport {
         Some(ViewportArg(rect)) => ViewportLocator::Fixed(rect),
         None => ViewportLocator::FullFrame,
@@ -279,6 +299,10 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
     let (video, video_name): (Box<dyn VideoSource + Send>, String) = match &args.video {
         VideoSpec::Emulator => {
             let mut config = emulator_config(&args.emulator)?;
+            if let Some(dev) = &dev {
+                config.dev_snapshots = true;
+                config.dev_snapshot_restore = dev.restore.clone();
+            }
             config.clock = if args.realtime {
                 ClockMode::RealTime
             } else {
@@ -316,6 +340,10 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
             format!("images:{}", dir.display()),
         ),
     };
+    let snapshots = emulator_controller
+        .clone()
+        .filter(|_| dev.is_some())
+        .map(|c| Arc::new(move || c.dev_snapshot()) as crate::scenario::Snapshotter);
     let persist_save = emulator_controller.clone().map(|c| {
         Box::new(move || c.flush_battery_save()) as Box<dyn Fn() -> pokebot_core::Result<()> + Send>
     });
@@ -366,14 +394,17 @@ pub fn open(args: &DeviceArgs) -> Result<Devices> {
             "null".into(),
         ),
     };
-    Ok(Devices {
-        video,
-        controller,
-        normalizer,
-        video_name,
-        controller_name,
-        persist_save,
-    })
+    Ok((
+        Devices {
+            video,
+            controller,
+            normalizer,
+            video_name,
+            controller_name,
+            persist_save,
+        },
+        snapshots,
+    ))
 }
 
 pub fn emulator_config(args: &EmulatorArgs) -> Result<EmulatorConfig> {
