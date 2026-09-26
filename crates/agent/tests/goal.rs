@@ -1084,3 +1084,55 @@ fn a_map_is_explored_again_after_it_paid_off_and_a_fruitless_one_widens() {
     assert_eq!(maps[1], maps[0], "explored again after it paid off");
     assert_ne!(maps[2], maps[1], "a fruitless map widens the search");
 }
+
+/// Runs out of budget on anything but the first badge.
+struct StonePlanner {
+    stone: Plan,
+    goals: Mutex<Vec<String>>,
+}
+
+impl GoalPlanner for StonePlanner {
+    fn plan(
+        &self,
+        goal: &GoalPredicate,
+        _knowledge: &SavedKnowledge,
+        _pose: Option<PlayerPose>,
+    ) -> Result<Plan, PlanError> {
+        self.goals.lock().unwrap().push(goal.to_string());
+        if *goal == GoalPredicate::World(pokebot_world::predicate::Predicate::Badge { n: 1 }) {
+            return Ok(self.stone.clone());
+        }
+        Err(PlanError::Budget {
+            goal: goal.clone(),
+            nodes: 20_000,
+            elapsed_s: 10.0,
+            best_partial: None,
+        })
+    }
+}
+
+/// The whole goal is out of the planner's budget (every non-Bulbasaur
+/// starter's lab, planning the game's end): the next badge is planned and
+/// played instead of falling back on the recourses.
+#[test]
+fn a_goal_out_of_budget_plays_the_next_badge_as_a_stepping_stone() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = StonePlanner {
+        stone: plan(vec![step(go("Route4")), step(catch())]),
+        goals: Mutex::new(Vec::new()),
+    };
+    let h = Harness::new(vec![("Catch", vec![Ok(vec![caught()])])]);
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["Go", "Catch"]);
+    let goals = planner.goals.lock().unwrap();
+    assert_eq!(goals.len(), 2, "{goals:?}");
+    assert!(goals[1].contains('1'), "{goals:?}");
+    assert!(
+        report.plans[0].reason.contains("stepping stone"),
+        "{}",
+        report.plans[0].reason
+    );
+}

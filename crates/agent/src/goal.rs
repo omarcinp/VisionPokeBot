@@ -254,22 +254,32 @@ impl Run<'_, '_> {
             let urgent = urgent_health(&knowledge);
             let recovery_goal = GoalPredicate::Healed { healed: true };
             let goal = if urgent { &recovery_goal } else { self.goal };
-            let plan_reason = if urgent {
+            let mut plan_reason = if urgent {
                 format!("urgent health: {reason}")
             } else {
                 reason.clone()
             };
+            // Set when the plan is for a stepping stone, not the goal.
+            let mut stone = None;
             self.set_status("planning", plan_reason.clone(), 0, None, ctx);
             let plan = match self.planner.plan(goal, &knowledge, pose.clone()) {
                 Ok(plan) => plan,
-                Err(e) if self.recover(ctx)? => {
-                    reason = format!("no plan ({e}); a recourse changed the belief");
-                    continue;
-                }
                 Err(e) => {
-                    self.report.outcome = format!("no plan: {e}");
-                    self.set_status("given up", e.to_string(), 0, None, ctx);
-                    return Ok(());
+                    let stepping = (!urgent && matches!(e, PlanError::Budget { .. }))
+                        .then(|| self.stepping_stone(ctx, &knowledge, pose.clone()))
+                        .flatten();
+                    if let Some((next, plan)) = stepping {
+                        plan_reason = format!("{plan_reason}; stepping stone {next} ({e})");
+                        stone = Some(next);
+                        plan
+                    } else if self.recover(ctx)? {
+                        reason = format!("no plan ({e}); a recourse changed the belief");
+                        continue;
+                    } else {
+                        self.report.outcome = format!("no plan: {e}");
+                        self.set_status("given up", e.to_string(), 0, None, ctx);
+                        return Ok(());
+                    }
                 }
             };
             self.log_plan(ctx, plan_no, &plan_reason, pose, plan.clone())?;
@@ -291,10 +301,19 @@ impl Run<'_, '_> {
                 }
                 Executed::Completed => {
                     let (knowledge, pose) = self.snapshot(ctx)?;
-                    if self.holds(ctx, &knowledge, pose) {
+                    if self.holds(ctx, &knowledge, pose.clone()) {
                         self.report.satisfied = true;
                         self.report.outcome = "goal satisfied".into();
                         return Ok(());
+                    }
+                    if let Some(stone) = stone.as_ref().filter(|s| {
+                        StateBelief::new(&knowledge, &ctx.data, pose.clone()).eval_goal(s)
+                            == Truth::True
+                    }) {
+                        // Progress: the replans start over from here.
+                        reason = format!("stepping stone {stone} reached");
+                        plan_no = 0;
+                        continue;
                     }
                     if urgent {
                         if urgent_health(&knowledge) {
@@ -539,6 +558,28 @@ impl Run<'_, '_> {
             }
         }
         Ok(why)
+    }
+
+    /// When the goal can't be planned within the budget (the whole game
+    /// from a lab with Charmander or Squirtle preferred: 20000 nodes and
+    /// 240 s were not enough, while `badge 1` plans in seconds), the next
+    /// badge not held and its plan: the goal is planned again once it is
+    /// reached.
+    fn stepping_stone(
+        &self,
+        ctx: &ToolContext<'_>,
+        knowledge: &SavedKnowledge,
+        pose: Option<PlayerPose>,
+    ) -> Option<(GoalPredicate, Plan)> {
+        let belief = StateBelief::new(knowledge, &ctx.data, pose.clone());
+        let stone = (1..=8)
+            .map(|n| GoalPredicate::World(Predicate::Badge { n }))
+            .find(|g| belief.eval_goal(g) != Truth::True)?;
+        if stone == *self.goal {
+            return None;
+        }
+        let plan = self.planner.plan(&stone, knowledge, pose).ok()?;
+        (!plan.intents.is_empty()).then_some((stone, plan))
     }
 
     /// The last resort of a stuck plan (an intent failed twice, one

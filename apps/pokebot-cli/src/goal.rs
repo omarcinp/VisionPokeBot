@@ -58,6 +58,10 @@ pub struct GoalArgs {
     /// (Ctrl-C ends it too)
     #[arg(long, default_value_t = 60.0)]
     pub plan_budget_secs: f64,
+    /// Partial plans the planner may expand before giving up (default:
+    /// 20000 per minute of --plan-budget-secs)
+    #[arg(long)]
+    pub plan_node_budget: Option<usize>,
     /// World model directory (tools/world/build.sh)
     #[arg(long, default_value = "data/world")]
     pub world: PathBuf,
@@ -208,6 +212,13 @@ impl PlannerData {
         let options = PlanOptions {
             expensive_secs: args.expensive_secs,
             budget_s: args.plan_budget_secs,
+            // The wall clock is the budget the user sets; the node cap
+            // scales with it (a fixed 20000 stopped plans after 5–10 s
+            // of a 240 s budget: every non-Bulbasaur starter's lab).
+            node_budget: args.plan_node_budget.unwrap_or_else(|| {
+                (PlanOptions::default().node_budget as f64
+                    * (args.plan_budget_secs / 60.0).max(1.0)) as usize
+            }),
             supported_probes: Some(Toolbox::supported_probes()),
             prefer_species: vec![args.starter.species().to_owned()],
             ..PlanOptions::default()
