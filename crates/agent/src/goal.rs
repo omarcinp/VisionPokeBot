@@ -155,7 +155,7 @@ struct Run<'g, 'p> {
     last_failure: Option<(String, String)>,
     /// Intent names that failed at each pose since the last success.
     failed_at: Vec<(PlayerPose, String)>,
-    /// Maps explored as a last resort in this run.
+    /// Maps where exploring as a last resort found nothing new in this run.
     explored: BTreeSet<String>,
 }
 
@@ -513,13 +513,16 @@ impl Run<'_, '_> {
 
     /// The last resort of a plan stuck on a map (an intent failed twice,
     /// no plan, the replans spent): talk to the map's people and read its
-    /// signs until the belief learns something ([`Intent::Explore`]), once
-    /// per map and run. Whether something was learnt.
+    /// signs until the belief learns something ([`Intent::Explore`]).
+    /// Again after it learnt something (reading Bill's PC puts Bill back as
+    /// himself, off his tiles: he is tried next), until a map yields
+    /// nothing; each target is tried once per session. Whether something
+    /// was learnt.
     fn explore(&mut self, ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> {
         let Some(pose) = ctx.pose() else {
             return Ok(false);
         };
-        if !self.explored.insert(pose.map.clone()) {
+        if self.explored.contains(&pose.map) {
             return Ok(false);
         }
         ctx.emit(progress(
@@ -534,6 +537,7 @@ impl Run<'_, '_> {
             Ok(()) => Ok(true),
             Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
             Err(e) => {
+                self.explored.insert(pose.map.clone());
                 ctx.emit(progress(GOAL, format!("explore: {e}")))?;
                 Ok(false)
             }

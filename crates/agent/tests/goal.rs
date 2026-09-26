@@ -1031,3 +1031,39 @@ fn exploring_that_learns_something_earns_one_more_plan() {
         1
     );
 }
+
+/// Exploring that learnt something may run again on the same map when the
+/// plan is stuck anew (on the emulator, Bill's PC was read first; Bill,
+/// walked off his tiles, was only reachable by a second exploration); one
+/// that found nothing is not repeated.
+#[test]
+fn a_map_is_explored_again_after_exploring_it_paid_off() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = FakePlanner::new(vec![plan(vec![step(buy()), step(catch())])]);
+    let h = Harness::new(vec![
+        (
+            "Buy",
+            vec![
+                Err("x".into()),
+                Err("x".into()),
+                Err("y".into()),
+                Err("y".into()),
+                Err("z".into()),
+                Err("z".into()),
+            ],
+        ),
+        (
+            "Explore",
+            vec![Ok(vec![]), Err("explore: nothing new".into())],
+        ),
+    ]);
+    let opts = GoalOptions {
+        max_replans: 8,
+        ..GoalOptions::default()
+    };
+    let _ = h.run(&d, frame, &planner, opts, vec![]);
+    let explores = h.seen_names().iter().filter(|n| **n == "Explore").count();
+    assert_eq!(explores, 2, "{:?}", h.seen_names());
+}
