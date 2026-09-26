@@ -1,5 +1,7 @@
 //! Establish the whole roster from visible menus before trusting a save.
-use super::menu::{open_start_menu, pick_row, Closer, MenuRow, Retries, SCREEN_FRAMES};
+use super::menu::{
+    open_start_menu, pick_row, start_menu_rows, Closer, MenuRow, Retries, SCREEN_FRAMES,
+};
 use super::{Expects, StepContext, ToolContext, ToolError, ToolStep};
 use crate::{Action, Decision, Expectation, Outcome};
 use pokebot_core::Button;
@@ -230,6 +232,19 @@ impl ToolStep for PartyAudit {
             return self.press(Button::A, Expectation::PartyActions);
         }
         if let Some(menu) = &o.menu {
+            // The Start menu read in full without POKéMON: no party yet (a
+            // new game before Oak gives the starter).
+            let lines = &o.menu_lines;
+            if lines.len() == start_menu_rows(menu)
+                && lines.iter().any(|l| l == "BAG")
+                && !lines.iter().any(|l| l == "POKéMON")
+            {
+                ctx.events.push(GameEvent::PartyAudited {
+                    members: Vec::new(),
+                });
+                self.done = true;
+                return self.closer.next(o, "no party yet");
+            }
             return pick_row(
                 &mut self.retries,
                 o,
@@ -242,5 +257,36 @@ impl ToolStep for PartyAudit {
             .0;
         }
         open_start_menu(&mut self.retries, o, ctx.quiet_frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Instant;
+
+    use pokebot_core::NormalizedFrame;
+    use pokebot_vision::{text::Font, FireRedPerception, PerceptionSystem};
+
+    use super::*;
+
+    /// Switch, a new game before Oak gives the starter: the Start menu has
+    /// no POKéMON row (the audit waited for one and failed, every cycle).
+    /// Its rows are all read, which is what tells the party is empty.
+    #[test]
+    fn switch_start_menu_without_a_party_is_read_in_full() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(font), Ok(image)) = (
+            Font::load(root.join("data/world/font_normal.json")),
+            pokebot_video::png::load(root.join("captures/fixtures/switch-start-menu-no-party.png")),
+        ) else {
+            return;
+        };
+        let mut vision = FireRedPerception::default().with_font(Arc::new(font));
+        let frame = NormalizedFrame::new(1, Instant::now(), image).unwrap();
+        let o = vision.observe(&frame);
+        let menu = o.menu.as_ref().expect("the Start menu");
+        assert_eq!(o.menu_lines, ["BAG", "RED", "SAVE", "OPTION", "EXIT"]);
+        assert_eq!(start_menu_rows(menu), o.menu_lines.len());
     }
 }

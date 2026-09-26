@@ -80,6 +80,7 @@ pub struct WorldBelief {
     pub respawn: Knowledge<HealSpot>,
     /// map → local_id → NPC (nested rather than keyed by a pair so that the
     /// JSON stays a plain object).
+    #[serde(deserialize_with = "npcs_from_json")]
     pub npcs: BTreeMap<String, BTreeMap<u32, NpcBelief>>,
     /// Intents that failed this session and should not be planned again
     /// until the belief is reset by a checkpoint. Left out of `state.json`
@@ -88,6 +89,30 @@ pub struct WorldBelief {
     /// (script label, path index) of the compiled paths run to completion,
     /// oldest first, bounded to [`PATHS_RUN_KEPT`].
     pub paths_run: Vec<(String, usize)>,
+}
+
+/// The NPC map with its local ids read from the JSON's string keys: a
+/// checkpoint is read through `#[serde(flatten)]`, whose buffered maps
+/// don't turn `"3"` into a `u32` (every `state.json` that had seen an NPC
+/// failed to load, and the Switch run started from an empty belief).
+fn npcs_from_json<'de, D>(d: D) -> Result<BTreeMap<String, BTreeMap<u32, NpcBelief>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: BTreeMap<String, BTreeMap<String, NpcBelief>> = BTreeMap::deserialize(d)?;
+    raw.into_iter()
+        .map(|(map, npcs)| {
+            let npcs = npcs
+                .into_iter()
+                .map(|(id, npc)| {
+                    id.parse::<u32>()
+                        .map(|id| (id, npc))
+                        .map_err(|_| serde::de::Error::custom(format!("NPC id {id:?}")))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok((map, npcs))
+        })
+        .collect()
 }
 
 impl WorldBelief {
@@ -166,6 +191,23 @@ pub(crate) fn track<T: PartialEq>(
 mod tests {
     use super::*;
     use crate::{GameState, KnowledgeSource, SavedKnowledge};
+
+    /// A checkpoint is read with its knowledge flattened beside the
+    /// identity: NPCs (keyed by local id) must survive that.
+    #[test]
+    fn npcs_survive_a_flattened_checkpoint() {
+        #[derive(Deserialize)]
+        struct File {
+            #[serde(flatten)]
+            knowledge: SavedKnowledge,
+        }
+        let mut state = GameState::default();
+        state.world.npc_mut("PalletTown", 3).present = Knowledge::observed(true, 5);
+        let json = serde_json::to_string(&state.saved_knowledge()).unwrap();
+        let file: File = serde_json::from_str(&json).unwrap();
+        let npc = file.knowledge.world.npc("PalletTown", 3).unwrap();
+        assert_eq!(npc.present.value, Some(true));
+    }
 
     #[test]
     fn new_belief_knows_nothing() {
