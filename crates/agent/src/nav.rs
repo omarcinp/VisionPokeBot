@@ -747,6 +747,38 @@ impl Navigator {
                 &format!("to door ({wx}, {wy})"),
             );
         }
+        if (pose.x, pose.y) == (wx, wy)
+            && tile.is_some_and(|t| pokebot_world::behavior::warp_fires(t.behavior))
+        {
+            // Standing on a warp walked onto (a ladder, a cave mouth: where
+            // the way in landed): it fires on entering it, so step off and
+            // come back (fleet worker 3 pushed Up into Mt. Moon B1F's wall
+            // from the ladder it had climbed down, 40 times a replan).
+            let mut obstacles = self.obstacles(map);
+            obstacles.remove(&(wx, wy));
+            let opened = self.gates.opened_on(&map.name);
+            let walk = Walk {
+                obstacles: &obstacles,
+                surf: self.surf,
+                opened: Some(&opened),
+            };
+            if let Some(dir) = Direction::ALL
+                .into_iter()
+                .find(|d| pokebot_world::path::step_with(map, (wx, wy), *d, &walk).is_some())
+            {
+                self.walker.clear_pending();
+                self.facing = Some(dir);
+                return NavStatus::Act(
+                    Action::new(
+                        format!("step off warp {index} of {} ({dir:?}) to take it", map.name),
+                        vec![ControllerCommand::Press(direction_button(dir))],
+                        Expectation::PlayerMovedFrom(pose.clone()),
+                        sync.timeout_frames(InputKind::WalkTile, 1),
+                    )
+                    .timed(InputKind::WalkTile, 1),
+                );
+            }
+        }
         if (pose.x, pose.y) == (wx, wy) {
             // A plain warp tile that didn't fire on arrival: push toward the
             // nearest map edge (exits sit on edges).
@@ -1390,6 +1422,31 @@ mod tests {
             NavStatus::Fail(r) | NavStatus::Wait(r) => panic!("{r}"),
             _ => panic!("expected a walk"),
         }
+    }
+
+    /// Fleet worker 3: climbed down to Mt. Moon B1F, it stood on the
+    /// ladder (3, 3) and pushed Up into the wall to climb it again. A
+    /// ladder fires when stepped onto: step off first.
+    #[test]
+    fn a_ladder_stood_on_is_stepped_off_and_back_onto() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let mut nav = Navigator::new(
+            Arc::new(world),
+            Destination::Warp {
+                map: "MtMoon_B1F".into(),
+                warp: 0,
+            },
+        );
+        match nav.next(&located("MtMoon_B1F", 3, 3)) {
+            NavStatus::Act(a) => assert!(a.label.starts_with("step off warp 0"), "{}", a.label),
+            _ => panic!("expected a step off the ladder"),
+        }
+        // One tile off, the step back onto it takes the ladder.
+        let off = nav.next(&located("MtMoon_B1F", 3, 4));
+        assert!(matches!(off, NavStatus::Act(_)));
     }
 
     /// The same run's pattern, whatever causes it: a walk that enters a
