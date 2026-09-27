@@ -537,6 +537,12 @@ impl FireRedPerception {
         if let Some(popup) = popup {
             exclude.push(popup);
         }
+        // A dark cave without Flash shows only a disc around the player:
+        // the black around it is no part of the map (fleet worker 1 stood
+        // unlocated in Rock Tunnel, "stuck waiting: locating the player").
+        if let Some(lit) = dark_view(image) {
+            exclude.extend(outside_disc(lit));
+        }
         let localizer = Localizer::new(&world);
         let tracked = self
             .hint
@@ -744,6 +750,62 @@ fn scene(image: &RgbImage) -> Option<(ScreenState, &'static str)> {
 fn read_fraction(text: &str) -> Option<(u8, u8)> {
     let (a, b) = text.trim().split_once('/')?;
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Luma at or below which a pixel is the darkness of an unlit cave.
+const UNLIT_LUMA: u8 = 12;
+
+/// The lit disc of a dark cave without Flash (the bounding box of what
+/// isn't black, around the player at the screen's centre), when the rest
+/// of the frame is black: `(x0, y0, x1, y1)`, inclusive.
+fn dark_view(image: &RgbImage) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    let mut lit = 0u32;
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            if color::luma(image.pixel(x, y)) > UNLIT_LUMA {
+                lit += 1;
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    let (w, h) = (x1.checked_sub(x0)? + 1, y1.checked_sub(y0)? + 1);
+    let (cx, cy) = ((x0 + x1) / 2, (y0 + y1) / 2);
+    // A disc (the box square, the lit area about π/4 of it) on the player.
+    let disc = w.abs_diff(h) <= 4
+        && (20..=120).contains(&w)
+        && cx.abs_diff(120) <= 4
+        && cy.abs_diff(80) <= 4
+        && lit * 100 >= w * h * 65
+        && lit * 100 <= w * h * 95;
+    disc.then_some((x0, y0, x1, y1))
+}
+
+/// Everything but the disc inscribed in `lit`, a margin inside its edge
+/// (the rim blends into black): the frame around its box, and row by row
+/// the box outside the circle.
+fn outside_disc((x0, y0, x1, y1): (u32, u32, u32, u32)) -> Vec<Region> {
+    const MARGIN: f64 = 3.0;
+    let (cx, cy) = (f64::from(x0 + x1) / 2.0, f64::from(y0 + y1) / 2.0);
+    let r = f64::from((x1 - x0).min(y1 - y0)) / 2.0 - MARGIN;
+    let mut out = vec![
+        Region::new(0, 0, 240, y0),
+        Region::new(0, y1 + 1, 240, 160 - (y1 + 1)),
+        Region::new(0, y0, x0, y1 - y0 + 1),
+        Region::new(x1 + 1, y0, 240 - (x1 + 1), y1 - y0 + 1),
+    ];
+    for y in y0..=y1 {
+        let dy = f64::from(y) + 0.5 - cy;
+        let half = (r * r - dy * dy).max(0.0).sqrt();
+        let (left, right) = ((cx - half).ceil() as u32, (cx + half).floor() as u32);
+        if half <= 0.0 || left > right {
+            out.push(Region::new(x0, y, x1 - x0 + 1, 1));
+            continue;
+        }
+        out.push(Region::new(x0, y, left.saturating_sub(x0), 1));
+        out.push(Region::new(right + 1, y, x1.saturating_sub(right), 1));
+    }
+    out
 }
 
 fn is_uniform(image: &RgbImage) -> bool {
@@ -1576,6 +1638,38 @@ mod tests {
             ScreenState::BattleText,
             "battle-text-box",
         )]);
+    }
+
+    /// Fleet worker 1 in Rock Tunnel without Flash: only a disc around the
+    /// player is drawn. It is located from the disc alone.
+    #[test]
+    fn a_dark_cave_is_located_from_the_lit_disc() {
+        let Some(image) = fixture("emu-rock-tunnel-dark.png") else {
+            return;
+        };
+        assert!(dark_view(&image).is_some());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = pokebot_world::World::load(root.join("data/world")) else {
+            return;
+        };
+        // Tracked from the tunnel's mouth on Route 10, where the player was
+        // last located: the disc alone is too plain for a whole-world
+        // search, not for the maps the mouth leads to.
+        let mut p = FireRedPerception::with_world(std::sync::Arc::new(world));
+        p.set_pose_hint(pokebot_state::PlayerPose {
+            map: "Route10".into(),
+            x: 8,
+            y: 19,
+        });
+        let pose = (0..3)
+            .find_map(|f| p.observe(&frame(f, image.clone())).player)
+            .map(|p| p.pose);
+        let pose = pose.expect("located");
+        assert!(pose.map.starts_with("RockTunnel"), "{pose:?}");
+        // A lit field is no dark view.
+        if let Some(lit) = fixture("emu-forest-tall-grass-static.png") {
+            assert!(dark_view(&lit).is_none());
+        }
     }
 
     /// Fleet workers 4 and 6, Viridian Forest (19, 21): in the tall grass
