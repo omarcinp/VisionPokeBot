@@ -549,6 +549,25 @@ impl Navigator {
         self.step_along(observation, &path, what)
     }
 
+    /// Whether the walk can get from `pose` to a tile satisfying `goal` on
+    /// `map`, around what it knows blocked.
+    fn reachable(
+        &self,
+        map: &MapData,
+        pose: &PlayerPose,
+        goal: impl Fn((i32, i32)) -> bool,
+    ) -> bool {
+        let mut obstacles = self.obstacles(map);
+        obstacles.remove(&(pose.x, pose.y));
+        let opened = self.gates.opened_on(&map.name);
+        let walk = Walk {
+            obstacles: &obstacles,
+            surf: self.surf,
+            opened: Some(&opened),
+        };
+        find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, |_| 0).is_some()
+    }
+
     /// The next act along `path` (a hold, a tap, a turn first, or a wait
     /// while a hold runs), tracked by the walker.
     fn step_along(&mut self, observation: &Observation, path: &[Step], what: &str) -> NavStatus {
@@ -632,12 +651,19 @@ impl Navigator {
         dir: Direction,
         via: Option<(i32, i32)>,
     ) -> NavStatus {
-        let exits: HashSet<(i32, i32)> = world
+        let all: HashSet<(i32, i32)> = world
             .crossings(map, dir)
             .into_iter()
             .map(|(a, _)| a)
-            .filter(|a| via.is_none_or(|v| v == *a))
             .collect();
+        // The route's crossing while the walk can reach it; the route
+        // search doesn't know what the walk has learnt blocked (an NPC on
+        // the tile: fleet workers failed "no path to the Right edge on
+        // PewterCity" at the one tile they were sent to).
+        let exits = match via.filter(|v| all.contains(v)) {
+            Some(v) if self.reachable(map, pose, |p| p == v) => HashSet::from([v]),
+            _ => all,
+        };
         if exits.contains(&(pose.x, pose.y)) {
             self.walker
                 .note_tap(pose.clone(), dir, (pose.x, pose.y), false);
@@ -1318,6 +1344,51 @@ mod tests {
         match nav.next(&located("CeruleanCity", 32, 39)) {
             NavStatus::Act(a) => assert!(!a.label.contains("cross"), "{}", a.label),
             _ => panic!("expected a walk along the edge"),
+        }
+    }
+
+    /// Fleet workers: the route's crossing out of Pewter City was a tile
+    /// the walk had learnt blocked (an NPC stood on it), and "no path to
+    /// the Right edge" failed Go(MtMoon_B2F) every replan. An unreachable
+    /// crossing gives way to the others.
+    #[test]
+    fn a_blocked_crossing_gives_way_to_the_others() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = Arc::new(world);
+        let m = world.map("Route3").unwrap();
+        let dest = Destination::Tile {
+            map: "Route3".into(),
+            x: 5,
+            y: m.height / 2,
+        };
+        let pewter = world.map("PewterCity").unwrap();
+        // A walkable tile a few steps west of a crossing.
+        let pose = world
+            .crossings(pewter, Direction::Right)
+            .into_iter()
+            .flat_map(|((x, y), _)| (2..6).map(move |d| (x - d, y)))
+            .find(|&(x, y)| pewter.tile(x, y).is_some_and(|t| t.collision == 0))
+            .map(|(x, y)| PlayerPose {
+                map: "PewterCity".into(),
+                x,
+                y,
+            })
+            .unwrap();
+        let (hop, via) = plan_route_with(&world, &pose, &dest, &Gone::new(), &GateTiles::default());
+        assert_eq!(hop, Some(Hop::Edge(Direction::Right)));
+        let via = via.expect("a crossing");
+        let blocked = Blocked::default();
+        blocked.lock().unwrap().insert("PewterCity", via);
+        let mut nav = Navigator::new(Arc::clone(&world), dest).with_blocked(blocked);
+        // At once toward another crossing, not "no path" (nor a wait while
+        // what was learnt is forgotten, to be learnt again).
+        match nav.next(&located("PewterCity", pose.x, pose.y)) {
+            NavStatus::Act(_) => {}
+            NavStatus::Fail(r) | NavStatus::Wait(r) => panic!("{r}"),
+            _ => panic!("expected a walk"),
         }
     }
 
