@@ -24,7 +24,7 @@ use pokebot_state::{
 };
 
 use super::menu::{
-    open_start_menu, pick_row, Closer, MenuRow, Retries, MENU_FRAMES, SCREEN_FRAMES,
+    open_start_menu, pick_row, Closer, Leave, MenuRow, Retries, MENU_FRAMES, SCREEN_FRAMES,
 };
 use super::{
     progress, Expects, Intent, ProbeFact, StepContext, Tool, ToolContext, ToolError, ToolOutcome,
@@ -35,38 +35,45 @@ use crate::{Action, Decision, Expectation, Outcome};
 
 pub struct ProbeTool;
 
-/// Refresh visible facts after CONTINUE or the new-game opening.
+/// The bag's pockets in the order one visit reads them: Right from ITEMS
+/// to KEY ITEMS, the TM CASE and the BERRY POUCH opened from there, then
+/// Right to POKé BALLS.
+const SESSION_POCKETS: [Pocket; 5] = [
+    Pocket::Items,
+    Pocket::KeyItems,
+    Pocket::TmCase,
+    Pocket::BerryPouch,
+    Pocket::PokeBalls,
+];
+
+/// Refresh visible facts after CONTINUE or the new-game opening, in one
+/// Start menu visit: POKéMON (every summary), back to the menu, BAG (every
+/// pocket without leaving the bag), back to the menu, the Trainer Card,
+/// and only then closed (live, Switch: seven visits, the Start menu opened
+/// and closed for every pocket and the card, spent 29 s of every CONTINUE
+/// past the party; one visit on the emulator takes 11 s).
 pub fn audit_core(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
-    ctx.info("startup audit: party summaries, trainer card, bag");
-    for fact in [
-        ProbeFact::Party,
-        ProbeFact::TrainerCard,
-        ProbeFact::Pocket {
-            pocket: Pocket::Items,
-        },
-        ProbeFact::Pocket {
-            pocket: Pocket::KeyItems,
-        },
-        ProbeFact::Pocket {
-            pocket: Pocket::PokeBalls,
-        },
-        ProbeFact::Pocket {
-            pocket: Pocket::TmCase,
-        },
-        ProbeFact::Pocket {
-            pocket: Pocket::BerryPouch,
-        },
-    ] {
-        // The party is what every plan starts from; the rest is refreshed
-        // on the way when a probe fails here (fleet workers LEAF and JADE:
-        // an unrecognised trainer card failed every CONTINUE's audit, and
-        // so the whole cycle, 55 times in a row).
-        let party = matches!(fact, ProbeFact::Party);
-        match ctx.invoke(&Intent::Probe { fact: fact.clone() }).result {
-            Err(e) if !party => ctx.info(format!("warning: startup audit: {fact:?} skipped: {e}")),
-            r => r?,
+    ctx.info("startup audit: party summaries, bag, trainer card in one Start menu visit");
+    // The party is what every plan starts from; the rest is refreshed on
+    // the way when a screen fails here (fleet workers LEAF and JADE: an
+    // unrecognised trainer card failed every CONTINUE's audit, and so the
+    // whole cycle, 55 times in a row).
+    super::party_audit::audit_leaving(ctx, Leave::StartMenu)?;
+    for (i, pocket) in SESSION_POCKETS.into_iter().enumerate() {
+        let leave = if i + 1 < SESSION_POCKETS.len() {
+            Leave::Open
+        } else {
+            Leave::StartMenu
+        };
+        if let Err(e) = audit_pocket_leaving(ctx, pocket, leave) {
+            ctx.info(format!("warning: startup audit: {pocket:?} skipped: {e}"));
+            close_all(ctx)?;
         }
     }
+    if let Err(e) = probe_trainer_card(ctx) {
+        ctx.info(format!("warning: startup audit: trainer card skipped: {e}"));
+    }
+    close_all(ctx)?;
     if ctx.state().money.value.is_none() {
         return Err(ToolError::Failed("startup audit: money unreadable".into()));
     }
@@ -107,8 +114,32 @@ impl ToolStep for AuditStep {
     }
 }
 
+/// Closes whatever a failed screen left open.
+fn close_all(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    struct Close(Closer);
+    impl ToolStep for Close {
+        fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+            self.0.next(ctx.observation, "closed")
+        }
+        fn expects(&self) -> Expects {
+            Expects::MENUS
+        }
+    }
+    ctx.drive(&mut Close(Closer::default())).map(|_| ())
+}
+
 /// Reads `pocket` through the Start menu and closes every menu again.
 pub fn audit_pocket(ctx: &mut ToolContext<'_>, pocket: Pocket) -> Result<String, ToolError> {
+    audit_pocket_leaving(ctx, pocket, Leave::Overworld)
+}
+
+/// Reads `pocket` from whatever of the way to it is on screen, and closes
+/// as far as `leave` says.
+pub fn audit_pocket_leaving(
+    ctx: &mut ToolContext<'_>,
+    pocket: Pocket,
+    leave: Leave,
+) -> Result<String, ToolError> {
     if matches!(pocket, Pocket::TmCase | Pocket::BerryPouch) {
         let item = if pocket == Pocket::TmCase {
             "ITEM_TM_CASE"
@@ -133,7 +164,7 @@ pub fn audit_pocket(ctx: &mut ToolContext<'_>, pocket: Pocket) -> Result<String,
         }
     }
     let mut step = AuditStep {
-        audit: PocketAudit::new(pocket),
+        audit: PocketAudit::leaving(pocket, leave),
         data: Arc::clone(&ctx.data),
     };
     let summary = ctx.drive(&mut step)?;

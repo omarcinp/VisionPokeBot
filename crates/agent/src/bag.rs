@@ -7,8 +7,9 @@
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, ItemList, Observation, Pocket};
+use pokebot_state::{GameEvent, ItemList, Observation, Pocket, ScreenState};
 
+use crate::tools::menu::{Leave, MENU_SETTLE_FRAMES};
 use crate::{Action, Decision, Expectation};
 
 /// Pocket titles in bag order (Left/Right step through them).
@@ -169,6 +170,10 @@ const MENU_FRAMES: u64 = 60;
 const BAG_OPEN_FRAMES: u64 = 120;
 const POCKET_FRAMES: u64 = 60;
 const CURSOR_FRAMES: u64 = 45;
+/// Frames after a container opens, or the bag comes back from one, before
+/// a press counts: pressed sooner it is dropped (emulator: B on a TM CASE
+/// just drawn, and Right on the bag sliding back in, each cost a timeout).
+const SETTLE_FRAMES: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -184,9 +189,18 @@ enum Phase {
     Close,
 }
 
-/// Audits one bag pocket: Start → BAG → pocket → read → close.
+/// The TM CASE and the BERRY POUCH open from the KEY ITEMS pocket and
+/// close back into it.
+fn nested(pocket: Pocket) -> bool {
+    matches!(pocket, Pocket::TmCase | Pocket::BerryPouch)
+}
+
+/// Audits one bag pocket: Start → BAG → pocket → read → close. It starts
+/// from whatever of that way is on screen (a session reading every pocket
+/// goes on from the pocket before), and closes as far as `leave` says.
 pub struct PocketAudit {
     pocket: Pocket,
+    leave: Leave,
     phase: Phase,
     /// Rows read so far, top to bottom (each one resolves to an item).
     rows: Vec<(String, Option<u16>)>,
@@ -206,12 +220,26 @@ pub struct PocketAudit {
     /// What the last input was meant to show.
     pending: Option<Expectation>,
     waiting_since: Option<u64>,
+    /// The last bag title seen (fades between screens show none), the
+    /// frame a container opened or closed, and whether the bag is on
+    /// screen now (for [`SETTLE_FRAMES`]).
+    title: Option<String>,
+    came_up: Option<u64>,
+    frame: u64,
+    bag_shown: bool,
+    /// The first frame of the Start menu the bag closed to.
+    menu_since: Option<u64>,
 }
 
 impl PocketAudit {
     pub fn new(pocket: Pocket) -> Self {
+        Self::leaving(pocket, Leave::Overworld)
+    }
+
+    pub fn leaving(pocket: Pocket, leave: Leave) -> Self {
         Self {
             pocket,
+            leave,
             phase: Phase::Open,
             rows: Vec::new(),
             top_seen: false,
@@ -222,7 +250,43 @@ impl PocketAudit {
             candidate: None,
             pending: None,
             waiting_since: None,
+            title: None,
+            came_up: None,
+            frame: 0,
+            bag_shown: false,
+            menu_since: None,
         }
+    }
+
+    /// Notes when a container opened or closed.
+    fn watch(&mut self, o: &Observation) {
+        self.frame = o.frame_id;
+        self.bag_shown = o.bag.is_some();
+        // A container's title reads while it still fades in: the settling
+        // counts from the fade's end.
+        let recent = self.came_up.is_some_and(|f| o.frame_id < f + SETTLE_FRAMES);
+        if recent && o.screen.value == ScreenState::Transition {
+            self.came_up = Some(o.frame_id);
+        }
+        let Some(title) = o.bag.as_ref().map(|b| b.pocket.clone()) else {
+            return;
+        };
+        let container = |t: &str| pocket_from_title(t).is_some_and(nested);
+        let changed = match self.title.as_deref() {
+            Some(last) => last != title && (container(last) || container(&title)),
+            // Begun in a container (the session's pocket before read it):
+            // when it opened is unknown.
+            None => container(&title),
+        };
+        if changed {
+            self.came_up = Some(o.frame_id);
+        }
+        self.title = Some(title);
+    }
+
+    /// A container opened or closed too recently for a press to count.
+    fn settling(&self) -> bool {
+        self.bag_shown && self.came_up.is_some_and(|f| self.frame < f + SETTLE_FRAMES)
     }
 
     /// Next input, or Done once the pocket was read and every menu is closed.
@@ -232,6 +296,7 @@ impl PocketAudit {
         data: &GameData,
         events: &mut Vec<GameEvent>,
     ) -> Decision {
+        self.watch(o);
         let target = pocket_index(self.pocket).unwrap_or(1);
         let phase = if self.observed.is_some() {
             Phase::Close
@@ -282,6 +347,16 @@ impl PocketAudit {
             Phase::StartMenu => self.start_menu(o),
             Phase::Pocket => {
                 let bag = o.bag.as_ref().expect("bag phase");
+                // In the other container (the session's last pocket): B
+                // goes back to KEY ITEMS.
+                if pocket_from_title(&bag.pocket).is_some_and(nested) {
+                    return self.act(
+                        "bag: close the container",
+                        Button::B,
+                        Expectation::BagPocket("KEY ITEMS".into()),
+                        POCKET_FRAMES,
+                    );
+                }
                 if pocket_index(self.pocket).is_none()
                     && pocket_from_title(&bag.pocket) == Some(Pocket::KeyItems)
                 {
@@ -290,6 +365,9 @@ impl PocketAudit {
                     } else {
                         ("ITEM_BERRY_POUCH", "BERRY POUCH")
                     };
+                    if self.settling() {
+                        return Decision::Wait("letting the bag settle".into());
+                    }
                     return select_item(o, data, item, Expectation::BagPocket(title.into()));
                 }
                 let Some(at) = pocket_from_title(&bag.pocket).and_then(pocket_index) else {
@@ -309,29 +387,56 @@ impl PocketAudit {
                 )
             }
             Phase::Read => self.read(o, data, events),
-            Phase::Close => {
-                if o.bag.is_some() {
-                    return self.act(
-                        "close the bag",
-                        Button::B,
-                        Expectation::MenuOpen,
-                        BAG_OPEN_FRAMES,
-                    );
-                }
-                if o.menu.is_some() {
-                    return self.act(
-                        "close the Start menu",
-                        Button::B,
-                        Expectation::BagClosed,
-                        MENU_FRAMES,
-                    );
-                }
-                if o.player.is_none() {
-                    return self.wait(o, "locating after closing the bag");
-                }
-                Decision::Done(self.observed.clone().unwrap_or_default())
-            }
+            Phase::Close => self.close(o),
         }
+    }
+
+    /// Closes as far as `leave` says, then Done.
+    fn close(&mut self, o: &Observation) -> Decision {
+        let summary = self.observed.clone().unwrap_or_default();
+        let done = move || Decision::Done(summary);
+        if self.leave == Leave::Open {
+            return done();
+        }
+        if let Some(bag) = &o.bag {
+            if pocket_from_title(&bag.pocket).is_some_and(nested) {
+                return self.act(
+                    "bag: close the container",
+                    Button::B,
+                    Expectation::BagPocket("KEY ITEMS".into()),
+                    POCKET_FRAMES,
+                );
+            }
+            return self.act(
+                "close the bag",
+                Button::B,
+                Expectation::MenuOpen,
+                BAG_OPEN_FRAMES,
+            );
+        }
+        if self.leave == Leave::StartMenu && o.menu.is_some() {
+            // Drawn while the field fades in, it drops a press at first.
+            let since = *self.menu_since.get_or_insert(o.frame_id);
+            if o.frame_id.saturating_sub(since) < MENU_SETTLE_FRAMES {
+                return Decision::Wait("letting the Start menu settle".into());
+            }
+            return done();
+        }
+        if self.leave == Leave::StartMenu && o.player.is_some() {
+            return done();
+        }
+        if o.menu.is_some() {
+            return self.act(
+                "close the Start menu",
+                Button::B,
+                Expectation::BagClosed,
+                MENU_FRAMES,
+            );
+        }
+        if o.player.is_none() {
+            return self.wait(o, "locating after closing the bag");
+        }
+        done()
     }
 
     /// Moves the Start menu's ▶ to BAG (found by reading the rows) and opens it.
@@ -446,15 +551,13 @@ impl PocketAudit {
         self.phase = Phase::Close;
         self.retries = 0;
         self.last_view = None;
-        self.act(
-            "close the bag",
-            Button::B,
-            Expectation::MenuOpen,
-            BAG_OPEN_FRAMES,
-        )
+        self.close(o)
     }
 
     fn act(&mut self, label: &str, button: Button, expect: Expectation, timeout: u64) -> Decision {
+        if self.settling() {
+            return Decision::Wait("letting the bag settle".into());
+        }
         self.waiting_since = None;
         self.candidate = None;
         self.pending = Some(expect.clone());
@@ -756,6 +859,73 @@ mod tests {
             Decision::Done(_)
         ));
         assert_eq!(events.len(), 1, "one PocketObserved");
+    }
+
+    /// One Start menu visit reads every pocket: a pocket read with the bag
+    /// left open is Done without a press, the next goes on from it, and a
+    /// container read last is left for the Start menu (TM CASE → KEY ITEMS
+    /// → Start menu), where the session's next screen begins.
+    #[test]
+    fn a_session_reads_pockets_without_leaving_the_bag() {
+        let Some(data) = data() else { return };
+        let mut events = Vec::new();
+        let mut items = PocketAudit::leaving(Pocket::Items, Leave::Open);
+        let o = bag(1, "ITEMS", &[("POTION", Some(2)), ("CANCEL", None)], 0);
+        assert!(matches!(
+            twice(&mut items, o, &data, &mut events),
+            Decision::Done(_)
+        ));
+
+        let mut keys = PocketAudit::leaving(Pocket::KeyItems, Leave::Open);
+        let a = act(keys.next(&bag(3, "ITEMS", &[("CANCEL", None)], 1), &data, &mut events));
+        assert_eq!(pressed(&a), Button::Right);
+        let key = [("TM CASE", None), ("CANCEL", None)];
+        assert!(matches!(
+            twice(&mut keys, bag(4, "KEY ITEMS", &key, 0), &data, &mut events),
+            Decision::Done(_)
+        ));
+
+        let mut case = PocketAudit::leaving(Pocket::TmCase, Leave::StartMenu);
+        // Begun in the TM CASE: it may have just opened, so it is read at
+        // once and closed once it has settled.
+        let tms = [("TM39", Some(1)), ("CANCEL", None)];
+        let o = bag(6, "TM CASE", &tms, 0);
+        assert!(matches!(
+            twice(&mut case, o, &data, &mut events),
+            Decision::Wait(_)
+        ));
+        let o = bag(6 + SETTLE_FRAMES, "TM CASE", &tms, 0);
+        let a = act(case.next(&o, &data, &mut events));
+        assert_eq!(pressed(&a), Button::B);
+        assert_eq!(a.expect, Expectation::BagPocket("KEY ITEMS".into()));
+        // The bag slides back in: a press this soon would be dropped.
+        assert!(matches!(
+            case.next(&bag(8, "KEY ITEMS", &key, 0), &data, &mut events),
+            Decision::Wait(_)
+        ));
+        let o = bag(8 + SETTLE_FRAMES, "KEY ITEMS", &key, 0);
+        let a = act(case.next(&o, &data, &mut events));
+        assert_eq!(
+            (a.label.as_str(), pressed(&a)),
+            ("close the bag", Button::B)
+        );
+        assert!(matches!(
+            case.next(&start_menu(40, 2), &data, &mut events),
+            Decision::Wait(_)
+        ));
+        let o = start_menu(40 + MENU_SETTLE_FRAMES, 2);
+        assert!(matches!(
+            case.next(&o, &data, &mut events),
+            Decision::Done(_)
+        ));
+        let pockets: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::PocketObserved { pocket, .. } => Some(*pocket),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pockets, [Pocket::Items, Pocket::KeyItems, Pocket::TmCase]);
     }
 
     #[test]

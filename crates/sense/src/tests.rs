@@ -463,6 +463,34 @@ fn a_catch_joins_the_party_when_the_battle_is_over() {
     }));
 }
 
+/// Switch, Viridian Forest: every catch left the new member's HP, status
+/// and name unknown, and the scheduler opened all six summaries for them
+/// right after the battle. The battle showed them: the bar, the status
+/// pages, and the name a declined nickname leaves.
+#[test]
+fn a_catch_joins_with_the_hp_and_status_the_battle_showed() {
+    let Some(d) = data() else { return };
+    let mut s = Sensor::new(d);
+    let mut frames = catch_frames(&[
+        "Wild PIDGEY fell asleep!",
+        "Gotcha! PIDGEY was caught!",
+        "Give a nickname to the captured PIDGEY?",
+    ]);
+    for o in &mut frames {
+        if let Some(b) = o.battle.as_mut() {
+            b.opponent_hp = Some(500);
+        }
+    }
+    let (state, _) = run(&mut s, with_party(), frames);
+    let party = state.party.value.unwrap();
+    let pidgey = &party[2];
+    assert_eq!(pidgey.nickname.value.as_deref(), Some("PIDGEY"));
+    assert_eq!(pidgey.status.value, Some(Status::Asleep));
+    // Base HP 40 at Lv6 with IV 15: 21; half of it left, rounded up.
+    assert_eq!(pidgey.hp.value, Some((11, 21)));
+    assert_eq!(pidgey.hp.source, pokebot_state::KnowledgeSource::Derived);
+}
+
 #[test]
 fn a_catch_the_pc_pages_name_goes_to_that_box() {
     let Some(d) = data() else { return };

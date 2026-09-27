@@ -167,6 +167,12 @@ pub struct Sensor {
     party_screens: bool,
     /// The opponent's level as last confirmed on its HUD.
     opponent_level: Option<u8>,
+    /// The opponent's HP bar (per mille), confirmed, and its last value.
+    opponent_bar: Confirm<u16>,
+    opponent_hp: Option<u16>,
+    /// The wild foe's status: healthy when it appears, then what the
+    /// battle's pages say ("Wild X fell asleep!").
+    foe_status: Option<Status>,
     /// The foe on the opponent HUD (species, level), and the one whose
     /// fainting page was read last: the EVs of the "gained EXP" pages.
     foe: Option<(String, Option<u8>)>,
@@ -186,6 +192,9 @@ pub struct Sensor {
 struct Catch {
     species: String,
     level: Option<u8>,
+    /// Its HP bar (per mille) and status when the ball caught it.
+    hp: Option<u16>,
+    status: Option<Status>,
     /// The PC pages said it went to the PC (and which box, if read).
     to_pc: bool,
     box_index: Option<u8>,
@@ -220,6 +229,9 @@ impl Sensor {
             party_selected: None,
             party_screens: false,
             opponent_level: None,
+            opponent_bar: Confirm::default(),
+            opponent_hp: None,
+            foe_status: None,
             foe: None,
             defeated: None,
             awarded: Vec::new(),
@@ -407,6 +419,8 @@ impl Sensor {
                 self.catch = Some(Catch {
                     species: species.to_owned(),
                     level: self.opponent_level,
+                    hp: self.opponent_hp,
+                    status: self.foe_status,
                     to_pc: false,
                     box_index: None,
                 });
@@ -452,10 +466,14 @@ impl Sensor {
                 }
             }
         }
-        if let Some((name, status)) = status_text(&page) {
-            if let Some(m) = names::member(state, &self.data, name) {
-                events.push(party_observed(m.slot, |e| e.status = Some(status)));
+        match status_text(&page) {
+            Some((_, status, true)) => self.foe_status = Some(status),
+            Some((name, status, false)) => {
+                if let Some(m) = names::member(state, &self.data, name) {
+                    events.push(party_observed(m.slot, |e| e.status = Some(status)));
+                }
             }
+            None => {}
         }
     }
 
@@ -563,6 +581,10 @@ impl Sensor {
             b.opponent_hp?;
             Some((name, b.opponent_caught, b.opponent_level))
         });
+        let bar = b.and_then(|b| b.opponent_hp);
+        if let Some(hp) = self.opponent_bar.update(f, bar, HUD_FRAMES) {
+            self.opponent_hp = Some(hp);
+        }
         if let Some((name, caught, level)) = self.opponent.update(f, opponent, HUD_FRAMES) {
             self.opponent_level = level.or(self.opponent_level);
             if let Some(species) = self.data.species_named(&name) {
@@ -573,6 +595,9 @@ impl Sensor {
                     self.foe = foe;
                     self.defeated = None;
                     self.awarded.clear();
+                    // Wild Pokémon appear healthy.
+                    self.foe_status = Some(Status::Healthy);
+                    self.opponent_hp = self.opponent_bar.given;
                 }
                 events.push(match caught {
                     Some(true) => GameEvent::SpeciesCaught { species },
@@ -1082,8 +1107,8 @@ fn member_hp(state: &GameState, slot: u8) -> Option<(u16, u16)> {
 }
 
 /// "BULBASAUR was poisoned!" → (`BULBASAUR`, Poisoned); not for "Foe …"
-/// or "Wild …".
-fn status_text(page: &str) -> Option<(&str, Status)> {
+/// or "Wild …" (then `true`: the page is the foe's).
+fn status_text(page: &str) -> Option<(&str, Status, bool)> {
     const CHANGES: [(&str, Status); 12] = [
         (" woke up", Status::Healthy),
         (" was defrosted", Status::Healthy),
@@ -1104,7 +1129,7 @@ fn status_text(page: &str) -> Option<(&str, Status)> {
     let mut words = page[..at].rsplit(' ');
     let name = words.next()?;
     let foe = words.next().is_some_and(|w| w == "Foe" || w == "Wild");
-    (!foe && !name.is_empty()).then_some((name, status))
+    (!name.is_empty()).then_some((name, status, foe))
 }
 
 /// A newly obtained Pokémon, known from game data: its default moves at
@@ -1128,6 +1153,29 @@ pub fn obtained_mon(data: &GameData, species: &str, level: u8) -> PartyMon {
             mv: Knowledge::derived(mv, 0),
             pp: Knowledge::derived((max, max), 0),
         });
+    }
+    mon
+}
+
+/// A Pokémon caught into the party, as the battle showed it: its printed
+/// name (a nickname is always declined), its status, and its HP from the
+/// bar with the total of middling IVs (live, Switch: every catch sent the
+/// scheduler to all six summaries for these fields; the next HUD, party
+/// menu or summary reads them exactly).
+fn caught_mon(data: &GameData, catch: &Catch, level: u8) -> PartyMon {
+    let mut mon = obtained_mon(data, &catch.species, level);
+    mon.nickname = Knowledge::derived(pokebot_gamedata::printed_name(&catch.species), 0);
+    if let Some(status) = catch.status {
+        mon.status = Knowledge::derived(status, 0);
+    }
+    let base = data.species(&catch.species).map(|s| s.base);
+    if let (Some(bar), Some(base)) = (catch.hp, base) {
+        let max = pokebot_gamedata::mechanics::Stats::compute(&base, level, 15).hp();
+        // A Pokémon the ball holds has HP left, however empty its bar.
+        let cur = (max * u32::from(bar.min(1000))).div_ceil(1000).max(1);
+        if let (Ok(cur), Ok(max)) = (u16::try_from(cur), u16::try_from(max)) {
+            mon.hp = Knowledge::derived((cur, max), 0);
+        }
     }
     mon
 }
@@ -1161,7 +1209,7 @@ fn caught_events(data: &GameData, state: &GameState, catch: &Catch) -> Vec<GameE
     } else if let Some(n) = party {
         vec![GameEvent::PartyMonDerived {
             slot: n as u8,
-            mon: Box::new(obtained_mon(data, &catch.species, level)),
+            mon: Box::new(caught_mon(data, catch, level)),
         }]
     } else {
         Vec::new()

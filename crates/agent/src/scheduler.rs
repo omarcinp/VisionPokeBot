@@ -419,6 +419,25 @@ mod tests {
         unknown.hp = Knowledge::unknown();
         assert_eq!(health(Some(&[unknown]), &d), Some(Need::AuditParty));
     }
+    /// A catch joins with the HP and status its battle showed (derived,
+    /// not read on a summary): no menu audit after the battle for it.
+    #[test]
+    fn a_catch_known_from_its_battle_needs_no_audit() {
+        let d = data();
+        let mut caught = mon(100);
+        caught.level = Knowledge::derived(6, 0);
+        caught.hp = Knowledge::derived((11, 21), 0);
+        caught.status = Knowledge::derived(Status::Asleep, 0);
+        assert_eq!(
+            health(Some(&[mon(100), caught.clone()]), &d),
+            Some(Need::HealSoon)
+        );
+        caught.status = Knowledge::unknown();
+        assert_eq!(
+            health(Some(&[mon(100), caught]), &d),
+            Some(Need::AuditParty)
+        );
+    }
     #[test]
     fn events_coalesce_and_recovery_clears_the_queue() {
         let d = data();

@@ -70,32 +70,37 @@ pub fn heal(ctx: &mut ToolContext<'_>, center: Option<&str>) -> Result<(), ToolE
         answers: vec![Answer::Yes],
     });
     outcome.result?;
-    ctx.invoke(&Intent::Probe {
-        fact: super::ProbeFact::Party,
-    })
-    .result?;
-    let verified = ctx.state().party.value.as_ref().is_some_and(|party| {
-        !party.is_empty()
-            && party.iter().all(|mon| {
-                mon.hp.value.is_some_and(|(hp, max)| hp == max && max > 0)
-                    && mon.status.value == Some(pokebot_state::Status::Healthy)
-                    && mon
-                        .moves
-                        .iter()
-                        .flatten()
-                        .all(|m| m.pp.value.is_some_and(|(pp, max)| pp == max))
-            })
-    });
-    if !verified {
+    let restored = |ctx: &ToolContext<'_>| {
+        ctx.state().party.value.as_ref().is_some_and(|party| {
+            !party.is_empty()
+                && party.iter().all(|mon| {
+                    mon.hp.value.is_some_and(|(hp, max)| hp == max && max > 0)
+                        && mon.status.value == Some(pokebot_state::Status::Healthy)
+                        && mon
+                            .moves
+                            .iter()
+                            .flatten()
+                            .all(|m| m.pp.value.is_some_and(|(pp, max)| pp == max))
+                })
+        })
+    };
+    // The nurse's pages ran her script, whose heal restored every total
+    // the belief holds. Only a total it doesn't hold needs the summaries
+    // (live, Switch: every heal opened all six summaries to read what the
+    // script had just set).
+    if !restored(ctx) {
+        ctx.invoke(&Intent::Probe {
+            fact: super::ProbeFact::Party,
+        })
+        .result?;
+    }
+    if !restored(ctx) {
         return Err(ToolError::Failed(
             "healer conversation ended, but menu audit did not confirm full recovery".into(),
         ));
     }
     ctx.emit(GameEvent::Healed)?;
-    ctx.emit(progress(
-        "Heal",
-        "full party recovery verified in summaries",
-    ))?;
+    ctx.emit(progress("Heal", "full party recovery verified"))?;
     if let Some(spot) = ctx.world.places().and_then(|p| {
         p.heal_spots
             .iter()

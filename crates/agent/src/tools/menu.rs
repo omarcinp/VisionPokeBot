@@ -30,6 +30,10 @@ const MAX_CLOSE_PRESSES: u32 = 12;
 /// Frames after a B on an unrecognised screen before the next one (the
 /// screen fades out, and the overworld needs a moment to be located).
 const CLOSE_GAP_FRAMES: u64 = 90;
+/// Frames the Start menu is up before a press on it counts: it is drawn
+/// while the field fades back in, and a press then is dropped (emulator:
+/// Down 1 frame after the menu came back from the party timed out).
+pub const MENU_SETTLE_FRAMES: u64 = 20;
 
 /// The Start menu rows: `POKéDEX`, `POKéMON`, `BAG`, the player's name
 /// (the Trainer Card), `SAVE`, `OPTION`, `EXIT`.
@@ -230,19 +234,71 @@ pub fn screen_open(o: &Observation) -> bool {
         || o.summary.is_some()
 }
 
-/// Closes everything with B until the player is located in the overworld
-/// with nothing open. Unrecognised screens (the Pokédex's TABLE OF CONTENTS,
-/// fades) get a B every [`CLOSE_GAP_FRAMES`].
+/// Where a menu step leaves the screen once it has read what it came for.
+/// A session reading several screens stays in the Start menu between them
+/// (one Start press for the party, every pocket and the card, rather than
+/// one per screen).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Leave {
+    /// Everything closed: the player located in the overworld.
+    #[default]
+    Overworld,
+    /// Back on the Start menu, for the session's next screen.
+    StartMenu,
+    /// The screen as it is (the bag, for the session's next pocket).
+    Open,
+}
+
+/// A list menu is up with nothing over it and no conversation: on the
+/// field that is the Start menu. Its rows aren't required: they read a few
+/// frames after its window, and a B then closes it (emulator: the menu the
+/// party audit came back to was closed before the bag was read).
+pub fn at_start_menu(o: &Observation) -> bool {
+    o.menu.is_some()
+        && o.dialogue.is_none()
+        && o.bag.is_none()
+        && o.party_menu.is_none()
+        && o.summary.is_none()
+        && o.trainer_card.is_none()
+}
+
+/// Closes with B until the screen is where [`Leave`] says: by default the
+/// overworld with nothing open. Unrecognised screens (the Pokédex's TABLE
+/// OF CONTENTS, fades) get a B every [`CLOSE_GAP_FRAMES`].
 #[derive(Debug, Default)]
 pub struct Closer {
+    leave: Leave,
     presses: u32,
     last_press: Option<u64>,
+    /// The first frame of the Start menu now up.
+    menu_since: Option<u64>,
 }
 
 impl Closer {
+    pub fn to(leave: Leave) -> Self {
+        Self {
+            leave,
+            ..Self::default()
+        }
+    }
+
     pub fn next(&mut self, o: &Observation, done: &str) -> Decision {
         let open = screen_open(o);
-        if !open && o.player.is_some() {
+        if at_start_menu(o) {
+            let since = *self.menu_since.get_or_insert(o.frame_id);
+            if o.frame_id.saturating_sub(since) < MENU_SETTLE_FRAMES {
+                return Decision::Wait("letting the Start menu settle".into());
+            }
+        } else {
+            self.menu_since = None;
+        }
+        // Past the Start menu is fine too: the next screen opens it again.
+        let arrived = match self.leave {
+            Leave::Open => true,
+            Leave::StartMenu => at_start_menu(o) || (!open && o.player.is_some()),
+            Leave::Overworld => !open && o.player.is_some(),
+        };
+        if arrived {
             return Decision::Done(done.to_owned());
         }
         if self.presses >= MAX_CLOSE_PRESSES {
@@ -313,6 +369,47 @@ mod tests {
         // A menu without the name row (nothing between BAG and SAVE).
         let none = lines(&["BAG", "SAVE", "OPTION", "EXIT"]);
         assert_eq!(MenuRow::PlayerName.find(&none, &state), None);
+    }
+
+    #[test]
+    fn a_session_closer_stops_on_the_start_menu() {
+        use pokebot_state::{Observed, Region, ScreenState};
+        let screen = Observed {
+            value: ScreenState::Menu,
+            detector: "test".into(),
+        };
+        let mut menu = Observation::bare(1, screen, Default::default());
+        menu.menu = Some(MenuObservation {
+            window: Region::new(174, 6, 60, 108),
+            rows: 7,
+            cursor_row: 2,
+            cursor_y: 40,
+        });
+        menu.menu_lines = lines(&["POKéDEX", "POKéMON", "BAG", "RED", "SAVE", "OPTION", "EXIT"]);
+        assert!(at_start_menu(&menu));
+        // Just drawn, the menu drops presses: both wait, then the session
+        // stops on it and the default closes it.
+        let mut settled = menu.clone();
+        settled.frame_id += MENU_SETTLE_FRAMES;
+        let mut session = Closer::to(Leave::StartMenu);
+        assert!(matches!(session.next(&menu, "read"), Decision::Wait(_)));
+        assert!(matches!(session.next(&settled, "read"), Decision::Done(_)));
+        let mut closer = Closer::default();
+        assert!(matches!(closer.next(&menu, "read"), Decision::Wait(_)));
+        assert!(matches!(closer.next(&settled, "read"), Decision::Act(_)));
+        // Its window before its rows read is the Start menu already.
+        let mut fading_in = menu.clone();
+        fading_in.menu_lines.clear();
+        assert!(at_start_menu(&fading_in));
+        // Over the bag it is the bag's prompt.
+        let mut prompt = menu;
+        prompt.bag = Some(pokebot_state::BagObservation {
+            pocket: "ITEMS".into(),
+            rows: Vec::new(),
+            cursor: None,
+            prompt: None,
+        });
+        assert!(!at_start_menu(&prompt));
     }
 
     #[test]

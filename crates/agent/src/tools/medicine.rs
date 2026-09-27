@@ -1,4 +1,4 @@
-//! One field medicine use, verified by fresh inventory and party reads.
+//! One field medicine use, verified by the inventory and party it shows.
 use super::menu::{open_start_menu, pick_row, Closer, MenuRow, Retries, SCREEN_FRAMES};
 use super::{Expects, Intent, ProbeFact, StepContext, ToolContext, ToolError, ToolStep};
 use crate::{Action, Decision, Expectation, Outcome};
@@ -40,25 +40,33 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
         applied: None,
     };
     ctx.drive(&mut step)?;
-    ctx.invoke(&Intent::Probe {
-        fact: ProbeFact::Pocket {
-            pocket: Pocket::Items,
-        },
-    })
-    .result?;
-    ctx.invoke(&Intent::Probe {
-        fact: ProbeFact::Party,
-    })
-    .result?;
-    let improved = ctx
-        .state()
-        .party
-        .value
-        .as_ref()
-        .and_then(|p| p.first())
-        .and_then(|m| m.hp.value)
-        .is_some_and(|hp| hp.0 > before_hp);
-    if count(ctx) + 1 != before_count || !improved {
+    let improved = |ctx: &ToolContext<'_>| {
+        ctx.state()
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.first())
+            .and_then(|m| m.hp.value)
+            .is_some_and(|hp| hp.0 > before_hp)
+    };
+    // The use passes the party menu (the lead's HP after it) and the ITEMS
+    // pocket (the count after it) on its way out, and the sensor reads
+    // both; a probe is only for what those screens didn't show.
+    if count(ctx) + 1 != before_count {
+        ctx.invoke(&Intent::Probe {
+            fact: ProbeFact::Pocket {
+                pocket: Pocket::Items,
+            },
+        })
+        .result?;
+    }
+    if !improved(ctx) {
+        ctx.invoke(&Intent::Probe {
+            fact: ProbeFact::Party,
+        })
+        .result?;
+    }
+    if count(ctx) + 1 != before_count || !improved(ctx) {
         return Err(ToolError::Failed(
             "medicine use was not verified by inventory and HP".into(),
         ));

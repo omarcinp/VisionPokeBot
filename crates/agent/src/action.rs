@@ -62,6 +62,9 @@ pub enum Expectation {
     PartyList,
     PartySelected(u8),
     PartyActions,
+    /// The party menu, its actions open or not (a summary closes back to
+    /// the actions it was opened from).
+    PartyMenu,
     SummaryPage(pokebot_state::SummaryPage),
     /// The dialogue's text changed (new page) or the dialogue closed.
     TextAdvanced {
@@ -139,6 +142,7 @@ impl Expectation {
                 .as_ref()
                 .is_some_and(|m| !m.actions && m.selected == Some(*slot)),
             Self::PartyActions => observation.party_menu.as_ref().is_some_and(|m| m.actions),
+            Self::PartyMenu => observation.party_menu.is_some(),
             Self::SummaryPage(page) => observation
                 .summary
                 .as_ref()

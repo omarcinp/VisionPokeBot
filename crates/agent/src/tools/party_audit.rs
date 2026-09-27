@@ -1,6 +1,7 @@
 //! Establish the whole roster from visible menus before trusting a save.
 use super::menu::{
-    open_start_menu, pick_row, start_menu_rows, Closer, MenuRow, Retries, SCREEN_FRAMES,
+    open_start_menu, pick_row, start_menu_rows, Closer, Leave, MenuRow, Retries,
+    MENU_SETTLE_FRAMES, SCREEN_FRAMES,
 };
 use super::{Expects, StepContext, ToolContext, ToolError, ToolStep};
 use crate::{Action, Decision, Expectation, Outcome};
@@ -10,10 +11,15 @@ use pokebot_state::{GameEvent, Knowledge, MoveSlot, PartyMon, SummaryObservation
 use std::sync::Arc;
 
 pub fn audit(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    audit_leaving(ctx, Leave::Overworld)
+}
+
+/// The party audit, closing as far as `leave` says.
+pub fn audit_leaving(ctx: &mut ToolContext<'_>, leave: Leave) -> Result<(), ToolError> {
     let mut step = PartyAudit {
         data: Arc::clone(&ctx.data),
         retries: Retries::default(),
-        closer: Closer::default(),
+        closer: Closer::to(leave),
         count: None,
         menu_candidate: None,
         members: Vec::new(),
@@ -21,6 +27,7 @@ pub fn audit(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         page: 0,
         candidate: None,
         returning: false,
+        back_since: None,
         done: false,
     };
     ctx.drive(&mut step).map(|_| ())
@@ -37,6 +44,8 @@ struct PartyAudit {
     page: u8,
     candidate: Option<(u64, SummaryObservation)>,
     returning: bool,
+    /// The first frame of the party menu the summary closed to.
+    back_since: Option<u64>,
     done: bool,
 }
 
@@ -137,7 +146,21 @@ impl ToolStep for PartyAudit {
             return Decision::Fail("party audit: screen or field stayed unreadable".into());
         }
         if self.returning {
-            if o.party_menu.as_ref().is_some_and(|m| !m.actions) {
+            let Some(menu) = &o.party_menu else {
+                self.back_since = None;
+                // Still on the summary: its B was dropped.
+                if o.summary.is_some() {
+                    return self.press(Button::B, Expectation::PartyMenu);
+                }
+                return self.retries.wait(o, "waiting for the party menu");
+            };
+            // The party menu fades back in; a B in the fade is dropped.
+            let since = *self.back_since.get_or_insert(o.frame_id);
+            if o.frame_id.saturating_sub(since) < MENU_SETTLE_FRAMES {
+                return Decision::Wait("letting the party menu settle".into());
+            }
+            if !menu.actions {
+                self.back_since = None;
                 self.returning = false;
                 self.page = 0;
                 self.candidate = None;
@@ -182,7 +205,10 @@ impl ToolStep for PartyAudit {
             if self.page == 2 {
                 self.members.push(self.mon.clone());
                 self.returning = true;
-                return self.press(Button::B, Expectation::PartyList);
+                // The summary closes back to the member's actions
+                // (emulator: waiting for the bare list here cost every
+                // member a 2 s timeout).
+                return self.press(Button::B, Expectation::PartyMenu);
             }
             self.page += 1;
             return self.press(
