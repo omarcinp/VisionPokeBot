@@ -5,13 +5,14 @@
 use pokebot_gamedata::{printed_name, GameData};
 use pokebot_state::GameState;
 
-/// `read` could be `name`: same length, `?` matches any character.
+/// `read` could be `name`: same length, `?` matches any character, and
+/// O and Q (one pixel apart in the HUD font) match each other.
 pub fn fits(name: &str, read: &str) -> bool {
     name.chars().count() == read.chars().count()
         && name
             .chars()
             .zip(read.chars())
-            .all(|(a, b)| b == '?' || a == b)
+            .all(|(a, b)| b == '?' || a == b || matches!((a, b), ('O', 'Q') | ('Q', 'O')))
 }
 
 /// Where a printed name was found in the party.

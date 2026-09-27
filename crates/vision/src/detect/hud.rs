@@ -121,6 +121,13 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         'P',
         ["###.", "#..#", "#..#", "###.", "#...", "#...", "#..."],
     ),
+    // Q is O with a tail: within these rows one pixel more than `0`, which
+    // it read as before (fleet workers' SQUIRTLE read `SOUIRTLE`, and no
+    // HP of theirs reached the party for hours).
+    (
+        'Q',
+        [".##.", "#..#", "#..#", "#..#", "#..#", "#.##", ".##."],
+    ),
     (
         'R',
         ["###.", "#..#", "#..#", "###.", "#..#", "#..#", "#..#"],
@@ -297,6 +304,37 @@ mod tests {
             return;
         };
         assert_eq!(player_hp(&image), Some((9, 21)));
+    }
+
+    /// Text drawn with the HUD glyphs (`0` for O, as the game's font has
+    /// one shape for both), one column apart.
+    fn draw(text: &str) -> RgbImage {
+        let mut image = RgbImage::filled(120, 12, [248, 248, 216]);
+        let mut x = 2;
+        for c in text.chars() {
+            let c = if c == 'O' { '0' } else { c };
+            let (_, rows) = GLYPHS.iter().find(|(g, _)| *g == c).unwrap();
+            for (r, row) in rows.iter().enumerate() {
+                for (dx, v) in row.chars().enumerate() {
+                    if v == '#' {
+                        image.put_pixel(x + dx as u32, 2 + r as u32, INK);
+                    }
+                }
+            }
+            x += rows[0].len() as u32 + 1;
+        }
+        image
+    }
+
+    /// Fleet workers: SQUIRTLE read `SOUIRTLE` (no Q in the table) and no
+    /// HUD reading of theirs ever reached the party.
+    #[test]
+    fn q_is_read_as_q() {
+        assert_eq!(read_line(&draw("SQUIRTLE"), 2, 0, 120), "SQUIRTLE");
+        assert_eq!(
+            parse_name_line(&read_line(&draw("ONIX"), 2, 0, 120)).name,
+            "ONIX"
+        );
     }
 
     #[test]

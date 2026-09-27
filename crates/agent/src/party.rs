@@ -354,11 +354,7 @@ fn seen_as(data: &GameData, species: &str, read: &str) -> Option<String> {
 
 /// `read` may contain `?` for unrecognised letters.
 pub fn names_match(name: &str, read: &str) -> bool {
-    name.len() == read.len()
-        && name
-            .chars()
-            .zip(read.chars())
-            .all(|(a, b)| b == '?' || a == b)
+    pokebot_sense::names::fits(name, read)
 }
 
 #[cfg(test)]
