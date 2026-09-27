@@ -244,15 +244,62 @@ impl<'a> ToolContext<'a> {
     /// The story passages as the belief stands now: what a walk must go
     /// around and may go through.
     pub fn gate_tiles(&self) -> pokebot_world::gates::GateTiles {
-        let gates = self.gates.get_or_init(|| match &self.scheduler.graph {
-            Some(g) => Arc::new(g.gates().clone()),
-            None => Arc::new(pokebot_world::gates::derive(&self.world)),
-        });
         pokebot_world::gates::GateTiles::believed(
             &self.world,
-            gates,
+            &self.story_gates(),
             &crate::belief_view::StateBelief(self.runtime.state()),
         )
+    }
+
+    fn story_gates(&self) -> Arc<pokebot_world::gates::Gates> {
+        Arc::clone(self.gates.get_or_init(|| match &self.scheduler.graph {
+            Some(g) => Arc::new(g.gates().clone()),
+            None => Arc::new(pokebot_world::gates::derive(&self.world)),
+        }))
+    }
+
+    /// A tile a script draws (a beam, a barrier) that the belief holds
+    /// open but a walk found it can't step onto: the belief is wrong, and
+    /// each flag it was open by alone is observed the other way (Switch,
+    /// Vermilion Gym: a trash can's "second lock opened" path recorded on
+    /// the plan's word; the beams stayed on and Lt. Surge was walked to
+    /// eight plans in a row). The flags corrected.
+    pub fn retract_open_gates(&mut self) -> Result<Vec<String>, ToolError> {
+        use pokebot_world::gates::{gate_truth, GateKind};
+        use pokebot_world::predicate::{check, Predicate, Truth};
+        let gates = self.story_gates();
+        let blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner()).all();
+        let mut wrong: Vec<(String, bool)> = Vec::new();
+        {
+            let belief = crate::belief_view::StateBelief(self.runtime.state());
+            for (map, tiles) in &blocked {
+                let Some(on) = gates.get(map) else { continue };
+                for gate in tiles.iter().filter_map(|t| on.get(t)) {
+                    if gate.kind != GateKind::Metatile
+                        || !matches!(gate_truth(gate, &belief), Truth::True)
+                    {
+                        continue;
+                    }
+                    for way in &gate.ways {
+                        let c = check(&belief, way);
+                        if let ([Predicate::Flag { name, is }], true) =
+                            (way.as_slice(), c.failed.is_empty() && c.unknown.is_empty())
+                        {
+                            if !wrong.contains(&(name.clone(), *is)) {
+                                wrong.push((name.clone(), *is));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (flag, is) in &wrong {
+            self.emit(GameEvent::FlagObserved {
+                flag: flag.clone(),
+                value: !is,
+            })?;
+        }
+        Ok(wrong.into_iter().map(|(f, _)| f).collect())
     }
 
     pub fn with_toolbox(mut self, toolbox: Toolbox) -> Self {

@@ -880,3 +880,26 @@ fn every_neighbour_on_one_side_is_crossed_into() {
         ]
     );
 }
+
+/// Vermilion Gym's beams are drawn by the gym's entry script and opened by
+/// the switches flag alone: a walk that finds them on proves the flag
+/// unset (`ToolContext::retract_open_gates`).
+#[test]
+fn vermilion_gyms_beams_open_on_the_switches_flag() {
+    use pokebot_world::gates::GateKind;
+    use pokebot_world::predicate::Predicate;
+    let Some(world) = world() else { return };
+    if world.events().is_none() {
+        return;
+    }
+    let gates = pokebot_world::gates::derive(&world);
+    let gym = &gates["VermilionCity_Gym"];
+    for tile in [(5, 6), (5, 7)] {
+        let gate = &gym[&tile];
+        assert_eq!(gate.kind, GateKind::Metatile, "{tile:?}");
+        assert!(gate.ways.iter().any(|w| matches!(
+            w.as_slice(),
+            [Predicate::Flag { name, is: true }] if name == "FLAG_FOUND_BOTH_VERMILION_GYM_SWITCHES"
+        )), "{tile:?}: {:?}", gate.ways);
+    }
+}

@@ -518,6 +518,26 @@ impl Conversation {
         // PC before Bill went into the teleporter shows the idle message,
         // not the Cell Separator's).
         if self.recognised.is_empty() {
+            // Pages were shown but none was recognised: a path that
+            // changes the world isn't taken on the plan's word (Switch,
+            // Vermilion Gym: "Nope! There's only trash here." read without
+            // its first line, and the planned "second lock opened" path
+            // was recorded: the beams stayed on, and Lt. Surge was walked
+            // to eight plans in a row).
+            let changes = data.paths.get(planned).is_some_and(|p| {
+                use pokebot_world::events::Effect;
+                use pokebot_world::gates::{is_local_flag, is_local_var};
+                p.does.iter().any(|e| match e {
+                    Effect::Say { .. } => false,
+                    // The script's own scratch (the trash can's id).
+                    Effect::Var { var, .. } => !is_local_var(var),
+                    Effect::Set { set: f } | Effect::Clear { clear: f } => !is_local_flag(f),
+                    _ => true,
+                })
+            });
+            if changes && !self.pages.is_empty() {
+                return None;
+            }
             return Some((script, planned));
         }
         let score = |i: usize| {
@@ -1529,6 +1549,50 @@ mod tests {
         c.recognised = vec!["PalletTown_Text_OakDontGoOut".into()];
         let index = LabelIndex::build_for(events, &c.recognised);
         assert_eq!(c.resolved(&index), None);
+    }
+
+    /// Switch, Vermilion Gym: the page was read without its first line
+    /// ("There's only trash here.") and nothing was recognised; the plan's
+    /// "second lock opened" path (the beams off) must not be recorded on
+    /// its word. A path that only prints still is.
+    #[test]
+    fn unrecognised_text_does_not_prove_a_planned_path_that_changes_things() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let script = "VermilionCity_Gym_EventScript_TrashCan10";
+        let events = world.events().unwrap();
+        let s = events.script(script).unwrap();
+        let prints = |i: usize, label: &str| path_labels(&s.paths[i].does).contains(&label);
+        let second = (0..s.paths.len())
+            .find(|&i| prints(i, "VermilionCity_Gym_Text_SecondLockOpened"))
+            .unwrap();
+        let nope = (0..s.paths.len())
+            .find(|&i| {
+                prints(i, "VermilionCity_Gym_Text_NopeOnlyTrashHere")
+                    && !s.paths[i]
+                        .does
+                        .iter()
+                        .any(|e| matches!(e, pokebot_world::events::Effect::Metatile { .. }))
+            })
+            .unwrap();
+        let conversation = |path| {
+            let mut c = Conversation::new(
+                Arc::clone(&world),
+                Arc::clone(&data),
+                Some(script.into()),
+                Some(path),
+                Vec::new(),
+            );
+            c.pages = vec!["There’s only trash here.".into()];
+            c
+        };
+        let index = LabelIndex::build_for(events, &[]);
+        assert_eq!(conversation(second).resolved(&index), None);
+        assert_eq!(
+            conversation(nope).resolved(&index),
+            Some((script.into(), nope))
+        );
     }
 
     /// Bill's script belongs to him and to the Clefairy he turned into:

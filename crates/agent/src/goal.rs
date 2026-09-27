@@ -505,6 +505,13 @@ impl Run<'_, '_> {
         let why = format!("{key} failed: {reason}");
         self.report.failures.push(why.clone());
         ctx.emit(progress(GOAL, why.clone()))?;
+        let retracted = ctx.retract_open_gates()?;
+        if !retracted.is_empty() {
+            ctx.emit(progress(
+                GOAL,
+                format!("a passage believed open is blocked: {retracted:?} can't hold"),
+            ))?;
+        }
         // The same failure twice in a row: don't plan this intent again.
         // Not for a `Go`: a leg fails at one tile (an NPC in the way, a
         // block the world model lacks), which the navigator learns and

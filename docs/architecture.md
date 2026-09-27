@@ -156,6 +156,8 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Waits: the existing stuck-waiting rule. A "fade" that stays unchanged for 30 frames counts as the screen, not a fade (a dark map with almost nothing bright).
   - Cycles: the session calls out a failure that ended 3 cycles in a row ("stuck: the same failure ended N cycles in a row"). The startup audit only fails on the party; other probes are skipped with a warning.
   - Battles: moves are chosen for the member the HUD names, not the lead.
+  - Beliefs about passages: a script path that changes the world isn't recorded on the plan's word when the text shown wasn't recognised (`Conversation::resolved_in`).
+    - A drawn barrier (a metatile gate) the belief holds open but a walk finds blocked retracts the single flag it was believed open by (`ToolContext::retract_open_gates`, on every failed step).
 
 ## Story (`agent::story`)
 
