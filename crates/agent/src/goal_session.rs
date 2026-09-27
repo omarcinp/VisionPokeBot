@@ -199,8 +199,10 @@ impl Repeats {
     /// Notes how a cycle ended; from the [`STUCK_CYCLES`]th same failure
     /// in a row on, how many there have been.
     fn note(&mut self, end: &CycleEnd) -> Option<u32> {
+        // A faint counts too: the same trainer beating us cycle after
+        // cycle is a loop the reload doesn't break.
         let reason = match end {
-            CycleEnd::Unsatisfied(r) | CycleEnd::Failed(r) if !end.is_faint() => r,
+            CycleEnd::Unsatisfied(r) | CycleEnd::Failed(r) => r,
             _ => {
                 *self = Self::default();
                 return None;
@@ -549,6 +551,25 @@ mod tests {
             .collect();
         assert_eq!(stuck.len(), 2, "{stuck:?}");
         assert!(stuck[0].contains("3 cycles") && stuck[1].contains("4 cycles"));
+        // Losing to the same trainer each time is the same loop.
+        let lost = || CycleEnd::Unsatisfied("fainted: our Pokémon fainted (CHARMANDER)".into());
+        let mut fake = Fake {
+            ends: VecDeque::from([lost(), lost(), lost()]),
+            checkpoint: true,
+            ..Fake::default()
+        };
+        run(
+            Session {
+                start: Start::Continue,
+                restart: Some(WAIT),
+            },
+            &mut fake,
+        );
+        assert!(fake
+            .logs
+            .borrow()
+            .iter()
+            .any(|l| l.starts_with("stuck:") && l.contains("3 cycles")));
     }
 
     #[test]
