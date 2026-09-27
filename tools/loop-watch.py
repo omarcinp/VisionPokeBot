@@ -46,10 +46,13 @@ while True:
             for line in chunk.splitlines():
                 key = re.sub(r'\d+', '#', line)[:160]
                 if 'Goal: ' in line:
-                    times = [t for t in recent.get((game, key), []) if now - t < REPEAT_S] + [now]
-                    recent[(game, key)] = times
-                    if len(times) >= REPEAT_N and now - seen.get((game, 'repeat', key), 0) > 1800:
-                        seen[(game, 'repeat', key)] = now
+                    # Only the frame number differs: counters in the text
+                    # ("battle over (20/150)") are progress.
+                    same = re.sub(r'^\[\d+\] ', '', line)[:160]
+                    times = [t for t in recent.get((game, same), []) if now - t < REPEAT_S] + [now]
+                    recent[(game, same)] = times
+                    if len(times) >= REPEAT_N and now - seen.get((game, 'repeat', same), 0) > 1800:
+                        seen[(game, 'repeat', same)] = now
                         print(f'[{game}] repeating ({len(times)}x in 10 min): {line[:280]}', flush=True)
                 if PAT.search(line):
                     if now - seen.get((game, key), 0) > 1800:

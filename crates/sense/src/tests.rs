@@ -1203,3 +1203,36 @@ fn a_new_foe_replaces_the_defeated_one() {
     assert_eq!(t.evs, [0, 0, 0, 1, 0, 0]);
     assert_eq!(t.unseen, [3; 6]);
 }
+
+/// Switch, Route 4: mid-swap both swapping panels slide off screen
+/// (fixture `switch-party-swap-slide`); the menu counted 1 member with no
+/// name read, and the party was cut to one. A size needs every counted
+/// panel read; a steady menu still gives it.
+#[test]
+fn a_party_menu_mid_swap_does_not_cut_the_party() {
+    let Some(d) = data() else { return };
+    let mut s = Sensor::new(d);
+    let sliding = (0..40).map(|f| {
+        let mut o = party_rows(
+            f,
+            vec![PartyRowObservation {
+                nickname: None,
+                level: None,
+                hp: None,
+                status: None,
+            }],
+        );
+        o.party_menu.as_mut().unwrap().prompt = "Move to where?".into();
+        o
+    });
+    let (state, _) = run(&mut s, with_party(), sliding);
+    assert_eq!(state.party.value.unwrap().len(), 2);
+    let mut s = Sensor::new(data().unwrap());
+    let steady = vec![row("BULBASAUR", 11, (30, 30), Status::Healthy)];
+    let (state, _) = run(
+        &mut s,
+        with_party(),
+        (0..40).map(|f| party_rows(f, steady.clone())),
+    );
+    assert_eq!(state.party.value.unwrap().len(), 1);
+}

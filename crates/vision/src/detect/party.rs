@@ -603,6 +603,13 @@ mod tests {
             hp,
             status: Some(Status::Healthy),
         };
+        // Mid-swap (Switch) the lead's and slot 1's panels are off
+        // screen: the count reads 1, but the lead's name doesn't, so the
+        // sensor takes no size from it.
+        if let Some(r) = rows("switch-party-swap-slide.png") {
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].nickname, None);
+        }
         if let Some(r) = rows("emu-party-cant-use.png") {
             assert_eq!(
                 r,

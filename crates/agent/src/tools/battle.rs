@@ -615,4 +615,105 @@ mod tests {
         assert_eq!(spares(None, &decided(None)), None);
         assert_eq!(spares(None, &decided(Some("SPECIES_RATTATA"))), None);
     }
+
+    fn member(species: &str, level: u8, hp: u16, mv: &[&str]) -> pokebot_state::PartyMon {
+        use pokebot_state::{Knowledge, MoveSlot, PartyMon};
+        let mut m = PartyMon {
+            species: Knowledge::observed(species.to_owned(), 1),
+            level: Knowledge::observed(level, 1),
+            hp: Knowledge::observed((hp, hp), 1),
+            ..PartyMon::default()
+        };
+        for (i, x) in mv.iter().enumerate() {
+            m.moves[i] = Some(MoveSlot {
+                mv: Knowledge::observed((*x).to_owned(), 1),
+                pp: Knowledge::observed((20, 20), 1),
+            });
+        }
+        m
+    }
+
+    /// Switch goal run, Route 4: `Train(PIDGEY to Lv9)` led with a Lv3
+    /// PIDGEY for IVYSAUR (slot 1) to carry, but the first command menu
+    /// went Down, Right, A: RUN ("Can't escape!" three times) until
+    /// SPEAROW Lv12 fainted PIDGEY. The carrier comes out: POKéMON.
+    #[test]
+    fn a_switch_trained_lead_shifts_to_the_carrier_at_the_first_command_menu() {
+        use pokebot_state::{Knowledge, Observation};
+        use pokebot_vision::{FireRedPerception, PerceptionSystem};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(data), Ok(font)) = (
+            GameData::load(root.join("data/world/gamedata.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let mut vision = FireRedPerception::default().with_font(Arc::new(font));
+        let mut observe = |name: &str, id: u64| -> Observation {
+            let image =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+                    .unwrap();
+            let frame =
+                pokebot_core::NormalizedFrame::new(id, std::time::Instant::now(), image).unwrap();
+            vision.observe(&frame)
+        };
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member("SPECIES_PIDGEY", 3, 16, &["MOVE_TACKLE"]),
+                    member(
+                        "SPECIES_IVYSAUR",
+                        25,
+                        68,
+                        &[
+                            "MOVE_TACKLE",
+                            "MOVE_SLEEP_POWDER",
+                            "MOVE_RAZOR_LEAF",
+                            "MOVE_VINE_WHIP",
+                        ],
+                    ),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false).shifting_to(1);
+        let mut events = Vec::new();
+        let mut run = |o: &Observation| {
+            step.next(&mut StepContext {
+                observation: o,
+                state: &state,
+                events: &mut events,
+                quiet_frames: 0,
+                frame: None,
+                learned: &[],
+            })
+        };
+        let label = |d: &Decision| match d {
+            Decision::Act(a) => a.label.clone(),
+            Decision::Wait(w) => format!("wait: {w}"),
+            Decision::Done(w) => format!("done: {w}"),
+            Decision::Fail(w) => format!("fail: {w}"),
+        };
+        let mut id = 0;
+        for name in ["switch-shift-go", "switch-shift-go"] {
+            id += 1;
+            run(&observe(name, id));
+        }
+        let mut last = String::new();
+        for name in ["switch-shift-command-fight", "switch-shift-command-fight"] {
+            id += 1;
+            last = label(&run(&observe(name, id)));
+        }
+        assert_eq!(last, "cursor to POKéMON: Down");
+        for name in [
+            "switch-shift-command-pokemon",
+            "switch-shift-command-pokemon",
+        ] {
+            id += 1;
+            last = label(&run(&observe(name, id)));
+        }
+        assert_eq!(last, "choose POKéMON");
+    }
 }

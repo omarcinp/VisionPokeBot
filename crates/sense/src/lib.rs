@@ -635,7 +635,19 @@ impl Sensor {
                 self.party_selected = menu.selected.or(self.party_selected);
             }
         }
-        let list = o.party_menu.clone().filter(|m| !m.actions && m.count > 0);
+        // A size is only what every counted panel shows: a panel whose
+        // name didn't read is sliding (a swap moves both panels off
+        // screen) or fading (Switch, Route 4: mid-swap the lead's and
+        // slot 1's panels were away, the count read 1, and the party
+        // lost the IVYSAUR that was to carry a switch-trained PIDGEY).
+        let list = o.party_menu.clone().filter(|m| {
+            !m.actions
+                && m.count > 0
+                && m.members
+                    .iter()
+                    .take(usize::from(m.count))
+                    .all(|r| r.nickname.is_some())
+        });
         let rows = list.as_ref().map(|m| m.members.clone());
         if let Some(menu) = self.party_menu.update(f, list, PARTY_MENU_FRAMES) {
             events.push(GameEvent::PartySizeObserved { size: menu.count });

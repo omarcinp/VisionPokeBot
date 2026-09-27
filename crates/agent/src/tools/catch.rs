@@ -268,6 +268,20 @@ impl ToolStep for HuntStep {
             });
             return Decision::Wait("a battle starts".into());
         }
+        // The carrier gone from the party knowledge: the trainee would
+        // start battles it loses with no one to switch to (Switch, Route 4:
+        // a misread party size dropped IVYSAUR, and a Lv3 PIDGEY ran from a
+        // Lv12 SPEAROW until it fainted).
+        if let Some(c) = self
+            .carrier
+            .as_ref()
+            .filter(|c| !party.members.iter().any(|m| &m.species == *c))
+        {
+            return Decision::Fail(format!(
+                "{} is to carry the trainee but isn't in the party knowledge",
+                crate::party::display_name(c)
+            ));
+        }
         if let Some(lead) = self.fighter(&party) {
             if lead
                 .hp
