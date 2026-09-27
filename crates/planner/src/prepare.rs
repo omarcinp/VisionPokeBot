@@ -36,7 +36,7 @@ const LEVEL_WINDOW: u8 = 14;
 /// Level combinations evaluated per party composition before the search
 /// settles for what it found (a four-member party has 15⁴ of them; the
 /// cheapest that meets the target usually comes within the first few).
-const MAX_LEVEL_COMBOS: usize = 96;
+const MAX_LEVEL_COMBOS: usize = 200;
 const POKE_BALL: &str = "ITEM_POKE_BALL";
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,8 +138,74 @@ fn land<'d>(data: &'d GameData, area: &Area) -> Option<&'d EncounterTable> {
     data.wild.get(&area.map)?.get("land")
 }
 
-/// Expected minutes and battles to train `member` from its level to `to` in `area`.
-fn training_cost(data: &GameData, member: &PartyMember, to: u8, area: &Area) -> Option<(f64, u32)> {
+/// [`matchup`] remembered: training is priced for every member, target
+/// level and carrier level against the same wild slots.
+fn matchup_cached(data: &GameData, us: &Combatant, them: &Combatant) -> crate::evaluate::Matchup {
+    type Key = (String, u8, Vec<String>, u32, [u32; 6], String, u8, u32);
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<Key, crate::evaluate::Matchup>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key: Key = (
+        us.species.clone(),
+        us.level,
+        us.moves.clone(),
+        us.hp,
+        us.stats.0,
+        them.species.clone(),
+        them.level,
+        them.hp,
+    );
+    if let Some(m) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return m;
+    }
+    let m = matchup(data, us, them);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 200_000 {
+            c.clear();
+        }
+        c.insert(key, m.clone());
+    });
+    m
+}
+
+/// Whether `member` wins its first battles on `map` at the level it has
+/// (it trains there by fighting; else it is switch-trained); `None`
+/// without land encounters there.
+pub fn trains_alone(data: &GameData, member: &PartyMember, map: &str) -> Option<bool> {
+    let table = data.wild.get(map)?.get("land")?;
+    Some(safe_against(
+        data,
+        &combatant(data, member, member.level)?,
+        table,
+    ))
+}
+
+/// Whether `us` wins (at least even odds) against every slot of `table`
+/// at its middle level.
+fn safe_against(data: &GameData, us: &Combatant, table: &EncounterTable) -> bool {
+    table.slots.iter().all(|slot| {
+        let level = (slot.min_level + slot.max_level) / 2;
+        let moves = data.default_moves(&slot.species, level);
+        Combatant::new(data, &slot.species, level, moves, WILD_IV)
+            .is_none_or(|foe| matchup_cached(data, us, &foe).p_win >= 0.5)
+    })
+}
+
+/// Expected minutes and battles to train `member` from its level to `to` in
+/// `area`. One that would lose its first battles there (fleet worker 4: a
+/// Lv2 MANKEY on Route 1, judged at its window's middle, fainted to a
+/// PIDGEY) is switch-trained when `carrier` can fight there: it starts
+/// each battle and `carrier` is switched in to win it, the experience
+/// shared between the two.
+fn training_cost(
+    data: &GameData,
+    member: &PartyMember,
+    to: u8,
+    area: &Area,
+    carrier: Option<&PartyMember>,
+) -> Option<(f64, u32)> {
     if to <= member.level {
         return Some((0.0, 0));
     }
@@ -151,9 +217,15 @@ fn training_cost(data: &GameData, member: &PartyMember, to: u8, area: &Area) -> 
         .unwrap_or_else(|| exp_for_level(growth, member.level));
     let needed = exp_for_level(growth, to).saturating_sub(start) as f64;
     // Average over the encounter table; battles are fought at the midpoint
-    // level of the training window.
+    // level of the training window, by the member itself when it can win
+    // its first ones.
     let mid = (member.level + to).div_ceil(2);
-    let us = combatant(data, member, mid)?;
+    let (us, share) = if safe_against(data, &combatant(data, member, member.level)?, table) {
+        (combatant(data, member, mid)?, 1.0)
+    } else {
+        let carrier = carrier?;
+        (combatant(data, carrier, carrier.level)?, 0.5)
+    };
     let (mut exp, mut seconds, mut damage, mut weight) = (0.0, 0.0, 0.0, 0.0);
     for slot in &table.slots {
         let level = (slot.min_level + slot.max_level) / 2;
@@ -161,12 +233,12 @@ fn training_cost(data: &GameData, member: &PartyMember, to: u8, area: &Area) -> 
         let Some(foe) = Combatant::new(data, &slot.species, level, moves, WILD_IV) else {
             continue;
         };
-        let m = matchup(data, &us, &foe);
+        let m = matchup_cached(data, &us, &foe);
         if m.p_win < 0.5 {
             return None; // too dangerous to train here
         }
         let w = f64::from(slot.chance);
-        exp += w * exp_gain(data, &slot.species, level, false) as f64;
+        exp += w * exp_gain(data, &slot.species, level, false) as f64 * share;
         seconds += w * (BATTLE_OVERHEAD_S + TURN_S * m.turns);
         damage += w * f64::from(us.hp.saturating_sub(m.our_hp_after));
         weight += w;
@@ -347,11 +419,17 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     kept
 }
 
-/// A target level for one member: (level, minutes, where and how many battles).
-type LevelOption = (u8, f64, Option<(String, u32)>);
-/// Level options per member, keyed by species, level and experience: the
-/// party members recur in every composition, so they are priced once.
-type LevelOptions = BTreeMap<(String, u8, Option<u64>), Vec<LevelOption>>;
+/// One member's part of a combination: (target level, minutes, where and
+/// how many battles).
+type MemberCost = (u8, f64, Option<(String, u32)>);
+/// The cheapest way to train one member to a level: (minutes, where and
+/// how many battles; `None` for no training).
+type LevelCost = Option<(f64, Option<(String, u32)>)>;
+/// Costs keyed by the member (species, level, experience), the target
+/// level and the carrier it may be switch-trained with (species and level
+/// in the combination): the party members recur in every composition, so
+/// each is priced once.
+type LevelOptions = BTreeMap<(String, u8, Option<u64>, u8, Option<(String, u8)>), LevelCost>;
 
 /// Level targets per member (up to LEVEL_WINDOW above its level, only
 /// where it can train), searched cheapest combination first: training time
@@ -364,48 +442,78 @@ fn search_levels(
     base_steps: &[PlanStep],
     base_minutes: f64,
     wanted: usize,
-    memo: &mut LevelOptions,
+    memo_out: &mut LevelOptions,
     plans: &mut Vec<PreparationPlan>,
 ) {
     let data = request.data;
-    // Cheapest training option per member and target level.
-    let options: Vec<Vec<LevelOption>> = party
-        .iter()
-        .map(|m| {
-            memo.entry((m.species.clone(), m.level, m.exp))
-                .or_insert_with(|| {
-                    (m.level..=m.level.saturating_add(LEVEL_WINDOW).min(100))
-                        .filter_map(|to| {
-                            if to == m.level {
-                                return Some((to, 0.0, None));
-                            }
-                            request
-                                .areas
-                                .iter()
-                                .filter_map(|a| {
-                                    training_cost(data, m, to, a)
-                                        .map(|(min, b)| (min, b, a.map.clone()))
-                                })
-                                .min_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.2.cmp(&y.2)))
-                                .map(|(min, battles, map)| (to, min, Some((map, battles))))
-                        })
-                        .collect()
-                })
-                .clone()
-        })
-        .collect();
-    let minutes_of = |index: &[usize]| -> f64 {
-        base_minutes
-            + index
-                .iter()
-                .zip(&options)
-                .map(|(i, o)| o[*i].1)
-                .sum::<f64>()
+    // The member a switch-trained one hands its battles to: the highest
+    // level other one.
+    let carrier_of = |i: usize| {
+        party
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .max_by_key(|(_, c)| c.level)
+            .map(|(j, _)| j)
+    };
+    let window = |m: &PartyMember| m.level.saturating_add(LEVEL_WINDOW).min(100) - m.level;
+    let memo = std::cell::RefCell::new(std::mem::take(memo_out));
+    // Cheapest training of member `i` to `to`, with `carrier` (party index,
+    // level in the combination) to switch-train with.
+    let cost = |i: usize, to: u8, carrier: Option<(usize, u8)>| -> LevelCost {
+        let m = &party[i];
+        if to == m.level {
+            return Some((0.0, None));
+        }
+        let carrier = carrier.map(|(c, level)| PartyMember {
+            level,
+            exp: None,
+            ..party[c].clone()
+        });
+        let key = (
+            m.species.clone(),
+            m.level,
+            m.exp,
+            to,
+            carrier.as_ref().map(|c| (c.species.clone(), c.level)),
+        );
+        if let Some(c) = memo.borrow().get(&key) {
+            return c.clone();
+        }
+        let best = request
+            .areas
+            .iter()
+            .filter_map(|a| {
+                training_cost(data, m, to, a, carrier.as_ref())
+                    .map(|(min, b)| (min, b, a.map.clone()))
+            })
+            .min_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.2.cmp(&y.2)))
+            .map(|(min, battles, map)| (min, Some((map, battles))));
+        memo.borrow_mut().insert(key, best.clone());
+        best
+    };
+    // A combination: each member's level offset. Its members' costs, the
+    // carrier at the level the combination gives it; `None` when one of
+    // them can't be trained that far.
+    let costs_of = |index: &[usize]| -> Option<Vec<MemberCost>> {
+        (0..party.len())
+            .map(|i| {
+                let to = party[i].level + index[i] as u8;
+                let carrier = carrier_of(i).map(|c| (c, party[c].level + index[c] as u8));
+                let (min, place) = cost(i, to, carrier)?;
+                Some((to, min, place))
+            })
+            .collect()
+    };
+    let minutes_of = |index: &[usize]| -> Option<f64> {
+        costs_of(index).map(|c| base_minutes + c.iter().map(|(_, m, _)| m).sum::<f64>())
     };
     let start = vec![0usize; party.len()];
     let mut heap: BinaryHeap<Reverse<(Minutes, Vec<usize>)>> = BinaryHeap::new();
     let mut seen: BTreeSet<Vec<usize>> = BTreeSet::new();
-    heap.push(Reverse((Minutes(minutes_of(&start)), start.clone())));
+    if let Some(m) = minutes_of(&start) {
+        heap.push(Reverse((Minutes(m), start.clone())));
+    }
     seen.insert(start);
     let mut found = 0;
     let mut tried = 0;
@@ -414,16 +522,18 @@ fn search_levels(
             break;
         }
         tried += 1;
+        let Some(costs) = costs_of(&index) else {
+            continue;
+        };
         let prepared: Vec<Combatant> = party
             .iter()
-            .zip(&index)
-            .zip(&options)
-            .filter_map(|((m, i), o)| combatant(data, m, o[*i].0))
+            .zip(&costs)
+            .filter_map(|(m, (to, _, _))| combatant(data, m, *to))
             .collect();
         let conf = confidence(data, &prepared, &request.targets);
         let mut steps = base_steps.to_vec();
-        for ((m, i), o) in party.iter().zip(&index).zip(&options) {
-            if let (to, min, Some((map, battles))) = &o[*i] {
+        for (m, c) in party.iter().zip(&costs) {
+            if let (to, min, Some((map, battles))) = c {
                 steps.push(PlanStep::Train {
                     species: m.species.clone(),
                     from: m.level,
@@ -450,15 +560,20 @@ fn search_levels(
         if found >= wanted {
             break;
         }
-        // One member a level target further, each way.
+        // One member a level target further, each way. A combination with
+        // a member that can't be trained that far isn't searched: it is
+        // reached once its carrier is further on (from that combination).
         for k in 0..index.len() {
             let mut next = index.clone();
             next[k] += 1;
-            if next[k] < options[k].len() && seen.insert(next.clone()) {
-                heap.push(Reverse((Minutes(minutes_of(&next)), next)));
+            if next[k] <= usize::from(window(&party[k])) && seen.insert(next.clone()) {
+                if let Some(m) = minutes_of(&next) {
+                    heap.push(Reverse((Minutes(m), next)));
+                }
             }
         }
     }
+    *memo_out = memo.into_inner();
 }
 
 /// Minutes with a total order, for the open set.

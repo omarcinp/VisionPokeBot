@@ -682,7 +682,9 @@ fn a_low_lead_heals_before_the_first_walk_through_grass() {
         .intents
         .iter()
         .position(
-            |s| matches!(&s.intent, Intent::Go { dest } if dest == "Route22" || dest == "Route1"),
+            // Route 2 too: a Lv5 lead now trains only where it wins its
+            // first battles (not Route 1's or Route 22's middle levels).
+            |s| matches!(&s.intent, Intent::Go { dest } if ["Route22", "Route1", "Route2"].contains(&dest.as_str())),
         )
         .expect("a walk onto a route");
     let train = position(&plan, |i| matches!(i, Intent::Train { .. }));
