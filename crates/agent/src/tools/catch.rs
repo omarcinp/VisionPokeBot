@@ -86,6 +86,9 @@ pub struct HuntStep {
     /// Where the hunt entered maps: its walks are planned afresh on each
     /// map, so only the hunt sees them go round in circles.
     entries: MapEntries,
+    /// The species a training hunt is for (it leads the battles); `None`:
+    /// the lead.
+    trainee: Option<String>,
     nav: NavParts,
 }
 
@@ -102,6 +105,7 @@ impl HuntStep {
             encounters: 0,
             fled_in_a_row: 0,
             entries: MapEntries::default(),
+            trainee: None,
             nav: NavParts::of(ctx),
         }
     }
@@ -149,13 +153,19 @@ impl HuntStep {
                     .is_some_and(|k| k.value == Some(true));
                 marked.then(|| format!("{species} is marked caught in the Pokédex"))
             }
-            Hunt::Level(level) => party.lead().filter(|l| l.level >= *level).map(|l| {
-                format!(
-                    "{} reached Lv{} (target Lv{level})",
-                    l.display_name(),
-                    l.level
-                )
-            }),
+            Hunt::Level(level) => self
+                .trainee
+                .as_ref()
+                .and_then(|s| party.members.iter().find(|m| &m.species == s))
+                .or_else(|| party.lead())
+                .filter(|l| l.level >= *level)
+                .map(|l| {
+                    format!(
+                        "{} reached Lv{} (target Lv{level})",
+                        l.display_name(),
+                        l.level
+                    )
+                }),
         }
     }
 
@@ -381,6 +391,15 @@ fn heal_after_flight(
 /// lead is too weak to go on, and saving after a catch on the way when
 /// the context keeps a checkpoint (`--save-game`).
 fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), ToolError> {
+    hunt_for(ctx, hunt, map, None)
+}
+
+fn hunt_for(
+    ctx: &mut ToolContext<'_>,
+    hunt: Hunt,
+    map: Option<&str>,
+    trainee: Option<&str>,
+) -> Result<(), ToolError> {
     let mut heals = 0;
     let mut buys = 0;
     let mut encounters = 0;
@@ -388,6 +407,7 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
     let mut restock = true;
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
+        step.trainee = trainee.map(str::to_owned);
         step.restock = restock;
         step.encounters = encounters;
         step.fled_in_a_row = fled_in_a_row;
@@ -460,8 +480,31 @@ pub fn catch(ctx: &mut ToolContext<'_>, species: &str, map: Option<&str>) -> Res
     hunt(ctx, Hunt::Species(species.to_owned()), map)
 }
 
-pub fn train(ctx: &mut ToolContext<'_>, map: &str, level: u8) -> Result<(), ToolError> {
-    hunt(ctx, Hunt::Level(level), Some(map))
+/// Trains `species` to `level` on `map`: it leads the battles (the lead
+/// is the one that fights, and gains the experience; fleet workers'
+/// "Train MANKEY to Lv12" was done at once, their CHARMANDER lead being
+/// Lv14 already, and MANKEY never fought).
+pub fn train(
+    ctx: &mut ToolContext<'_>,
+    map: &str,
+    species: &str,
+    level: u8,
+) -> Result<(), ToolError> {
+    let party = Party::from_state(ctx.state());
+    let slot = party
+        .members
+        .iter()
+        .filter(|m| m.hp.is_none_or(|(hp, _)| hp > 0))
+        .find(|m| m.species == species)
+        .map(|m| m.slot);
+    if let Some(slot) = slot.filter(|s| *s != 0) {
+        ctx.emit(progress(
+            "Party",
+            format!("{} leads to train", crate::party::display_name(species)),
+        ))?;
+        ctx.drive(&mut super::party_order::LeadWith::new(slot, species))?;
+    }
+    hunt_for(ctx, Hunt::Level(level), Some(map), slot.map(|_| species))
 }
 
 impl Tool for CatchTool {
@@ -491,10 +534,15 @@ impl Tool for TrainTool {
     }
 
     fn run(&mut self, intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
-        let Intent::Train { map, level, .. } = intent else {
+        let Intent::Train {
+            map,
+            species,
+            level,
+        } = intent
+        else {
             return ToolOutcome::failed("not a Train");
         };
-        train(ctx, map, *level).into()
+        train(ctx, map, species, *level).into()
     }
 }
 
