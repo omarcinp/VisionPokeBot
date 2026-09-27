@@ -298,7 +298,7 @@ impl ToolStep for HuntStep {
         let Some(pose) = o.player.as_ref().map(|p| p.pose.clone()) else {
             return Decision::Wait("locating".into());
         };
-        if let Some(why) = self.entries.note(&pose) {
+        if let Some(why) = self.entries.note(&pose, o.frame_id) {
             return Decision::Fail(format!("{:?}: {why}", self.hunt));
         }
         if let Some(map) = self.map.clone().filter(|m| *m != pose.map) {

@@ -206,30 +206,39 @@ pub struct Navigator {
 /// goal run, 2026-09-27: 800 crossings between Cerulean City and Route 5
 /// in two hours, nothing noticing).
 pub const MAX_SAME_ENTRY: u32 = 3;
+/// Frames within which those entries count as one circle: going round
+/// takes seconds (Cerulean ↔ Route 5: 130 frames a lap), a trip to heal
+/// and back through the same way tens of seconds (fleet worker 2: Route 1
+/// to Mom's and back, 2700 frames, counted as a circle).
+pub const SAME_ENTRY_FRAMES: u64 = 1800;
 
 /// Where a walk has entered maps (warps and edges), to notice it going
 /// round in circles.
 #[derive(Debug, Clone, Default)]
 pub struct MapEntries {
     last_map: Option<String>,
-    entries: HashMap<(String, i32, i32), u32>,
+    /// Frames each (map, tile) was entered at, recent ones.
+    entries: HashMap<(String, i32, i32), Vec<u64>>,
 }
 
 impl MapEntries {
-    /// Notes where the player is; on entering a map for the
-    /// [`MAX_SAME_ENTRY`]th time at the same tile, why the walk has failed.
-    pub fn note(&mut self, pose: &PlayerPose) -> Option<String> {
+    /// Notes where the player is at `frame`; on entering a map for the
+    /// [`MAX_SAME_ENTRY`]th time at the same tile within
+    /// [`SAME_ENTRY_FRAMES`], why the walk has failed.
+    pub fn note(&mut self, pose: &PlayerPose, frame: u64) -> Option<String> {
         if self.last_map.as_deref() == Some(pose.map.as_str()) {
             return None;
         }
         let from = self.last_map.replace(pose.map.clone())?;
-        let n = self
+        let times = self
             .entries
             .entry((pose.map.clone(), pose.x, pose.y))
             .or_default();
-        *n += 1;
-        (*n >= MAX_SAME_ENTRY)
-            .then(|| format!("going in circles: entered {pose} from {from} {n} times"))
+        times.push(frame);
+        times.retain(|f| frame.saturating_sub(*f) <= SAME_ENTRY_FRAMES);
+        let n = times.len() as u32;
+        (n >= MAX_SAME_ENTRY)
+            .then(|| format!("going in circles: entered {pose} from {from} {n} times in a row"))
     }
 }
 
@@ -355,7 +364,7 @@ impl Navigator {
         let Some(pose) = observation.player.as_ref().map(|p| p.pose.clone()) else {
             return NavStatus::Wait("locating the player".into());
         };
-        if let Some(why) = self.entries.note(&pose) {
+        if let Some(why) = self.entries.note(&pose, observation.frame_id) {
             return NavStatus::Fail(why);
         }
         if self.last_map.as_deref() != Some(pose.map.as_str()) {
@@ -1482,7 +1491,25 @@ mod tests {
             x,
             y: 0,
         };
-        assert!((0..10).all(|x| entries.note(&at(x)).is_none()));
+        assert!((0..10).all(|x| entries.note(&at(x), 0).is_none()));
+        // A trip to heal and back through the same way is not a circle.
+        let mut entries = MapEntries::default();
+        let (route1, pallet) = (
+            PlayerPose {
+                map: "Route1".into(),
+                x: 13,
+                y: 39,
+            },
+            PlayerPose {
+                map: "PalletTown".into(),
+                x: 13,
+                y: 0,
+            },
+        );
+        for lap in 0..4u64 {
+            entries.note(&pallet, lap * 2700);
+            assert_eq!(entries.note(&route1, lap * 2700 + 100), None, "lap {lap}");
+        }
     }
 
     /// Cinnabar Gym's quiz doors are walls in the map data that a script
