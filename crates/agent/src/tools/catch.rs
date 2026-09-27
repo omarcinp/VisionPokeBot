@@ -180,11 +180,9 @@ impl ToolStep for HuntStep {
             if let Decision::Done(summary) = &decision {
                 self.encounters += 1;
                 let caught = battle.caught().map(str::to_owned);
-                self.fled_in_a_row = if battle.ran() && caught.is_none() {
-                    self.fled_in_a_row + 1
-                } else {
-                    0
-                };
+                let fled = battle.ran() && caught.is_none();
+                let foe = battle.memory.catch.foe.as_ref().map(|(s, _)| s.clone());
+                self.fled_in_a_row = if fled { self.fled_in_a_row + 1 } else { 0 };
                 ctx.events.push(progress(
                     self.phase(),
                     format!("{summary} ({}/{})", self.encounters, self.max_encounters()),
@@ -195,6 +193,20 @@ impl ToolStep for HuntStep {
                 // last events; the caught species is read from the battle.
                 if let Some(done) = self.reached(&party, caught.as_deref(), ctx.state) {
                     return Decision::Done(done);
+                }
+                // Ran from a battle the hunt is for (any, training; the
+                // hunted species, catching) with the lead hurt: the battle's
+                // risk rule is stricter than the hunt's heal bar, so heal
+                // rather than run from every battle on (fleet workers 2 and
+                // 5: SQUIRTLE at 12/23 ran from eight Route 22 battles in a
+                // row, twice, and the plan gave up).
+                let lead_hp = party.lead().and_then(|l| l.hp);
+                if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp) {
+                    let (hp, max) = lead_hp.unwrap_or_default();
+                    return Decision::Fail(format!(
+                        "{HEAL_FIRST}: ran from a {} battle at {hp}/{max} HP",
+                        self.phase().to_lowercase()
+                    ));
                 }
                 if self.fled_in_a_row >= MAX_FLED_IN_A_ROW {
                     return Decision::Fail(format!(
@@ -349,6 +361,22 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
     !nearest_reachable(&nav.world, pose, &goals, &nav.gone).is_empty()
 }
 
+/// Whether a battle the hunt ran from calls for a heal: one it is for (any
+/// while training; the hunted species while catching; running from others
+/// is how a catch hunt goes on), with the lead hurt.
+fn heal_after_flight(
+    hunt: &Hunt,
+    fled: bool,
+    foe: Option<&str>,
+    lead_hp: Option<(u16, u16)>,
+) -> bool {
+    let for_the_hunt = match hunt {
+        Hunt::Level(_) => true,
+        Hunt::Species(s) => foe == Some(s.as_str()),
+    };
+    fled && for_the_hunt && lead_hp.is_some_and(|(hp, max)| hp < max)
+}
+
 /// Runs the hunt, healing at the nearest Center (and coming back) when the
 /// lead is too weak to go on, and saving after a catch on the way when
 /// the context keeps a checkpoint (`--save-game`).
@@ -379,6 +407,11 @@ fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), 
             }
             Ok(_) => return Ok(()),
             Err(ToolError::Failed(reason)) if reason.starts_with(HEAL_FIRST) => {
+                // Heals in a row without a battle fought between them are
+                // what doesn't work; a hunt that fights heals as it needs.
+                if fled_in_a_row == 0 {
+                    heals = 0;
+                }
                 heals += 1;
                 if heals > MAX_HEALS {
                     return Err(ToolError::Failed(format!(
@@ -471,6 +504,44 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    #[test]
+    fn a_hunt_heals_after_running_from_what_it_is_for() {
+        let train = Hunt::Level(13);
+        let mankey = Hunt::Species("SPECIES_MANKEY".into());
+        // Fleet workers 2 and 5: SQUIRTLE at 12/23 ran from every battle.
+        assert!(heal_after_flight(
+            &train,
+            true,
+            Some("SPECIES_RATTATA"),
+            Some((12, 23))
+        ));
+        assert!(!heal_after_flight(
+            &train,
+            true,
+            Some("SPECIES_RATTATA"),
+            Some((23, 23))
+        ));
+        assert!(!heal_after_flight(
+            &train,
+            false,
+            Some("SPECIES_RATTATA"),
+            Some((12, 23))
+        ));
+        // A catch hunt runs from other species as it goes.
+        assert!(!heal_after_flight(
+            &mankey,
+            true,
+            Some("SPECIES_RATTATA"),
+            Some((12, 23))
+        ));
+        assert!(heal_after_flight(
+            &mankey,
+            true,
+            Some("SPECIES_MANKEY"),
+            Some((12, 23))
+        ));
+    }
 
     #[test]
     fn route_4_grass_is_out_of_reach_from_its_west_part() {
