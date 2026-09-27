@@ -412,3 +412,121 @@ fn clefairy_is_put_first_through_switch() {
     drop(ctx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Switch-training (the Cascade save): CLEFAIRY Lv8 would lose to Route
+/// 4's Lv6–10 foes, so it starts each battle and IVYSAUR Lv26 is
+/// SHIFTed in to win it; CLEFAIRY shares the experience and levels up
+/// without fighting. Run with `--ignored` (a few minutes).
+#[test]
+#[ignore]
+fn clefairy_is_switch_trained_by_ivysaur() {
+    let _guard = EMULATOR.lock().unwrap_or_else(|e| e.into_inner());
+    let root = root();
+    let Some((core, rom)) = core_and_rom() else {
+        eprintln!("skipping: emulator core or ROM missing");
+        return;
+    };
+    let world_dir = root.join("data/world");
+    let (Ok(world), Ok(data), Ok(font), Ok(small)) = (
+        World::load(&world_dir),
+        GameData::load(world_dir.join("gamedata.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_normal.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_small.json")),
+    ) else {
+        eprintln!("skipping: no world data");
+        return;
+    };
+    let Ok(save) = std::fs::read(root.join("saves/cascade.sav")) else {
+        eprintln!("skipping: no saves/cascade.sav");
+        return;
+    };
+    let progress = Progress::load(&root.join("saves/progress.cascade.json")).expect("progress");
+    let state_path = root.join("saves/state.cascade.json");
+    let dir = std::env::temp_dir().join(format!("pokebot-carry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let save_path = dir.join("cascade.sav");
+    std::fs::write(&save_path, &save).unwrap();
+    let world = Arc::new(world);
+    let data = Arc::new(data);
+    let mut config = EmulatorConfig::new(core, rom);
+    config.battery_save = Some(save_path);
+    let (video, controller, _) = launch(config).expect("emulator");
+    let perception = FireRedPerception::with_world(Arc::clone(&world))
+        .with_font(Arc::new(font))
+        .with_small_font(Arc::new(small));
+    let mut runtime = Runtime::with_perception(
+        Devices {
+            video: Box::new(video),
+            controller: Box::new(controller),
+            normalizer: Normalizer::new(ViewportLocator::FullFrame),
+            video_name: "emulator".into(),
+            controller_name: "emulator".into(),
+            persist_save: None,
+        },
+        perception,
+    );
+    if let Some(rec) = std::env::var_os("VPB_RECORD") {
+        runtime
+            .record_to(Path::new(&rec), false, 4)
+            .expect("record");
+    }
+    runtime.echo_events(std::env::var_os("VPB_ECHO").is_some());
+    let executor = Executor {
+        syncer: Some(Arc::new(Mutex::new(Syncer::new("emulator")))),
+        ..Executor::default()
+    };
+    let stop = AtomicBool::new(false);
+    continue_game(
+        &mut runtime,
+        &executor,
+        &progress,
+        &state_path,
+        &data,
+        &stop,
+        None,
+    )
+    .expect("continue the cascade save");
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&world),
+        Arc::clone(&data),
+        &stop,
+    );
+    let audit = ctx.invoke(&Intent::Probe {
+        fact: ProbeFact::Party,
+    });
+    assert!(audit.is_ok(), "party: {:?}", audit.result);
+    let level = |ctx: &ToolContext<'_>, species: &str| {
+        ctx.state()
+            .party
+            .value
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.species.value.as_deref() == Some(species))
+            .and_then(|m| m.level.value)
+            .unwrap()
+    };
+    let before = level(&ctx, "SPECIES_CLEFAIRY");
+    let train = ctx.invoke(&Intent::Train {
+        // Route 4, west of Cerulean (Route 5's grass is behind the robbed
+        // house; Route 24's bridge trainers stand on the way).
+        map: "Route4".into(),
+        species: "SPECIES_CLEFAIRY".into(),
+        level: before + 1,
+    });
+    eprintln!("Train -> {:?}", train.result);
+    assert!(train.is_ok(), "{:?}", train.result);
+    assert!(level(&ctx, "SPECIES_CLEFAIRY") > before);
+    assert!(
+        train.learned.iter().any(|e| matches!(
+            e,
+            pokebot_state::GameEvent::GoalProgress { detail, .. } if detail.contains("IVYSAUR fights")
+        )),
+        "switch-trained: {:?}",
+        train.learned.iter().filter(|e| matches!(e, pokebot_state::GameEvent::GoalProgress { .. })).collect::<Vec<_>>()
+    );
+    drop(ctx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

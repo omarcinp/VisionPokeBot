@@ -89,6 +89,9 @@ pub struct HuntStep {
     /// The species a training hunt is for (it leads the battles); `None`:
     /// the lead.
     trainee: Option<String>,
+    /// Switch-training: the species that fights the battles the trainee
+    /// starts (the trainee would lose them).
+    carrier: Option<String>,
     nav: NavParts,
 }
 
@@ -106,6 +109,7 @@ impl HuntStep {
             fled_in_a_row: 0,
             entries: MapEntries::default(),
             trainee: None,
+            carrier: None,
             nav: NavParts::of(ctx),
         }
     }
@@ -169,6 +173,15 @@ impl HuntStep {
         }
     }
 
+    /// The member whose HP decides heals: the carrier while switch-training
+    /// (the trainee doesn't fight), else the lead.
+    fn fighter<'p>(&self, party: &'p Party) -> Option<&'p crate::party::Member> {
+        self.carrier
+            .as_ref()
+            .and_then(|c| party.members.iter().find(|m| &m.species == c))
+            .or_else(|| party.lead())
+    }
+
     /// Walks to the grass of `map` (from another map) or to the spin tile.
     fn walk(&mut self, ctx: &mut StepContext<'_>, dest: Destination) -> Decision {
         if self.go.as_ref().is_none_or(|go| *go.destination() != dest) {
@@ -210,7 +223,7 @@ impl ToolStep for HuntStep {
                 // rather than run from every battle on (fleet workers 2 and
                 // 5: SQUIRTLE at 12/23 ran from eight Route 22 battles in a
                 // row, twice, and the plan gave up).
-                let lead_hp = party.lead().and_then(|l| l.hp);
+                let lead_hp = self.fighter(&party).and_then(|l| l.hp);
                 if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp) {
                     let (hp, max) = lead_hp.unwrap_or_default();
                     return Decision::Fail(format!(
@@ -243,19 +256,26 @@ impl ToolStep for HuntStep {
         }
         if o.battle.is_some() {
             let battle = BattleStep::new(Arc::clone(&self.data), self.plan(), false);
-            self.battle = Some(match &self.hunt {
-                Hunt::Species(species) => battle.sparing(species),
-                Hunt::Level(_) => battle,
+            let carrier_slot = self
+                .carrier
+                .as_ref()
+                .and_then(|c| party.members.iter().find(|m| &m.species == c))
+                .map(|m| m.slot);
+            self.battle = Some(match (&self.hunt, carrier_slot) {
+                (Hunt::Species(species), _) => battle.sparing(species),
+                (Hunt::Level(_), Some(slot)) => battle.shifting_to(slot),
+                (Hunt::Level(_), None) => battle,
             });
             return Decision::Wait("a battle starts".into());
         }
-        if let Some(lead) = party.lead() {
+        if let Some(lead) = self.fighter(&party) {
             if lead
                 .hp
                 .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
             {
                 return Decision::Fail(format!(
-                    "{HEAL_FIRST}: the lead is at {}/{} HP, below {:.0} %",
+                    "{HEAL_FIRST}: {} is at {}/{} HP, below {:.0} %",
+                    lead.display_name(),
                     lead.hp.map_or(0, |h| h.0),
                     lead.hp.map_or(0, |h| h.1),
                     f64::from(HEAL_BELOW) / 10.0
@@ -391,7 +411,7 @@ fn heal_after_flight(
 /// lead is too weak to go on, and saving after a catch on the way when
 /// the context keeps a checkpoint (`--save-game`).
 fn hunt(ctx: &mut ToolContext<'_>, hunt: Hunt, map: Option<&str>) -> Result<(), ToolError> {
-    hunt_for(ctx, hunt, map, None)
+    hunt_for(ctx, hunt, map, None, None)
 }
 
 fn hunt_for(
@@ -399,6 +419,7 @@ fn hunt_for(
     hunt: Hunt,
     map: Option<&str>,
     trainee: Option<&str>,
+    carrier: Option<&str>,
 ) -> Result<(), ToolError> {
     let mut heals = 0;
     let mut buys = 0;
@@ -408,6 +429,7 @@ fn hunt_for(
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.trainee = trainee.map(str::to_owned);
+        step.carrier = carrier.map(str::to_owned);
         step.restock = restock;
         step.encounters = encounters;
         step.fled_in_a_row = fled_in_a_row;
@@ -497,14 +519,64 @@ pub fn train(
         .filter(|m| m.hp.is_none_or(|(hp, _)| hp > 0))
         .find(|m| m.species == species)
         .map(|m| m.slot);
+    // One that would lose its first battles here is switch-trained: it
+    // starts each battle and the strongest member that can fight here
+    // comes out to win it (fleet worker 4: a Lv2 MANKEY led on Route 1
+    // and fainted to a PIDGEY, twice).
+    let as_planned = |m: &crate::party::Member| pokebot_planner::PartyMember {
+        species: m.species.clone(),
+        level: m.level,
+        exp: None,
+        moves: m.moves.iter().filter(|mv| *mv != "?").cloned().collect(),
+    };
+    let trainee = party.members.iter().find(|m| Some(m.slot) == slot);
+    let carrier = trainee
+        .filter(|t| {
+            pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(t), map) == Some(false)
+        })
+        .map(|t| {
+            party
+                .members
+                .iter()
+                .filter(|m| m.slot != t.slot && m.hp.is_none_or(|(hp, _)| hp > 0))
+                .filter(|m| {
+                    pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(m), map)
+                        == Some(true)
+                })
+                .max_by_key(|m| m.level)
+                .map(|m| m.species.clone())
+        });
+    let carrier = match carrier {
+        Some(None) => {
+            return Err(ToolError::Failed(format!(
+                "{} can't train on {map} and no member can carry it there",
+                crate::party::display_name(species)
+            )))
+        }
+        Some(Some(c)) => Some(c),
+        None => None,
+    };
     if let Some(slot) = slot.filter(|s| *s != 0) {
         ctx.emit(progress(
             "Party",
-            format!("{} leads to train", crate::party::display_name(species)),
+            match &carrier {
+                Some(c) => format!(
+                    "{} leads to train, {} fights",
+                    crate::party::display_name(species),
+                    crate::party::display_name(c)
+                ),
+                None => format!("{} leads to train", crate::party::display_name(species)),
+            },
         ))?;
         ctx.drive(&mut super::party_order::LeadWith::new(slot, species))?;
     }
-    hunt_for(ctx, Hunt::Level(level), Some(map), slot.map(|_| species))
+    hunt_for(
+        ctx,
+        Hunt::Level(level),
+        Some(map),
+        slot.map(|_| species),
+        carrier.as_deref(),
+    )
 }
 
 impl Tool for CatchTool {

@@ -6,7 +6,7 @@ use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
 use pokebot_planner::evaluate::best_move;
 use pokebot_planner::Combatant;
-use pokebot_state::{BattleMenu, GameEvent, Observation, ScreenState, Status};
+use pokebot_state::{BattleMenu, BattleObservation, GameEvent, Observation, ScreenState, Status};
 
 use crate::catch::{self, CatchMemory};
 use crate::party::{display_name, plausible_hp_for, Party};
@@ -51,6 +51,47 @@ pub struct BattleMemory {
     /// Our battler's stat stages (HP, Atk, Def, Spe, SpA, SpD; −6..=6) as
     /// the battle text tells them ("MANKEY's DEFENSE fell!").
     pub our_stages: [i8; 6],
+}
+
+/// In a battle that can't be run from (a trainer's), the member to SHIFT
+/// to when the one out is at risk against the foe on the HUD: the
+/// healthy member with the least risk (over three turns: the switch gives
+/// the foe a free attack), when that is safe or half the risk at most.
+/// `party` has the battler out first.
+pub fn defensive_switch(
+    data: &GameData,
+    party: &Party,
+    battle: &BattleObservation,
+    stages: [i8; 6],
+) -> Option<u8> {
+    let active = party.lead()?;
+    let species = data
+        .species_named(battle.opponent_name.as_deref()?)?
+        .to_owned();
+    let foe = catch::Foe {
+        species,
+        level: battle.opponent_level?,
+        hp_per_mille: battle.opponent_hp.unwrap_or(1000),
+        status: catch::FoeStatus::None,
+        shiny: false,
+        caught: None,
+    };
+    let hp = battle.player_hp_numbers.or(active.hp)?;
+    let at_risk = catch::risk_staged(data, &catch::Lead { member: active, hp }, &foe, 2, stages);
+    if at_risk <= catch::RISK_LIMIT {
+        return None;
+    }
+    let (slot, risk) = party
+        .members
+        .iter()
+        .skip(1)
+        .filter_map(|m| {
+            let hp = m.hp.filter(|(hp, _)| *hp > 0)?;
+            let risk = catch::risk(data, &catch::Lead { member: m, hp }, &foe, 3);
+            Some((m.slot, risk))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    (risk <= catch::RISK_LIMIT || risk * 2.0 <= at_risk).then_some(slot)
 }
 
 /// The stage change a page tells of our battler named `lead`, per stat.

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, Observation, Status};
+use pokebot_state::{BattleMenu, GameEvent, Observation, Status};
 
 use super::{BattlePlan, Expects, Intent, StepContext, Tool, ToolContext, ToolOutcome, ToolStep};
 use crate::battle::{self, BattleMemory, BattlePolicy};
@@ -42,6 +42,11 @@ pub struct BattleStep {
     lead_status: Option<Status>,
     /// The frame our HUD first read 0 HP (in a row).
     zero_hp_since: Option<u64>,
+    /// Switch-training: the party slot to SHIFT to at the first command
+    /// menu of a wild battle (the lead, being trained, only starts it and
+    /// shares the experience); done once that member is out.
+    shift_to: Option<u8>,
+    shifted: bool,
     /// The party slot of our Pokémon in battle, from its HUD name (the
     /// lead until another is sent out).
     active: Option<u8>,
@@ -77,6 +82,8 @@ impl BattleStep {
             tracker: TextTracker::default(),
             lead_status: None,
             zero_hp_since: None,
+            shift_to: None,
+            shifted: false,
             active: None,
             trainer,
             started: false,
@@ -93,6 +100,89 @@ impl BattleStep {
     pub fn sparing(mut self, species: &str) -> Self {
         self.spare = Some(species.to_owned());
         self
+    }
+
+    /// Switch-training: at the first command menu of a wild battle, SHIFT
+    /// to party slot `slot` (the lead started the battle, and shares the
+    /// experience without fighting).
+    pub fn shifting_to(mut self, slot: u8) -> Self {
+        self.shift_to = Some(slot).filter(|s| *s != 0);
+        self
+    }
+
+    /// The in-battle party screen, choosing the member to SHIFT to.
+    fn shift_in_party_menu(
+        &mut self,
+        party: &pokebot_state::PartyMenuObservation,
+        slot: u8,
+    ) -> Decision {
+        let press = |label: String, button: Button, expect: Expectation| {
+            Decision::Act(Action::new(
+                label,
+                vec![ControllerCommand::Press(button)],
+                expect,
+                60,
+            ))
+        };
+        if party.actions {
+            if party.selected != Some(slot) {
+                return press(
+                    "shift: close another member's actions".into(),
+                    Button::B,
+                    Expectation::PartyList,
+                );
+            }
+            let Some(row) = party
+                .options
+                .iter()
+                .position(|l| crate::bag::fits("SHIFT", l))
+            else {
+                // No SHIFT (the member can't come out): fight on as is.
+                self.shifted = true;
+                return press(
+                    "shift: no SHIFT, back".into(),
+                    Button::B,
+                    Expectation::PartyList,
+                );
+            };
+            let Some(at) = party.option_cursor else {
+                return Decision::Wait("reading the action window's ▶".into());
+            };
+            let row = row as u8;
+            if at == row {
+                return press("choose SHIFT".into(), Button::A, Expectation::InputsDone);
+            }
+            let (button, next) = if at < row {
+                (Button::Down, at + 1)
+            } else {
+                (Button::Up, at - 1)
+            };
+            return press(
+                format!("shift: {button:?} toward SHIFT"),
+                button,
+                Expectation::PartyOptionAt(next),
+            );
+        }
+        let Some(at) = party.selected else {
+            return Decision::Wait("reading the selected member".into());
+        };
+        if at == slot {
+            return press(
+                "shift: open the member's actions".into(),
+                Button::A,
+                Expectation::PartyActions,
+            );
+        }
+        let (button, next) = if at < slot {
+            (Button::Down, at + 1)
+        } else {
+            (Button::Up, at - 1)
+        };
+        press(
+            format!("shift: {button:?} toward slot {slot}"),
+            button,
+            Expectation::PartySelected(next),
+        )
     }
 
     /// Losing doesn't end the story ([`loss_allowed`]).
@@ -282,6 +372,38 @@ impl ToolStep for BattleStep {
                     b.player_name.clone().unwrap_or_default()
                 ));
             }
+            // A trainer's battle can't be run from: a member at risk
+            // against the foe out makes way for a safer one (once a battle:
+            // the battle's party menu is reordered after a switch).
+            if self.memory.trainer && self.shift_to.is_none() && !self.shifted {
+                if let Some(BattleMenu::Command { .. }) = b.menu {
+                    if let Some(slot) =
+                        battle::defensive_switch(&data, &self.party, b, self.memory.our_stages)
+                    {
+                        ctx.events.push(super::progress(
+                            "Battle",
+                            format!("switching to slot {slot}: the one out is at risk"),
+                        ));
+                        self.shift_to = Some(slot);
+                    }
+                }
+            }
+            // Switch-training: the member being carried started the
+            // battle; the carrier comes out at the first command menu.
+            if let Some(slot) = self.shift_to.filter(|_| !self.shifted) {
+                if self.active == Some(slot) {
+                    self.shifted = true;
+                    self.memory.our_stages = [0; 6];
+                } else if let Some(BattleMenu::Command { column, row }) = b.menu {
+                    return battle::step_toward(
+                        (column, row),
+                        (0, 1),
+                        |c, r| BattleMenu::Command { column: c, row: r },
+                        "POKéMON",
+                        Expectation::ScreenIsNot(pokebot_state::ScreenState::BattleCommand),
+                    );
+                }
+            }
             if let Some(decision) = battle::decide(
                 o,
                 &self.policy,
@@ -347,6 +469,11 @@ impl ToolStep for BattleStep {
         if self.in_battle {
             if let Some(decision) = catch::dismiss_pokedex(&mut self.memory.catch, o) {
                 return decision;
+            }
+            if let (Some(party), Some(slot)) =
+                (&o.party_menu, self.shift_to.filter(|_| !self.shifted))
+            {
+                return self.shift_in_party_menu(party, slot);
             }
             if o.bag.is_some() || self.memory.catch.thrower.is_some() {
                 return catch::in_bag(o, &data, &mut self.memory.catch, ctx.events);
