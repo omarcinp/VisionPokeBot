@@ -21,7 +21,7 @@ use super::{
     ToolStep, SETTLE_FRAMES,
 };
 use crate::catch::ball_budget;
-use crate::nav::{nearest_reachable, Destination};
+use crate::nav::{nearest_reachable, Destination, MapEntries};
 use crate::party::Party;
 use crate::stock::ball_count;
 use crate::story::spin_sequence;
@@ -83,6 +83,9 @@ pub struct HuntStep {
     encounters: u32,
     /// Battles run from since the last one fought to its end.
     fled_in_a_row: u32,
+    /// Where the hunt entered maps: its walks are planned afresh on each
+    /// map, so only the hunt sees them go round in circles.
+    entries: MapEntries,
     nav: NavParts,
 }
 
@@ -98,6 +101,7 @@ impl HuntStep {
             spin_at: None,
             encounters: 0,
             fled_in_a_row: 0,
+            entries: MapEntries::default(),
             nav: NavParts::of(ctx),
         }
     }
@@ -252,6 +256,9 @@ impl ToolStep for HuntStep {
         let Some(pose) = o.player.as_ref().map(|p| p.pose.clone()) else {
             return Decision::Wait("locating".into());
         };
+        if let Some(why) = self.entries.note(&pose) {
+            return Decision::Fail(format!("{:?}: {why}", self.hunt));
+        }
         if let Some(map) = self.map.clone().filter(|m| *m != pose.map) {
             // Another map: head for its grass first.
             let Some(m) = self.nav.world.map(&map) else {

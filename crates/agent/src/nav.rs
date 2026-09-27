@@ -185,8 +185,9 @@ pub struct Navigator {
     /// The device's timing model (shared with the executor, which feeds it).
     syncer: SyncerHandle,
     /// First hop out of the current map toward the destination, or None to
-    /// walk on this map (planned on entering each map).
-    hop: Option<(String, Option<Hop>)>,
+    /// walk on this map (planned on entering each map), and for an edge the
+    /// tile the route crosses from.
+    hop: Option<(String, Route)>,
     /// Map objects no longer there (items and fossils taken), by map and
     /// local id: they don't block their tiles.
     gone: Gone,
@@ -195,6 +196,40 @@ pub struct Navigator {
     /// Story passages as the belief stands (closed triggers, opened doors),
     /// the destination's own tile never closed.
     gates: Arc<GateTiles>,
+    /// Where this walk entered maps.
+    entries: MapEntries,
+}
+
+/// Times one walk may enter a map at the same tile: a route crosses each
+/// place once, so a third entry is a walk going round in circles (Switch
+/// goal run, 2026-09-27: 800 crossings between Cerulean City and Route 5
+/// in two hours, nothing noticing).
+pub const MAX_SAME_ENTRY: u32 = 3;
+
+/// Where a walk has entered maps (warps and edges), to notice it going
+/// round in circles.
+#[derive(Debug, Clone, Default)]
+pub struct MapEntries {
+    last_map: Option<String>,
+    entries: HashMap<(String, i32, i32), u32>,
+}
+
+impl MapEntries {
+    /// Notes where the player is; on entering a map for the
+    /// [`MAX_SAME_ENTRY`]th time at the same tile, why the walk has failed.
+    pub fn note(&mut self, pose: &PlayerPose) -> Option<String> {
+        if self.last_map.as_deref() == Some(pose.map.as_str()) {
+            return None;
+        }
+        let from = self.last_map.replace(pose.map.clone())?;
+        let n = self
+            .entries
+            .entry((pose.map.clone(), pose.x, pose.y))
+            .or_default();
+        *n += 1;
+        (*n >= MAX_SAME_ENTRY)
+            .then(|| format!("going in circles: entered {pose} from {from} {n} times"))
+    }
 }
 
 /// Map objects known to be gone, as (map, local id).
@@ -255,6 +290,7 @@ impl Navigator {
             gone: Gone::new(),
             surf: false,
             gates: Arc::new(GateTiles::default()),
+            entries: MapEntries::default(),
         }
     }
 
@@ -318,6 +354,9 @@ impl Navigator {
         let Some(pose) = observation.player.as_ref().map(|p| p.pose.clone()) else {
             return NavStatus::Wait("locating the player".into());
         };
+        if let Some(why) = self.entries.note(&pose) {
+            return NavStatus::Fail(why);
+        }
         if self.last_map.as_deref() != Some(pose.map.as_str()) {
             // A warp or an edge sets the facing; don't trust the old one.
             if self.last_map.is_some() {
@@ -339,17 +378,20 @@ impl Navigator {
                 return NavStatus::Arrived;
             }
         }
-        let hop = match &self.hop {
-            Some((map, hop)) if *map == pose.map => *hop,
+        let (hop, via) = match &self.hop {
+            Some((map, route)) if *map == pose.map => *route,
             _ => {
-                let hop = plan_hop_with(&world, &pose, &self.destination, &self.gone, &self.gates);
-                self.hop = Some((pose.map.clone(), hop));
-                hop
+                let route =
+                    plan_route_with(&world, &pose, &self.destination, &self.gone, &self.gates);
+                self.hop = Some((pose.map.clone(), route));
+                route
             }
         };
         match hop {
             Some(Hop::Warp(warp)) => return self.use_warp(observation, map, &pose, warp),
-            Some(Hop::Edge(dir)) => return self.cross_edge(observation, &world, map, &pose, dir),
+            Some(Hop::Edge(dir)) => {
+                return self.cross_edge(observation, &world, map, &pose, dir, via)
+            }
             None if pose.map != self.destination.map() => {
                 return NavStatus::Fail(format!(
                     "no known route from {} to {}",
@@ -577,7 +619,9 @@ impl Navigator {
     }
 
     /// Walk to a tile on the map's edge that continues into the neighbour,
-    /// then step across.
+    /// then step across: the route's crossing `via` when known (another
+    /// may lead into a part of the neighbour the destination isn't in),
+    /// else any.
     fn cross_edge(
         &mut self,
         observation: &Observation,
@@ -585,11 +629,13 @@ impl Navigator {
         map: &MapData,
         pose: &PlayerPose,
         dir: Direction,
+        via: Option<(i32, i32)>,
     ) -> NavStatus {
         let exits: HashSet<(i32, i32)> = world
             .crossings(map, dir)
             .into_iter()
             .map(|(a, _)| a)
+            .filter(|a| via.is_none_or(|v| v == *a))
             .collect();
         if exits.contains(&(pose.x, pose.y)) {
             self.walker
@@ -841,23 +887,36 @@ pub fn plan_hop_with(
     gone: &Gone,
     gates: &GateTiles,
 ) -> Option<Hop> {
+    plan_route_with(world, pose, dest, gone, gates).0
+}
+
+/// [`plan_hop_with`], and for an edge hop on a walkable route the tile to
+/// cross from (see [`route_search_via`]).
+pub fn plan_route_with(
+    world: &World,
+    pose: &PlayerPose,
+    dest: &Destination,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> Route {
     let goals = goal_tiles(world, dest);
-    if let Some(hop) =
-        route_search_with(world, pose, dest.map(), |p| goals.contains(&p), gone, gates)
+    if let Some(route) =
+        route_search_via(world, pose, dest.map(), |p| goals.contains(&p), gone, gates)
     {
-        return hop;
+        return route;
     }
     if pose.map == dest.map() {
-        return None;
+        return (None, None);
     }
     // No walkable route (a gate, or an object the belief doesn't know is
     // gone): head for the destination's map anyway, but only through an
     // exit the player can walk to from here. A map-level guess through an
     // exit in a walled-off part of the map fails every time.
-    route_from(world, pose, dest.map()).or_else(|| {
+    let hop = route_from(world, pose, dest.map()).or_else(|| {
         route_exit(world, &pose.map, dest.map())
             .filter(|hop| reachable_hop(world, pose, *hop, gone, gates))
-    })
+    });
+    (hop, None)
 }
 
 /// Whether the player can walk from `pose` to where `hop` leaves the map.
@@ -950,6 +1009,10 @@ pub fn route_from(world: &World, pose: &PlayerPose, to: &str) -> Option<Hop> {
 
 type Node = (String, i32, i32);
 
+/// The first hop out of the start map (None: walk on it), and for an edge
+/// the tile the route crosses from.
+pub type Route = (Option<Hop>, Option<(i32, i32)>);
+
 /// Tiles one move from `(x, y)` on `map`: walking within the map, a warp
 /// (standing on one, or below a door) or a map edge, each with the hop that
 /// leaves `map` (None when walking within it).
@@ -1027,15 +1090,31 @@ pub fn route_search_with(
     gone: &Gone,
     gates: &GateTiles,
 ) -> Option<Option<Hop>> {
+    route_search_via(world, pose, to, goal, gone, gates).map(|(hop, _)| hop)
+}
+
+/// [`route_search_with`], with the tile of the start map the path leaves
+/// it from when the first hop is an edge: which crossing matters when the
+/// neighbour is split (Route 5's grass is fenced off from the corridor
+/// Cerulean's crossing at x 32 leads into; any other column of the edge
+/// reaches it).
+pub fn route_search_via(
+    world: &World,
+    pose: &PlayerPose,
+    to: &str,
+    goal: impl Fn((i32, i32)) -> bool,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> Option<Route> {
     let mut blocked: HashMap<String, (Obstacles, Obstacles)> = HashMap::new();
     let start: Node = (pose.map.clone(), pose.x, pose.y);
-    let mut first: HashMap<Node, Option<Hop>> = HashMap::from([(start.clone(), None)]);
+    let mut first: HashMap<Node, Route> = HashMap::from([(start.clone(), (None, None))]);
     let mut queue = VecDeque::from([start]);
     while let Some(node) = queue.pop_front() {
         let (name, x, y) = node.clone();
-        let hop_here = first[&node];
+        let here = first[&node];
         if name == to && goal((x, y)) {
-            return Some(hop_here);
+            return Some(here);
         }
         let Some(map) = world.map(&name) else {
             continue;
@@ -1055,10 +1134,11 @@ pub fn route_search_with(
                 continue;
             }
             // The first hop is fixed once the path leaves the start map.
-            let inherited = if name == pose.map && n.0 == pose.map {
-                hop_here
+            let inherited = if name == pose.map && n.0 == pose.map || here.0.is_some() {
+                here
             } else {
-                hop_here.or(hop)
+                let via = matches!(hop, Some(Hop::Edge(_))).then_some((x, y));
+                (hop, via)
             };
             first.insert(n.clone(), inherited);
             queue.push_back(n);
@@ -1196,6 +1276,89 @@ mod tests {
         let world = World::load(root.join("data/world")).ok()?;
         world.events()?;
         Some(Arc::new(world))
+    }
+
+    /// Switch goal run (2026-09-27, 800 crossings in 2 h): Route 5's
+    /// grass is fenced off from the corridor Cerulean's crossing at x 32
+    /// leads into, and reached from Cerulean's other south-edge columns.
+    /// From Route 5 the route went Up; in Cerulean any crossing tile would
+    /// do, so it stepped straight back Down at x 32. The route's crossing
+    /// is kept: in Cerulean the walk goes to it first.
+    #[test]
+    fn an_edge_is_crossed_where_the_route_crosses_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = Arc::new(world);
+        let grass = Destination::Tile {
+            map: "Route5".into(),
+            x: 26,
+            y: 5,
+        };
+        let corridor = PlayerPose {
+            map: "Route5".into(),
+            x: 32,
+            y: 0,
+        };
+        let city = PlayerPose {
+            map: "CeruleanCity".into(),
+            x: 32,
+            y: 39,
+        };
+        let none = (Gone::new(), GateTiles::default());
+        // Up out of the corridor (x 29..=32): the only way.
+        let (hop, via) = plan_route_with(&world, &corridor, &grass, &none.0, &none.1);
+        assert_eq!(hop, Some(Hop::Edge(Direction::Up)));
+        assert!(
+            via.is_some_and(|(x, y)| (29..=32).contains(&x) && y == 0),
+            "{via:?}"
+        );
+        let (hop, via) = plan_route_with(&world, &city, &grass, &none.0, &none.1);
+        assert_eq!(hop, Some(Hop::Edge(Direction::Down)));
+        let (x, y) = via.expect("the crossing tile");
+        assert!((20..=27).contains(&x) && y == 39, "crosses at ({x}, {y})");
+        let mut nav = Navigator::new(Arc::clone(&world), grass);
+        match nav.next(&located("CeruleanCity", 32, 39)) {
+            NavStatus::Act(a) => assert!(!a.label.contains("cross"), "{}", a.label),
+            _ => panic!("expected a walk along the edge"),
+        }
+    }
+
+    /// The same run's pattern, whatever causes it: a walk that enters a
+    /// map at the same tile a third time fails instead of going on.
+    #[test]
+    fn a_walk_going_round_in_circles_fails() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let mut nav = Navigator::new(
+            Arc::new(world),
+            Destination::Tile {
+                map: "Route5".into(),
+                x: 26,
+                y: 5,
+            },
+        );
+        let mut failed = None;
+        for _ in 0..4 {
+            for o in [located("CeruleanCity", 32, 39), located("Route5", 32, 0)] {
+                if let NavStatus::Fail(why) = nav.next(&o) {
+                    failed.get_or_insert(why);
+                }
+            }
+        }
+        let why = failed.expect("fails");
+        assert!(why.contains("going in circles"), "{why}");
+        // Moving about one map is not a circle.
+        let mut entries = MapEntries::default();
+        let at = |x| PlayerPose {
+            map: "Route5".into(),
+            x,
+            y: 0,
+        };
+        assert!((0..10).all(|x| entries.note(&at(x)).is_none()));
     }
 
     /// Cinnabar Gym's quiz doors are walls in the map data that a script
