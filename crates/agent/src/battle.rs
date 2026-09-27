@@ -48,6 +48,38 @@ pub struct BattleMemory {
     /// Our lead's move under the foe's DISABLE, read from battle text; never
     /// chosen until "… is disabled no more!".
     pub disabled: Option<String>,
+    /// Our battler's stat stages (HP, Atk, Def, Spe, SpA, SpD; −6..=6) as
+    /// the battle text tells them ("MANKEY's DEFENSE fell!").
+    pub our_stages: [i8; 6],
+}
+
+/// The stage change a page tells of our battler named `lead`, per stat.
+pub fn stage_text(page: &str, lead: &str) -> Option<(usize, i8)> {
+    let rest = [format!("{lead}’s "), format!("{lead}'s ")]
+        .iter()
+        .find_map(|p| page.strip_prefix(p.as_str()))?;
+    let index = [
+        ("ATTACK", 1),
+        ("DEFENSE", 2),
+        ("SPEED", 3),
+        ("SP. ATK", 4),
+        ("SP. DEF", 5),
+    ]
+    .into_iter()
+    .find(|(s, _)| rest.starts_with(s))
+    .map(|(_, i)| i)?;
+    let delta = if rest.contains("harshly fell") {
+        -2
+    } else if rest.contains("fell") {
+        -1
+    } else if rest.contains("sharply rose") {
+        2
+    } else if rest.contains("rose") {
+        1
+    } else {
+        return None;
+    };
+    Some((index, delta))
 }
 
 /// DISABLE in battle text about our lead (`lead`, its printed name):
@@ -106,6 +138,9 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
     let Some(lead) = party.lead() else { return };
     if let Some(disabled) = disable_text(page, &lead.display_name(), data) {
         memory.disabled = disabled;
+    }
+    if let Some((i, d)) = stage_text(page, &lead.display_name()) {
+        memory.our_stages[i] = (memory.our_stages[i] + d).clamp(-6, 6);
     }
 }
 
@@ -268,7 +303,13 @@ pub fn decide(
                     shiny: false,
                     caught: battle.opponent_caught,
                 };
-                catch::risk(data, &catch::Lead { member, hp }, &foe, 2) > catch::RISK_LIMIT
+                catch::risk_staged(
+                    data,
+                    &catch::Lead { member, hp },
+                    &foe,
+                    2,
+                    memory.our_stages,
+                ) > catch::RISK_LIMIT
             })
         }
         _ => true,
@@ -626,6 +667,52 @@ mod tests {
             Some(Decision::Fail(r)) => assert_eq!(r, "no move has PP left"),
             _ => panic!("unexpected decision"),
         }
+    }
+
+    /// Fleet worker 4 (Route 1): two TAIL WHIPs halved MANKEY's Defense and
+    /// a critical TACKLE took all 16 HP; the risk had counted its Defense
+    /// whole. The pages are counted, and the risk rises with them.
+    #[test]
+    fn lowered_defense_raises_the_risk() {
+        let Some(data) = data() else { return };
+        assert_eq!(
+            stage_text("MANKEY’s DEFENSE fell!", "MANKEY"),
+            Some((2, -1))
+        );
+        assert_eq!(
+            stage_text("MANKEY's ATTACK sharply rose!", "MANKEY"),
+            Some((1, 2))
+        );
+        assert_eq!(stage_text("Foe RATTATA’s DEFENSE fell!", "MANKEY"), None);
+        let mut memory = BattleMemory::default();
+        let party = Party {
+            members: vec![Member::new(&data, "SPECIES_MANKEY", 3)],
+        };
+        for _ in 0..2 {
+            observe_page(&mut memory, "MANKEY’s DEFENSE fell!", &party, &data);
+        }
+        assert_eq!(memory.our_stages[2], -2);
+        let mankey = &party.members[0];
+        let lead = catch::Lead {
+            member: mankey,
+            hp: (16, 16),
+        };
+        let rattata = catch::Foe {
+            species: "SPECIES_RATTATA".into(),
+            level: 3,
+            hp_per_mille: 187,
+            status: catch::FoeStatus::None,
+            shiny: false,
+            caught: None,
+        };
+        let plain = catch::risk_staged(&data, &lead, &rattata, 2, [0; 6]);
+        let whipped = catch::risk_staged(&data, &lead, &rattata, 2, memory.our_stages);
+        // Fought on at 1.5 %; run from at −2 Defense.
+        assert!(
+            plain < catch::RISK_LIMIT && whipped > catch::RISK_LIMIT,
+            "{whipped} vs {plain}"
+        );
+        assert_eq!(plain, catch::risk(&data, &lead, &rattata, 2));
     }
 
     /// Fleet worker 2 (Viridian Forest): the lead SQUIRTLE fainted and

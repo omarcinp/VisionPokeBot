@@ -141,6 +141,23 @@ pub fn risk(data: &GameData, lead: &Lead, foe: &Foe, turns: u32) -> f64 {
     faint_probability(data, &them, &us, turns as usize)
 }
 
+/// [`risk`] with our battler's stat stages applied (a foe's TAIL WHIPs
+/// halve our Defense at −2: fleet worker 4's MANKEY fought on at full HP
+/// and fell to one critical TACKLE; the risk had counted its Defense
+/// whole).
+pub fn risk_staged(data: &GameData, lead: &Lead, foe: &Foe, turns: u32, stages: [i8; 6]) -> f64 {
+    let (Some(them), Some(mut us)) = (foe_combatant(data, foe, 31), our_combatant(data, lead, 0))
+    else {
+        return 1.0;
+    };
+    for (i, stage) in stages.iter().enumerate().skip(1) {
+        let s = i32::from(*stage);
+        let (num, den) = if s >= 0 { (2 + s, 2) } else { (2, 2 - s) };
+        us.stats.0[i] = (us.stats.0[i] * num as u32 / den as u32).max(1);
+    }
+    faint_probability(data, &them, &us, turns as usize)
+}
+
 /// Share of max HP (per mille) the lead needs to try a non-shiny catch.
 pub const CATCH_MIN_HP: u32 = 750;
 

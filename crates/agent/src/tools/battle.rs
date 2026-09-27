@@ -28,6 +28,9 @@ const PAGE_READ_WAIT_FRAMES: u64 = 10;
 pub struct BattleTool;
 
 /// One battle, from its first frame to the overworld.
+/// Frames our HUD must read 0 HP before the Pokémon counts as fainted.
+const ZERO_HP_FRAMES: u64 = 30;
+
 pub struct BattleStep {
     data: Arc<GameData>,
     plan: BattlePlan,
@@ -37,6 +40,8 @@ pub struct BattleStep {
     learning: MoveLearning,
     tracker: TextTracker,
     lead_status: Option<Status>,
+    /// The frame our HUD first read 0 HP (in a row).
+    zero_hp_since: Option<u64>,
     /// The party slot of our Pokémon in battle, from its HUD name (the
     /// lead until another is sent out).
     active: Option<u8>,
@@ -71,6 +76,7 @@ impl BattleStep {
             learning: MoveLearning::default(),
             tracker: TextTracker::default(),
             lead_status: None,
+            zero_hp_since: None,
             active: None,
             trainer,
             started: false,
@@ -257,7 +263,20 @@ impl ToolStep for BattleStep {
                     format!("not catching {species} now: running rather than fainting it"),
                 ));
             }
-            if b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0) && !self.loss_ok {
+            // 0 HP read on one frame may be the drain's digits misread
+            // (fleet worker 4: a full-HP MANKEY read 0/16 as a Lv3
+            // RATTATA's TACKLE landed, and the cycle ended); a faint shows
+            // 0 until the fainting page.
+            let zero = b.player_hp_numbers.is_some_and(|(hp, _)| hp == 0);
+            let since = match (zero, self.zero_hp_since) {
+                (false, _) => None,
+                (true, None) => Some(o.frame_id),
+                (true, s) => s,
+            };
+            self.zero_hp_since = since;
+            if since.is_some_and(|s| o.frame_id.saturating_sub(s) >= ZERO_HP_FRAMES)
+                && !self.loss_ok
+            {
                 return Decision::Fail(format!(
                     "our Pokémon fainted ({})",
                     b.player_name.clone().unwrap_or_default()
