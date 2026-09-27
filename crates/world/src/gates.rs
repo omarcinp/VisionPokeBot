@@ -644,11 +644,31 @@ fn trigger_gates(
             .paths
             .iter()
             .any(|p| !(moves_player(p) && !warps(p) && !switches_off(p)) && paid(p));
+        // A trainer battle on the way is passed only by winning it (a loss
+        // whites out): the tile is walked past once the battle is won (its
+        // var moved on, or the trainer defeated), and a plan that needs the
+        // way fights it through RunScript, with readiness judged, rather
+        // than walking into it (Switch: Go(Route24) met the Cerulean rival
+        // before the training planned for it, and IVYSAUR fainted). A
+        // battle the script goes on from when lost (a victory text: the
+        // rival in Oak's lab, the early Route 22 rival) is walked into.
+        let fights = |p: &ScriptPath| {
+            p.does.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Battle {
+                        rematch: false,
+                        victory: None,
+                        ..
+                    }
+                )
+            })
+        };
         let (mut blocking, mut passing) = (Vec::new(), Vec::new());
         for p in &script.paths {
             let turned_back = moves_player(p) && !warps(p) && !switches_off(p);
             let carried_off = story_scene && warps(p);
-            if turned_back || carried_off {
+            if turned_back || carried_off || fights(p) {
                 let avoid = !(pays_to_pass && needs_answer(p));
                 if let Some(c) = conj_of(&p.when, avoid) {
                     blocking.push(c);

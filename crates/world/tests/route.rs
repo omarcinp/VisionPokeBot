@@ -390,17 +390,19 @@ fn route4_center_to_cerulean_crosses_mt_moon_past_the_fossils() {
         &pes,
     );
     assert!(!pes.found());
-    // Each fossil is a way (Fly, which the party lacks, is listed too).
+    // Each fossil is a way (Fly, which the party lacks, is listed too),
+    // with Miguel's trigger battle past it won.
     let by_fossil: Vec<&(Vec<Predicate>, f64)> = fossils
         .iter()
-        .filter_map(|f| pes.blocked.iter().find(|(req, _)| *req == vec![flag(f)]))
+        .filter_map(|f| pes.blocked.iter().find(|(req, _)| req.contains(&flag(f))))
         .collect();
     assert_eq!(by_fossil.len(), 2, "{:?}", pes.blocked);
     let cheapest = by_fossil[0].1;
     assert!(cheapest.is_finite());
     assert!((by_fossil[1].1 - cheapest).abs() < 1e-9);
 
-    // Optimistic about the fossils: the route assumes one, and beats no grunt.
+    // Optimistic about the fossils: the route assumes one, and beats no
+    // grunt on the way (Miguel's battle is the trigger's, assumed won).
     let mut unknown_fossils = on_foot();
     for g in &grunts {
         unknown_fossils = unknown_fossils.flag(g, false);
@@ -417,9 +419,12 @@ fn route4_center_to_cerulean_crosses_mt_moon_past_the_fossils() {
     );
     print("Route 4 PC -> Cerulean, fossils unknown, optimistic", &opt);
     assert!(opt.found());
-    assert_eq!(opt.assumes.len(), 1, "{:?}", opt.assumes);
+    // The fossil, and Miguel's trigger battle won (his scene var moved on).
+    assert_eq!(opt.assumes.len(), 2, "{:?}", opt.assumes);
     assert!(fossils.iter().any(|f| opt.assumes[0] == flag(f)));
-    assert!((opt.cost_s - (cheapest + 30.0)).abs() < 1e-9);
+    assert!(matches!(&opt.assumes[1],
+        Predicate::Var { name, .. } if name == "VAR_MAP_SCENE_MT_MOON_B2F"));
+    assert!((opt.cost_s - (cheapest + 60.0)).abs() < 1e-9);
     for leg in &opt.legs {
         assert!(
             !leg.requires
@@ -446,8 +451,11 @@ fn route4_center_to_cerulean_crosses_mt_moon_past_the_fossils() {
     );
     assert_eq!(opt.legs[1].to.map, "Route4");
 
-    // A fossil taken: the same route, open.
-    let taken = nothing_done.clone().flag("FLAG_HIDE_DOME_FOSSIL", true);
+    // A fossil taken and Miguel beaten: the same route, open.
+    let taken = nothing_done
+        .clone()
+        .flag("FLAG_HIDE_DOME_FOSSIL", true)
+        .flag("TRAINER_SUPER_NERD_MIGUEL", true);
     let open = route_to_map(
         &world,
         &graph,
@@ -458,7 +466,12 @@ fn route4_center_to_cerulean_crosses_mt_moon_past_the_fossils() {
     );
     print("Route 4 PC -> Cerulean, Dome Fossil taken", &open);
     assert!(open.found());
-    assert!((open.cost_s - cheapest).abs() < 1e-9);
+    // No dearer than the blocked estimate (which priced Miguel's battle).
+    assert!(
+        open.cost_s <= cheapest + 1e-9,
+        "{} > {cheapest}",
+        open.cost_s
+    );
     assert!(open.assumes.is_empty());
 }
 
@@ -928,5 +941,48 @@ fn a_ticket_trigger_is_a_gate_until_the_ticket_is_bought() {
             }]],
             "({x}, 5)"
         );
+    }
+}
+
+/// Switch: `Go(Route24)` crossed the Cerulean rival's trigger before the
+/// training planned for that battle, and IVYSAUR fainted twice. A trigger
+/// whose script starts a trainer battle is passed only by winning it: a
+/// gate, open once the rival is beaten or the scene var moved on.
+#[test]
+fn a_trigger_battle_is_a_gate_until_it_is_won() {
+    use pokebot_world::predicate::{CmpOp, Predicate};
+    let Some(world) = world() else { return };
+    if world.events().is_none() {
+        return;
+    }
+    let gates = pokebot_world::gates::derive(&world);
+    let cerulean = &gates["CeruleanCity"];
+    let moved_on = vec![Predicate::Var {
+        name: "VAR_MAP_SCENE_CERULEAN_CITY_RIVAL".into(),
+        op: CmpOp::Gt,
+        value: 0,
+    }];
+    for x in 22..=24 {
+        let gate = &cerulean[&(x, 6)];
+        assert!(gate.ways.contains(&moved_on), "({x}, 6): {:?}", gate.ways);
+    }
+    // A battle the story goes on from when lost is walked into: the early
+    // rival on Route 22 (armed at scene 1) gates nothing; the late one
+    // (scene 3, on the same tiles) must be won.
+    let route22 = &gates["Route22"];
+    for y in 4..=6 {
+        let gate = &route22[&(33, y)];
+        let scene_values: Vec<i64> = gate
+            .ways
+            .iter()
+            .flatten()
+            .filter_map(|p| match p {
+                Predicate::Var { name, value, .. } if name == "VAR_MAP_SCENE_ROUTE22" => {
+                    Some(*value)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scene_values, vec![3], "(33, {y}): {:?}", gate.ways);
     }
 }
