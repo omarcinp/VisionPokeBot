@@ -64,9 +64,20 @@ pub struct FireRedPerception {
     /// Brightest-surface level of the last dim frame that turned out not
     /// to be a fade (see `fade`).
     fade_miss: Option<u8>,
+    /// Consecutive frames read as a fade that didn't change.
+    static_fade: u32,
     /// Object sprites around the located player.
     sprites: SpriteDetector,
 }
+
+/// Frames a "fade" may stay unchanged before it counts as the screen
+/// itself: a fade changes the whole screen every frame and is over in
+/// half a second, but a dark map can have almost nothing bright (Viridian
+/// Forest (19, 21): tall grass hides the player's highlights, 6 pixels
+/// reach the fade ceiling; two fleet workers waited there for hours).
+const STATIC_FADE_FRAMES: u32 = 30;
+/// Changed pixels below which a frame counts as unchanged (capture noise).
+const STATIC_PIXELS: u32 = 240 * 160 / 100;
 
 /// Frames between whole-world searches while the player can't be located
 /// (each takes ~10 ms of all cores; see `Localizer::locate_anywhere`).
@@ -97,7 +108,13 @@ impl PerceptionSystem for FireRedPerception {
                 metrics,
             );
         }
-        if let Some((state, detector)) = scene(image) {
+        let scene = scene(image);
+        let fading = scene.is_some_and(|(_, d)| d == "fade");
+        self.static_fade = match fading && metrics.changed_pixels < STATIC_PIXELS {
+            true => self.static_fade + 1,
+            false => 0,
+        };
+        if let Some((state, detector)) = scene.filter(|_| self.static_fade <= STATIC_FADE_FRAMES) {
             // A fade: name the screen under it when brightening shows one.
             if detector == "fade" {
                 if let Some(fade) = self.fade(frame.frame_id, image, metrics) {
@@ -1559,6 +1576,30 @@ mod tests {
             ScreenState::BattleText,
             "battle-text-box",
         )]);
+    }
+
+    /// Fleet workers 4 and 6, Viridian Forest (19, 21): in the tall grass
+    /// the dark forest has only 6 pixels at fade brightness, so the field
+    /// read as a fade and the walk waited for it to end, for hours. A fade
+    /// changes every frame; unchanged for half a second it is the screen.
+    #[test]
+    fn an_unchanging_dark_field_is_not_a_fade_for_long() {
+        let Some(image) = fixture("emu-forest-tall-grass-static.png") else {
+            return;
+        };
+        let mut p = FireRedPerception::default();
+        let first = p.observe(&frame(0, image.clone()));
+        assert_eq!(first.screen.value, ScreenState::Transition);
+        let later = (1..=40)
+            .map(|f| p.observe(&frame(f, image.clone())))
+            .last()
+            .unwrap();
+        assert_ne!(
+            later.screen.value,
+            ScreenState::Transition,
+            "{}",
+            later.screen.detector
+        );
     }
 
     /// Switch goal run (frames 2621200 / 2621240): BULBASAUR grew to Lv 11.

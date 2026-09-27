@@ -37,6 +37,9 @@ pub struct BattleStep {
     learning: MoveLearning,
     tracker: TextTracker,
     lead_status: Option<Status>,
+    /// The party slot of our Pokémon in battle, from its HUD name (the
+    /// lead until another is sent out).
+    active: Option<u8>,
     /// A trainer's battle (dialogue just before it).
     trainer: bool,
     started: bool,
@@ -68,6 +71,7 @@ impl BattleStep {
             learning: MoveLearning::default(),
             tracker: TextTracker::default(),
             lead_status: None,
+            active: None,
             trainer,
             started: false,
             in_battle: false,
@@ -140,7 +144,7 @@ impl BattleStep {
             {
                 self.lead_status = Some(status);
                 events.push(GameEvent::PartyObserved {
-                    slot: 0,
+                    slot: self.active.unwrap_or(0),
                     species: None,
                     nickname: None,
                     level: None,
@@ -155,15 +159,32 @@ impl BattleStep {
 
 impl ToolStep for BattleStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
-        self.party = Party::from_state(ctx.state);
+        let o = ctx.observation;
+        // The Pokémon out is the policy's lead: after a faint it is
+        // another member (fleet worker 2: BUBBLE, the fainted SQUIRTLE's
+        // move, chosen for RATTATA, whose menu has two moves).
+        let party = Party::from_state(ctx.state);
+        if let Some(slot) = o
+            .battle
+            .as_ref()
+            .and_then(|b| b.player_name.as_deref())
+            .filter(|n| !n.is_empty())
+            .and_then(|n| party.battler_named(&self.data, n))
+        {
+            self.active = Some(slot);
+        }
+        self.party = match self.active {
+            Some(slot) => party.with_first(slot),
+            None => party,
+        };
+        let active = usize::from(self.active.unwrap_or(0));
         self.lead_status = ctx
             .state
             .party
             .value
             .as_ref()
-            .and_then(|p| p.first())
+            .and_then(|p| p.get(active))
             .and_then(|m| m.status.value);
-        let o = ctx.observation;
         let data = Arc::clone(&self.data);
 
         // New moves and evolution: every finished page is read, and the

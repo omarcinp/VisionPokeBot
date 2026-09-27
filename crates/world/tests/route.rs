@@ -804,3 +804,79 @@ fn a_door_a_script_opens_is_walkable_once_believed_open() {
         .opened_on(&map)
         .contains(&tile));
 }
+
+/// Only warps the game fires have routes (portal audit, 2026-09-27): a
+/// warp on a wall that isn't a door does nothing when pushed into, and one
+/// on plain floor is only where a hole or a one-way warp lands. A door a
+/// script draws (the Elite Four's rooms) stays takeable.
+#[test]
+fn only_warps_the_game_fires_are_takeable() {
+    use pokebot_world::route::warp_takeable;
+    let Some(world) = world() else { return };
+    if world.events().is_none() {
+        return;
+    }
+    let takeable = |map: &str, index: usize| warp_takeable(&world, world.map(map).unwrap(), index);
+    // Walls with a warp that aren't doors.
+    for (map, index) in [
+        ("Route5_SouthEntrance", 3),
+        ("Route6_NorthEntrance", 1),
+        ("Route12_NorthEntrance_1F", 1),
+        ("SSAnne_Exterior", 0),
+        ("SafariZone_Center", 5),
+    ] {
+        assert!(!takeable(map, index), "{map}#{index}");
+    }
+    // Landing spots of the Mansion's and Seafoam's holes.
+    assert!(!takeable("PokemonMansion_1F", 7));
+    assert!(!takeable("SeafoamIslands_B1F", 9));
+    // A door the room's script opens after its trainer is beaten.
+    assert!(takeable("PokemonLeague_LoreleisRoom", 1));
+    // Ordinary doors, ladders, exit mats.
+    let m = world.map("ViridianCity").unwrap();
+    let door = m
+        .warps
+        .iter()
+        .position(|w| world.name_of(&w.dest_map) == Some("ViridianCity_PokemonCenter_1F"))
+        .unwrap();
+    assert!(takeable("ViridianCity", door));
+    assert!(
+        takeable("ViridianCity_PokemonCenter_1F", 0)
+            || takeable("ViridianCity_PokemonCenter_1F", 1)
+    );
+    assert!(takeable("MtMoon_1F", 0) || takeable("MtMoon_1F", 1));
+    // Route 5's gate is still walked through by its real door.
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let r = route_to_map(
+        &world,
+        &graph,
+        &MapBelief::default(),
+        &pose("Route5", 17, 30),
+        "Route5_SouthEntrance",
+        UnknownPolicy::Pessimistic,
+    );
+    assert!(r.found(), "Route 5's south gate is reachable");
+}
+
+/// Six Island's Water Path meets three maps on its left (Green Path, Six
+/// Island, Ruin Valley): each is crossed into, not only the first listed.
+#[test]
+fn every_neighbour_on_one_side_is_crossed_into() {
+    let Some(world) = world() else { return };
+    let path = world.map("SixIsland_WaterPath").unwrap();
+    let mut into: Vec<String> = world
+        .edge_crossings(path, Direction::Left)
+        .into_iter()
+        .map(|(m, _, _)| m)
+        .collect();
+    into.sort();
+    into.dedup();
+    assert_eq!(
+        into,
+        vec![
+            "SixIsland".to_owned(),
+            "SixIsland_GreenPath".to_owned(),
+            "SixIsland_RuinValley".to_owned()
+        ]
+    );
+}

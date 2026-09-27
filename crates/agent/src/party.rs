@@ -164,6 +164,27 @@ impl Party {
         self.members.first()
     }
 
+    /// The slot of the member the battle HUD names (`read` may hold `?`):
+    /// after a faint or a switch it is not the lead.
+    pub fn battler_named(&self, data: &GameData, read: &str) -> Option<u8> {
+        let mut found = self
+            .members
+            .iter()
+            .filter(|m| seen_as(data, &m.species, read).is_some());
+        let first = found.next()?;
+        found.next().is_none().then_some(first.slot)
+    }
+
+    /// The party with the member in `slot` first (the one in battle), the
+    /// others in order; slots are kept.
+    pub fn with_first(mut self, slot: u8) -> Party {
+        if let Some(at) = self.members.iter().position(|m| m.slot == slot) {
+            let member = self.members.remove(at);
+            self.members.insert(0, member);
+        }
+        self
+    }
+
     /// The party as the state knows it (members with a known species).
     pub fn from_state(state: &GameState) -> Party {
         let members = state

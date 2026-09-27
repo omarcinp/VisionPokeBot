@@ -100,15 +100,21 @@ pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expecta
             }),
         );
     }
+    // Fewer rows than the list shows, ending in CANCEL, are the whole
+    // pocket: the item isn't in it (fleet worker 3 pressed Up 400 000
+    // times for a POTION the belief still counted).
+    let cancel = bag.rows.iter().any(|(name, _)| is_cancel(name));
+    if cancel && bag.rows.len() < WHOLE_POCKET_ROWS {
+        return Decision::Fail(format!("{item} is not in the pocket"));
+    }
     press(
-        if bag.rows.iter().any(|(name, _)| is_cancel(name)) {
-            Button::Up
-        } else {
-            Button::Down
-        },
+        if cancel { Button::Up } else { Button::Down },
         Expectation::InputsDone,
     )
 }
+
+/// Rows the bag list shows at once.
+const WHOLE_POCKET_ROWS: usize = 6;
 
 /// Bag rows: (name or item key, count).
 pub(crate) type Rows = Vec<(String, Option<u16>)>;
@@ -612,6 +618,38 @@ mod tests {
             Decision::Done(r) => panic!("done: {r}"),
             Decision::Fail(r) => panic!("failed: {r}"),
         }
+    }
+
+    /// Fleet worker 3: the belief counted a POTION the ITEMS pocket no
+    /// longer held; with only CANCEL listed the item can't be scrolled to.
+    #[test]
+    fn an_item_missing_from_a_whole_pocket_fails() {
+        let Some(data) = data() else { return };
+        let o = bag(1, "ITEMS", &[("CANCEL", None)], 0);
+        match select_item(&o, &data, "ITEM_POTION", Expectation::InputsDone) {
+            Decision::Fail(r) => assert!(r.contains("not in the pocket"), "{r}"),
+            _ => panic!("expected a failure"),
+        }
+        // A full list ending in CANCEL may be scrolled: look further up.
+        let full: Vec<(&str, Option<u16>)> = vec![
+            ("ANTIDOTE", Some(1)),
+            ("REPEL", Some(2)),
+            ("ESCAPE ROPE", Some(1)),
+            ("NUGGET", Some(1)),
+            ("TINYMUSHROOM", Some(1)),
+            ("CANCEL", None),
+        ];
+        let o = bag(2, "ITEMS", &full, 5);
+        assert_eq!(
+            act(select_item(
+                &o,
+                &data,
+                "ITEM_POTION",
+                Expectation::InputsDone
+            ))
+            .commands,
+            vec![ControllerCommand::Press(Button::Up)]
+        );
     }
 
     /// A list reading counts only when a later frame reads the same: the

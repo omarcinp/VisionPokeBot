@@ -13,6 +13,7 @@ use pokebot_state::{Direction, Observation, PlayerPose};
 use pokebot_world::behavior::{arrow_warp, stair_warp, COUNTER, WARP_DOOR};
 use pokebot_world::gates::GateTiles;
 use pokebot_world::path::{find_path_with, Obstacles, Step, Walk};
+use pokebot_world::route::warp_takeable;
 use pokebot_world::{MapData, World};
 use serde::Serialize;
 
@@ -1032,7 +1033,7 @@ fn neighbours(
     }
     // Warps: standing on one (mats, stairs, plain) or below a door.
     for (i, w) in map.warps.iter().enumerate() {
-        if w.dest_warp < 0 || !warp_usable(map, i) {
+        if w.dest_warp < 0 || !warp_usable(map, i) || !warp_takeable(world, map, i) {
             continue;
         }
         let door = map
@@ -1051,16 +1052,9 @@ fn neighbours(
     }
     // Map edges.
     for dir in Direction::ALL {
-        for (a, b) in world.crossings(map, dir) {
+        for (other, a, b) in world.edge_crossings(map, dir) {
             if a == (x, y) {
-                if let Some(other) = map
-                    .connections
-                    .iter()
-                    .find(|c| c.direction() == Some(dir))
-                    .and_then(|c| world.name_of(&c.map))
-                {
-                    next.push(((other.to_owned(), b.0, b.1), Some(Hop::Edge(dir))));
-                }
+                next.push(((other, b.0, b.1), Some(Hop::Edge(dir))));
             }
         }
     }
@@ -1210,7 +1204,9 @@ pub fn route_exit(world: &World, from: &str, to: &str) -> Option<Hop> {
             .warps
             .iter()
             .enumerate()
-            .filter(|(i, w)| w.dest_warp >= 0 && warp_usable(map, *i))
+            .filter(|(i, w)| {
+                w.dest_warp >= 0 && warp_usable(map, *i) && warp_takeable(world, map, *i)
+            })
             .collect();
         ordered.sort_by_key(|(i, w)| (u8::from(!warp_is_marked(map, w)), *i));
         let warps = ordered

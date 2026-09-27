@@ -200,6 +200,10 @@ impl MapData {
     }
 }
 
+/// A crossing of a map edge: the neighbour's name, the tile on this map's
+/// edge and the tile it leads to.
+pub type EdgeCrossing = (String, (i32, i32), (i32, i32));
+
 /// All maps, keyed by name (e.g. `PalletTown_PlayersHouse_2F`), plus the
 /// compiled event data when the data dir has it.
 pub struct World {
@@ -211,6 +215,8 @@ pub struct World {
     events: Option<Events>,
     dialogue: Option<Dialogue>,
     places: Option<Places>,
+    /// Tiles a map's own scripts rewrite (`setmetatile`), by map.
+    rewritten: HashMap<String, std::collections::HashSet<(i32, i32)>>,
 }
 
 impl World {
@@ -269,13 +275,30 @@ impl World {
                 maps_dir.display()
             )));
         }
+        let events: Option<Events> = events::load_optional(&dir.join("events.json"))?;
+        let mut rewritten: HashMap<String, std::collections::HashSet<(i32, i32)>> = HashMap::new();
+        for script in events.iter().flat_map(|e| e.scripts.values()) {
+            let Some(map) = &script.map else { continue };
+            for effect in script.paths.iter().flat_map(|p| &p.does) {
+                if let events::Effect::Metatile { metatile, .. } = effect {
+                    rewritten.entry(map.clone()).or_default().insert(*metatile);
+                }
+            }
+        }
         Ok(World {
             maps,
             by_id,
-            events: events::load_optional(&dir.join("events.json"))?,
+            events,
             dialogue: events::load_optional(&dir.join("dialogue.json"))?,
             places: events::load_optional(&dir.join("places.json"))?,
+            rewritten,
         })
+    }
+
+    /// Whether one of `map`'s scripts rewrites tile `(x, y)` (a door the
+    /// Elite Four's rooms open once their trainer is beaten).
+    pub fn script_rewrites(&self, map: &str, tile: (i32, i32)) -> bool {
+        self.rewritten.get(map).is_some_and(|t| t.contains(&tile))
     }
 
     /// Compiled scripts (`events.json`), when the data dir has them.
@@ -304,41 +327,54 @@ impl World {
         self.maps.values()
     }
 
-    /// Crossings from `map` into its neighbour in `dir`: pairs of (tile on
+    /// Crossings from `map` into its neighbours in `dir`: pairs of (tile on
     /// this map's edge, tile it leads to on the neighbour).
     pub fn crossings(&self, map: &MapData, dir: Direction) -> Vec<((i32, i32), (i32, i32))> {
-        let Some(conn) = map.connections.iter().find(|c| c.direction() == Some(dir)) else {
-            return Vec::new();
-        };
-        let Some(other) = self.name_of(&conn.map).and_then(|n| self.map(n)) else {
-            return Vec::new();
-        };
+        self.edge_crossings(map, dir)
+            .into_iter()
+            .map(|(_, a, b)| (a, b))
+            .collect()
+    }
+
+    /// [`World::crossings`] with the neighbour each leads into: a side may
+    /// join several maps (Six Island's route meets Green Path, Six Island
+    /// and Ruin Valley on its left; only the first was ever crossed into).
+    pub fn edge_crossings(&self, map: &MapData, dir: Direction) -> Vec<EdgeCrossing> {
         let walkable = |m: &MapData, x: i32, y: i32| m.tile(x, y).is_some_and(|t| t.collision == 0);
         let mut out = Vec::new();
-        match dir {
-            Direction::Up | Direction::Down => {
-                let (ay, by) = if dir == Direction::Up {
-                    (0, other.height - 1)
-                } else {
-                    (map.height - 1, 0)
-                };
-                for x in 0..map.width {
-                    let bx = x - conn.offset;
-                    if walkable(map, x, ay) && walkable(other, bx, by) {
-                        out.push(((x, ay), (bx, by)));
+        for conn in map
+            .connections
+            .iter()
+            .filter(|c| c.direction() == Some(dir))
+        {
+            let Some(other) = self.name_of(&conn.map).and_then(|n| self.map(n)) else {
+                continue;
+            };
+            match dir {
+                Direction::Up | Direction::Down => {
+                    let (ay, by) = if dir == Direction::Up {
+                        (0, other.height - 1)
+                    } else {
+                        (map.height - 1, 0)
+                    };
+                    for x in 0..map.width {
+                        let bx = x - conn.offset;
+                        if walkable(map, x, ay) && walkable(other, bx, by) {
+                            out.push((other.name.clone(), (x, ay), (bx, by)));
+                        }
                     }
                 }
-            }
-            Direction::Left | Direction::Right => {
-                let (ax, bx) = if dir == Direction::Left {
-                    (0, other.width - 1)
-                } else {
-                    (map.width - 1, 0)
-                };
-                for y in 0..map.height {
-                    let by = y - conn.offset;
-                    if walkable(map, ax, y) && walkable(other, bx, by) {
-                        out.push(((ax, y), (bx, by)));
+                Direction::Left | Direction::Right => {
+                    let (ax, bx) = if dir == Direction::Left {
+                        (0, other.width - 1)
+                    } else {
+                        (map.width - 1, 0)
+                    };
+                    for y in 0..map.height {
+                        let by = y - conn.offset;
+                        if walkable(map, ax, y) && walkable(other, bx, by) {
+                            out.push((other.name.clone(), (ax, y), (bx, by)));
+                        }
                     }
                 }
             }

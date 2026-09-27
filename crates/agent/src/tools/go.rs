@@ -440,6 +440,33 @@ fn use_move(ctx: &mut ToolContext<'_>, mv: FieldMove, at: Option<Dest>) -> Resul
     .result
 }
 
+/// Walks onto `map` first when the way there needs field moves: the tools
+/// that walk to a target of their own (Talk, Buy, a hunt) drive the
+/// navigator, which knows no Cut tree or water (Switch goal run: a Heal
+/// from Vermilion Gym's side of the Cut tree failed "no path to door";
+/// Go had cut its way in). Nothing to do on `map`, or when the navigator
+/// walks there alone.
+pub fn reach_map(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
+    if ctx.pose().is_none_or(|p| p.map == map) {
+        return Ok(());
+    }
+    let dest = Dest::Map {
+        map: map.to_owned(),
+    };
+    let Some(legs) = field_route(ctx, &dest) else {
+        return Ok(());
+    };
+    ctx.info(format!(
+        "the way to {map} needs field moves: {}",
+        legs.iter()
+            .filter(|l| special(&ctx.world, l))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    walk_legs(ctx, &legs, &dest).map(|_| ())
+}
+
 /// Carries out the legs of a route that needs field moves: plain legs are
 /// walked by the navigator up to the next special one, which uses its
 /// move through the `FieldMove` tool.
@@ -770,6 +797,34 @@ mod tests {
         assert_eq!((gate.from.x, gate.from.y), (26, 31));
         assert_eq!((gate.to.x, gate.to.y), (26, 33));
         assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest).is_none());
+    }
+
+    /// Switch goal run: out of Vermilion Gym, on the gym's side of the
+    /// Cut tree, a Heal walked to the Center with the navigator ("no path
+    /// to door (15, 6)"). The way to the Center's map is a field route,
+    /// which `reach_map` walks before the tool's own approach.
+    #[test]
+    fn the_way_to_another_map_through_a_cut_tree_is_a_field_route() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let mut state = cutter(false);
+        state.world.flags.insert(
+            "FLAG_BADGE02_GET".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        let pose = PlayerPose {
+            map: "VermilionCity".into(),
+            x: 14,
+            y: 25,
+        };
+        let dest = Dest::Map {
+            map: "VermilionCity_PokemonCenter_1F".into(),
+        };
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest)
+            .expect("the Center is past the tree");
+        assert!(legs
+            .iter()
+            .any(|l| matches!(&l.kind, EdgeKind::Gate { kind } if kind == "cut_tree")));
     }
 
     #[test]

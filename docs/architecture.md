@@ -135,6 +135,27 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - The bot taps one direction per tile and confirms the move by relocating the player.
   - A tap that doesn't move the player counts as a turn; a second one marks the tile blocked.
   - How to take each exit depends on the tile: stand below a door and press Up; stand on an arrow mat and push its arrow; stand on stairs and push sideways; for a map edge, walk to a tile that continues into the neighbour and step across.
+  - A warp is an exit only if the game fires it (`route::warp_takeable`, `behavior::warp_fires`):
+    - walked onto: cave door, ladder, hole, warp pad, escalator;
+    - pushed into from below: a door (`MB_WARP_DOOR`);
+    - stood on and pushed: arrow mats and stairs;
+    - or its tile is one a map script rewrites (`World::script_rewrites`: the Elite Four's doors).
+
+    A warp on a wall that isn't a door, or on plain floor (where a hole lands), is only a landing spot. 45 such warps had routes the game never takes.
+  - An edge is crossed where the route crosses it (`nav::route_search_via`): a split neighbour (Route 5's grass behind Cerulean's columns 20–27) is entered from the right column. Every connection on a side counts (`World::edge_crossings`: Six Island's Water Path has three on its left).
+  - Tools that walk to a target of their own (Talk, Buy, Heal, the hunts) first walk the field-move route to its map when the way needs Cut, Surf, Rock Smash or Fly (`go::reach_map`).
+- **Not modelled yet** (portal audit, 2026-09-27):
+  - Spin tiles (Rocket Hideout B2F/B3F, Viridian Gym) are walked as floor.
+  - Currents (Seafoam B3F/B4F) count as land, and waterfalls as plain Surf water.
+  - Cycling Road's downhill slope and Icefall Cave's ice aren't modelled.
+  - Elevator script-warp legs have planner edges, but no navigator step to carry them out.
+  - The Seagallop ferries (`special DoSeagallopFerryScene` with `VAR_0x8006`), Icefall Cave's coordinate-less `warphole`, and Escape Rope/Dig/Teleport exits have no edges.
+- **Stuck games: the strategy.** Every loop that can repeat has a bound, and every bound fails the step with a reason, so the plan moves on and the logs say why:
+  - Walks: a walk entering a map at the same tile a third time fails "going in circles" (`nav::MapEntries`; hunts count across their walks).
+  - Actions: the same action sent 40 times on an unchanged screen fails "no progress" (`tools::context::ActRepeats`; waiting actions such as spinning for encounters are exempt).
+  - Waits: the existing stuck-waiting rule. A "fade" that stays unchanged for 30 frames counts as the screen, not a fade (a dark map with almost nothing bright).
+  - Cycles: the session calls out a failure that ended 3 cycles in a row ("stuck: the same failure ended N cycles in a row"). The startup audit only fails on the party; other probes are skipped with a warning.
+  - Battles: moves are chosen for the member the HUD names, not the lead.
 
 ## Story (`agent::story`)
 

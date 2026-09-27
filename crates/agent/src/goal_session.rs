@@ -107,8 +107,18 @@ pub struct SessionReport {
 pub fn run(session: Session, runner: &mut dyn Runner) -> SessionReport {
     let mut start = session.start;
     let mut cycle = 1u64;
+    let mut repeats = Repeats::default();
     loop {
         let end = runner.cycle(start, cycle);
+        if let Some(n) = repeats.note(&end) {
+            runner.log(&format!(
+                "stuck: the same failure ended {n} cycles in a row (restarting won't clear it): {}",
+                match &end {
+                    CycleEnd::Unsatisfied(r) | CycleEnd::Failed(r) => r.as_str(),
+                    _ => "",
+                }
+            ));
+        }
         let stopped = end.is_stopped() || runner.stopped();
         let Some(wait) = session.restart else {
             return SessionReport {
@@ -169,6 +179,49 @@ pub fn run(session: Session, runner: &mut dyn Runner) -> SessionReport {
             }
         };
         cycle += 1;
+    }
+}
+
+/// Cycles ending the same way (numbers aside) before the session says it
+/// is stuck: a restart clears a device glitch or a lost pose, not a bug
+/// (fleet workers LEAF and JADE failed their startup audit on an unread
+/// trainer card 55 cycles in a row, four hours, one NOTIFY each time).
+pub const STUCK_CYCLES: u32 = 3;
+
+/// Consecutive cycles that ended with the same failure.
+#[derive(Debug, Default)]
+struct Repeats {
+    last: Option<String>,
+    count: u32,
+}
+
+impl Repeats {
+    /// Notes how a cycle ended; from the [`STUCK_CYCLES`]th same failure
+    /// in a row on, how many there have been.
+    fn note(&mut self, end: &CycleEnd) -> Option<u32> {
+        let reason = match end {
+            CycleEnd::Unsatisfied(r) | CycleEnd::Failed(r) if !end.is_faint() => r,
+            _ => {
+                *self = Self::default();
+                return None;
+            }
+        };
+        // Frame numbers, counts and seconds differ between cycles.
+        let mut key = String::new();
+        for c in reason.chars() {
+            if !c.is_ascii_digit() {
+                key.push(c);
+            } else if !key.ends_with('#') {
+                key.push('#');
+            }
+        }
+        if self.last.as_deref() == Some(key.as_str()) {
+            self.count += 1;
+        } else {
+            self.last = Some(key);
+            self.count = 1;
+        }
+        (self.count >= STUCK_CYCLES).then_some(self.count)
     }
 }
 
@@ -465,6 +518,38 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(240);
+
+    #[test]
+    fn the_same_failure_cycle_after_cycle_is_called_stuck() {
+        let fail = |f: u32| CycleEnd::Failed(format!("trainer card: no progress at frame {f}"));
+        let mut fake = Fake {
+            ends: VecDeque::from([
+                fail(1),
+                fail(2),
+                fail(30),
+                fail(400),
+                CycleEnd::Unsatisfied("out of replans".into()),
+            ]),
+            checkpoint: true,
+            ..Fake::default()
+        };
+        run(
+            Session {
+                start: Start::Continue,
+                restart: Some(WAIT),
+            },
+            &mut fake,
+        );
+        let stuck: Vec<String> = fake
+            .logs
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("stuck:"))
+            .cloned()
+            .collect();
+        assert_eq!(stuck.len(), 2, "{stuck:?}");
+        assert!(stuck[0].contains("3 cycles") && stuck[1].contains("4 cycles"));
+    }
 
     #[test]
     fn without_restart_one_cycle_is_played() {

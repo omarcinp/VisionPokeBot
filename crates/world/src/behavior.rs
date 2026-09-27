@@ -15,6 +15,18 @@ pub const SOUTH_ARROW_WARP: u16 = 0x65;
 pub const WARP_DOOR: u16 = 0x69;
 pub const COUNTER: u16 = 0x80;
 
+/// Whether a warp on a tile of this behaviour ever fires (`field_control_
+/// avatar.c`): walked onto (cave door, ladder, hole, warp pad, escalator,
+/// union room; `IsWarpMetatileBehavior`), pushed into from below (a door,
+/// `TryDoorWarp`), or stood on and pushed (arrow mats, stairs). A warp on
+/// any other tile is only a landing spot (the Pokémon Mansion's and
+/// Seafoam's holes land on plain floor) or a door a script draws first.
+pub fn warp_fires(b: u16) -> bool {
+    matches!(b, 0x60 | 0x61 | 0x66..=0x6B | 0x71)
+        || arrow_warp(b).is_some()
+        || stair_warp(b).is_some()
+}
+
 /// Water of any kind (needs Surf).
 pub fn is_water(b: u16) -> bool {
     matches!(b, 0x10..=0x15 | 0x19..=0x1B)

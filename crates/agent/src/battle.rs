@@ -628,6 +628,39 @@ mod tests {
         }
     }
 
+    /// Fleet worker 2 (Viridian Forest): the lead SQUIRTLE fainted and
+    /// RATTATA came out; the move picker still read SQUIRTLE's moves and
+    /// sent the cursor after BUBBLE (slot 2) on a two-move menu, forever.
+    /// The member the HUD names is the one the moves are chosen for.
+    #[test]
+    fn moves_are_chosen_for_the_member_in_battle() {
+        let Some(data) = data() else { return };
+        let mut squirtle = Member::new(&data, "SPECIES_SQUIRTLE", 9);
+        squirtle.moves = vec![
+            "MOVE_TACKLE".into(),
+            "MOVE_TAIL_WHIP".into(),
+            "MOVE_BUBBLE".into(),
+        ];
+        squirtle.hp = Some((0, 28));
+        let mut rattata = Member::new(&data, "SPECIES_RATTATA", 2);
+        rattata.slot = 1;
+        rattata.moves = vec!["MOVE_TACKLE".into(), "MOVE_TAIL_WHIP".into()];
+        rattata.hp = Some((13, 13));
+        let party = Party {
+            members: vec![squirtle, rattata],
+        };
+        let slot = party.battler_named(&data, "RATTATA");
+        assert_eq!(slot, Some(1));
+        let party = party.with_first(1);
+        assert_eq!(party.lead().map(|m| m.slot), Some(1));
+        let memory = BattleMemory::default();
+        let chosen = choose_move(&data, &party, None, &memory, &BattlePolicy::default());
+        assert!(
+            chosen.as_ref().is_some_and(|(i, _)| *i < 2),
+            "{chosen:?}: RATTATA knows two moves"
+        );
+    }
+
     /// Live (Route 3, Lass Robin's JIGGLYPUFF): DISABLE on VINE WHIP, and the
     /// bot chose VINE WHIP again every turn: "IVYSAUR's VINE WHIP is
     /// disabled!" sent it back to the move menu forever.

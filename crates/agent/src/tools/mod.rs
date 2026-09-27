@@ -229,6 +229,19 @@ pub enum Intent {
 }
 
 impl Intent {
+    /// The map a tool walks to on its own to carry the intent out (not Go
+    /// and FieldMove, which route with field moves themselves).
+    pub fn target_map(&self) -> Option<&str> {
+        match self {
+            Intent::Talk { map, .. } | Intent::Beat { map, .. } | Intent::Train { map, .. } => {
+                Some(map)
+            }
+            Intent::Catch { map, .. } | Intent::Explore { map } => map.as_deref(),
+            Intent::Heal { center } => center.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Short name for logs and the infeasible set.
     pub fn name(&self) -> &'static str {
         match self {

@@ -98,6 +98,19 @@ pub fn warp_usable(map: &MapData, index: usize) -> bool {
         })
 }
 
+/// Whether warp `index` can ever take the player anywhere: its tile fires
+/// ([`crate::behavior::warp_fires`]) or a script of the map rewrites it
+/// (into a door). Pushing Up below a wall with a warp on it does nothing
+/// (Route 5's south gate #3, the S.S. Anne's deck, the Safari Zone's rest
+/// houses: 45 warps had routes the game never takes).
+pub fn warp_takeable(world: &World, map: &MapData, index: usize) -> bool {
+    map.warps.get(index).is_some_and(|w| {
+        map.tile(w.x, w.y)
+            .is_some_and(|t| crate::behavior::warp_fires(t.behavior))
+            || world.script_rewrites(&map.name, (w.x, w.y))
+    })
+}
+
 /// The tile the player stands on to take warp `index`: below a door, on
 /// the mat, stairs or plain warp tile otherwise (the navigator's rule).
 pub fn warp_approach(map: &MapData, index: usize) -> Option<(i32, i32)> {
@@ -650,7 +663,7 @@ impl PlaceGraph {
             let Some((dest, dx, dy)) = world.warp_destination(w) else {
                 continue;
             };
-            if !warp_usable(map, i) {
+            if !warp_usable(map, i) || !warp_takeable(world, map, i) {
                 continue;
             }
             let Some((ax, ay)) = warp_approach(map, i) else {
@@ -690,13 +703,7 @@ impl PlaceGraph {
 
     fn add_connections(&mut self, world: &World, map: &MapData) {
         for dir in Direction::ALL {
-            let Some(conn) = map.connections.iter().find(|c| c.direction() == Some(dir)) else {
-                continue;
-            };
-            let Some(other) = world.name_of(&conn.map).map(str::to_string) else {
-                continue;
-            };
-            for ((ax, ay), (bx, by)) in world.crossings(map, dir) {
+            for (other, (ax, ay), (bx, by)) in world.edge_crossings(map, dir) {
                 let from = self.add_place(&map.name, ax, ay, PlaceKind::Crossing);
                 let to = self.add_place(&other, bx, by, PlaceKind::Crossing);
                 self.add_edge(

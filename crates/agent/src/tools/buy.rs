@@ -81,6 +81,7 @@ pub fn buy(ctx: &mut ToolContext<'_>, item: &str, count: u16) -> Result<String, 
         .ok_or_else(|| ToolError::Failed(format!("no mart selling {item} found")))?;
     let (x, y) = object_tile(&ctx.world, &map, clerk)
         .ok_or_else(|| ToolError::Failed(format!("{map} has no clerk {clerk}")))?;
+    super::go::reach_map(ctx, &map)?;
     let stock = ball_count(ctx.state());
     let mut step = BuyStep {
         data: Arc::clone(&ctx.data),

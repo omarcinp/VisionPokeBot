@@ -22,6 +22,10 @@ use crate::text::Font;
 /// Card frame (left, right and bottom borders, and the title plate).
 const FRAME_TEAL: Rgb = [49, 154, 148];
 const FRAME_TEAL_LIGHT: Rgb = [82, 203, 181];
+/// A girl's card is framed in orange instead (fleet workers LEAF and JADE:
+/// every CONTINUE's audit failed to see it, 55 restarts in a row).
+const FRAME_ORANGE: Rgb = [214, 97, 41];
+const FRAME_ORANGE_LIGHT: Rgb = [231, 146, 82];
 /// Badge band and the empty slots' inner shade.
 const BAND_BLUE: Rgb = [132, 186, 231];
 const SLOT_LIGHT: Rgb = [214, 227, 247];
@@ -100,9 +104,11 @@ pub fn pokedex_count(image: &RgbImage, font: &Font) -> Option<u16> {
 /// Teal frame on the left and bottom, blue band above the slots (measured
 /// 1000‰, 626‰ and 994‰).
 fn is_card(image: &RgbImage) -> bool {
-    let teal = [FRAME_TEAL, FRAME_TEAL_LIGHT];
-    share_any(image, LEFT_FRAME, &teal, 1) >= 800
-        && share_any(image, BOTTOM_FRAME, &teal, 2) >= 500
+    let framed = |frame: &[Rgb]| {
+        share_any(image, LEFT_FRAME, frame, 1) >= 800
+            && share_any(image, BOTTOM_FRAME, frame, 2) >= 500
+    };
+    (framed(&[FRAME_TEAL, FRAME_TEAL_LIGHT]) || framed(&[FRAME_ORANGE, FRAME_ORANGE_LIGHT]))
         && share(image, BAND, BAND_BLUE, 1) >= 800
 }
 
@@ -149,6 +155,19 @@ mod tests {
         let card = detect(&image, None).unwrap();
         assert_eq!(card.badges, vec![1]);
         assert_eq!(card.pokedex_count, None, "no font, no count");
+    }
+
+    /// Fleet worker LEAF's card (emulator): orange, no badges yet.
+    #[test]
+    fn a_girls_card_is_read_too() {
+        let Some(image) = fixture("emu-trainer-card-girl.png") else {
+            return;
+        };
+        let card = detect(&image, font().as_ref()).unwrap();
+        assert_eq!(card.badges, Vec::<u8>::new());
+        if font().is_some() {
+            assert_eq!(card.pokedex_count, Some(3));
+        }
     }
 
     #[test]

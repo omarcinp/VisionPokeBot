@@ -648,8 +648,9 @@ impl<'a> ToolContext<'a> {
     pub fn drive(&mut self, step: &mut dyn ToolStep) -> Result<String, ToolError> {
         let mut waiting_since: Option<(u64, String)> = None;
         let mut nudged = false;
+        let mut repeats = ActRepeats::default();
         let saved = self.expects;
-        let result = self.drive_inner(step, &mut waiting_since, &mut nudged);
+        let result = self.drive_inner(step, &mut waiting_since, &mut nudged, &mut repeats);
         self.expects = saved;
         result
     }
@@ -659,6 +660,7 @@ impl<'a> ToolContext<'a> {
         step: &mut dyn ToolStep,
         waiting_since: &mut Option<(u64, String)>,
         nudged: &mut bool,
+        repeats: &mut ActRepeats,
     ) -> Result<String, ToolError> {
         loop {
             let o = self.observe()?;
@@ -698,6 +700,9 @@ impl<'a> ToolContext<'a> {
                 Decision::Act(action) => {
                     *waiting_since = None;
                     *nudged = false;
+                    if let Some(why) = repeats.note(&action, &o) {
+                        return Err(ToolError::Failed(why));
+                    }
                     let outcome = self.act(action.clone())?;
                     let o = self.runtime.observation().cloned().expect("act observed");
                     let state = self.runtime.state().clone();
@@ -742,6 +747,16 @@ impl<'a> ToolContext<'a> {
     pub fn invoke(&mut self, intent: &Intent) -> ToolOutcome {
         if self.depth >= MAX_DEPTH {
             return ToolOutcome::failed(format!("tools nested too deep at {intent}"));
+        }
+        // Tools walk to their target with the navigator: a way there
+        // through a Cut tree or water is walked first.
+        if let Some(map) = intent.target_map().map(str::to_owned) {
+            self.depth += 1;
+            let reached = super::go::reach_map(self, &map);
+            self.depth -= 1;
+            if let Err(e) = reached {
+                return e.into();
+            }
         }
         let (index, mut tool) = match self.toolbox.take(intent) {
             Ok(t) => t,
@@ -794,5 +809,123 @@ impl<'a> ToolContext<'a> {
             Err(e) => self.runtime.error(format!("tool {intent}: {e}")),
         }
         outcome
+    }
+}
+/// The same action sent this many times in a row on an unchanged screen
+/// makes no progress: the step fails and the plan goes on without it
+/// (fleet workers: "cursor to move 3 (BUBBLE)" pressed Down 300 000 times
+/// with a two-move RATTATA out; "select bag item" pressed Up 400 000 times
+/// for a POTION the pocket didn't hold, each for hours).
+pub const MAX_SAME_ACTS: u32 = 40;
+
+/// Consecutive sends of one action on one screen.
+#[derive(Debug, Default)]
+pub(crate) struct ActRepeats {
+    last: Option<(String, String)>,
+    count: u32,
+}
+
+impl ActRepeats {
+    /// Notes `action` about to be sent on `o`; why the step has failed
+    /// when it is the [`MAX_SAME_ACTS`]th send in a row on the same
+    /// screen. Actions that wait for something to happen (spinning for
+    /// an encounter) are not counted.
+    pub(crate) fn note(&mut self, action: &Action, o: &Observation) -> Option<String> {
+        if action.interruptible {
+            *self = Self::default();
+            return None;
+        }
+        let key = (action.label.clone(), screen_fingerprint(o));
+        if self.last.as_ref() == Some(&key) {
+            self.count += 1;
+        } else {
+            self.last = Some(key);
+            self.count = 1;
+        }
+        (self.count >= MAX_SAME_ACTS).then(|| {
+            format!(
+                "no progress: \"{}\" sent {} times on an unchanged screen",
+                action.label, self.count
+            )
+        })
+    }
+}
+
+/// What a screen shows that an action is meant to change (not frame
+/// counters or match scores).
+fn screen_fingerprint(o: &Observation) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        o.screen.value,
+        o.dialogue.as_ref().map(|d| &d.lines),
+        o.menu,
+        o.battle.as_ref().map(|b| (
+            b.menu,
+            &b.move_names,
+            b.move_pp,
+            b.player_hp_numbers,
+            b.opponent_hp
+        )),
+        o.bag,
+        o.player.as_ref().map(|p| &p.pose),
+        o.party_menu,
+        o.summary.as_ref().map(|s| (s.page, &s.nickname)),
+        o.move_list,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Expectation;
+    use pokebot_core::{Button, ControllerCommand};
+    use pokebot_state::{Observed, ScreenState};
+
+    fn screen(state: ScreenState) -> Observation {
+        Observation::bare(
+            1,
+            Observed {
+                value: state,
+                detector: "test".into(),
+            },
+            Default::default(),
+        )
+    }
+
+    fn press(label: &str) -> Action {
+        Action::new(
+            label,
+            vec![ControllerCommand::Press(Button::Up)],
+            Expectation::InputsDone,
+            10,
+        )
+    }
+
+    #[test]
+    fn the_same_act_on_an_unchanged_screen_fails_after_the_limit() {
+        let bag = screen(ScreenState::Bag);
+        let mut repeats = ActRepeats::default();
+        for _ in 1..MAX_SAME_ACTS {
+            assert_eq!(repeats.note(&press("select bag item"), &bag), None);
+        }
+        let why = repeats
+            .note(&press("select bag item"), &bag)
+            .expect("fails");
+        assert!(why.contains("select bag item"), "{why}");
+        // A changed screen, or another action, starts the count over.
+        let mut repeats = ActRepeats::default();
+        for i in 0..3 * MAX_SAME_ACTS {
+            let o = if i % 10 == 0 {
+                screen(ScreenState::Menu)
+            } else {
+                bag.clone()
+            };
+            assert_eq!(repeats.note(&press("select bag item"), &o), None);
+        }
+        // Waiting for an encounter repeats by design.
+        let spin = press("spin in the grass").interruptible();
+        let field = screen(ScreenState::Overworld);
+        let mut repeats = ActRepeats::default();
+        assert!((0..3 * MAX_SAME_ACTS).all(|_| repeats.note(&spin, &field).is_none()));
     }
 }

@@ -57,7 +57,15 @@ pub fn audit_core(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
             pocket: Pocket::BerryPouch,
         },
     ] {
-        ctx.invoke(&Intent::Probe { fact }).result?;
+        // The party is what every plan starts from; the rest is refreshed
+        // on the way when a probe fails here (fleet workers LEAF and JADE:
+        // an unrecognised trainer card failed every CONTINUE's audit, and
+        // so the whole cycle, 55 times in a row).
+        let party = matches!(fact, ProbeFact::Party);
+        match ctx.invoke(&Intent::Probe { fact: fact.clone() }).result {
+            Err(e) if !party => ctx.info(format!("warning: startup audit: {fact:?} skipped: {e}")),
+            r => r?,
+        }
     }
     if ctx.state().money.value.is_none() {
         return Err(ToolError::Failed("startup audit: money unreadable".into()));
