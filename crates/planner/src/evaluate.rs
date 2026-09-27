@@ -232,6 +232,22 @@ pub struct BattleEstimate {
 }
 
 /// The party (in order, lead first) against a trainer's team.
+/// The member who beats `trainer` alone with the best chance, and that
+/// chance: the bot lets no Pokémon faint (a faint reloads the save), so
+/// a relay where one member faints and the next finishes never happens;
+/// the one who can win it all leads instead (fleet workers: CHARMANDER
+/// led against Brock and fainted to ONIX while the MANKEY trained to
+/// finish him waited in the party).
+pub fn best_fighter(data: &GameData, party: &[Combatant], trainer: &str) -> Option<(usize, f64)> {
+    party
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            battle_vs_trainer(data, std::slice::from_ref(c), trainer).map(|e| (i, e.p_win))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+}
+
 pub fn battle_vs_trainer(
     data: &GameData,
     party: &[Combatant],

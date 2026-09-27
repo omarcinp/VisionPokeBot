@@ -19,7 +19,7 @@ use pokebot_gamedata::mechanics::{catch_probability, exp_for_level, exp_gain, St
 use pokebot_gamedata::{EncounterTable, GameData};
 use serde::Serialize;
 
-use crate::evaluate::{battle_vs_trainer, matchup, Combatant};
+use crate::evaluate::{best_fighter, matchup, Combatant};
 
 /// Seconds per walking step (16 frames at 59.73 Hz).
 const STEP_SECONDS: f64 = 16.0 / 59.7275;
@@ -227,7 +227,7 @@ fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(
         .map(|t| {
             (
                 t.clone(),
-                battle_vs_trainer(data, party, t).map_or(0.0, |e| e.p_win),
+                best_fighter(data, party, t).map_or(0.0, |(_, p)| p),
             )
         })
         .collect()

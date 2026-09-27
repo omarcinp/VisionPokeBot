@@ -156,3 +156,38 @@ fn faint_probability_grows_with_turns() {
     us.hp = 1;
     assert!(faint_probability(&data, &foe, &us, 1) > 0.5);
 }
+
+/// Fleet workers (CHARMANDER starts): the relay estimate counted on
+/// CHARMANDER fainting to ONIX and MANKEY finishing, but no Pokémon may
+/// faint. The best single fighter is who leads, and its chance is the
+/// party's.
+#[test]
+fn the_member_who_wins_alone_is_the_fighter() {
+    let Some(data) = data() else { return };
+    let charmander = Combatant::new(
+        &data,
+        "SPECIES_CHARMANDER",
+        14,
+        data.default_moves("SPECIES_CHARMANDER", 14),
+        10,
+    )
+    .unwrap();
+    let mankey = Combatant::new(
+        &data,
+        "SPECIES_MANKEY",
+        14,
+        data.default_moves("SPECIES_MANKEY", 14),
+        10,
+    )
+    .unwrap();
+    let party = [charmander.clone(), mankey.clone()];
+    let (slot, p) = pokebot_planner::best_fighter(&data, &party, "TRAINER_LEADER_BROCK").unwrap();
+    let alone = |c: &Combatant| {
+        battle_vs_trainer(&data, std::slice::from_ref(c), "TRAINER_LEADER_BROCK")
+            .unwrap()
+            .p_win
+    };
+    assert_eq!(slot, 1, "MANKEY (Fighting) over CHARMANDER against Rock");
+    assert!((p - alone(&mankey)).abs() < 1e-9);
+    assert!(alone(&mankey) > alone(&charmander));
+}

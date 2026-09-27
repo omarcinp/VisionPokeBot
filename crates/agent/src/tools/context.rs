@@ -251,6 +251,31 @@ impl<'a> ToolContext<'a> {
         )
     }
 
+    /// The trainer `intent` fights: a `Beat`, or a script path that
+    /// starts a trainer battle (a gym leader's).
+    fn trainer_of(&self, intent: &Intent) -> Option<String> {
+        match intent {
+            Intent::Beat { trainer, .. } => Some(trainer.clone()),
+            Intent::RunScript {
+                script,
+                path: Some(path),
+                ..
+            } => self
+                .world
+                .events()?
+                .script(script)?
+                .paths
+                .get(*path)?
+                .does
+                .iter()
+                .find_map(|e| match e {
+                    pokebot_world::events::Effect::Battle { battle, .. } => Some(battle.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        }
+    }
+
     fn story_gates(&self) -> Arc<pokebot_world::gates::Gates> {
         Arc::clone(self.gates.get_or_init(|| match &self.scheduler.graph {
             Some(g) => Arc::new(g.gates().clone()),
@@ -803,6 +828,18 @@ impl<'a> ToolContext<'a> {
             self.depth -= 1;
             if let Err(e) = reached {
                 return e.into();
+            }
+        }
+        // A trainer battle is fought by the lead, and no Pokémon may
+        // faint: the member best able to win it alone leads.
+        if let Some(trainer) = self.trainer_of(intent) {
+            self.depth += 1;
+            let led = super::party_order::lead_for(self, &trainer);
+            self.depth -= 1;
+            match led {
+                Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return e.into(),
+                Err(e) => self.info(format!("warning: leading for {trainer}: {e}")),
+                Ok(()) => {}
             }
         }
         let (index, mut tool) = match self.toolbox.take(intent) {

@@ -303,3 +303,112 @@ fn the_save_fixture_gets_hm01() {
     give_tm_case_items(&mut save, &[ITEM_HM01], &[FLAG_GOT_SS_TICKET]);
     assert_eq!(save, before, "adding it twice changes nothing");
 }
+
+/// Putting a member first through the party menu's SWITCH (the Cascade
+/// save: IVYSAUR leads, CLEFAIRY is fifth): the game swaps the two, and
+/// the state follows. Run with `--ignored`.
+#[test]
+#[ignore]
+fn clefairy_is_put_first_through_switch() {
+    let _guard = EMULATOR.lock().unwrap_or_else(|e| e.into_inner());
+    let root = root();
+    let Some((core, rom)) = core_and_rom() else {
+        eprintln!("skipping: emulator core or ROM missing");
+        return;
+    };
+    let world_dir = root.join("data/world");
+    let (Ok(world), Ok(data), Ok(font), Ok(small)) = (
+        World::load(&world_dir),
+        GameData::load(world_dir.join("gamedata.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_normal.json")),
+        pokebot_vision::text::Font::load(world_dir.join("font_small.json")),
+    ) else {
+        eprintln!("skipping: no world data");
+        return;
+    };
+    let Ok(save) = std::fs::read(root.join("saves/cascade.sav")) else {
+        eprintln!("skipping: no saves/cascade.sav");
+        return;
+    };
+    let progress = Progress::load(&root.join("saves/progress.cascade.json")).expect("progress");
+    let state_path = root.join("saves/state.cascade.json");
+    let dir = std::env::temp_dir().join(format!("pokebot-lead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let save_path = dir.join("cascade.sav");
+    std::fs::write(&save_path, &save).unwrap();
+    let world = Arc::new(world);
+    let data = Arc::new(data);
+    let mut config = EmulatorConfig::new(core, rom);
+    config.battery_save = Some(save_path);
+    let (video, controller, _) = launch(config).expect("emulator");
+    let perception = FireRedPerception::with_world(Arc::clone(&world))
+        .with_font(Arc::new(font))
+        .with_small_font(Arc::new(small));
+    let mut runtime = Runtime::with_perception(
+        Devices {
+            video: Box::new(video),
+            controller: Box::new(controller),
+            normalizer: Normalizer::new(ViewportLocator::FullFrame),
+            video_name: "emulator".into(),
+            controller_name: "emulator".into(),
+            persist_save: None,
+        },
+        perception,
+    );
+    runtime.echo_events(std::env::var_os("VPB_ECHO").is_some());
+    let executor = Executor {
+        syncer: Some(Arc::new(Mutex::new(Syncer::new("emulator")))),
+        ..Executor::default()
+    };
+    let stop = AtomicBool::new(false);
+    continue_game(
+        &mut runtime,
+        &executor,
+        &progress,
+        &state_path,
+        &data,
+        &stop,
+        None,
+    )
+    .expect("continue the cascade save");
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&world),
+        Arc::clone(&data),
+        &stop,
+    );
+    let audit = ctx.invoke(&Intent::Probe {
+        fact: ProbeFact::Party,
+    });
+    assert!(audit.is_ok(), "party: {:?}", audit.result);
+    let slot = ctx
+        .state()
+        .party
+        .value
+        .as_ref()
+        .unwrap()
+        .iter()
+        .position(|m| m.species.value.as_deref() == Some("SPECIES_CLEFAIRY"))
+        .expect("a CLEFAIRY") as u8;
+    let mut step = pokebot_agent::tools::party_order::LeadWith::new(slot, "SPECIES_CLEFAIRY");
+    let led = ctx.drive(&mut step);
+    assert!(led.is_ok(), "{led:?}");
+    let party = ctx.state().party.value.clone().unwrap();
+    assert_eq!(party[0].species.value.as_deref(), Some("SPECIES_CLEFAIRY"));
+    assert_eq!(
+        party[usize::from(slot)].species.value.as_deref(),
+        Some("SPECIES_IVYSAUR")
+    );
+    // The game agrees: the party menu read again lists CLEFAIRY first.
+    let audit = ctx.invoke(&Intent::Probe {
+        fact: ProbeFact::Party,
+    });
+    assert!(audit.is_ok(), "party again: {:?}", audit.result);
+    let party = ctx.state().party.value.clone().unwrap();
+    assert_eq!(party[0].species.value.as_deref(), Some("SPECIES_CLEFAIRY"));
+    let o = ctx.observe().expect("observe");
+    assert!(o.party_menu.is_none() && o.menu.is_none(), "menus closed");
+    drop(ctx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -21,6 +21,7 @@ pub mod lookup;
 mod medicine;
 pub mod menu;
 mod party_audit;
+pub mod party_order;
 pub mod probe;
 mod save;
 pub mod scene;

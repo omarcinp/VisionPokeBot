@@ -1,0 +1,308 @@
+//! Putting a party member first (Start → POKéMON → the member → SWITCH →
+//! the first slot), so it leads the next battle. The planner counts on the
+//! member best able to beat a trainer alone (no Pokémon may faint; see
+//! `pokebot_planner::best_fighter`), and the battle is fought by whoever
+//! leads (fleet workers: CHARMANDER led against Brock and fainted to ONIX
+//! while the MANKEY trained for him waited in the party).
+
+use pokebot_core::Button;
+use pokebot_gamedata::GameData;
+use pokebot_state::{GameEvent, GameState};
+
+use super::menu::{
+    open_start_menu, pick_row, Closer, MenuRow, Retries, CURSOR_FRAMES, SCREEN_FRAMES,
+};
+use super::{progress, Expects, StepContext, ToolContext, ToolError, ToolStep};
+use crate::bag::fits;
+use crate::party::Party;
+use crate::{Action, Decision, Expectation, Outcome};
+
+/// A better fighter leads only when its chance beats the lead's by this.
+pub const LEAD_MARGIN: f64 = 0.05;
+
+/// Moves party slot `slot` to the front.
+pub struct LeadWith {
+    slot: u8,
+    /// Its species, to know it leads once the state says so.
+    species: String,
+    retries: Retries,
+    closer: Closer,
+    /// SWITCH was chosen; the next A on the first slot swaps.
+    switching: bool,
+    swapped: bool,
+    reordered: bool,
+}
+
+impl LeadWith {
+    pub fn new(slot: u8, species: &str) -> Self {
+        Self {
+            slot,
+            species: species.to_owned(),
+            retries: Retries::default(),
+            closer: Closer::default(),
+            switching: false,
+            swapped: false,
+            reordered: false,
+        }
+    }
+
+    fn leads(&self, state: &GameState) -> bool {
+        state
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.first())
+            .and_then(|m| m.species.value.as_deref())
+            == Some(self.species.as_str())
+    }
+}
+
+impl ToolStep for LeadWith {
+    fn expects(&self) -> Expects {
+        Expects::MENUS
+    }
+
+    fn on_outcome(&mut self, action: &Action, outcome: Outcome, _: &mut StepContext<'_>) {
+        if outcome != Outcome::Confirmed {
+            self.retries.failed();
+        } else if action.label == "choose SWITCH" {
+            self.switching = true;
+        } else if action.label == "swap into the first slot" {
+            self.swapped = true;
+        }
+    }
+
+    fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+        let o = ctx.observation;
+        if self.retries.exhausted() {
+            return Decision::Fail(format!(
+                "leading with slot {}: no progress in {}",
+                self.slot,
+                self.retries.phase()
+            ));
+        }
+        if self.leads(ctx.state) {
+            // The swap is in the state: back to the field.
+            return self.closer.next(o, "leads");
+        }
+        if self.swapped && !self.reordered {
+            // The game swapped the two; the sensor reorders the party when
+            // the panels name every member uniquely, else it is told here.
+            if o.party_menu.as_ref().is_some_and(|m| !m.actions) {
+                self.retries.enter("reordered");
+                if let Some(n) = ctx.state.party.value.as_ref().map(Vec::len) {
+                    let mut order: Vec<u8> = (0..n as u8).collect();
+                    order.swap(0, usize::from(self.slot));
+                    ctx.events.push(GameEvent::PartyReordered { order });
+                    self.reordered = true;
+                }
+                return Decision::Wait("the new order".into());
+            }
+            return self.retries.wait(o, "the party list after the swap");
+        }
+        if let Some(party) = &o.party_menu {
+            if !party.actions && self.switching {
+                // "Move to where?": the ▶ to the first slot, then A.
+                self.retries.enter("switching");
+                let Some(at) = party.selected else {
+                    return self.retries.wait(o, "reading the switch cursor");
+                };
+                if at == 0 {
+                    return self.retries.act(
+                        "swap into the first slot",
+                        Button::A,
+                        Expectation::InputsDone,
+                        SCREEN_FRAMES,
+                    );
+                }
+                return self.retries.act(
+                    "switch: Up toward the first slot",
+                    Button::Up,
+                    Expectation::PartySelected(at - 1),
+                    CURSOR_FRAMES,
+                );
+            }
+            if party.actions {
+                self.retries.enter("actions");
+                if party.selected != Some(self.slot) {
+                    return self.retries.act(
+                        "close another member's actions",
+                        Button::B,
+                        Expectation::PartyList,
+                        SCREEN_FRAMES,
+                    );
+                }
+                let Some(row) = party.options.iter().position(|l| fits("SWITCH", l)) else {
+                    return self.retries.wait(o, "reading the member's actions");
+                };
+                let Some(at) = party.option_cursor else {
+                    return self.retries.wait(o, "reading the action window's ▶");
+                };
+                let row = row as u8;
+                if at == row {
+                    return self.retries.act(
+                        "choose SWITCH",
+                        Button::A,
+                        Expectation::PartyList,
+                        SCREEN_FRAMES,
+                    );
+                }
+                let (button, next) = if at < row {
+                    (Button::Down, at + 1)
+                } else {
+                    (Button::Up, at - 1)
+                };
+                return self.retries.act(
+                    format!("actions: {button:?} toward SWITCH"),
+                    button,
+                    Expectation::PartyOptionAt(next),
+                    CURSOR_FRAMES,
+                );
+            }
+            self.retries.enter("party");
+            if self.slot >= party.count {
+                return Decision::Fail(format!(
+                    "slot {} is not in the party ({} members)",
+                    self.slot, party.count
+                ));
+            }
+            let Some(at) = party.selected else {
+                return self.retries.wait(o, "reading the selected member");
+            };
+            if at == self.slot {
+                return self.retries.act(
+                    "open the member's actions",
+                    Button::A,
+                    Expectation::PartyActions,
+                    SCREEN_FRAMES,
+                );
+            }
+            let (button, next) = if at < self.slot {
+                (Button::Down, at + 1)
+            } else {
+                (Button::Up, at - 1)
+            };
+            return self.retries.act(
+                format!("party: {button:?} toward slot {}", self.slot),
+                button,
+                Expectation::PartySelected(next),
+                CURSOR_FRAMES,
+            );
+        }
+        if let Some(menu) = &o.menu {
+            if o.dialogue.is_none() {
+                self.retries.enter("start menu");
+                return pick_row(
+                    &mut self.retries,
+                    o,
+                    menu,
+                    &MenuRow::Text("POKéMON"),
+                    ctx.state,
+                    Expectation::PartyList,
+                    SCREEN_FRAMES,
+                )
+                .0;
+            }
+        }
+        if o.dialogue.is_some() {
+            return crate::new_game::advance_or_wait(o.dialogue.as_ref(), "reading");
+        }
+        self.retries.enter("open");
+        open_start_menu(&mut self.retries, o, ctx.quiet_frames)
+    }
+}
+
+/// The party slot that should lead against `trainer`: the member best
+/// able to beat it alone, when it isn't the lead and its chance beats the
+/// lead's by [`LEAD_MARGIN`]; with that chance and the lead's.
+pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8, f64, f64)> {
+    let fighters: Vec<(u8, pokebot_planner::Combatant)> = party
+        .members
+        .iter()
+        .filter(|m| m.hp.is_none_or(|(hp, _)| hp > 0))
+        .filter_map(|m| {
+            let moves: Vec<String> = m.moves.iter().filter(|mv| *mv != "?").cloned().collect();
+            let moves = if moves.is_empty() {
+                data.default_moves(&m.species, m.level)
+            } else {
+                moves
+            };
+            let c = pokebot_planner::Combatant::new(
+                data,
+                &m.species,
+                m.level,
+                moves,
+                pokebot_planner::prepare::OUR_IV,
+            )?;
+            Some((m.slot, c))
+        })
+        .collect();
+    let lead = fighters.iter().find(|(slot, _)| *slot == 0)?;
+    let p_lead =
+        pokebot_planner::battle_vs_trainer(data, std::slice::from_ref(&lead.1), trainer)?.p_win;
+    let combatants: Vec<_> = fighters.iter().map(|(_, c)| c.clone()).collect();
+    let (best, p_best) = pokebot_planner::best_fighter(data, &combatants, trainer)?;
+    let slot = fighters[best].0;
+    (slot != 0 && p_best > p_lead + LEAD_MARGIN).then_some((slot, p_best, p_lead))
+}
+
+/// Before a battle with `trainer`: the member best able to beat it leads.
+pub fn lead_for(ctx: &mut ToolContext<'_>, trainer: &str) -> Result<(), ToolError> {
+    let party = Party::from_state(ctx.state());
+    let Some((slot, p_best, p_lead)) = fighter_for(&ctx.data, &party, trainer) else {
+        return Ok(());
+    };
+    let species = party
+        .members
+        .iter()
+        .find(|m| m.slot == slot)
+        .map(|m| m.species.clone())
+        .unwrap_or_default();
+    ctx.emit(progress(
+        "Party",
+        format!(
+            "{} leads against {trainer} ({:.0} % alone, the lead {:.0} %)",
+            crate::party::display_name(&species),
+            p_best * 100.0,
+            p_lead * 100.0
+        ),
+    ))?;
+    ctx.drive(&mut LeadWith::new(slot, &species))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::party::Member;
+
+    fn data() -> Option<GameData> {
+        GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        )
+        .ok()
+    }
+
+    /// Fleet workers: CHARMANDER led against Brock; the MANKEY trained
+    /// for him should.
+    #[test]
+    fn the_member_who_beats_the_trainer_alone_leads() {
+        let Some(d) = data() else { return };
+        let charmander = Member::new(&d, "SPECIES_CHARMANDER", 14);
+        let mankey = Member {
+            slot: 1,
+            ..Member::new(&d, "SPECIES_MANKEY", 14)
+        };
+        let party = Party {
+            members: vec![charmander.clone(), mankey],
+        };
+        let (slot, p_best, p_lead) = fighter_for(&d, &party, "TRAINER_LEADER_BROCK").unwrap();
+        assert_eq!(slot, 1);
+        assert!(p_best > p_lead);
+        // A lone lead, or one already best, stays.
+        let alone = Party {
+            members: vec![charmander],
+        };
+        assert_eq!(fighter_for(&d, &alone, "TRAINER_LEADER_BROCK"), None);
+    }
+}
