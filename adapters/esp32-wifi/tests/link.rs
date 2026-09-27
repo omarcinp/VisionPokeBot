@@ -388,3 +388,36 @@ fn an_unanswered_status_is_asked_again_over_a_fresh_link() {
     let seen = server.finish();
     assert!(matches!(seen[0][0], ClientMessage::Status { .. }));
 }
+
+/// Switch goal run (2026-09-27): the link broke during the 240 s restart
+/// pause, and the next command failed at once, "unreachable for 309.5 s
+/// after 0 reconnect attempts", with the board answering all along. A
+/// link that broke while nothing was sent is tried before it counts as
+/// lost.
+#[test]
+fn a_link_lost_while_idle_is_reconnected_after_any_pause() {
+    let server = fake::start(|n, fake| {
+        fake.hello();
+        match n {
+            0 => {
+                fake.close();
+                true
+            }
+            _ => {
+                assert_eq!(fake.serve(1), SwitchCommand::Neutral);
+                assert_eq!(fake.serve(2), press(SwitchButton::A));
+                false
+            }
+        }
+    });
+    let mut config = config(server.addr());
+    config.unreachable_limit = Duration::from_millis(200);
+    let mut controller = Esp32WifiController::connect(config).unwrap();
+    // Idle for longer than the limit after the link broke.
+    std::thread::sleep(Duration::from_millis(500));
+    controller.execute(press(SwitchButton::A)).unwrap();
+    wait_idle(|| controller.is_idle().unwrap(), Duration::from_secs(2));
+    assert_eq!(controller.reconnects(), 1);
+    drop(controller);
+    server.finish();
+}

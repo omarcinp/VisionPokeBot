@@ -187,9 +187,14 @@ impl Esp32WifiController {
         let mut last = lost.to_string();
         let mut backoff = self.config.reconnect_backoff;
         let mut tries = 0u32;
+        // The limit runs from the first attempt: a link that broke while
+        // nothing was sent (the restart pause) is tried before it counts as
+        // lost (Switch goal run, 2026-09-27: "unreachable for 309.5 s after
+        // 0 reconnect attempts", the board answering all along).
+        let trying_since = Instant::now();
         loop {
             let down = down_since.elapsed();
-            if down >= limit {
+            if trying_since.elapsed() >= limit {
                 return Err(Error::Disconnected(format!(
                     "{peer}: unreachable for {:.1} s after {tries} reconnect attempts ({last})",
                     down.as_secs_f64()
@@ -213,7 +218,7 @@ impl Esp32WifiController {
                 }
                 Err(e) => last = e.to_string(),
             }
-            let left = limit.saturating_sub(down_since.elapsed());
+            let left = limit.saturating_sub(trying_since.elapsed());
             if left.is_zero() {
                 continue;
             }
