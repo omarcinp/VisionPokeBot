@@ -319,7 +319,10 @@ pub struct Conversation {
     /// How many events the running tool had learned when this
     /// conversation began (its own start in `StepContext::learned`).
     learned_at_start: Option<usize>,
-    /// A battle ended while it ran (a trainer's).
+    /// A trainer battle was won while it ran: "RED got ¥N for winning!",
+    /// which no wild battle prints (Switch: a wild SPEAROW caught on the
+    /// way to Cerulean's rival trigger was taken for the rival's battle,
+    /// the rival recorded beaten, and the next walk met him at 61/73 HP).
     pub battled: bool,
 }
 
@@ -578,13 +581,18 @@ impl Conversation {
     }
 }
 
+/// A trainer battle's win: its prize money (wild battles pay none).
+fn trainer_won(e: &GameEvent) -> bool {
+    matches!(e, GameEvent::MoneyChanged { delta, reason } if *delta > 0 && reason == "won a battle")
+}
+
 impl ToolStep for Conversation {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         let start = *self.learned_at_start.get_or_insert(ctx.learned.len());
         self.battled |= ctx
             .learned
             .get(start..)
-            .is_some_and(|l| l.iter().any(|e| matches!(e, GameEvent::BattleEnded)));
+            .is_some_and(|l| l.iter().any(trainer_won));
         let o = ctx.observation;
         let Some(d) = &o.dialogue else {
             if let Some(menu) = &o.menu {
@@ -1671,7 +1679,47 @@ mod tests {
         );
         c.pages = vec!["…".into()];
         assert_eq!(c.resolved(&index), None, "no battle yet");
-        c.battled = true;
+        // A wild battle on the way is no trainer's (Switch: a SPEAROW
+        // caught before Cerulean's rival trigger was taken for the rival):
+        // only a trainer's prize money is.
+        let o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: pokebot_state::ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        let state = pokebot_state::GameState::default();
+        let step = |c: &mut Conversation, learned: &[GameEvent]| {
+            let mut events = Vec::new();
+            c.next(&mut StepContext {
+                observation: &o,
+                state: &state,
+                events: &mut events,
+                quiet_frames: 0,
+                frame: None,
+                learned,
+            });
+        };
+        let wild = [
+            GameEvent::BattleStarted,
+            GameEvent::SpeciesCaught {
+                species: "SPECIES_SPEAROW".into(),
+            },
+            GameEvent::BattleEnded,
+        ];
+        step(&mut c, &[]);
+        step(&mut c, &wild);
+        assert!(!c.battled, "a wild battle");
+        assert_eq!(c.resolved(&index), None, "a wild battle is not Brock's");
+        let mut won = wild.to_vec();
+        won.push(GameEvent::MoneyChanged {
+            delta: 1386,
+            reason: "won a battle".into(),
+        });
+        step(&mut c, &won);
+        assert!(c.battled);
         assert_eq!(c.resolved(&index), Some((brock.into(), fights)));
     }
 
