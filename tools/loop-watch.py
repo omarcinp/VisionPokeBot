@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Loop watcher for an agent's monitor: follows the Switch log and the live
 fleet's worker logs, and prints one line per loop/stuck signal (per game,
-deduplicated for 30 min) and when a game's log goes quiet for 15 min.
+deduplicated for 30 min), when the same goal line repeats 20 times in 10 min
+(a loop no bound names), and when a game's log goes quiet for 15 min.
 Run it as a Monitor command: `python3 -u tools/loop-watch.py`."""
 import glob, os, re, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAT = re.compile(r'stuck:|no progress|going in circles|looping at|out of replans|no recourse|'
                  r'restart: cycle|device disconnected|panicked|intent_infeasible|failed twice')
 QUIET_S = 15 * 60
+REPEAT_N, REPEAT_S = 20, 10 * 60
+recent = {}    # (game, key) -> times a goal line was seen in the last REPEAT_S
 seen = {}      # (game, key) -> time
 pos = {}       # path -> offset
 grew = {}      # path -> last growth time
@@ -41,8 +44,14 @@ while True:
                 f.seek(pos[p]); chunk = f.read()
             pos[p] = size; grew[p] = now
             for line in chunk.splitlines():
+                key = re.sub(r'\d+', '#', line)[:160]
+                if 'Goal: ' in line:
+                    times = [t for t in recent.get((game, key), []) if now - t < REPEAT_S] + [now]
+                    recent[(game, key)] = times
+                    if len(times) >= REPEAT_N and now - seen.get((game, 'repeat', key), 0) > 1800:
+                        seen[(game, 'repeat', key)] = now
+                        print(f'[{game}] repeating ({len(times)}x in 10 min): {line[:280]}', flush=True)
                 if PAT.search(line):
-                    key = re.sub(r'\d+', '#', line)[:160]
                     if now - seen.get((game, key), 0) > 1800:
                         seen[(game, key)] = now
                         print(f'[{game}] {line[:300]}', flush=True)
