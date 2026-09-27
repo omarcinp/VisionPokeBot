@@ -167,6 +167,20 @@ fn read(c: &Condition) -> Read {
 
 type Conj = Vec<Lit>;
 
+/// The path depends on a YES/NO answer.
+fn needs_answer(p: &ScriptPath) -> bool {
+    p.when.iter().any(|c| matches!(c, Condition::Answer { .. }))
+}
+
+/// The path takes money or an item from the player.
+fn spends(p: &ScriptPath) -> bool {
+    p.does.iter().any(|e| match e {
+        Effect::Money { money } => money.as_int().is_some_and(|m| m < 0),
+        Effect::Take { .. } => true,
+        _ => false,
+    })
+}
+
 /// The path's conditions as literals; `None` when `avoid_choices` and the
 /// path needs a choice (a blocking path the player can stay off).
 fn conj_of(when: &[Condition], avoid_choices: bool) -> Option<Conj> {
@@ -619,14 +633,28 @@ fn trigger_gates(
         // walked past while it is armed, only onto (Oak stopping the
         // player at the edge of Pallet Town and taking them to his lab).
         let story_scene = own.is_some_and(|(var, _)| !is_local_var(var));
+        // A question whose way through costs money or an item (the
+        // museum's ¥50 ticket) is answered NO when no plan asked for it
+        // (the dialogue policy never spends unasked): the NO path's turn
+        // back blocks, and the paying path isn't a way through (fleet
+        // worker 5 walked onto Pewter Museum's ticket trigger for hours,
+        // answering NO and being turned back each time).
+        let paid = |p: &ScriptPath| needs_answer(p) && spends(p);
+        let pays_to_pass = script
+            .paths
+            .iter()
+            .any(|p| !(moves_player(p) && !warps(p) && !switches_off(p)) && paid(p));
         let (mut blocking, mut passing) = (Vec::new(), Vec::new());
         for p in &script.paths {
             let turned_back = moves_player(p) && !warps(p) && !switches_off(p);
             let carried_off = story_scene && warps(p);
             if turned_back || carried_off {
-                if let Some(c) = conj_of(&p.when, true) {
+                let avoid = !(pays_to_pass && needs_answer(p));
+                if let Some(c) = conj_of(&p.when, avoid) {
                     blocking.push(c);
                 }
+            } else if paid(p) {
+                // Not a way through unasked.
             } else if let Some(c) = conj_of(&p.when, false) {
                 passing.push(c);
             }

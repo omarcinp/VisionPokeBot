@@ -903,3 +903,30 @@ fn vermilion_gyms_beams_open_on_the_switches_flag() {
         )), "{tile:?}: {:?}", gate.ways);
     }
 }
+
+/// Fleet worker 5 walked onto Pewter Museum's ticket trigger for hours:
+/// the question's way in costs ¥50, the dialogue policy answers NO when no
+/// plan asked, and NO turns the player back. The trigger is a gate, open
+/// once the ticket is bought (its scene var moved on).
+#[test]
+fn a_ticket_trigger_is_a_gate_until_the_ticket_is_bought() {
+    use pokebot_world::predicate::{CmpOp, Predicate};
+    let Some(world) = world() else { return };
+    if world.events().is_none() {
+        return;
+    }
+    let gates = pokebot_world::gates::derive(&world);
+    let museum = &gates["PewterCity_Museum_1F"];
+    for x in 12..=14 {
+        let gate = &museum[&(x, 5)];
+        assert_eq!(
+            gate.ways,
+            vec![vec![Predicate::Var {
+                name: "VAR_MAP_SCENE_PEWTER_CITY_MUSEUM_1F".into(),
+                op: CmpOp::Gt,
+                value: 0,
+            }]],
+            "({x}, 5)"
+        );
+    }
+}

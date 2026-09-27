@@ -721,8 +721,16 @@ impl<'a> ToolContext<'a> {
         let mut waiting_since: Option<(u64, String)> = None;
         let mut nudged = false;
         let mut repeats = ActRepeats::default();
+        let mut interrupted: std::collections::HashMap<pokebot_state::PlayerPose, u32> =
+            std::collections::HashMap::new();
         let saved = self.expects;
-        let result = self.drive_inner(step, &mut waiting_since, &mut nudged, &mut repeats);
+        let result = self.drive_inner(
+            step,
+            &mut waiting_since,
+            &mut nudged,
+            &mut repeats,
+            &mut interrupted,
+        );
         self.expects = saved;
         result
     }
@@ -733,6 +741,7 @@ impl<'a> ToolContext<'a> {
         waiting_since: &mut Option<(u64, String)>,
         nudged: &mut bool,
         repeats: &mut ActRepeats,
+        interrupted: &mut std::collections::HashMap<pokebot_state::PlayerPose, u32>,
     ) -> Result<String, ToolError> {
         loop {
             let o = self.observe()?;
@@ -743,7 +752,20 @@ impl<'a> ToolContext<'a> {
                 continue;
             }
             self.expects = step.expects();
+            let before = self.pose();
             if self.interrupt(&o)? {
+                // A scene at one spot every time the step comes by (a
+                // ticket gate turning the walk back): the way is shut
+                // (fleet worker 5, Pewter Museum: hours of "Come again!").
+                if let Some(pose) = before {
+                    let n = interrupted.entry(pose.clone()).or_default();
+                    *n += 1;
+                    if *n >= MAX_SAME_INTERRUPTS {
+                        return Err(ToolError::Failed(format!(
+                            "interrupted at {pose} {n} times: something there turns the step back"
+                        )));
+                    }
+                }
                 // The interrupt ran another tool (a trainer battle can take
                 // minutes): the step's wait starts over from the screen it
                 // sees next (flash-2: Unstick failed "stuck waiting:
@@ -895,6 +917,10 @@ impl<'a> ToolContext<'a> {
         outcome
     }
 }
+/// Interruptions (a scene, a conversation) at the same tile within one
+/// step before it fails.
+pub const MAX_SAME_INTERRUPTS: u32 = 3;
+
 /// The same action sent this many times in a row on an unchanged screen
 /// makes no progress: the step fails and the plan goes on without it
 /// (fleet workers: "cursor to move 3 (BUBBLE)" pressed Down 300 000 times
