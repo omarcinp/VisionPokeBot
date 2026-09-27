@@ -70,6 +70,7 @@ pub fn audit_core(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
     if ctx.state().money.value.is_none() {
         return Err(ToolError::Failed("startup audit: money unreadable".into()));
     }
+    super::dialogue::reconcile_badges(ctx)?;
     ctx.scheduler.enabled = true;
     let party = ctx.state().party.value.clone().unwrap_or_default();
     ctx.emit(GameEvent::PartyAudited { members: party })?;

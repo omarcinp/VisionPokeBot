@@ -535,7 +535,17 @@ impl Conversation {
                     _ => true,
                 })
             });
-            if changes && !self.pages.is_empty() {
+            // A trainer battle fought and won is the path's evidence, its
+            // text read or not (Switch: Brock's defeat went unrecorded,
+            // FLAG_DEFEATED_BROCK and Pewter's scene var with it, and no
+            // plan could leave Pewter).
+            let fought = self.battled
+                && data.paths.get(planned).is_some_and(|p| {
+                    p.does
+                        .iter()
+                        .any(|e| matches!(e, pokebot_world::events::Effect::Battle { .. }))
+                });
+            if changes && !fought && !self.pages.is_empty() {
                 return None;
             }
             return Some((script, planned));
@@ -732,6 +742,53 @@ fn same_effects(events: &pokebot_world::events::Events, script: &str, a: usize, 
 
 /// Records that path `path` of `script` ran, with its effects, and then
 /// the scenes it sets off by itself ([`chained_scenes`]).
+/// Badges the state knows held whose giving script path was never
+/// recorded (its text went unread): of the paths giving the badge, the one
+/// with the fewest effects is recorded, so the leader's defeat and what it
+/// sets follow the badge (Switch: BOULDERBADGE on the Trainer Card, but
+/// FLAG_DEFEATED_BROCK and Pewter's scene var unset, and no plan could
+/// leave Pewter).
+pub fn reconcile_badges(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    let world = Arc::clone(&ctx.world);
+    let Some(events) = world.events() else {
+        return Ok(());
+    };
+    for n in 1..=8 {
+        let flag = format!("FLAG_BADGE{n:02}_GET");
+        if ctx.state().world.flags.get(&flag).and_then(|k| k.value) != Some(true) {
+            continue;
+        }
+        let wanted = flag.as_str();
+        let mut givers: Vec<(&str, usize, usize)> = events
+            .scripts
+            .iter()
+            .flat_map(|(name, s)| {
+                s.paths.iter().enumerate().filter_map(move |(i, p)| {
+                    p.does
+                        .iter()
+                        .any(|e| matches!(e, Effect::Set { set } if set == wanted))
+                        .then_some((name.as_str(), i, p.does.len()))
+                })
+            })
+            .collect();
+        let run = &ctx.state().world.paths_run;
+        if givers.is_empty()
+            || givers
+                .iter()
+                .any(|(s, p, _)| run.iter().any(|(rs, rp)| rs == s && rp == p))
+        {
+            continue;
+        }
+        givers.sort_by_key(|(s, p, len)| (*len, *s, *p));
+        let (script, path, _) = givers[0];
+        ctx.info(format!(
+            "{flag} is held but its path never ran: recording {script}[{path}]"
+        ));
+        record_path(ctx, script, path)?;
+    }
+    Ok(())
+}
+
 pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Result<(), ToolError> {
     let world = Arc::clone(&ctx.world);
     let Some(events) = world.events() else {
@@ -1593,6 +1650,29 @@ mod tests {
             conversation(nope).resolved(&index),
             Some((script.into(), nope))
         );
+        // A battle fought and won is the path's evidence (Switch: Brock's
+        // defeat, its text unread, went unrecorded).
+        let brock = "PewterCity_Gym_EventScript_Brock";
+        let b = events.script(brock).unwrap();
+        let fights = (0..b.paths.len())
+            .find(|&i| {
+                b.paths[i]
+                    .does
+                    .iter()
+                    .any(|e| matches!(e, pokebot_world::events::Effect::Battle { .. }))
+            })
+            .unwrap();
+        let mut c = Conversation::new(
+            Arc::clone(&world),
+            Arc::clone(&data),
+            Some(brock.into()),
+            Some(fights),
+            Vec::new(),
+        );
+        c.pages = vec!["…".into()];
+        assert_eq!(c.resolved(&index), None, "no battle yet");
+        c.battled = true;
+        assert_eq!(c.resolved(&index), Some((brock.into(), fights)));
     }
 
     /// Bill's script belongs to him and to the Clefairy he turned into:
