@@ -721,7 +721,34 @@ impl Runner for CliRunner<'_> {
         if cycle > 1 {
             self.runtime.info(format!("goal cycle {cycle}: {start:?}"));
         }
+        // What the screen showed wrong in the save (a path it records that
+        // the game contradicted) is corrected in the checkpoint before the
+        // next reload restores it.
+        let corrections = self.runtime.subscribe(|n| {
+            matches!(n, pokebot_runtime::Notice::Event { record, origin: pokebot_runtime::Origin::Perception }
+                if matches!(record.event,
+                    GameEvent::ScriptPathRetracted { .. }
+                        | GameEvent::VarObserved { .. }
+                        | GameEvent::FlagObserved { .. }))
+        });
         let result = self.play(start);
+        if self.args.save_game {
+            let seen: Vec<_> = corrections
+                .try_iter()
+                .filter_map(|n| match n {
+                    pokebot_runtime::Notice::Event { record, .. } => Some(record),
+                    pokebot_runtime::Notice::Change(_) => None,
+                })
+                .collect();
+            match checkpoint::correct(&self.state_path, &seen) {
+                Ok(true) => self.runtime.info(format!(
+                    "checkpoint corrected: the game contradicted a path it records ({})",
+                    self.state_path.display()
+                )),
+                Ok(false) => {}
+                Err(e) => self.runtime.error(format!("checkpoint correction: {e}")),
+            }
+        }
         let runtime = &self.runtime;
         match result {
             Ok(report) => {

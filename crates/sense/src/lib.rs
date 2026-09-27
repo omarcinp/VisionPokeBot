@@ -31,6 +31,7 @@ mod field;
 pub mod names;
 pub mod text;
 pub mod training;
+mod triggers;
 
 use std::sync::Arc;
 
@@ -128,6 +129,8 @@ pub struct Sensor {
     data: Arc<GameData>,
     /// Where warps lead, to tell lookalike maps apart (off without it).
     world: Option<Arc<pokebot_world::World>>,
+    /// A trainer battle begun on a battle trigger the belief has done.
+    trigger_battle: triggers::TriggerBattle,
     /// The lookalike maps last resolved or announced, so each ambiguous
     /// stretch is decided once.
     ambiguous: Option<Vec<String>>,
@@ -193,6 +196,7 @@ impl Sensor {
         Self {
             data,
             world: None,
+            trigger_battle: triggers::TriggerBattle::default(),
             ambiguous: None,
             page: Confirm::default(),
             hud: Confirm::default(),
@@ -246,6 +250,7 @@ impl Sensor {
         self.location(o, state, &mut events);
         self.text(o, state, &mut events);
         self.battle(o, state, &mut events);
+        events.extend(self.trigger_battle.observe(self.world.as_deref(), o, state));
         // Back on the field: a catch goes to the party or the PC.
         if o.player.is_some() {
             if let Some(catch) = self.catch.take() {

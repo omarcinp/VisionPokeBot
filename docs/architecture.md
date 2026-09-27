@@ -159,6 +159,8 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Battles: moves are chosen for the member the HUD names, not the lead.
   - Beliefs about passages: a script path that changes the world isn't recorded on the plan's word when the text shown wasn't recognised (`Conversation::resolved_in`).
     - A drawn barrier (a metatile gate) the belief holds open but a walk finds blocked retracts the single flag it was believed open by (`ToolContext::retract_open_gates`, on every failed step).
+    - A script's battle counts as fought only when a trainer's prize page was read ("RED got ¥N for winning!"); a wild battle on the way to a trigger is not the trigger's battle.
+    - A trainer battle that begins on a battle trigger the belief holds done (its var moved on) retracts the recorded path, observes the var armed and the trainer unbeaten (`sense::triggers`). Corrections of paths the save itself records are written into `state.json` at the end of the cycle (`checkpoint::correct`), so the reload after the faint they caused doesn't restore the wrong belief.
 
 ## Story (`agent::story`)
 

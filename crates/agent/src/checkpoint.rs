@@ -65,6 +65,64 @@ pub fn store(path: &Path, identity: &Identity, knowledge: &SavedKnowledge) -> Re
     write_atomic(path, &json)
 }
 
+/// Corrects the checkpoint at `path` with what the screen showed wrong in
+/// it: each `ScriptPathRetracted` of a path the checkpoint itself records
+/// (so recorded before the save), with the facts observed on the same
+/// frame (the var a trigger fired on, its trainer not beaten). The save is
+/// what every reload restores; a belief the game contradicted would be
+/// restored again after the faint it caused (Switch: Cerulean's rival held
+/// beaten, met unprepared on every cycle). `true` when it was rewritten.
+pub fn correct(path: &Path, events: &[pokebot_state::EventRecord]) -> Result<bool> {
+    use pokebot_state::{DefaultReducer, EventRecord, GameEvent, GameState, StateReducer};
+    let Some(Checkpoint {
+        identity: Some(identity),
+        knowledge,
+    }) = load(path)?
+    else {
+        return Ok(false);
+    };
+    let recorded = |script: &str, path: usize| {
+        knowledge
+            .world
+            .paths_run
+            .iter()
+            .any(|(s, p)| s == script && *p == path)
+    };
+    let frames: Vec<u64> = events
+        .iter()
+        .filter(|r| {
+            matches!(&r.event, GameEvent::ScriptPathRetracted { script, path, .. }
+                if recorded(script, *path))
+        })
+        .map(|r| r.frame_id)
+        .collect();
+    let apply: Vec<EventRecord> = events
+        .iter()
+        .filter(|r| frames.contains(&r.frame_id))
+        .filter(|r| match &r.event {
+            GameEvent::ScriptPathRetracted { script, path, .. } => recorded(script, *path),
+            GameEvent::VarObserved { .. } | GameEvent::FlagObserved { .. } => true,
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    if apply.is_empty() {
+        return Ok(false);
+    }
+    let restored = DefaultReducer.reduce(
+        &GameState::default(),
+        &[EventRecord {
+            frame_id: 0,
+            event: GameEvent::CheckpointRestored {
+                knowledge: Box::new(knowledge),
+            },
+        }],
+    );
+    let corrected = DefaultReducer.reduce(&restored, &apply);
+    store(path, &identity, &corrected.saved_knowledge())?;
+    Ok(true)
+}
+
 pub fn load(path: &Path) -> Result<Option<Checkpoint>> {
     if !path.exists() {
         return Ok(None);
@@ -358,6 +416,84 @@ mod tests {
             Knowledge::observed(true, 7)
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Switch: a wild battle was taken for Cerulean's rival battle and
+    /// saved. His trigger firing (the sensor's retraction, the var armed)
+    /// corrects the checkpoint; a path the save doesn't record, or facts of
+    /// other frames, don't touch it.
+    #[test]
+    fn a_contradicted_path_is_corrected_in_the_checkpoint() {
+        use pokebot_state::{EventRecord, GameEvent};
+        let dir = temp_dir("correct");
+        let path = dir.join("state.json");
+        let script = "CeruleanCity_EventScript_RivalTriggerLeft";
+        let var = "VAR_MAP_SCENE_CERULEAN_CITY_RIVAL";
+        let rival = "TRAINER_RIVAL_CERULEAN_CHARMANDER";
+        let mut k = SavedKnowledge::default();
+        k.world.record_path(script, 4);
+        k.world
+            .vars
+            .insert(var.into(), Knowledge::tracked(1, Some(5)));
+        k.world
+            .flags
+            .insert(rival.into(), Knowledge::tracked(true, Some(5)));
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        let at = |frame_id, event| EventRecord { frame_id, event };
+        let unrelated = at(
+            9,
+            GameEvent::FlagObserved {
+                flag: "FLAG_OTHER".into(),
+                value: true,
+            },
+        );
+        let not_saved = at(
+            10,
+            GameEvent::ScriptPathRetracted {
+                script: "Other_EventScript_X".into(),
+                path: 0,
+                flags: Vec::new(),
+                vars: Vec::new(),
+            },
+        );
+        assert!(!correct(&path, &[unrelated.clone(), not_saved.clone()]).unwrap());
+        let fired = [
+            unrelated,
+            not_saved,
+            at(
+                20,
+                GameEvent::ScriptPathRetracted {
+                    script: script.into(),
+                    path: 4,
+                    flags: vec![rival.into()],
+                    vars: vec![var.into()],
+                },
+            ),
+            at(
+                20,
+                GameEvent::FlagObserved {
+                    flag: rival.into(),
+                    value: false,
+                },
+            ),
+            at(
+                20,
+                GameEvent::VarObserved {
+                    var: var.into(),
+                    value: 0,
+                },
+            ),
+        ];
+        assert!(correct(&path, &fired).unwrap());
+        let c = load(&path).unwrap().unwrap();
+        assert_eq!(c.identity, Some(id));
+        assert!(c.knowledge.world.paths_run.is_empty());
+        assert_eq!(c.knowledge.world.vars[var].value, Some(0));
+        assert_eq!(c.knowledge.world.flags[rival].value, Some(false));
+        assert!(!c.knowledge.world.flags.contains_key("FLAG_OTHER"));
+        // Corrected once: the path is gone, nothing more to do.
+        assert!(!correct(&path, &fired).unwrap());
     }
 
     #[test]
