@@ -896,7 +896,10 @@ fn game_clear_is_derived_without_methods() {
         ..PlanOptions::default()
     };
     let planner = f.planner(options);
-    let (knowledge, pose) = fresh_game();
+    let (mut knowledge, pose) = fresh_game();
+    // The game starts with ₽3000: Bulbasaur can't learn Fly, so a Pidgey
+    // is caught for it, with balls bought (earning money isn't planned).
+    knowledge.money = pokebot_state::Knowledge::observed(3000, 1);
     let goal = parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap();
     let started = Instant::now();
     let plan = match planner.plan(&goal, &knowledge, pose.clone()) {
@@ -1126,4 +1129,90 @@ fn bill_is_asked_for_help_before_his_pc_runs() {
     assert!(scripts[separator + 1..]
         .iter()
         .any(|&(s, p)| s == bill && sets(s, p, "FLAG_GOT_SS_TICKET")));
+}
+
+/// The Route 4 checkpoint with HM01 in the TM CASE, two badges and the
+/// party replaced by `party` (species, level), each a copy of the lead.
+fn with_hm01(party: &[(&str, u8)]) -> (SavedKnowledge, Option<PlayerPose>) {
+    use pokebot_state::Knowledge;
+    let (mut knowledge, pose) = route4();
+    let lead = knowledge.party.value.as_ref().unwrap()[0].clone();
+    let members = party
+        .iter()
+        .map(|(species, level)| {
+            let mut m = lead.clone();
+            m.species = Knowledge::observed((*species).to_owned(), 1);
+            m.level = Knowledge::observed(*level, 1);
+            m
+        })
+        .collect();
+    knowledge.party = Knowledge::observed(members, 1);
+    knowledge.bag.pockets.insert(
+        Pocket::TmCase,
+        Knowledge::observed(vec![("ITEM_HM01".to_owned(), 1)], 1),
+    );
+    for flag in ["FLAG_BADGE01_GET", "FLAG_BADGE02_GET"] {
+        knowledge
+            .world
+            .flags
+            .insert(flag.to_owned(), Knowledge::observed(true, 1));
+    }
+    (knowledge, pose)
+}
+
+/// Blastoise can't learn Cut ("NOT ABLE"): a species that can is caught
+/// first and taught, never Blastoise.
+#[test]
+fn cut_for_a_party_that_cannot_learn_it_is_caught_first() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, pose) = with_hm01(&[("SPECIES_BLASTOISE", 40)]);
+    let goal = GoalPredicate::party_has_move("MOVE_CUT");
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 20);
+    let teach = plan
+        .intents
+        .iter()
+        .position(|s| matches!(&s.intent, Intent::Teach { hm, .. } if hm == "ITEM_HM01"))
+        .expect("Cut is taught");
+    let Intent::Teach { mon, .. } = &plan.intents[teach].intent else {
+        unreachable!()
+    };
+    assert!(f.data.can_learn(mon, "ITEM_HM01"), "taught to {mon}");
+    let caught = plan.intents[..teach]
+        .iter()
+        .any(|s| matches!(&s.intent, Intent::Catch { species, .. } if species == mon));
+    assert!(caught, "{mon} is caught before it is taught");
+    assert!(!plan
+        .intents
+        .iter()
+        .any(|s| matches!(&s.intent, Intent::Teach { mon, .. } if mon == "SPECIES_BLASTOISE")));
+}
+
+/// With a member that can learn Cut, it is taught to that one directly.
+#[test]
+fn cut_goes_to_the_member_that_can_learn_it() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, pose) = with_hm01(&[("SPECIES_BLASTOISE", 40), ("SPECIES_RATTATA", 6)]);
+    let goal = GoalPredicate::party_has_move("MOVE_CUT");
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 20);
+    let teaches: Vec<&Intent> = plan
+        .intents
+        .iter()
+        .map(|s| &s.intent)
+        .filter(|i| matches!(i, Intent::Teach { .. }))
+        .collect();
+    assert_eq!(
+        teaches,
+        [&Intent::Teach {
+            hm: "ITEM_HM01".into(),
+            mon: "SPECIES_RATTATA".into()
+        }]
+    );
+    assert!(!plan
+        .intents
+        .iter()
+        .any(|s| matches!(s.intent, Intent::Catch { .. })));
 }

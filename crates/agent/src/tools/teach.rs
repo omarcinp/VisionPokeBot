@@ -216,6 +216,39 @@ pub fn member_slot(state: &GameState, member: &str) -> Option<u8> {
         .and_then(|i| u8::try_from(i).ok())
 }
 
+/// The slot to teach `item` to: the one `member` names when its species
+/// can learn it, else the first member that can (the game answers "NOT
+/// ABLE" otherwise). An error when none can. A member whose species isn't
+/// known, or game data without TM/HM compatibility, is taken as named.
+pub fn teachable_slot(
+    data: &GameData,
+    state: &GameState,
+    item: &str,
+    member: &str,
+) -> Result<u8, String> {
+    let party = state.party.value.as_deref().unwrap_or(&[]);
+    let species = |slot: usize| party.get(slot).and_then(|m| m.species.value.as_deref());
+    let named = member_slot(state, member);
+    if !data.tmhm_known() {
+        return named.ok_or_else(|| format!("no party member matches {member}"));
+    }
+    if let Some(slot) = named {
+        match species(usize::from(slot)) {
+            Some(s) if !data.can_learn(s, item) => {}
+            _ => return Ok(slot),
+        }
+    }
+    (0..party.len())
+        .find(|&i| species(i).is_some_and(|s| data.can_learn(s, item)))
+        .and_then(|i| u8::try_from(i).ok())
+        .ok_or_else(|| {
+            let names: Vec<String> = (0..party.len())
+                .filter_map(|i| species(i).map(display_name))
+                .collect();
+            format!("no party member can learn {item} ({})", names.join(", "))
+        })
+}
+
 /// What the teaching came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Taught {
@@ -675,8 +708,12 @@ pub struct TeachTool;
 
 /// Teaches `item` to the party member `member` names.
 pub fn teach(ctx: &mut ToolContext<'_>, item: &str, member: &str) -> Result<Taught, ToolError> {
-    let slot = member_slot(ctx.state(), member)
-        .ok_or_else(|| ToolError::Failed(format!("no party member matches {member}")))?;
+    let slot = teachable_slot(&ctx.data, ctx.state(), item, member).map_err(ToolError::Failed)?;
+    if member_slot(ctx.state(), member) != Some(slot) {
+        ctx.info(format!(
+            "teach: {member} can't learn {item}; slot {slot} can"
+        ));
+    }
     let mut step = TeachStep::new(Arc::clone(&ctx.data), item, slot, ctx.state())?;
     ctx.info(format!(
         "teach: {item} ({}) to slot {slot} ({}), moves {:?}; would forget {:?}",
@@ -861,6 +898,29 @@ mod tests {
         assert_eq!(member_slot(&s, "lead"), Some(0));
         assert_eq!(member_slot(&s, "slot:3"), Some(3));
         assert_eq!(member_slot(&s, "SPECIES_ZUBAT"), None);
+    }
+
+    #[test]
+    fn an_hm_goes_to_a_member_that_can_learn_it() {
+        let Some(data) = data() else { return };
+        let party = |species: &[&str]| GameState {
+            party: Knowledge::observed(species.iter().map(|s| mon(s, &[])).collect(), 1),
+            ..GameState::default()
+        };
+        let s = party(&["SPECIES_BLASTOISE", "SPECIES_RATTATA"]);
+        assert_eq!(
+            teachable_slot(&data, &s, "ITEM_HM01", "SPECIES_RATTATA"),
+            Ok(1)
+        );
+        // Blastoise is NOT ABLE: Rattata takes it instead.
+        assert_eq!(
+            teachable_slot(&data, &s, "ITEM_HM01", "SPECIES_BLASTOISE"),
+            Ok(1)
+        );
+        assert_eq!(teachable_slot(&data, &s, "ITEM_HM03", "lead"), Ok(0));
+        let alone = party(&["SPECIES_BLASTOISE"]);
+        let err = teachable_slot(&data, &alone, "ITEM_HM01", "lead").unwrap_err();
+        assert!(err.contains("no party member can learn ITEM_HM01"), "{err}");
     }
 
     fn bare(frame: u64) -> Observation {

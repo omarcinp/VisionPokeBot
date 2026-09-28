@@ -98,6 +98,13 @@ const NEAREST_SHOPS: usize = 3;
 /// Encounter areas priced for new Pokédex entries: the nearest by maps
 /// crossed among those with a species still uncaught.
 const NEAREST_AREAS: usize = 12;
+/// Charged per level of the member an HM is taught to: the weaker members
+/// take it, and the main fighter keeps its four moves.
+const TEACH_LEVEL_S: f64 = 0.2;
+/// Species offered to catch when no party member can learn an HM.
+const TEACH_CATCH_OPTIONS: usize = 3;
+/// Party members at most (a catch past it goes to the PC).
+const PARTY_SIZE: usize = 6;
 /// A species the walk is expected to catch with at least this probability
 /// is not hunted explicitly (§4.6.2).
 const PASSIVE_LIKELY: f64 = 0.5;
@@ -3726,16 +3733,7 @@ impl<'p, 'a> Session<'p, 'a> {
             GoalPredicate::World(Predicate::PartyHasMove { mv }) => {
                 let mut v = self.script_candidates(p, belief, &ctx);
                 if let Some(hm) = hm_of_move(mv) {
-                    let mon = belief
-                        .party_members()
-                        .and_then(|m| m.first().map(|m| m.species.clone()))
-                        .unwrap_or_else(|| "lead".to_string());
-                    let intent = Intent::Teach {
-                        hm: hm.to_string(),
-                        mon,
-                    };
-                    let cost = intent.cost_s(&ctx);
-                    v.push(Candidate::single(intent, &ctx, cost));
+                    v.extend(self.teach_candidates(hm, p, belief, &ctx));
                 }
                 v
             }
@@ -4416,6 +4414,110 @@ impl<'p, 'a> Session<'p, 'a> {
         };
         c.cost += travel;
         Some((c, travel))
+    }
+
+    /// Teaching `hm`: one `Teach` per party species that can learn it
+    /// (the weaker ones first, so the main fighter keeps its moves), never
+    /// to one the game answers "NOT ABLE" for. When none can, the cheapest
+    /// wild catches of species that can, each followed by the `Teach` to
+    /// the newcomer. Without the party (or TM/HM data), or with no such
+    /// catch in reach, the lead.
+    fn teach_candidates(
+        &self,
+        hm: &str,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        ctx: &PlanContext<'_>,
+    ) -> Vec<Candidate> {
+        let data = self.planner.data;
+        let teach = |mon: &str| {
+            let intent = Intent::Teach {
+                hm: hm.to_string(),
+                mon: mon.to_string(),
+            };
+            let cost = intent.cost_s(ctx);
+            Candidate::single(intent, ctx, cost)
+        };
+        let party = belief.party_members().unwrap_or_default();
+        if party.is_empty() || !data.tmhm_known() {
+            let mon = party.first().map_or("lead", |m| m.species.as_str());
+            return vec![teach(mon)];
+        }
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for m in &party {
+            if !data.can_learn(&m.species, hm) || !seen.insert(m.species.as_str()) {
+                continue;
+            }
+            let mut c = teach(&m.species);
+            c.cost += TEACH_LEVEL_S * f64::from(m.level);
+            out.push(c);
+        }
+        if !out.is_empty() {
+            return out;
+        }
+        let full = belief
+            .knowledge
+            .party
+            .value
+            .as_ref()
+            .is_some_and(|p| p.len() >= PARTY_SIZE);
+        if full {
+            return vec![self.unsupported(
+                format!("no party member can learn {hm} and the party is full"),
+                p,
+                ctx,
+            )];
+        }
+        // (cost, species, catch then teach)
+        let mut options: Vec<(OrdF64, String, Candidate)> = Vec::new();
+        let Some(obtain) = self.planner.obtain else {
+            return vec![self.unsupported("no obtain.json".into(), p, ctx)];
+        };
+        // Catches in grass only: they are priced with the open walk there
+        // (a gift or trade's walk is a precondition, not in its cost, and
+        // water needs Surf).
+        for (species, entry) in &obtain.species {
+            if !data.can_learn(species, hm) || !entry.methods.iter().any(|m| m.method == "wild") {
+                continue;
+            }
+            let caught = GoalPredicate::caught(species);
+            let best = self
+                .catch_candidates(species, &caught, belief, ctx)
+                .into_iter()
+                .filter(|c| {
+                    c.cost.is_finite()
+                        && c.steps
+                            .iter()
+                            .any(|s| matches!(&s.planned.intent, Intent::Catch { slot, .. } if slot == "land"))
+                })
+                .min_by_key(|c| c.sort_key());
+            let Some(mut c) = best else {
+                continue;
+            };
+            let then = teach(species);
+            c.steps.extend(then.steps);
+            for pre in then.preconditions {
+                if !c.preconditions.contains(&pre) {
+                    c.preconditions.push(pre);
+                }
+            }
+            c.cost += then.cost;
+            options.push((OrdF64(c.cost), species.clone(), c));
+        }
+        options.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        options.truncate(TEACH_CATCH_OPTIONS);
+        if options.is_empty() {
+            // Far ahead (Surf from Pallet): the party will have changed by
+            // then, and the replan there finds the catch once its grass is
+            // in reach. The Teach tool never picks a member that can't.
+            let mut c = teach("lead");
+            c.steps[0].planned.note = Some(format!(
+                "no member can learn {hm} yet and no wild one that can is in reach"
+            ));
+            return vec![c];
+        }
+        options.into_iter().map(|(_, _, c)| c).collect()
     }
 
     fn catch_candidates(

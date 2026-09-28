@@ -2,10 +2,10 @@
 """Extract FireRed game mechanics data from the pret/pokefirered decompilation.
 
 Offline tool. Writes data/world/gamedata.json (local, gitignored) with:
-species (stats, types, catch rate, exp yield, growth rate, learnset,
-evolutions), moves, the type chart, trainers and their parties, which map
-objects are trainers, wild encounter tables (FireRed versions), marts and
-item prices.
+species (stats, types, catch rate, exp yield, growth rate, learnset, TMs
+and HMs, evolutions), moves, the type chart, trainers and their parties,
+which map objects are trainers, wild encounter tables (FireRed versions),
+marts and item prices.
 """
 
 import argparse
@@ -55,6 +55,7 @@ def species_data(src):
             "growth_rate": f.get("growthRate", "GROWTH_MEDIUM_FAST"),
             "abilities": listing(f.get("abilities", "{}")),
             "learnset": [],
+            "tmhm": [],
             "evolutions": [],
         }
     # Level-up learnsets.
@@ -65,6 +66,11 @@ def species_data(src):
     for sp, table in re.findall(r"\[(SPECIES_\w+)\]\s*=\s*(\w+)", pointers):
         if sp in species and table in tables:
             species[sp]["learnset"] = tables[table]
+    # TMs and HMs each species can learn (`TMHM(HM01_CUT)` → ITEM_HM01).
+    tmhm = (src / "data/pokemon/tmhm_learnsets.h").read_text()
+    for m in re.finditer(r"\[(SPECIES_\w+)\]\s*=\s*TMHM_LEARNSET\((.*?)\),\s*\n", tmhm, re.S):
+        if m.group(1) in species:
+            species[m.group(1)]["tmhm"] = ["ITEM_" + t for t in re.findall(r"TMHM\(((?:TM|HM)\d\d)_\w+\)", m.group(2))]
     # Evolutions.
     evo = (src / "data/pokemon/evolution.h").read_text()
     for m in re.finditer(r"\[(SPECIES_\w+)\]\s*=\s*\{(.*?)\},\s*\n", evo, re.S):

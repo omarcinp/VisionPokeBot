@@ -37,6 +37,9 @@ pub struct Species {
     pub abilities: Vec<String>,
     /// (level, move) in learning order.
     pub learnset: Vec<(u8, String)>,
+    /// TMs and HMs it can learn, as items (`ITEM_TM06`, `ITEM_HM01`).
+    #[serde(default)]
+    pub tmhm: Vec<String>,
     /// (method, parameter, target species).
     pub evolutions: Vec<(String, serde_json::Value, String)>,
     #[serde(default)]
@@ -184,6 +187,19 @@ impl GameData {
         unique_named(self.items.iter().map(|(k, i)| (k, i.name.as_str())), read)
     }
 
+    /// Whether `species` can learn the TM or HM `item` (`ITEM_HM01`); the
+    /// game answers "NOT ABLE" otherwise.
+    pub fn can_learn(&self, species: &str, item: &str) -> bool {
+        self.species(species)
+            .is_some_and(|s| s.tmhm.iter().any(|t| t == item))
+    }
+
+    /// Whether the TM/HM compatibility was extracted (an older
+    /// `gamedata.json` has none).
+    pub fn tmhm_known(&self) -> bool {
+        self.species.values().any(|s| !s.tmhm.is_empty())
+    }
+
     /// Whether a wild `foe` may keep `us` from switching out and running
     /// (`IsRunningFromBattleImpossible`): SHADOW TAG always, ARENA TRAP
     /// unless `us` flies or levitates, MAGNET PULL a Steel type. A species
@@ -307,6 +323,17 @@ mod lookup_tests {
         assert_eq!(d.move_named("POISONPOWDER"), Some("MOVE_POISON_POWDER"));
         // Too many wildcards: several moves fit, so nothing is resolved.
         assert_eq!(d.move_named("?????"), None);
+    }
+
+    #[test]
+    fn tm_and_hm_compatibility_follows_the_decomp() {
+        let Some(d) = data() else { return };
+        assert!(!d.can_learn("SPECIES_BLASTOISE", "ITEM_HM01"));
+        assert!(d.can_learn("SPECIES_BLASTOISE", "ITEM_HM03"));
+        assert!(d.can_learn("SPECIES_DIGLETT", "ITEM_HM01"));
+        assert!(d.can_learn("SPECIES_DIGLETT", "ITEM_TM28"));
+        assert!(!d.can_learn("SPECIES_MAGIKARP", "ITEM_HM01"));
+        assert!(!d.can_learn("SPECIES_NOT_A_SPECIES", "ITEM_HM01"));
     }
 
     #[test]
