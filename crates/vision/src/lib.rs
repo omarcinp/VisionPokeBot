@@ -98,6 +98,10 @@ const DARK_REACH: i32 = 8;
 /// takes a good share of it (fleet worker 1, a trainer below the player in
 /// Rock Tunnel: the whole disc scored about 600 on the true tile).
 const DARK_ACCEPT: u32 = 700;
+/// A hint (a pose from outside, maybe stale: a save's) starts the
+/// reckoning only matching this well: the disc matches 700–875 at many
+/// places of Rock Tunnel.
+const DARK_HINT_ACCEPT: u32 = 850;
 /// Frames without a dark view (a fade, a battle, a menu) after which the
 /// player may have taken a warp next to them.
 const DARK_GAP: u64 = 6;
@@ -594,7 +598,14 @@ impl FireRedPerception {
             disc.extend(outside_disc(lit));
             if self.reckoned.is_none() {
                 if let Some(hint) = self.hint.clone() {
-                    self.seed_reckoning(observation.frame_id, image, &localizer, &disc, &hint);
+                    self.seed_reckoning(
+                        observation.frame_id,
+                        image,
+                        &localizer,
+                        &disc,
+                        &hint,
+                        DARK_HINT_ACCEPT,
+                    );
                 }
             }
             if self.reckoned.is_some() {
@@ -667,9 +678,14 @@ impl FireRedPerception {
             match dark {
                 Some(_) => {
                     let pose = found.pose.clone();
-                    if let Some(followed) =
-                        self.seed_reckoning(observation.frame_id, image, &localizer, &disc, &pose)
-                    {
+                    if let Some(followed) = self.seed_reckoning(
+                        observation.frame_id,
+                        image,
+                        &localizer,
+                        &disc,
+                        &pose,
+                        DARK_ACCEPT,
+                    ) {
                         self.hint = Some(followed.pose.clone());
                         observation.player = Some(followed);
                         return;
@@ -767,13 +783,14 @@ impl FireRedPerception {
         localizer: &Localizer<'_>,
         exclude: &[Region],
         pose: &PlayerPose,
+        accept: u32,
     ) -> Option<pokebot_state::PoseObservation> {
         let world = self.world.clone()?;
         let map = world.map(&pose.map).filter(|m| m.requires_flash)?;
         let start = (pose.x * BLOCK, pose.y * BLOCK);
         let f = localizer
             .follow(image, map, start, start, BLOCK - 1, exclude)
-            .filter(|f| f.score >= DARK_ACCEPT)?;
+            .filter(|f| f.score >= accept)?;
         let tile = f.tile((pose.x, pose.y));
         self.reckoned = Some(Reckoned {
             map: pose.map.clone(),
