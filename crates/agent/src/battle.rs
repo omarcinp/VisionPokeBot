@@ -51,6 +51,10 @@ pub struct BattleMemory {
     /// Our battler's stat stages (HP, Atk, Def, Spe, SpA, SpD; −6..=6) as
     /// the battle text tells them ("MANKEY's DEFENSE fell!").
     pub our_stages: [i8; 6],
+    /// The trainer's Pokémon out is asleep ("Foe X fell asleep!" until
+    /// "Foe X woke up!"), and the sleep moves chosen against it.
+    pub foe_asleep: bool,
+    pub sleep_tries: u8,
 }
 
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
@@ -175,6 +179,20 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
         memory.trainer = false;
     } else if page.contains("sent out") || page.contains("would like to battle") {
         memory.trainer = true;
+    }
+    if page.contains("sent out") {
+        memory.foe_asleep = false;
+        memory.sleep_tries = 0;
+    }
+    if let Some(rest) = page.strip_prefix("Foe ") {
+        if ["fell asleep!", "is fast asleep", "is already asleep"]
+            .iter()
+            .any(|p| rest.contains(p))
+        {
+            memory.foe_asleep = true;
+        } else if rest.contains("woke up!") {
+            memory.foe_asleep = false;
+        }
     }
     let Some(lead) = party.lead() else { return };
     if let Some(disabled) = disable_text(page, &lead.display_name(), data) {
@@ -378,7 +396,12 @@ pub fn decide(
             45,
         )),
         BattleMenu::Moves { column, row } => {
-            let Some((slot, name)) = choose_move(data, party, opponent.as_ref(), memory, policy)
+            let opener = sleep_opener(data, party, opponent.as_ref(), battle, memory);
+            if opener.is_some() {
+                memory.sleep_tries += 1;
+            }
+            let Some((slot, name)) = opener
+                .or_else(|| choose_move(data, party, opponent.as_ref(), memory, policy))
                 .or_else(|| fallback_move(data, party, memory))
             else {
                 return Some(Decision::Fail("no move has PP left".into()));
@@ -395,6 +418,75 @@ pub fn decide(
             )
         }
     })
+}
+
+/// Sleep attempts per foe before attacking regardless.
+const MAX_SLEEP_TRIES: u8 = 2;
+/// A fight attacking alone wins with at least this: no opener needed.
+const SURE_WIN: f64 = 0.99;
+/// The turn spent putting the foe to sleep must be affordable: our risk of
+/// fainting to its next attack stays under this.
+const OPENER_RISK: f64 = 0.05;
+
+/// In a trainer's battle (it must be won), the sleep move to open with,
+/// as a player would: when attacking alone isn't a sure win from here,
+/// our best move doesn't knock the foe out at once, and one of its
+/// attacks can't faint us. A sleeping foe loses turns while it is beaten
+/// (Switch: IVYSAUR, SAND-ATTACKed by the rival's PIDGEOTTO, missed
+/// three TACKLEs against his CHARMANDER and fainted, SLEEP POWDER unused).
+pub fn sleep_opener(
+    data: &GameData,
+    party: &Party,
+    opponent: Option<&Combatant>,
+    battle: &pokebot_state::BattleObservation,
+    memory: &BattleMemory,
+) -> Option<(u8, String)> {
+    if !memory.trainer || memory.foe_asleep || memory.sleep_tries >= MAX_SLEEP_TRIES {
+        return None;
+    }
+    let lead = party.lead()?;
+    let foe = opponent?;
+    let (slot, sleep) = lead.moves.iter().enumerate().find(|(_, m)| {
+        data.move_(m)
+            .is_some_and(|mv| mv.effect.as_deref() == Some("EFFECT_SLEEP"))
+            && lead.pp_left(data, m) > 0
+            && memory.disabled.as_ref() != Some(*m)
+    })?;
+    let hp = battle
+        .player_hp_numbers
+        .filter(|h| plausible_hp_for(*h, lead.level, Some(&lead.species)))
+        .or(lead.hp)?;
+    let mut us = Combatant::new(data, &lead.species, lead.level, lead.moves.clone(), 10)?;
+    if let Some(stats) = lead.stats(data) {
+        us.stats = stats;
+    }
+    us.hp = u32::from(hp.0);
+    let mut them = foe.clone();
+    them.hp = (foe.hp * u32::from(battle.opponent_hp.unwrap_or(1000)))
+        .div_ceil(1000)
+        .max(1);
+    if pokebot_planner::evaluate::matchup(data, &us, &them).p_win >= SURE_WIN {
+        return None;
+    }
+    if pokebot_planner::evaluate::faint_probability(data, &us, &them, 1) >= SAFE_KO {
+        return None;
+    }
+    let as_foe = catch::Foe {
+        species: foe.species.clone(),
+        level: foe.level,
+        hp_per_mille: battle.opponent_hp.unwrap_or(1000),
+        status: catch::FoeStatus::None,
+        shiny: false,
+        caught: None,
+    };
+    let risk = catch::risk_staged(
+        data,
+        &catch::Lead { member: lead, hp },
+        &as_foe,
+        1,
+        memory.our_stages,
+    );
+    (risk < OPENER_RISK).then(|| (slot as u8, sleep.clone()))
 }
 
 /// Probability of a KO in one hit to count as sure (a 95 %-accurate move
@@ -708,6 +800,94 @@ mod tests {
             Some(Decision::Fail(r)) => assert_eq!(r, "no move has PP left"),
             _ => panic!("unexpected decision"),
         }
+    }
+
+    /// Switch, Cerulean: the rival's CHARMANDER against IVYSAUR Lv28 at
+    /// 52/75 (after PIDGEOTTO) — attacking alone lost; SLEEP POWDER first.
+    /// Not against a foe beaten outright, a sleeping one, nor in the wild.
+    #[test]
+    fn a_risky_trainer_fight_opens_with_sleep() {
+        let Some(data) = data() else { return };
+        let mut ivysaur = Member::new(&data, "SPECIES_IVYSAUR", 28);
+        ivysaur.moves = [
+            "MOVE_TACKLE",
+            "MOVE_SLEEP_POWDER",
+            "MOVE_RAZOR_LEAF",
+            "MOVE_VINE_WHIP",
+        ]
+        .map(String::from)
+        .to_vec();
+        ivysaur.hp = Some((52, 75));
+        let party = Party {
+            members: vec![ivysaur],
+        };
+        let foe = |species: &str, level| {
+            Combatant::new(
+                &data,
+                species,
+                level,
+                data.default_moves(species, level),
+                15,
+            )
+            .unwrap()
+        };
+        let battle = pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
+            player_name: Some("IVYSAUR".into()),
+            player_level: Some(28),
+            player_hp_numbers: Some((52, 75)),
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: None,
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: None,
+        };
+        let mut memory = BattleMemory::default();
+        observe_page(
+            &mut memory,
+            "RIVAL GREEN sent out CHARMANDER!",
+            &party,
+            &data,
+        );
+        assert!(memory.trainer);
+        let charmander = foe("SPECIES_CHARMANDER", 18);
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&charmander), &battle, &memory),
+            Some((1, "MOVE_SLEEP_POWDER".into()))
+        );
+        // Asleep: attack it.
+        observe_page(&mut memory, "Foe CHARMANDER fell asleep!", &party, &data);
+        assert!(memory.foe_asleep);
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&charmander), &battle, &memory),
+            None
+        );
+        observe_page(&mut memory, "Foe CHARMANDER woke up!", &party, &data);
+        assert!(!memory.foe_asleep);
+        // Tried twice on this foe: attack regardless; the next foe resets.
+        memory.sleep_tries = MAX_SLEEP_TRIES;
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&charmander), &battle, &memory),
+            None
+        );
+        observe_page(&mut memory, "RIVAL GREEN sent out ABRA!", &party, &data);
+        assert_eq!(memory.sleep_tries, 0);
+        // A foe beaten outright needs no opener.
+        let rattata = foe("SPECIES_RATTATA", 15);
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&rattata), &battle, &memory),
+            None
+        );
+        // In the wild the catch policy owns sleep.
+        let wild = BattleMemory::default();
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&charmander), &battle, &wild),
+            None
+        );
     }
 
     /// Fleet worker 4 (Route 1): two TAIL WHIPs halved MANKEY's Defense and
