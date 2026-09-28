@@ -211,6 +211,21 @@ pub struct OutsideRecovery {
     presses: u32,
 }
 
+/// Frames unlocated on the field before the player walks about, and
+/// between two of its steps (see [`Executor::wander`]).
+const WANDER_AFTER: u64 = 300;
+const WANDER_EVERY: u64 = 40;
+
+/// The field, with nothing over it that a direction would act on (a
+/// dialogue, a menu, a battle).
+fn on_the_field(o: &Observation) -> bool {
+    o.screen.value == pokebot_state::ScreenState::Unknown
+        && o.dialogue.is_none()
+        && o.menu.is_none()
+        && o.battle.is_none()
+        && o.party_menu.is_none()
+}
+
 /// Name under which actions run outside a task are recorded.
 const TOOL_TASK: &str = "tool";
 
@@ -230,6 +245,8 @@ impl Executor {
         let mut waiting_since: Option<(u64, String)> = None;
         // Recovery presses since the task last acted on its own.
         let mut nudged = false;
+        // The frame of the last step walked about unlocated.
+        let mut wandered: Option<u64> = None;
         let mut outside = OutsideRecovery::default();
         loop {
             if stop.load(Ordering::Relaxed) || runtime.bot_stopped() {
@@ -268,6 +285,7 @@ impl Executor {
                 Decision::Act(action) => {
                     waiting_since = None;
                     nudged = false;
+                    wandered = None;
                     let (action, outcome) = match self.run_pending(
                         runtime,
                         &name,
@@ -310,6 +328,15 @@ impl Executor {
                     if !nudged && waited > self.max_wait_frames / 2 {
                         nudged = true;
                         self.nudge(runtime, &name, &reason)?;
+                        continue;
+                    }
+                    if waited >= WANDER_AFTER
+                        && wandered.is_none_or(|w| frame - w >= WANDER_EVERY)
+                        && reason.contains("locating the player")
+                        && on_the_field(&observation)
+                    {
+                        wandered = Some(frame);
+                        self.wander(runtime, &name, frame)?;
                         continue;
                     }
                     if waited > self.max_wait_frames {
@@ -510,6 +537,21 @@ impl Executor {
             runtime.execute(action.commands[0].clone())?;
         }
         Ok(true)
+    }
+
+    /// A step some way while the player can't be located: walking about
+    /// beats standing still (fleet worker 1 stood unlocated in Rock
+    /// Tunnel's dark for hours; a new view may be located, the reckoning
+    /// in a dark cave picks it up). Each direction is kept for a few
+    /// presses (the first may only turn the player).
+    fn wander(&self, runtime: &mut Runtime, name: &str, frame: u64) -> Result<(), ExecutorError> {
+        const DIRECTIONS: [Button; 4] = [Button::Up, Button::Right, Button::Down, Button::Left];
+        let turn = frame / (WANDER_EVERY * 3);
+        let button = DIRECTIONS[(turn.wrapping_mul(0x9E37_79B9) >> 7) as usize % 4];
+        let label = format!("recover: unlocated, wander {button:?}");
+        runtime.error(format!("{name}: {label}"));
+        runtime.execute(ControllerCommand::Press(button))?;
+        Ok(())
     }
 
     /// One B press when a wait has gone on too long: it closes menus and

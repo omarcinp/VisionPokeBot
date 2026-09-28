@@ -17,7 +17,7 @@ use pokebot_state::{
     BattleMenu, DialogueKind, DialogueObservation, FrameMetrics, Observation, Observed, PlayerPose,
     Region, ScreenState,
 };
-use pokebot_world::{localize::PLAYER_SPRITE, sprites::SpriteDetector, Localizer, World};
+use pokebot_world::{localize::PLAYER_SPRITE, sprites::SpriteDetector, Localizer, World, BLOCK};
 
 pub trait PerceptionSystem {
     fn observe(&mut self, frame: &NormalizedFrame) -> Observation;
@@ -68,7 +68,45 @@ pub struct FireRedPerception {
     static_fade: u32,
     /// Object sprites around the located player.
     sprites: SpriteDetector,
+    /// Dead reckoning in a dark cave (see `reckon`).
+    reckoned: Option<Reckoned>,
 }
+
+/// The player's position in a dark cave, followed frame to frame from where
+/// it was last known (a warp's arrival, a located tile).
+#[derive(Debug, Clone)]
+struct Reckoned {
+    map: String,
+    /// The sprite's map pixel (its tile's top-left while standing).
+    px: i32,
+    py: i32,
+    /// The tile reported: a step counts once it has played out.
+    tile: (i32, i32),
+    /// Pixels moved on the last frame followed (a step under way goes on).
+    velocity: (i32, i32),
+    /// The last frame followed.
+    frame: u64,
+    /// Dark views in a row that matched nowhere near.
+    misses: u32,
+}
+
+/// Pixels the view scrolls at most between two frames followed (walking
+/// is 1 px a frame, running 2, the bike 4).
+const DARK_REACH: i32 = 8;
+/// A dark view matching this well (per mille) is where the player is. The
+/// lit disc is small: an NPC next to the player, or the edge of the disc,
+/// takes a good share of it (fleet worker 1, a trainer below the player in
+/// Rock Tunnel: the whole disc scored about 600 on the true tile).
+const DARK_ACCEPT: u32 = 700;
+/// Frames without a dark view (a fade, a battle, a menu) after which the
+/// player may have taken a warp next to them.
+const DARK_GAP: u64 = 6;
+/// Dark views in a row that match nowhere near before the reckoning is
+/// given up (the player is somewhere else).
+const DARK_MISSES: u32 = 90;
+/// How much better (per mille) the view must match past a warp than where
+/// the player was for the reckoning to take it.
+const WARP_MARGIN: u32 = 50;
 
 /// Frames a "fade" may stay unchanged before it counts as the screen
 /// itself: a fade changes the whole screen every frame and is over in
@@ -244,11 +282,13 @@ impl PerceptionSystem for FireRedPerception {
     }
 
     fn set_pose_hint(&mut self, pose: PlayerPose) {
+        self.forget_reckoning_unless(&pose);
         self.hint = Some(pose);
         self.inferred = None;
     }
 
     fn set_pose_hint_inferred(&mut self, pose: PlayerPose) {
+        self.forget_reckoning_unless(&pose);
         self.inferred = Some(pose.map.clone());
         self.hint = Some(pose);
     }
@@ -258,6 +298,7 @@ impl PerceptionSystem for FireRedPerception {
     fn clear_pose_hint(&mut self) {
         self.hint = None;
         self.inferred = None;
+        self.reckoned = None;
         self.global_search = true;
         self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
     }
@@ -527,27 +568,51 @@ impl FireRedPerception {
         let Some(world) = self.world.clone() else {
             return;
         };
-        let mut exclude = vec![PLAYER_SPRITE];
+        let mut windows = Vec::new();
         if observation.dialogue.is_some() {
-            exclude.push(Region::new(0, 112, 240, 48));
+            windows.push(Region::new(0, 112, 240, 48));
         }
         if let Some(menu) = &observation.menu {
-            exclude.push(menu.window.inflate(8));
+            windows.push(menu.window.inflate(8));
         }
         if let Some(popup) = popup {
-            exclude.push(popup);
+            windows.push(popup);
         }
+        let mut exclude = vec![PLAYER_SPRITE];
+        exclude.extend(windows.iter().copied());
+        let localizer = Localizer::new(&world);
         // A dark cave without Flash shows only a disc around the player:
         // the black around it is no part of the map (fleet worker 1 stood
         // unlocated in Rock Tunnel, "stuck waiting: locating the player").
-        if let Some(lit) = dark_view(image) {
+        // The disc is too small a view to search the cave by: the player
+        // is followed from where they came in (dead reckoning).
+        let dark = dark_view(image, &windows);
+        let mut disc = vec![DARK_PLAYER_SPRITE];
+        if let Some(lit) = dark {
             exclude.extend(outside_disc(lit));
+            disc.extend(windows.iter().copied());
+            disc.extend(outside_disc(lit));
+            if self.reckoned.is_none() {
+                if let Some(hint) = self.hint.clone() {
+                    self.seed_reckoning(observation.frame_id, image, &localizer, &disc, &hint);
+                }
+            }
+            if self.reckoned.is_some() {
+                let found = self.reckon(observation.frame_id, image, &localizer, &disc);
+                if self.reckoned.is_some() {
+                    if let Some(found) = &found {
+                        self.hint = Some(found.pose.clone());
+                    }
+                    observation.player = found;
+                    return;
+                }
+                // Given up: searched for as usual (near the hint only).
+            }
         }
-        let localizer = Localizer::new(&world);
-        let tracked = self
-            .hint
-            .as_ref()
-            .and_then(|hint| localizer.locate_from(image, hint, &exclude));
+        let tracked = self.hint.as_ref().and_then(|hint| match dark {
+            Some(_) => localizer.locate_near(image, hint, &exclude),
+            None => localizer.locate_from(image, hint, &exclude),
+        });
         // A hint that stopped matching is searched past: the tracker only
         // looks at the hint's map and its neighbours, so a wrong hint (a
         // warp to somewhere unconnected, a reset) otherwise kept the player
@@ -579,7 +644,8 @@ impl FireRedPerception {
                     None => Some(found),
                 }
             }
-            None if !self.global_search => None,
+            // Nor the world by it.
+            None if !self.global_search || dark.is_some() => None,
             None => {
                 self.frames_since_global_search += 1;
                 if self.frames_since_global_search < GLOBAL_SEARCH_INTERVAL {
@@ -598,8 +664,146 @@ impl FireRedPerception {
         };
         if let Some(found) = &found {
             self.hint = Some(found.pose.clone());
+            match dark {
+                Some(_) => {
+                    let pose = found.pose.clone();
+                    if let Some(followed) =
+                        self.seed_reckoning(observation.frame_id, image, &localizer, &disc, &pose)
+                    {
+                        self.hint = Some(followed.pose.clone());
+                        observation.player = Some(followed);
+                        return;
+                    }
+                }
+                None => self.reckoned = None,
+            }
         }
         observation.player = found;
+    }
+
+    /// Dead reckoning in a dark cave: the lit disc is too small a view to
+    /// search the cave by (its floor repeats), but from where the player
+    /// was last known each frame's view has scrolled a few pixels at most,
+    /// and past a fade or a battle only a warp next to them has moved them
+    /// elsewhere. `None` when the view matched nowhere near; after
+    /// [`DARK_MISSES`] such frames the reckoning is given up.
+    fn reckon(
+        &mut self,
+        frame_id: u64,
+        image: &RgbImage,
+        localizer: &Localizer<'_>,
+        exclude: &[Region],
+    ) -> Option<pokebot_state::PoseObservation> {
+        let world = self.world.clone()?;
+        let r = self.reckoned.clone()?;
+        let map = world.map(&r.map)?;
+        let gap = frame_id.saturating_sub(r.frame) > DARK_GAP;
+        let (expect, reach) = match gap {
+            true => ((r.px, r.py), BLOCK - 1),
+            false => ((r.px + r.velocity.0, r.py + r.velocity.1), DARK_REACH),
+        };
+        let here = localizer.follow(image, map, (r.px, r.py), expect, reach, exclude);
+        let mut best = here.map(|f| (map, f));
+        if gap {
+            let floor = here.map_or(0, |f| f.score) + WARP_MARGIN;
+            let near = map
+                .warps
+                .iter()
+                .filter(|w| (w.x - r.tile.0).abs() + (w.y - r.tile.1).abs() <= 1);
+            for warp in near {
+                // A lit map is located as usual.
+                let Some((dest, x, y)) = world.warp_destination(warp) else {
+                    continue;
+                };
+                if !dest.requires_flash {
+                    continue;
+                }
+                let start = (x * BLOCK, y * BLOCK);
+                let Some(f) = localizer.follow(image, dest, start, start, BLOCK - 1, exclude)
+                else {
+                    continue;
+                };
+                if f.score >= floor && best.is_none_or(|(_, b)| f.score > b.score) {
+                    best = Some((dest, f));
+                }
+            }
+        }
+        let r = self.reckoned.as_mut()?;
+        r.frame = frame_id;
+        let Some((at, f)) = best.filter(|(_, f)| f.score >= DARK_ACCEPT) else {
+            r.misses += 1;
+            r.velocity = (0, 0);
+            if r.misses > DARK_MISSES {
+                self.reckoned = None;
+            }
+            return None;
+        };
+        if at.name == r.map {
+            r.velocity = (f.px - r.px, f.py - r.py);
+            r.tile = f.tile(r.tile);
+        } else {
+            r.map = at.name.clone();
+            r.velocity = (0, 0);
+            r.tile = f.tile((f.px.div_euclid(BLOCK), f.py.div_euclid(BLOCK)));
+        }
+        (r.px, r.py, r.misses) = (f.px, f.py, 0);
+        Some(pokebot_state::PoseObservation {
+            pose: PlayerPose {
+                map: r.map.clone(),
+                x: r.tile.0,
+                y: r.tile.1,
+            },
+            score: f.score as u16,
+        })
+    }
+
+    /// Starts the reckoning at `pose` (a warp's arrival, a located tile, the
+    /// hint) when it is on a dark map and the view matches there (the view
+    /// may be mid-step): the pose followed.
+    fn seed_reckoning(
+        &mut self,
+        frame_id: u64,
+        image: &RgbImage,
+        localizer: &Localizer<'_>,
+        exclude: &[Region],
+        pose: &PlayerPose,
+    ) -> Option<pokebot_state::PoseObservation> {
+        let world = self.world.clone()?;
+        let map = world.map(&pose.map).filter(|m| m.requires_flash)?;
+        let start = (pose.x * BLOCK, pose.y * BLOCK);
+        let f = localizer
+            .follow(image, map, start, start, BLOCK - 1, exclude)
+            .filter(|f| f.score >= DARK_ACCEPT)?;
+        let tile = f.tile((pose.x, pose.y));
+        self.reckoned = Some(Reckoned {
+            map: pose.map.clone(),
+            px: f.px,
+            py: f.py,
+            tile,
+            velocity: (0, 0),
+            frame: frame_id,
+            misses: 0,
+        });
+        Some(pokebot_state::PoseObservation {
+            pose: PlayerPose {
+                map: pose.map.clone(),
+                x: tile.0,
+                y: tile.1,
+            },
+            score: f.score as u16,
+        })
+    }
+
+    /// A pose from outside (a reset, a warp worked out) other than the one
+    /// reckoned ends the reckoning.
+    fn forget_reckoning_unless(&mut self, pose: &PlayerPose) {
+        let same = self
+            .reckoned
+            .as_ref()
+            .is_some_and(|r| r.map == pose.map && r.tile == (pose.x, pose.y));
+        if !same {
+            self.reckoned = None;
+        }
     }
 
     /// The sprites around the located player, and the objects seen not to
@@ -752,17 +956,30 @@ fn read_fraction(text: &str) -> Option<(u8, u8)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+/// The player's sprite alone (16×32 over its tile and the one above), for
+/// the lit disc of a dark cave: [`PLAYER_SPRITE`]'s margin would take a
+/// third of it.
+const DARK_PLAYER_SPRITE: Region = Region {
+    x: 110,
+    y: 54,
+    width: 20,
+    height: 36,
+};
+
 /// Luma at or below which a pixel is the darkness of an unlit cave.
 const UNLIT_LUMA: u8 = 12;
 
 /// The lit disc of a dark cave without Flash (the bounding box of what
 /// isn't black, around the player at the screen's centre), when the rest
 /// of the frame is black: `(x0, y0, x1, y1)`, inclusive.
-fn dark_view(image: &RgbImage) -> Option<(u32, u32, u32, u32)> {
+fn dark_view(image: &RgbImage, windows: &[Region]) -> Option<(u32, u32, u32, u32)> {
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
     let mut lit = 0u32;
     for y in 0..image.height() {
         for x in 0..image.width() {
+            if windows.iter().any(|w| w.contains(x, y)) {
+                continue;
+            }
             if color::luma(image.pixel(x, y)) > UNLIT_LUMA {
                 lit += 1;
                 (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
@@ -1647,7 +1864,7 @@ mod tests {
         let Some(image) = fixture("emu-rock-tunnel-dark.png") else {
             return;
         };
-        assert!(dark_view(&image).is_some());
+        assert!(dark_view(&image, &[]).is_some());
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let Ok(world) = pokebot_world::World::load(root.join("data/world")) else {
             return;
@@ -1668,7 +1885,119 @@ mod tests {
         assert!(pose.map.starts_with("RockTunnel"), "{pose:?}");
         // A lit field is no dark view.
         if let Some(lit) = fixture("emu-forest-tall-grass-static.png") {
-            assert!(dark_view(&lit).is_none());
+            assert!(dark_view(&lit, &[]).is_none());
+        }
+    }
+
+    /// A dark cave's view at sprite map pixel `(px, py)`: the map's render
+    /// inside the lit disc (as fleet worker 1 saw it in Rock Tunnel: its
+    /// box 96–143 × 56–104), black around it, the player's sprite on top.
+    fn dark_frame(map: &pokebot_world::MapData, px: i32, py: i32) -> RgbImage {
+        let render = map.render().unwrap();
+        let (ox, oy) = (px + map.pad * BLOCK - 112, py + map.pad * BLOCK - 72);
+        let mut image = RgbImage::filled(240, 160, [0, 0, 0]);
+        for y in 0..160u32 {
+            for x in 0..240u32 {
+                let (dx, dy) = (f64::from(x) + 0.5 - 120.0, f64::from(y) + 0.5 - 80.5);
+                if dx * dx + dy * dy > 24.0 * 24.0 {
+                    continue;
+                }
+                let (rx, ry) = (ox + x as i32, oy + y as i32);
+                let inside =
+                    rx >= 0 && ry >= 0 && rx < render.width() as i32 && ry < render.height() as i32;
+                if inside {
+                    image.put_pixel(x, y, render.pixel(rx as u32, ry as u32));
+                }
+            }
+        }
+        for y in 58..88 {
+            for x in 113..127 {
+                image.put_pixel(
+                    x,
+                    y,
+                    if (x + y) % 3 == 0 {
+                        [248, 248, 248]
+                    } else {
+                        [200, 48, 40]
+                    },
+                );
+            }
+        }
+        image
+    }
+
+    /// The user's idea for dark caves: the player's first tile past the
+    /// warp is known, and every step from there can be followed. Rock
+    /// Tunnel's lit disc matches many places of the cave (the whole-cave
+    /// search "located" fleet worker 1 eight tiles off, then in Diglett's
+    /// Cave), but between two frames the view scrolls a few pixels: a walk
+    /// and a run across 1F from the ladder, then down the ladder to B1F,
+    /// are followed tile by tile.
+    #[test]
+    fn a_dark_cave_walk_is_followed_from_the_warp() {
+        use pokebot_world::path::{find_path_with, Obstacles, Walk};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = pokebot_world::World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = std::sync::Arc::new(world);
+        let map = world.map("RockTunnel_1F").unwrap();
+        let none = Obstacles::new();
+        let walk = Walk {
+            obstacles: &none,
+            surf: false,
+            opened: None,
+        };
+        let mut p = FireRedPerception::with_world(world.clone());
+        let mut id = 0;
+        let mut see = |p: &mut FireRedPerception, image: RgbImage| {
+            id += 1;
+            p.observe(&frame(id, image)).player.map(|o| o.pose)
+        };
+        let pose = |map: &str, x: i32, y: i32| PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        // Arrived from B1F at the ladder (45, 21).
+        p.set_pose_hint(pose("RockTunnel_1F", 45, 21));
+        let mut at = (45, 21);
+        for (goal, speed) in [((18, 37), 1), ((45, 21), 2)] {
+            let path = find_path_with(map, at, &walk, |_| 0, |t| t == goal, |_| 0).unwrap();
+            assert!(path.len() > 30, "{}", path.len());
+            for step in path {
+                let (dx, dy) = step.dir.delta();
+                for k in (0..BLOCK).step_by(speed) {
+                    let (px, py) = (at.0 * BLOCK + dx * k, at.1 * BLOCK + dy * k);
+                    let seen = see(&mut p, dark_frame(map, px, py));
+                    assert_eq!(
+                        seen,
+                        Some(pose("RockTunnel_1F", at.0, at.1)),
+                        "{step:?} +{k}"
+                    );
+                }
+                at = step.to;
+                let seen = see(&mut p, dark_frame(map, at.0 * BLOCK, at.1 * BLOCK));
+                assert_eq!(seen, Some(pose("RockTunnel_1F", at.0, at.1)));
+            }
+        }
+        // Down the ladder: a fade, then B1F's ladder the warp leads to.
+        let warp = map.warps.iter().find(|w| (w.x, w.y) == at).unwrap();
+        let (b1f, x, y) = world.warp_destination(warp).unwrap();
+        for _ in 0..20 {
+            see(&mut p, RgbImage::filled(240, 160, [0, 0, 0]));
+        }
+        let seen = see(&mut p, dark_frame(b1f, x * BLOCK, y * BLOCK));
+        assert_eq!(seen, Some(pose(&b1f.name, x, y)));
+        // Fleet worker 1 after a battle on 1F (27, 9): the trainer beaten
+        // stands below the player, taking a third of the disc. The
+        // reckoning holds.
+        if let Some(image) = fixture("emu-rock-tunnel-dark-trainer.png") {
+            p.set_pose_hint(pose("RockTunnel_1F", 27, 9));
+            for _ in 0..3 {
+                let seen = see(&mut p, image.clone());
+                assert_eq!(seen, Some(pose("RockTunnel_1F", 27, 9)));
+            }
         }
     }
 

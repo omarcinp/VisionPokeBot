@@ -210,6 +210,26 @@ fn step_tile(px: i32, py: i32, target: Option<(i32, i32)>) -> (i32, i32) {
     }
 }
 
+/// Sample spacing in a dark cave's lit disc (a few hundred pixels).
+const DARK_SAMPLE_STEP: u32 = 2;
+
+/// A sprite position [`Localizer::follow`] found: map pixels, and its
+/// score (per mille).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Followed {
+    pub px: i32,
+    pub py: i32,
+    pub score: u32,
+}
+
+impl Followed {
+    /// The tile reported for this position, a step started on `from`
+    /// counting only once it has played out (as tracked poses do).
+    pub fn tile(&self, from: (i32, i32)) -> (i32, i32) {
+        step_tile(self.px, self.py, Some((from.0 * BLOCK, from.1 * BLOCK)))
+    }
+}
+
 /// Search windows a tracking search moves through at most (see
 /// `Localizer::climb`).
 const MAX_WINDOWS: usize = 4;
@@ -473,12 +493,38 @@ impl<'w> Localizer<'w> {
         hint: &PlayerPose,
         exclude: &[Region],
     ) -> Option<PoseObservation> {
+        self.track(frame, hint, exclude, true)
+    }
+
+    /// [`Localizer::locate_from`] without the whole-map searches: near the
+    /// hint, and near where the warps from its map arrive. A dark cave's
+    /// lit disc matches too many places of a whole cave (fleet worker 1:
+    /// Rock Tunnel's floor, "located" eight tiles off, then in Diglett's
+    /// Cave).
+    pub fn locate_near(
+        &self,
+        frame: &RgbImage,
+        hint: &PlayerPose,
+        exclude: &[Region],
+    ) -> Option<PoseObservation> {
+        self.track(frame, hint, exclude, false)
+    }
+
+    fn track(
+        &self,
+        frame: &RgbImage,
+        hint: &PlayerPose,
+        exclude: &[Region],
+        whole: bool,
+    ) -> Option<PoseObservation> {
         let map = self.world.map(&hint.map)?;
         if let Some(found) = self.locate_in(frame, map, Some((hint.x, hint.y)), 3, exclude) {
             return Some(found);
         }
-        if let Some(found) = self.locate_in(frame, map, None, 0, exclude) {
-            return Some(found);
+        if whole {
+            if let Some(found) = self.locate_in(frame, map, None, 0, exclude) {
+                return Some(found);
+            }
         }
         // Maps that look the same (the two Viridian Forest gates, every
         // Pokémon Center) score the same: the one whose way in is nearest
@@ -492,7 +538,11 @@ impl<'w> Localizer<'w> {
                     .arrivals(map, &other.name)
                     .filter_map(|at| self.locate_in(frame, other, Some(at), 2, exclude))
                     .max_by_key(|o| o.score)
-                    .or_else(|| self.locate_in(frame, other, None, 0, exclude))?;
+                    .or_else(|| {
+                        whole
+                            .then(|| self.locate_in(frame, other, None, 0, exclude))
+                            .flatten()
+                    })?;
                 Some((found, self.distance_to(map, hint, &other.name)))
             })
             .max_by_key(|(o, distance)| (o.score, std::cmp::Reverse(*distance)))
@@ -532,6 +582,54 @@ impl<'w> Localizer<'w> {
                 })
             });
         warps.chain(edges).min().unwrap_or(i32::MAX)
+    }
+
+    /// Dead reckoning's search in a dark cave, where the lit disc around
+    /// the player is too small a view to search a window of tiles by (the
+    /// cave floor repeats; fleet worker 1 in Rock Tunnel was "located"
+    /// eight tiles off). From the sprite at map pixel `from`, the view
+    /// scrolls at most `reach` pixels between two frames, along one axis
+    /// (a step runs to the next tile before another starts): the best of
+    /// those positions, ties to the one nearest `expect` (the step under
+    /// way goes on). No floor: the caller judges the score.
+    pub fn follow(
+        &self,
+        frame: &RgbImage,
+        map: &MapData,
+        from: (i32, i32),
+        expect: (i32, i32),
+        reach: i32,
+        exclude: &[Region],
+    ) -> Option<Followed> {
+        let render = map.render().ok()?;
+        let grid = SampleGrid::new(exclude, DARK_SAMPLE_STEP);
+        let (on_x, on_y) = (from.1.rem_euclid(BLOCK) == 0, from.0.rem_euclid(BLOCK) == 0);
+        let mut candidates = vec![from];
+        for d in (-reach..=reach).filter(|d| *d != 0) {
+            if on_x {
+                candidates.push((from.0 + d, from.1));
+            }
+            if on_y {
+                candidates.push((from.0, from.1 + d));
+            }
+        }
+        let distance = |(x, y): (i32, i32)| (x - expect.0).abs() + (y - expect.1).abs();
+        candidates
+            .into_iter()
+            .filter(|&(px, py)| {
+                let tile = (px.div_euclid(BLOCK), py.div_euclid(BLOCK));
+                map.in_bounds(tile.0, tile.1)
+            })
+            .filter_map(|(px, py)| {
+                let (cx, cy) = camera(map, px, py);
+                let score = score_at(frame, render, cx, cy, &grid, 0)?;
+                Some(Followed { px, py, score })
+            })
+            .max_by(|a, b| {
+                a.score
+                    .cmp(&b.score)
+                    .then_with(|| distance((b.px, b.py)).cmp(&distance((a.px, a.py))))
+            })
     }
 
     /// Searches every map, split over the machine's cores (for recovering

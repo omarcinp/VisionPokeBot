@@ -775,3 +775,51 @@ fn console_go_and_heal_through_the_tools() {
     eprintln!("script paths run: {ran:?}");
     let _ = ctx.runtime.execute(ControllerCommand::Neutral);
 }
+
+/// A task that can't locate the player, whatever it sees.
+struct Unlocated;
+
+impl pokebot_agent::Task for Unlocated {
+    fn name(&self) -> &str {
+        "Unlocated"
+    }
+
+    fn next(&mut self, _ctx: &mut pokebot_agent::TaskContext<'_>) -> Decision {
+        Decision::Wait("locating the player".into())
+    }
+
+    fn on_outcome(&mut self, _: &Action, _: Outcome, _: &mut pokebot_agent::TaskContext<'_>) {}
+}
+
+/// Fleet worker 1 stood unlocated in Rock Tunnel's dark for hours, a B
+/// press the only thing done. Walking about beats standing still: a new
+/// view may be located.
+#[test]
+fn an_unlocated_player_walks_about_rather_than_idles() {
+    let Some(d) = data() else {
+        return;
+    };
+    let Some(dark) = fixture("emu-rock-tunnel-dark-trainer.png") else {
+        return;
+    };
+    let (mut runtime, commands) = runtime(&d, vec![dark]);
+    let executor = Executor {
+        max_wait_frames: 700,
+        ..Executor::default()
+    };
+    let stop = AtomicBool::new(false);
+    let failed = executor.run(&mut runtime, &mut Unlocated, &stop);
+    assert!(failed.is_err());
+    let directions = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| {
+            matches!(c, ControllerCommand::Press(b) if matches!(b,
+                pokebot_core::Button::Up | pokebot_core::Button::Down
+                | pokebot_core::Button::Left | pokebot_core::Button::Right))
+        })
+        .count();
+    // From frame 300 on, one every 40 frames.
+    assert!(directions >= 8, "{directions}");
+}
