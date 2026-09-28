@@ -63,6 +63,38 @@ fn valid_hp(mon: &PartyMon) -> Option<(u16, u16)> {
     })
 }
 
+/// A worn lead (under `LEAD_HP_MIN` % HP) on a map with a trainer not yet
+/// beaten heals before walking on: a trainer's battle can't be fled, and
+/// its sight may span the way (fleet worker 1: BULBASAUR at 16/40, a team
+/// behind it so only `HealSoon`, walked on across Route 3 and fainted to a
+/// trainer's EKANS).
+pub fn trainers_near(need: Option<Need>, state: &GameState, data: &GameData) -> Option<Need> {
+    use pokebot_planner::intents::LEAD_HP_MIN;
+    if need != Some(Need::HealSoon) {
+        return need;
+    }
+    let worn = state
+        .party
+        .value
+        .as_ref()
+        .and_then(|p| p.first())
+        .and_then(|m| m.hp.value)
+        .is_some_and(|(hp, max)| {
+            max > 0 && u32::from(hp) * 100 < u32::from(max) * u32::from(LEAD_HP_MIN)
+        });
+    let unbeaten = state.player.pose.value.as_ref().is_some_and(|pose| {
+        data.map_trainers.get(&pose.map).is_some_and(|ts| {
+            ts.iter()
+                .any(|t| state.world.flags.get(&t.trainer).and_then(|k| k.value) != Some(true))
+        })
+    });
+    if worn && unbeaten {
+        Some(Need::HealUrgent)
+    } else {
+        need
+    }
+}
+
 pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
     let Some(party) = party else {
         return Some(Need::AuditParty);
@@ -170,7 +202,7 @@ impl Scheduler {
         }
         let old = self.queue.clone();
         self.queue.clear();
-        let need = health(state.party.value.as_deref(), data);
+        let need = trainers_near(health(state.party.value.as_deref(), data), state, data);
         // Battle HUD, status text and PP events already update persistent
         // party facts. BattleEnded reuses those readings; only missing or
         // inconsistent facts require another menu audit.
@@ -596,6 +628,47 @@ mod tests {
             &d,
         );
         assert!(s.invalidated.is_some());
+    }
+
+    /// Fleet worker 1: BULBASAUR at 16/40 with a team behind it (only
+    /// `HealSoon`) walked on across Route 3 and fainted to a trainer. On a
+    /// map with a trainer not yet beaten a worn lead heals first.
+    #[test]
+    fn a_worn_lead_among_unbeaten_trainers_heals_first() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(d) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let at = |map: &str, lead_hp: u16| {
+            let mut state = GameState {
+                party: Knowledge::observed(vec![mon(lead_hp), mon(100)], 1),
+                ..GameState::default()
+            };
+            state.player.pose = Knowledge::observed(
+                PlayerPose {
+                    map: map.into(),
+                    x: 10,
+                    y: 10,
+                },
+                1,
+            );
+            state
+        };
+        let need =
+            |state: &GameState| trainers_near(health(state.party.value.as_deref(), &d), state, &d);
+        assert_eq!(need(&at("Route3", 40)), Some(Need::HealUrgent));
+        // Not worn, or no trainer here: soon is soon.
+        assert_eq!(need(&at("Route3", 60)), Some(Need::HealSoon));
+        assert_eq!(need(&at("PalletTown", 40)), Some(Need::HealSoon));
+        // Every trainer here beaten.
+        let mut beaten = at("Route3", 40);
+        for t in &d.map_trainers["Route3"] {
+            beaten
+                .world
+                .flags
+                .insert(t.trainer.clone(), Knowledge::observed(true, 1));
+        }
+        assert_eq!(need(&beaten), Some(Need::HealSoon));
     }
 
     #[test]
