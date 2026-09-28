@@ -1,0 +1,136 @@
+//! A warp taken in the dark: a fade that begins while the player stands on
+//! a warp tile that fires is that warp, so the player is at its
+//! destination. Perception tracks from there instead of matching the old
+//! floor again (Switch, Rock Tunnel without Flash: the ladder at B1F
+//! (33, 3) took the player to 1F (4, 2), the dim frames still matched B1F,
+//! and the walk stepped off and on the ladder, up and down, until it
+//! failed "looping").
+
+use pokebot_state::{GameEvent, GameState, Observation, PlayerPose, ScreenState};
+use pokebot_world::behavior::warp_fires;
+use pokebot_world::World;
+
+#[derive(Debug, Default)]
+pub(crate) struct WarpTaken {
+    /// The destination of the warp under the player when a fade began.
+    to: Option<PlayerPose>,
+    in_fade: bool,
+}
+
+impl WarpTaken {
+    pub(crate) fn observe(
+        &mut self,
+        world: Option<&World>,
+        o: &Observation,
+        state: &GameState,
+    ) -> Vec<GameEvent> {
+        if o.screen.value == ScreenState::Transition {
+            if !self.in_fade {
+                self.in_fade = true;
+                self.to = world.and_then(|w| destination(w, state.player.pose.value.as_ref()?));
+            }
+            return Vec::new();
+        }
+        self.in_fade = false;
+        let Some(to) = self.to.take() else {
+            return Vec::new();
+        };
+        // A battle's fade isn't a warp (none starts on a warp tile anyway).
+        if o.battle.is_some() {
+            return Vec::new();
+        }
+        vec![GameEvent::PlayerInferred {
+            pose: to,
+            candidates: Vec::new(),
+        }]
+    }
+}
+
+/// Where the warp on `pose`'s tile leads, if one is there and fires.
+pub(crate) fn destination(world: &World, pose: &PlayerPose) -> Option<PlayerPose> {
+    let map = world.map(&pose.map)?;
+    let tile = map.tile(pose.x, pose.y)?;
+    if !warp_fires(tile.behavior) {
+        return None;
+    }
+    let warp = map.warps.iter().find(|w| (w.x, w.y) == (pose.x, pose.y))?;
+    let (to, x, y) = world.warp_destination(warp)?;
+    Some(PlayerPose {
+        map: to.name.clone(),
+        x,
+        y,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pokebot_state::{FrameMetrics, Knowledge, Observed};
+    use std::path::Path;
+
+    fn world() -> Option<World> {
+        World::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world")).ok()
+    }
+
+    fn frame(id: u64, screen: ScreenState) -> Observation {
+        Observation::bare(
+            id,
+            Observed {
+                value: screen,
+                detector: "test".into(),
+            },
+            FrameMetrics::default(),
+        )
+    }
+
+    fn at(map: &str, x: i32, y: i32) -> GameState {
+        let mut state = GameState::default();
+        state.player.pose = Knowledge::observed(
+            PlayerPose {
+                map: map.into(),
+                x,
+                y,
+            },
+            1,
+        );
+        state
+    }
+
+    /// Switch, Rock Tunnel: the fade on B1F's ladder (33, 3) lands on 1F
+    /// (4, 2); a fade on a plain tile says nothing.
+    #[test]
+    fn a_fade_on_a_ladder_lands_at_its_destination() {
+        let Some(world) = world() else { return };
+        let ladder = at("RockTunnel_B1F", 33, 3);
+        let mut w = WarpTaken::default();
+        assert!(w
+            .observe(Some(&world), &frame(1, ScreenState::Transition), &ladder)
+            .is_empty());
+        assert!(w
+            .observe(Some(&world), &frame(2, ScreenState::Transition), &ladder)
+            .is_empty());
+        let events = w.observe(Some(&world), &frame(3, ScreenState::Unknown), &ladder);
+        assert_eq!(
+            events,
+            vec![GameEvent::PlayerInferred {
+                pose: PlayerPose {
+                    map: "RockTunnel_1F".into(),
+                    x: 4,
+                    y: 2,
+                },
+                candidates: Vec::new(),
+            }]
+        );
+        // Once per fade.
+        assert!(w
+            .observe(Some(&world), &frame(4, ScreenState::Unknown), &ladder)
+            .is_empty());
+        // A fade elsewhere on the floor: nothing.
+        let floor = at("RockTunnel_B1F", 33, 5);
+        let mut w = WarpTaken::default();
+        w.observe(Some(&world), &frame(1, ScreenState::Transition), &floor);
+        assert!(w
+            .observe(Some(&world), &frame(2, ScreenState::Unknown), &floor)
+            .is_empty());
+    }
+}

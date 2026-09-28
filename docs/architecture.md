@@ -131,6 +131,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Early exit keeps it at about 0.1 ms near the last pose.
   - The search widens as needed: near the last pose, then the whole map, then connected and warp-linked maps. An optional global search is available but throttled.
   - A pose is confirmed after 2 consecutive frames, producing `PlayerLocated`, `PlayerMoved` or `MapChanged` events.
+  - A fade that begins while the player stands on a warp tile that fires (ladder, cave door, stairs, arrow mat) is that warp: the sensor infers the warp's destination (`sense::warps`) and perception tracks from it, so a dark floor that looks like the one left isn't matched again (Rock Tunnel without Flash).
 - **Navigation:** A* per map, where tall grass costs +4 and ledges can only be crossed one way. Between maps, a breadth-first route over fixed warps and map connections.
   - The bot taps one direction per tile and confirms the move by relocating the player.
   - A tap that doesn't move the player counts as a turn; a second one marks the tile blocked.

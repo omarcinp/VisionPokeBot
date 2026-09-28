@@ -32,6 +32,7 @@ pub mod names;
 pub mod text;
 pub mod training;
 mod triggers;
+mod warps;
 
 use std::sync::Arc;
 
@@ -131,6 +132,8 @@ pub struct Sensor {
     world: Option<Arc<pokebot_world::World>>,
     /// A trainer battle begun on a battle trigger the belief has done.
     trigger_battle: triggers::TriggerBattle,
+    /// A fade that begins on a warp that fires: its destination.
+    warp_taken: warps::WarpTaken,
     /// The lookalike maps last resolved or announced, so each ambiguous
     /// stretch is decided once.
     ambiguous: Option<Vec<String>>,
@@ -206,6 +209,7 @@ impl Sensor {
             data,
             world: None,
             trigger_battle: triggers::TriggerBattle::default(),
+            warp_taken: warps::WarpTaken::default(),
             ambiguous: None,
             page: Confirm::default(),
             hud: Confirm::default(),
@@ -249,7 +253,7 @@ impl Sensor {
 
     /// The facts `o` confirms, given what the state already holds.
     pub fn observe(&mut self, o: &Observation, state: &GameState) -> Vec<GameEvent> {
-        let mut events = Vec::new();
+        let mut events = self.warp_taken.observe(self.world.as_deref(), o, state);
         // Fades and cut-ins show nothing; readings in progress survive them
         // only if they read the same afterwards.
         if o.screen.value == ScreenState::Transition {
