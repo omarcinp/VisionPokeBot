@@ -20,6 +20,7 @@ pub mod goal_session;
 pub mod keyboard;
 pub mod learn;
 pub mod ledger;
+pub mod limits;
 pub mod motion;
 pub mod moves;
 pub mod nav;

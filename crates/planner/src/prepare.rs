@@ -224,6 +224,24 @@ fn training_cost(
         (combatant(data, member, mid)?, 1.0)
     } else {
         let carrier = carrier?;
+        // A wild one that may trap the trainee (ARENA TRAP, SHADOW TAG,
+        // MAGNET PULL) refuses the SHIFT and RUN: the trainee fights it
+        // alone (the Switch: a Lv5 CATERPIE against DIGLETT, Diglett's
+        // Cave), and must win.
+        let alone = combatant(data, member, member.level)?;
+        for slot in &table.slots {
+            if !data.may_trap(&slot.species, &species_now) {
+                continue;
+            }
+            let level = (slot.min_level + slot.max_level) / 2;
+            let moves = data.default_moves(&slot.species, level);
+            let Some(foe) = Combatant::new(data, &slot.species, level, moves, WILD_IV) else {
+                continue;
+            };
+            if matchup_cached(data, &alone, &foe).p_win < 0.5 {
+                return None;
+            }
+        }
         (combatant(data, carrier, carrier.level)?, 0.5)
     };
     let (mut exp, mut seconds, mut damage, mut weight) = (0.0, 0.0, 0.0, 0.0);
@@ -591,5 +609,63 @@ impl PartialOrd for Minutes {
 impl Ord for Minutes {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.total_cmp(&other.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data() -> Option<GameData> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        GameData::load(root.join("data/world/gamedata.json")).ok()
+    }
+
+    fn member(species: &str, level: u8) -> PartyMember {
+        PartyMember {
+            species: species.into(),
+            level,
+            exp: None,
+            moves: Vec::new(),
+        }
+    }
+
+    fn area(map: &str) -> Area {
+        Area {
+            map: map.into(),
+            travel_minutes: 1.0,
+            heal_minutes: 2.0,
+        }
+    }
+
+    /// The Switch switch-trained a Lv5 CATERPIE for a Lv33 VENUSAUR in
+    /// Diglett's Cave: DIGLETT's ARENA TRAP refused the SHIFT, and CATERPIE
+    /// had to fight it alone. A trainee that can't beat a wild one that may
+    /// trap it isn't switch-trained there; where nothing traps, it is.
+    #[test]
+    fn no_switch_training_where_a_wild_one_may_trap_the_trainee() {
+        let Some(data) = data() else { return };
+        let caterpie = member("SPECIES_CATERPIE", 5);
+        let venusaur = member("SPECIES_VENUSAUR", 33);
+        let cave = training_cost(
+            &data,
+            &caterpie,
+            11,
+            &area("DiglettsCave_B1F"),
+            Some(&venusaur),
+        );
+        assert_eq!(cave, None);
+        let route = training_cost(&data, &caterpie, 11, &area("Route6"), Some(&venusaur));
+        assert!(route.is_some());
+        // A flier isn't held by ARENA TRAP.
+        let pidgey = member("SPECIES_PIDGEY", 5);
+        let cave = training_cost(
+            &data,
+            &pidgey,
+            11,
+            &area("DiglettsCave_B1F"),
+            Some(&venusaur),
+        );
+        assert!(cave.is_some());
     }
 }

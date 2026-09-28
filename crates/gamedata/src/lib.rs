@@ -184,6 +184,26 @@ impl GameData {
         unique_named(self.items.iter().map(|(k, i)| (k, i.name.as_str())), read)
     }
 
+    /// Whether a wild `foe` may keep `us` from switching out and running
+    /// (`IsRunningFromBattleImpossible`): SHADOW TAG always, ARENA TRAP
+    /// unless `us` flies or levitates, MAGNET PULL a Steel type. A species
+    /// with two abilities may have either.
+    pub fn may_trap(&self, foe: &str, us: &str) -> bool {
+        let (Some(foe), Some(us)) = (self.species(foe), self.species(us)) else {
+            return false;
+        };
+        let has = |a: &str| foe.abilities.iter().any(|x| x == a);
+        let typed = |t: &str| us.types.iter().any(|x| x == t);
+        let levitates = !us.abilities.is_empty()
+            && us
+                .abilities
+                .iter()
+                .all(|a| a == "ABILITY_LEVITATE" || a == "ABILITY_NONE");
+        has("ABILITY_SHADOW_TAG")
+            || (has("ABILITY_ARENA_TRAP") && !typed("TYPE_FLYING") && !levitates)
+            || (has("ABILITY_MAGNET_PULL") && typed("TYPE_STEEL"))
+    }
+
     /// Species by printed name (`SPECIES_NIDORAN_F` prints as `NIDORAN♀`).
     pub fn species_named(&self, read: &str) -> Option<&str> {
         let printed: Vec<(&String, String)> =
@@ -261,6 +281,18 @@ mod lookup_tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
         )
         .ok()
+    }
+
+    #[test]
+    fn trapping_abilities_follow_the_battle_rules() {
+        let Some(d) = data() else { return };
+        assert!(d.may_trap("SPECIES_DIGLETT", "SPECIES_CATERPIE"));
+        assert!(!d.may_trap("SPECIES_DIGLETT", "SPECIES_PIDGEY"));
+        assert!(!d.may_trap("SPECIES_DIGLETT", "SPECIES_GASTLY"));
+        assert!(d.may_trap("SPECIES_WOBBUFFET", "SPECIES_PIDGEY"));
+        assert!(d.may_trap("SPECIES_MAGNEMITE", "SPECIES_MAGNEMITE"));
+        assert!(!d.may_trap("SPECIES_MAGNEMITE", "SPECIES_CATERPIE"));
+        assert!(!d.may_trap("SPECIES_RATTATA", "SPECIES_CATERPIE"));
     }
 
     #[test]

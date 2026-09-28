@@ -62,6 +62,17 @@ pub struct BattleMemory {
     /// evasiveness rose!"): the evaluator scales hit chances by them.
     pub our_accuracy: i8,
     pub foe_evasion: i8,
+    /// What the foe's moves and abilities forbid (a trap, a refused move).
+    pub limits: crate::limits::Limits,
+}
+
+impl BattleMemory {
+    /// Whether the game accepts our move `mv` now: not DISABLEd, nor
+    /// refused by TAUNT, TORMENT, IMPRISON or a CHOICE BAND.
+    pub fn allows(&self, data: &GameData, mv: &str) -> bool {
+        self.disabled.as_deref() != Some(mv)
+            && self.limits.allows(data, mv, self.last_move.as_deref())
+    }
 }
 
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
@@ -244,6 +255,7 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
             memory.foe_asleep = false;
         }
     }
+    memory.limits.observe(page, &lead_name, data);
     let Some(lead) = party.lead() else { return };
     if let Some(disabled) = disable_text(page, &lead.display_name(), data) {
         memory.disabled = disabled;
@@ -283,9 +295,8 @@ pub fn choose_move(
     policy: &BattlePolicy,
 ) -> Option<(u8, String)> {
     let lead = party.lead()?;
-    let damaging = |m: &String| {
-        data.move_(m).is_some_and(|mv| mv.power > 0) && memory.disabled.as_ref() != Some(m)
-    };
+    let damaging =
+        |m: &String| data.move_(m).is_some_and(|mv| mv.power > 0) && memory.allows(data, m);
     let spare = |m: &String| {
         let left = lead.pp_left(data, m);
         let max = data.move_(m).map_or(0, |mv| mv.pp);
@@ -333,7 +344,7 @@ pub fn fallback_move(
     lead.moves
         .iter()
         .enumerate()
-        .find(|(_, m)| lead.pp_left(data, m) > 0 && memory.disabled.as_ref() != Some(*m))
+        .find(|(_, m)| lead.pp_left(data, m) > 0 && memory.allows(data, m))
         .map(|(slot, m)| (slot as u8, m.clone()))
 }
 
@@ -348,6 +359,9 @@ pub fn decide(
 ) -> Option<Decision> {
     let battle = observation.battle.as_ref()?;
     let menu = battle.menu?;
+    if matches!(menu, BattleMenu::Command { .. }) {
+        memory.limits.at_command_menu();
+    }
     // A catch attempt drives the menus (its risk check replaces fleeing);
     // `None` means it was abandoned and the battle goes on as usual.
     if memory.catch.attempt.is_some() {
@@ -429,7 +443,21 @@ pub fn decide(
         }
         _ => true,
     };
-    let flee = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
+    let wants_out = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
+    // Trapped (ARENA TRAP, MEAN LOOK, WRAP…): the game refuses RUN and
+    // puts the menu back; fight on.
+    let flee = wants_out && memory.limits.can_run();
+    if wants_out && !flee && memory.fled_for.as_deref() != Some("trapped") {
+        events.push(GameEvent::GoalProgress {
+            goal: "Story".into(),
+            phase: "Battle".into(),
+            detail: format!(
+                "can't run ({}): fighting on",
+                memory.limits.why().unwrap_or_default()
+            ),
+        });
+        memory.fled_for = Some("trapped".into());
+    }
     if flee {
         // Once a battle, with every reason: a run costs the training
         // battle, and a hunt heals after one.
@@ -475,7 +503,8 @@ pub fn decide(
             (0, 0),
             |c, r| BattleMenu::Command { column: c, row: r },
             "FIGHT",
-            Expectation::ScreenIs(ScreenState::BattleMoveSelection),
+            // ENCORE and STRUGGLE use their move without the move menu.
+            Expectation::ScreenIsNot(ScreenState::BattleCommand),
         ),
         BattleMenu::Moves { .. } if flee => Decision::Act(Action::new(
             "back to the command menu to RUN",
@@ -538,7 +567,7 @@ pub fn sleep_opener(
         data.move_(m)
             .is_some_and(|mv| mv.effect.as_deref() == Some("EFFECT_SLEEP"))
             && lead.pp_left(data, m) > 0
-            && memory.disabled.as_ref() != Some(*m)
+            && memory.allows(data, m)
     })?;
     let hp = battle
         .player_hp_numbers

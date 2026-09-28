@@ -766,7 +766,11 @@ pub(crate) fn attempt_decision(
     if plan.shiny {
         // A shiny never runs for risk; only the low-HP rule may RUN.
         let low = battle.player_hp.is_some_and(|hp| hp < policy.flee_below);
-        if command && low && memory.run_attempts < policy.max_run_attempts {
+        if command
+            && low
+            && memory.run_attempts < policy.max_run_attempts
+            && memory.limits.can_run()
+        {
             let BattleMenu::Command { column, row } = menu else {
                 unreachable!()
             };
@@ -853,6 +857,15 @@ pub(crate) fn attempt_decision(
         Choice::Attack(slot, mv) => Some((*slot, mv.clone(), false)),
         Choice::Throw | Choice::Run => None,
     };
+    // A move the game refuses (TAUNT, TORMENT, IMPRISON) puts the move
+    // menu back: the catch can't be played as priced.
+    if let Some((_, mv, _)) = fight.as_ref().filter(|(_, mv, _)| !memory.allows(data, mv)) {
+        memory.catch.attempt = None;
+        events.push(log(format!(
+            "{species}: {mv} is refused now: abandoning the catch"
+        )));
+        return None;
+    }
     Some(match menu {
         BattleMenu::Command { column, row } => {
             if fight.is_some() {
@@ -861,7 +874,8 @@ pub(crate) fn attempt_decision(
                     (0, 0),
                     |c, r| BattleMenu::Command { column: c, row: r },
                     "FIGHT",
-                    Expectation::ScreenIs(ScreenState::BattleMoveSelection),
+                    // ENCORE uses its move without the move menu.
+                    Expectation::ScreenIsNot(ScreenState::BattleCommand),
                 )
             } else {
                 if (column, row) == (1, 0) {

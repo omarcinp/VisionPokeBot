@@ -110,6 +110,21 @@ impl BattleStep {
         self
     }
 
+    /// A SHIFT the game refuses (a trap: ARENA TRAP, MEAN LOOK, WRAP…) is
+    /// given up: the one out fights on (asking again only loops).
+    fn give_up_a_refused_shift(&mut self, events: &mut Vec<GameEvent>) {
+        if self.shift_to.is_some() && !self.shifted && !self.memory.limits.can_switch() {
+            self.shifted = true;
+            events.push(super::progress(
+                "Battle",
+                format!(
+                    "can't SHIFT ({}): the one out fights on",
+                    self.memory.limits.why().unwrap_or_default()
+                ),
+            ));
+        }
+    }
+
     /// The in-battle party screen, choosing the member to SHIFT to.
     fn shift_in_party_menu(
         &mut self,
@@ -400,7 +415,11 @@ impl ToolStep for BattleStep {
             // A trainer's battle can't be run from: a member at risk
             // against the foe out makes way for a safer one (once a battle:
             // the battle's party menu is reordered after a switch).
-            if self.memory.trainer && self.shift_to.is_none() && !self.shifted {
+            if self.memory.trainer
+                && self.shift_to.is_none()
+                && !self.shifted
+                && self.memory.limits.can_switch()
+            {
                 if let Some(BattleMenu::Command { .. }) = b.menu {
                     if let Some(slot) =
                         battle::defensive_switch(&data, &self.party, b, self.memory.our_stages)
@@ -413,6 +432,7 @@ impl ToolStep for BattleStep {
                     }
                 }
             }
+            self.give_up_a_refused_shift(ctx.events);
             // Switch-training: the member being carried started the
             // battle; the carrier comes out at the first command menu.
             if let Some(slot) = self.shift_to.filter(|_| !self.shifted) {
@@ -496,6 +516,20 @@ impl ToolStep for BattleStep {
             if let Some(decision) = catch::dismiss_pokedex(&mut self.memory.catch, o) {
                 return decision;
             }
+            // The party menu's refusals ("Wild DIGLETT's ARENA TRAP
+            // prevents switching!", "X can't be switched out!") show there,
+            // without the battle HUD.
+            if let Some(d) = &o.dialogue {
+                let lead = self
+                    .party
+                    .lead()
+                    .map(|l| l.display_name())
+                    .unwrap_or_default();
+                self.memory
+                    .limits
+                    .observe(&d.lines.join(" "), &lead, &self.data);
+                self.give_up_a_refused_shift(ctx.events);
+            }
             if let (Some(party), Some(slot)) =
                 (&o.party_menu, self.shift_to.filter(|_| !self.shifted))
             {
@@ -520,6 +554,16 @@ impl ToolStep for BattleStep {
             }
             if o.dialogue.is_some() {
                 return advance_or_wait(o.dialogue.as_ref(), "battle text");
+            }
+            // The party menu with no SHIFT to make (given up): back to the
+            // command menu.
+            if o.party_menu.is_some() {
+                return Decision::Act(Action::new(
+                    "party menu: nothing to SHIFT, back",
+                    vec![ControllerCommand::Press(Button::B)],
+                    Expectation::ScreenIsNot(pokebot_state::ScreenState::PartyMenu),
+                    60,
+                ));
             }
             return Decision::Wait("battle screen".into());
         }
@@ -833,5 +877,93 @@ mod tests {
             _ => panic!("no press"),
         }
         assert!(step.shifted);
+    }
+
+    /// Switch, Diglett's Cave: switch-training CATERPIE (Lv5) for VENUSAUR
+    /// (Lv33), the SHIFT met "Wild DIGLETT's ARENA TRAP prevents
+    /// switching!", and the member was chosen again 45 times until the run
+    /// was stopped. The refusal is read over the party menu: the SHIFT is
+    /// given up and the menu left.
+    #[test]
+    fn a_shift_refused_by_a_trap_is_given_up() {
+        use pokebot_state::{Knowledge, Observation};
+        use pokebot_vision::{FireRedPerception, PerceptionSystem};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(data), Ok(font)) = (
+            GameData::load(root.join("data/world/gamedata.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let mut vision = FireRedPerception::default().with_font(Arc::new(font));
+        let mut observe = |name: &str, id: u64| -> Observation {
+            let image =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+                    .unwrap();
+            let frame =
+                pokebot_core::NormalizedFrame::new(id, std::time::Instant::now(), image).unwrap();
+            vision.observe(&frame)
+        };
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member(
+                        "SPECIES_CATERPIE",
+                        5,
+                        20,
+                        &["MOVE_TACKLE", "MOVE_STRING_SHOT"],
+                    ),
+                    member("SPECIES_VENUSAUR", 33, 100, &["MOVE_RAZOR_LEAF"]),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(1);
+        step.started = true;
+        step.in_battle = true;
+        let mut events = Vec::new();
+        let mut run = |o: &Observation, events: &mut Vec<GameEvent>| {
+            step_label(&step_next(&mut step, o, &state, events))
+        };
+        // The page, read on two frames.
+        for id in 1..=2 {
+            run(
+                &observe("switch-arena-trap-prevents-switching", id),
+                &mut events,
+            );
+        }
+        assert!(
+            events.iter().any(|e| matches!(e,
+                GameEvent::GoalProgress { detail, .. } if detail.starts_with("can't SHIFT (Wild DIGLETT's ARENA TRAP"))),
+            "{events:?}"
+        );
+        let last = run(&observe("switch-arena-trap-party-actions", 3), &mut events);
+        assert_eq!(last, "party menu: nothing to SHIFT, back");
+    }
+
+    fn step_next(
+        step: &mut BattleStep,
+        o: &pokebot_state::Observation,
+        state: &pokebot_state::GameState,
+        events: &mut Vec<GameEvent>,
+    ) -> Decision {
+        step.next(&mut StepContext {
+            observation: o,
+            state,
+            events,
+            quiet_frames: 0,
+            frame: None,
+            learned: &[],
+        })
+    }
+
+    fn step_label(d: &Decision) -> String {
+        match d {
+            Decision::Act(a) => a.label.clone(),
+            Decision::Wait(w) => format!("wait: {w}"),
+            Decision::Done(w) => format!("done: {w}"),
+            Decision::Fail(w) => format!("fail: {w}"),
+        }
     }
 }
