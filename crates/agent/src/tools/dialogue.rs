@@ -1089,6 +1089,27 @@ impl Tool for DialogueTool {
     }
 }
 
+/// The trainer a script path fights and must beat (a loss whites out; a
+/// battle with a victory text the story goes on from is not one).
+fn scripted_battle(world: &World, script: &str, path: usize) -> Option<String> {
+    world
+        .events()?
+        .script(script)?
+        .paths
+        .get(path)?
+        .does
+        .iter()
+        .find_map(|e| match e {
+            Effect::Battle {
+                battle,
+                victory: None,
+                rematch: false,
+                ..
+            } => Some(battle.clone()),
+            _ => None,
+        })
+}
+
 /// [`DialogueTool`]'s work.
 fn run_script(
     ctx: &mut ToolContext<'_>,
@@ -1096,6 +1117,20 @@ fn run_script(
     path: Option<usize>,
     answers: &[Answer],
 ) -> Result<(), ToolError> {
+    // A path that fights a trainer who must be beaten is prepared for
+    // like a Beat: heal first when the lead isn't ready (Switch: IVYSAUR
+    // met Cerulean's rival at 64/75 through RunScript, never healed, and
+    // fainted to his CHARMANDER).
+    if let Some(trainer) = path.and_then(|p| scripted_battle(&ctx.world, script, p)) {
+        let party = crate::party::Party::from_state(ctx.state());
+        if let Some(why) = super::beat::unready(&ctx.data, &party, &trainer) {
+            ctx.emit(super::progress(
+                "Dialogue",
+                format!("healing before {trainer}: {why}"),
+            ))?;
+            ctx.invoke(&Intent::Heal { center: None }).result?;
+        }
+    }
     let pose = ctx.pose();
     let conversation = Conversation::new(
         Arc::clone(&ctx.world),
@@ -1734,6 +1769,33 @@ mod tests {
         step(&mut c, &won);
         assert!(c.battled);
         assert_eq!(c.resolved(&index), Some((brock.into(), fights)));
+    }
+
+    /// A RunScript that fights a trainer who must be beaten heals first
+    /// like a Beat (Switch: the Cerulean rival met at 64/75); Oak's lab
+    /// rival, whose loss the story goes on from, isn't one.
+    #[test]
+    fn a_scripted_must_win_battle_is_found() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let fights = |script: &str| -> Vec<String> {
+            let n = events.script(script).map_or(0, |s| s.paths.len());
+            (0..n)
+                .filter_map(|p| scripted_battle(&world, script, p))
+                .collect()
+        };
+        let rival = fights("CeruleanCity_EventScript_RivalTriggerLeft");
+        assert!(
+            rival.contains(&"TRAINER_RIVAL_CERULEAN_CHARMANDER".to_owned()),
+            "{rival:?}"
+        );
+        assert!(
+            fights("PewterCity_Gym_EventScript_Brock").contains(&"TRAINER_LEADER_BROCK".to_owned())
+        );
+        let lab = fights("PalletTown_ProfessorOaksLab_EventScript_RivalBattleTriggerMid");
+        assert!(lab.is_empty(), "{lab:?}");
     }
 
     /// Fleet worker 4: Brock beaten with his opening pages unrecognised,
