@@ -232,6 +232,7 @@ pub fn screen_open(o: &Observation) -> bool {
         || o.pokedex_page
         || o.party_menu.is_some()
         || o.summary.is_some()
+        || o.pc_storage.is_some()
 }
 
 /// Where a menu step leaves the screen once it has read what it came for.
@@ -260,6 +261,7 @@ pub fn at_start_menu(o: &Observation) -> bool {
         && o.party_menu.is_none()
         && o.summary.is_none()
         && o.trainer_card.is_none()
+        && o.pc_storage.is_none()
 }
 
 /// Closes with B until the screen is where [`Leave`] says: by default the

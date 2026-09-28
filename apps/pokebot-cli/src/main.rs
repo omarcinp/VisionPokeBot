@@ -1382,6 +1382,19 @@ fn describe_observation(o: &Observation) -> String {
     if !o.menu_lines.is_empty() {
         parts.push(format!("menu text {:?}", o.menu_lines));
     }
+    if let Some(pc) = &o.pc_storage {
+        parts.push(format!(
+            "pc {:?} hand {:?} data {:?} /{:?} Lv{:?} box {:?} picker {:?} message {:?}",
+            pc.mode,
+            pc.cursor,
+            pc.nickname,
+            pc.species,
+            pc.level,
+            pc.box_title,
+            pc.picker,
+            pc.message
+        ));
+    }
     if let Some(b) = &o.battle {
         parts.push(format!(
             "battle {:?} PP {:?} moves {:?}, us {:?} Lv{:?} HP {:?} ({:?}‰) vs {:?} Lv{:?} ({:?}‰)",

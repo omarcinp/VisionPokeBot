@@ -460,6 +460,7 @@ impl<'a> ToolContext<'a> {
             || o.shop.is_some()
             || o.party_menu.is_some()
             || o.summary.is_some()
+            || o.pc_storage.is_some()
             || o.screen.value == ScreenState::Transition
             || self.runtime.outside_game();
         self.quiet_frames = if busy {
@@ -618,6 +619,7 @@ impl<'a> ToolContext<'a> {
             && o.battle.is_none()
             && o.party_menu.is_none()
             && o.summary.is_none()
+            && o.pc_storage.is_none()
             && self.quiet_frames >= SETTLE_FRAMES
             && o.frame_id >= self.next_need_check
         {
@@ -981,7 +983,7 @@ impl ActRepeats {
 /// counters or match scores).
 fn screen_fingerprint(o: &Observation) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         o.screen.value,
         o.dialogue.as_ref().map(|d| &d.lines),
         o.menu,
@@ -997,6 +999,7 @@ fn screen_fingerprint(o: &Observation) -> String {
         o.party_menu,
         o.summary.as_ref().map(|s| (s.page, &s.nickname)),
         o.move_list,
+        o.pc_storage,
     )
 }
 

@@ -28,7 +28,7 @@ pub struct Region {
 }
 
 impl Region {
-    pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
             x,
             y,
@@ -251,6 +251,51 @@ pub struct ShopObservation {
     pub quantity: Option<(u16, u32)>,
 }
 
+/// Which panel the Pokémon Storage System shows beside PKMN DATA: the
+/// party (DEPOSIT POKéMON) or a box's grid (WITHDRAW, MOVE POKéMON).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PcMode {
+    Party,
+    Box,
+}
+
+/// Where the storage system's hand points (`pokemon_storage_system_
+/// data.c` `GetCursorCoordsByPos`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PcCursor {
+    /// A party slot (0–5) of the party panel.
+    Party(u8),
+    /// The party panel's CANCEL button.
+    PartyCancel,
+    /// A box cell, 0–29 (row × 6 + column).
+    Cell(u8),
+    /// The box title (Left/Right there switch boxes).
+    BoxTitle,
+}
+
+/// The Pokémon Storage System screen (BILL's PC → WITHDRAW/DEPOSIT): the
+/// PKMN DATA panel of the Pokémon under the hand, the hand, the box, and
+/// the message at the bottom. Its action window (STORE / WITHDRAW /
+/// SUMMARY …) and YES/NO are ordinary menus (`Observation::menu`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcStorageObservation {
+    pub mode: PcMode,
+    pub cursor: Option<PcCursor>,
+    /// PKMN DATA's first line: the nickname (`None`: nothing under the
+    /// hand, or not read).
+    pub nickname: Option<String>,
+    /// PKMN DATA's second line without its `/`: the species name.
+    pub species: Option<String>,
+    pub level: Option<u8>,
+    /// The box title as read (`BOX1`), box mode only.
+    pub box_title: Option<String>,
+    /// "Deposit in which BOX?": the box picker's name and `n /30` count.
+    pub picker: Option<(String, Option<u8>)>,
+    /// The message window's lines ("PARAS is selected.", "Continue BOX
+    /// operations?"); empty when none is shown.
+    pub message: Vec<String>,
+}
+
 /// Which battle menu is open and where its ▶ is (column, row in the 2×2 grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleMenu {
@@ -374,6 +419,9 @@ pub struct Observation {
     pub party_menu: Option<PartyMenuObservation>,
     #[serde(default)]
     pub summary: Option<SummaryObservation>,
+    /// The Pokémon Storage System (BILL's PC boxes).
+    #[serde(default)]
+    pub pc_storage: Option<PcStorageObservation>,
     /// The map name in the popup shown on entering a map ("ROUTE 3",
     /// "MT. MOON"), as read while the box is fully down.
     #[serde(default)]
@@ -436,6 +484,7 @@ impl Observation {
             pokedex_list: None,
             party_menu: None,
             summary: None,
+            pc_storage: None,
             map_popup: None,
             sprites: Vec::new(),
             objects_absent: Vec::new(),

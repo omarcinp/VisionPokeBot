@@ -14,6 +14,8 @@ pub const NORTH_ARROW_WARP: u16 = 0x64;
 pub const SOUTH_ARROW_WARP: u16 = 0x65;
 pub const WARP_DOOR: u16 = 0x69;
 pub const COUNTER: u16 = 0x80;
+/// The Pokémon Center PC (`MB_PC`): A facing it runs `EventScript_PC`.
+pub const PC: u16 = 0x83;
 
 /// Whether a warp on a tile of this behaviour ever fires (`field_control_
 /// avatar.c`): walked onto (cave door, ladder, hole, warp pad, escalator,

@@ -14,6 +14,7 @@ pub mod menu;
 pub mod move_list;
 pub mod naming;
 pub mod party;
+pub mod pc;
 pub mod pokedex;
 pub mod quest_log;
 pub mod shop;

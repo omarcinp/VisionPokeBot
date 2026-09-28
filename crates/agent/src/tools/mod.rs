@@ -22,6 +22,7 @@ mod medicine;
 pub mod menu;
 mod party_audit;
 pub mod party_order;
+pub mod pc;
 pub mod probe;
 mod save;
 pub mod scene;
@@ -577,6 +578,7 @@ impl Default for Toolbox {
             Box::new(buy::BuyTool),
             Box::new(probe::ProbeTool),
             Box::new(teach::TeachTool),
+            Box::new(pc::PcSwapTool),
             Box::new(field::FieldMoveTool),
             Box::new(save::SaveTool),
             Box::new(UnstickTool),
@@ -756,6 +758,12 @@ mod tests {
             .take(&Intent::Teach {
                 item: "ITEM_HM01".into(),
                 member: "lead".into()
+            })
+            .is_ok());
+        assert!(Toolbox::default()
+            .take(&Intent::PcSwap {
+                deposit: "SPECIES_PARAS".into(),
+                withdraw: "SPECIES_PIDGEY".into(),
             })
             .is_ok());
         assert!(Toolbox::default()

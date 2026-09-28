@@ -38,9 +38,9 @@ pub use knowledge::{Knowledge, KnowledgeSource};
 pub use observation::{
     BagObservation, BattleMenu, BattleObservation, DialogueKind, DialogueObservation, Direction,
     FlyMapObservation, FrameMetrics, KeyboardFocus, MenuObservation, MoveListObservation,
-    NamingObservation, Observation, Observed, PartyRowObservation, PlayerPose,
-    PokedexListObservation, PoseObservation, Region, ShinyReading, ShopObservation,
-    SpriteObservation, TrainerCardObservation,
+    NamingObservation, Observation, Observed, PartyRowObservation, PcCursor, PcMode,
+    PcStorageObservation, PlayerPose, PokedexListObservation, PoseObservation, Region,
+    ShinyReading, ShopObservation, SpriteObservation, TrainerCardObservation,
 };
 pub use party::{MoveSlot, PartyDetailChange, PartyMon, PokemonDetails, Status, SummaryDetails};
 pub use priors::{PriorRule, Priors};

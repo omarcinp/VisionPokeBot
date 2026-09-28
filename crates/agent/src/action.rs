@@ -1,6 +1,6 @@
 use pokebot_core::ControllerCommand;
 use pokebot_state::{
-    BattleMenu, DialogueKind, KeyboardFocus, Observation, PlayerPose, ScreenState,
+    BattleMenu, DialogueKind, KeyboardFocus, Observation, PcCursor, PlayerPose, ScreenState,
 };
 use pokebot_vision::detect::dialogue::changed_cells;
 use serde::Serialize;
@@ -129,6 +129,12 @@ pub enum Expectation {
     FlyMap,
     /// The region map's cursor frames this Kanto grid cell.
     FlyCursorAt(u32, u32),
+    /// The storage system's hand points here.
+    PcCursorAt(PcCursor),
+    /// The storage system's hand points somewhere other than here.
+    PcCursorMoved(PcCursor),
+    /// The storage system's box picker is gone.
+    PcPickerClosed,
     /// Nothing to verify; only wait for the inputs to finish.
     InputsDone,
 }
@@ -236,6 +242,18 @@ impl Expectation {
                 .fly_map
                 .as_ref()
                 .is_some_and(|m| m.cursor == Some((*x, *y))),
+            Expectation::PcCursorAt(at) => observation
+                .pc_storage
+                .as_ref()
+                .is_some_and(|p| p.cursor == Some(*at)),
+            Expectation::PcCursorMoved(from) => observation
+                .pc_storage
+                .as_ref()
+                .is_some_and(|p| p.cursor.is_some_and(|c| c != *from)),
+            Expectation::PcPickerClosed => observation
+                .pc_storage
+                .as_ref()
+                .is_none_or(|p| p.picker.is_none()),
             Expectation::InputsDone => true,
         }
     }

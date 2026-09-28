@@ -406,6 +406,25 @@ impl FireRedPerception {
                 return Some(observation);
             }
         }
+        // The storage system's action window (STORE / WITHDRAW …) and its
+        // YES/NO are ordinary menus over it: read with the screen.
+        if let Some(font) = self.font.as_deref() {
+            let menu = detect::menu::detect(image);
+            if let Some(pc) = detect::pc::detect(image, font, menu.map(|m| m.window)) {
+                let mut observation = Observation::bare(
+                    frame_id,
+                    screen(ScreenState::PcStorage, "pc-storage"),
+                    metrics,
+                );
+                if let Some(m) = &menu {
+                    let cursor = detect::menu::cursor_region(image, m);
+                    observation.menu_lines = font.read(image, m.window, &[cursor]);
+                }
+                observation.menu = menu;
+                observation.pc_storage = Some(pc);
+                return Some(observation);
+            }
+        }
         if detect::pokedex::is_page(image) {
             let mut observation = Observation::bare(
                 frame_id,
@@ -1326,6 +1345,63 @@ mod tests {
         // A scene that was no fade doesn't hide the next real one.
         let o = p.observe(&frame(3, detect::fade::darken(&menu, 8)));
         assert_eq!(o.screen.detector, "fade:menu-cursor");
+    }
+
+    /// The PC: "Which PC should be accessed?" and the storage menu are
+    /// dialogue with a field menu; the storage system is its own screen,
+    /// its STORE / WITHDRAW window and YES/NO read as menus over it.
+    #[test]
+    fn pc_screens_are_recognised() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = text::Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let font = std::sync::Arc::new(font);
+        let observe = |name: &str| {
+            let image =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+                    .ok()?;
+            let mut p = FireRedPerception::default().with_font(std::sync::Arc::clone(&font));
+            Some(p.observe(&frame(0, image)))
+        };
+        if let Some(o) = observe("emu-pc-which-pc-someone") {
+            assert_eq!(o.dialogue.unwrap().lines, ["Which PC should be accessed?"]);
+            assert_eq!(o.menu_lines.len(), 4);
+            assert!(o.menu_lines[0].starts_with("SOMEONE"));
+            assert_eq!(o.menu_lines[3], "LOG OFF");
+            assert!(o.pc_storage.is_none());
+        }
+        if let Some(o) = observe("emu-pc-storage-menu") {
+            assert!(o.dialogue.is_some());
+            assert_eq!(
+                o.menu_lines,
+                [
+                    "WITHDRAW POKéMON",
+                    "DEPOSIT POKéMON",
+                    "MOVE POKéMON",
+                    "MOVE ITEMS",
+                    "SEE YA!"
+                ]
+            );
+        }
+        if let Some(o) = observe("emu-pc-deposit-store") {
+            assert_eq!(o.screen.value, ScreenState::PcStorage);
+            assert!(o.dialogue.is_none());
+            assert_eq!(
+                o.menu_lines,
+                ["STORE", "SUMMARY", "MARK", "RELEASE", "CANCEL"]
+            );
+            assert!(o.pc_storage.is_some());
+        }
+        if let Some(o) = observe("emu-pc-continue") {
+            assert_eq!(o.menu_lines, ["YES", "NO"]);
+            assert_eq!(o.menu.unwrap().cursor_row, 1);
+            assert!(o.pc_storage.is_some());
+        }
+        if let Some(o) = observe("emu-pc-withdraw-box") {
+            assert_eq!(o.screen.value, ScreenState::PcStorage);
+            assert!(o.menu.is_none() && o.dialogue.is_none());
+        }
     }
 
     /// Teaching a TM/HM: the mauve-framed messages over the party menu and

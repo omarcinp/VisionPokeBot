@@ -69,6 +69,7 @@ Controller ◀── commands (also emitted as InputIssued events)
   | Caught-ball icon | a 7×7 Poké Ball (outline, highlight, orange/red top, grey/cream bottom) left of the opponent HP bar, present once that species is caught |
   | Shiny matcher | opponent sprite pixels inside the 64×64 sprite box classified against the species' normal/shiny palettes (`vision::shiny`); a species needs enough normal-only and shiny-only pixels to decide |
   | Pokédex page | tan background, upper/lower page split; only detected (to press A past it after a first catch), not read |
+  | PC storage (`detect::pc`) | the PKMN DATA panel's lilac-grey frame; the teal party panel (DEPOSIT) or the green PARTY POKéMON button (a box); the hand found by its glove white at the places `GetCursorCoordsByPos` puts it; PKMN DATA's nickname, `/SPECIES` and level, the box title, the yellow box picker (`BOX1`, `n /30`) and the bottom-right message read with the font; its STORE/WITHDRAW window and YES/NO are ordinary menus |
 
   Anything else is `Unknown`, including the overworld for now.
 - **Text reading (`vision::text`):** the game's normal font is extracted from the decompilation (`tools/gamedata/extract_font.py` → `data/world/font_normal.json`: bitmap and advance width per character, built locally).
@@ -186,6 +187,11 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - the near-black battle ▶ (rows 2-3-4-5-5-5-4-3-2), which gives the 2×2 command and move menus;
   - the HP bars (48 px each, framed, green/yellow/red), read as per mille.
 - **Policy (placeholder):** FIGHT with move slot 1. RUN when HP is under 35 %, trying at most 3 times per battle so trainer battles fall back to fighting.
+
+## PC swaps (`tools::pc`)
+
+- `PcSwap { deposit, withdraw }` walks to face the nearest Center's PC (its `MB_PC` tile), boots it, takes SOMEONE'S/BILL'S PC, DEPOSITs the member (the hand moved to the belief's slot, PKMN DATA checked, other slots read when it disagrees; a full box moves the picker on) and WITHDRAWs the species: to the cell the belief holds, checked on PKMN DATA, else every cell of the box read under the hand (`BoxObserved`), box after box from the title. It leaves with B, NO, SEE YA!, LOG OFF, and reads the party to verify. Events: `MonDeposited`, `BoxObserved`, `MonWithdrawn`. The deposit goes first unless the party has one member.
+- `tests/pc_emulator.rs` (ignored) swaps PARAS for EKANS, then CLEFAIRY for PARAS, at the Cerulean Center from a scenario save.
 
 ## Catching (`agent::catch`) and buying (`agent::stock`, `agent::shop`)
 
