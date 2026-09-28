@@ -1264,3 +1264,46 @@ fn a_party_menu_mid_swap_does_not_cut_the_party() {
     );
     assert_eq!(state.party.value.unwrap().len(), 1);
 }
+
+/// In battle the party menu lists the party in battle order (the one out
+/// first) and closing it restores the field order (`party_menu.c`
+/// `UpdatePartyToBattleOrder` / `UpdatePartyToFieldOrder`): fleet worker
+/// 6's switches shuffled HP between slots. Each row is its member by
+/// name; the order is no reorder. Out of battle the same rows are one.
+#[test]
+fn a_battle_party_menu_is_in_battle_order() {
+    let Some(d) = data() else { return };
+    let rows = vec![
+        row("BIRDY", 5, (5, 19), Status::Healthy),
+        row("BULBASAUR", 11, (20, 30), Status::Healthy),
+    ];
+    let mut s = Sensor::new(Arc::clone(&d));
+    let mut in_battle = with_party();
+    in_battle.in_battle = true;
+    let (state, changes) = run(
+        &mut s,
+        in_battle,
+        (0..20).map(|f| party_rows(f, rows.clone())),
+    );
+    let party = state.party.value.unwrap();
+    assert_eq!(party[0].nickname.value.as_deref(), Some("BULBASAUR"));
+    assert_eq!(party[0].hp.value, Some((20, 30)));
+    assert_eq!(party[1].nickname.value.as_deref(), Some("BIRDY"));
+    assert_eq!(party[1].hp.value, Some((5, 19)));
+    assert!(
+        !changes
+            .iter()
+            .any(|c| matches!(c, StateChange::PartySpeciesChanged { .. })),
+        "{changes:?}"
+    );
+    // Out of battle: the player swapped them.
+    let mut s = Sensor::new(d);
+    let (state, _) = run(
+        &mut s,
+        with_party(),
+        (0..20).map(|f| party_rows(f, rows.clone())),
+    );
+    let party = state.party.value.unwrap();
+    assert_eq!(party[0].nickname.value.as_deref(), Some("BIRDY"));
+    assert_eq!(party[0].hp.value, Some((5, 19)));
+}

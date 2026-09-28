@@ -115,7 +115,20 @@ impl BattleStep {
         &mut self,
         party: &pokebot_state::PartyMenuObservation,
         slot: u8,
+        name: Option<&str>,
     ) -> Decision {
+        // In battle the menu lists the party in battle order (the one out
+        // first, then as switches left it; `UpdatePartyToBattleOrder`):
+        // the member's row is where its name is, its slot only when no
+        // name was read.
+        let slot = name
+            .and_then(|n| {
+                party
+                    .members
+                    .iter()
+                    .position(|r| r.nickname.as_deref() == Some(n))
+            })
+            .map_or(slot, |row| row as u8);
         let press = |label: String, button: Button, expect: Expectation| {
             Decision::Act(Action::new(
                 label,
@@ -485,7 +498,21 @@ impl ToolStep for BattleStep {
             if let (Some(party), Some(slot)) =
                 (&o.party_menu, self.shift_to.filter(|_| !self.shifted))
             {
-                return self.shift_in_party_menu(party, slot);
+                let name = ctx
+                    .state
+                    .party
+                    .value
+                    .as_ref()
+                    .and_then(|p| p.get(usize::from(slot)))
+                    .and_then(|m| m.nickname.value.clone())
+                    .or_else(|| {
+                        self.party
+                            .members
+                            .iter()
+                            .find(|m| m.slot == slot)
+                            .map(|m| m.display_name())
+                    });
+                return self.shift_in_party_menu(party, slot, name.as_deref());
             }
             if o.bag.is_some() || self.memory.catch.thrower.is_some() {
                 return catch::in_bag(o, &data, &mut self.memory.catch, ctx.events);
@@ -616,6 +643,51 @@ mod tests {
         let mut fleeing = decided(pidgey);
         fleeing.flee = true;
         assert_eq!(spares(pidgey, &fleeing), None);
+    }
+
+    /// In battle the party menu is in battle order: the member to SHIFT to
+    /// is the row with its name (fleet worker 6's switches went to the row
+    /// numbered like its party slot).
+    #[test]
+    fn the_shift_goes_to_the_row_with_the_members_name() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let row = |name: &str| pokebot_state::PartyRowObservation {
+            nickname: Some(name.into()),
+            level: None,
+            hp: None,
+            status: None,
+        };
+        let mut menu = pokebot_state::PartyMenuObservation {
+            count: 3,
+            selected: Some(0),
+            members: vec![row("RATTATA"), row("BEEDRILL"), row("PIDGEY")],
+            ..Default::default()
+        };
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(2);
+        let label = |d: Decision| match d {
+            Decision::Act(a) => a.label,
+            _ => String::new(),
+        };
+        // BEEDRILL is party slot 2 but battle row 1.
+        assert_eq!(
+            label(step.shift_in_party_menu(&menu, 2, Some("BEEDRILL"))),
+            "shift: Down toward slot 1"
+        );
+        menu.selected = Some(1);
+        assert_eq!(
+            label(step.shift_in_party_menu(&menu, 2, Some("BEEDRILL"))),
+            "shift: open the member's actions"
+        );
+        // No name read: the slot.
+        menu.selected = Some(0);
+        assert_eq!(
+            label(step.shift_in_party_menu(&menu, 2, None)),
+            "shift: Down toward slot 2"
+        );
     }
 
     /// Switch goal run, Route 22: `Train(BULBASAUR to Lv10)` fights with
@@ -755,7 +827,7 @@ mod tests {
         let party = o.party_menu.expect("the battle's party menu");
         assert_eq!(party.count, 1);
         let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(1);
-        match step.shift_in_party_menu(&party, 1) {
+        match step.shift_in_party_menu(&party, 1, None) {
             Decision::Act(a) => assert!(a.label.starts_with("shift: no slot 1"), "{}", a.label),
             _ => panic!("no press"),
         }

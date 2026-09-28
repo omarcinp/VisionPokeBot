@@ -683,10 +683,9 @@ impl Sensor {
             events.push(GameEvent::PartySizeObserved { size: menu.count });
         }
         if let Some(rows) = self.party_rows.update(f, rows, PARTY_MENU_FRAMES) {
-            // Preserve each member's details/history when the user swaps
-            // party slots. Only a complete, unique permutation is evidence.
-            if let Some(party) = state.party.value.as_ref().filter(|p| p.len() == rows.len()) {
-                let order: Option<Vec<u8>> = rows
+            // Each row's member by its name (unique in the party).
+            let by_name: Vec<Option<u8>> = match state.party.value.as_ref() {
+                Some(party) => rows
                     .iter()
                     .map(|row| {
                         let name = row.nickname.as_ref()?;
@@ -697,8 +696,35 @@ impl Sensor {
                             .collect();
                         (matches.len() == 1).then(|| matches[0].0 as u8)
                     })
-                    .collect();
-                if let Some(order) = order {
+                    .collect(),
+                None => vec![None; rows.len()],
+            };
+            if state.in_battle {
+                // In battle the menu lists the party in battle order (the
+                // one out first; `UpdatePartyToBattleOrder`), and closing it
+                // puts the field order back: no reorder, and each row is its
+                // member by name, never by place (fleet worker 6: switches
+                // against a Bug Catcher shuffled the party's HP between
+                // slots, and RATTATA was sent out at 9/20 and fainted).
+                events.extend(
+                    rows.iter()
+                        .zip(&by_name)
+                        .filter_map(|(row, slot)| party_row_event((*slot)?, row, state)),
+                );
+            } else {
+                // Preserve each member's details/history when the user swaps
+                // party slots. Only a complete, unique permutation is evidence.
+                let complete = state
+                    .party
+                    .value
+                    .as_ref()
+                    .is_some_and(|p| p.len() == rows.len());
+                if let Some(order) = by_name
+                    .iter()
+                    .copied()
+                    .collect::<Option<Vec<u8>>>()
+                    .filter(|_| complete)
+                {
                     let mut sorted = order.clone();
                     sorted.sort_unstable();
                     let original: Vec<u8> = (0..rows.len() as u8).collect();
@@ -706,12 +732,12 @@ impl Sensor {
                         events.push(GameEvent::PartyReordered { order });
                     }
                 }
+                events.extend(
+                    rows.iter()
+                        .enumerate()
+                        .filter_map(|(slot, row)| party_row_event(slot as u8, row, state)),
+                );
             }
-            events.extend(
-                rows.iter()
-                    .enumerate()
-                    .filter_map(|(slot, row)| party_row_event(slot as u8, row, state)),
-            );
         }
         let summary = o
             .summary
@@ -720,9 +746,11 @@ impl Sensor {
         let Some(s) = self.summary.update(f, summary, SUMMARY_FRAMES) else {
             return;
         };
+        // The selected row is a party slot only outside battle (in battle
+        // the menu is in battle order).
         let slot = names::member(state, &self.data, &s.nickname)
             .map(|m| m.slot)
-            .or(self.party_selected);
+            .or(self.party_selected.filter(|_| !state.in_battle));
         let Some(slot) = slot else { return };
         events.extend(self.summary_events(slot, &s, state));
     }
