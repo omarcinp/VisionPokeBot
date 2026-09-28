@@ -55,6 +55,8 @@ pub struct BattleMemory {
     /// "Foe X woke up!"), and the sleep moves chosen against it.
     pub foe_asleep: bool,
     pub sleep_tries: u8,
+    /// Why the battle is being run from, once told.
+    pub fled_for: Option<String>,
 }
 
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
@@ -346,6 +348,7 @@ pub fn decide(
     let opponent = identify_opponent(data, observation);
     // Allow for a failed escape followed by another attack. A full HP bar
     // can still be unsafe against a much stronger wild opponent.
+    let mut risk = None;
     let high_risk = match (
         lead,
         numbers,
@@ -362,18 +365,52 @@ pub fn decide(
                     shiny: false,
                     caught: battle.opponent_caught,
                 };
-                catch::risk_staged(
+                let r = catch::risk_staged(
                     data,
                     &catch::Lead { member, hp },
                     &foe,
                     2,
                     memory.our_stages,
-                ) > catch::RISK_LIMIT
+                );
+                risk = Some(r);
+                r > catch::RISK_LIMIT
             })
         }
         _ => true,
     };
     let flee = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
+    if flee {
+        // Once a battle, with every reason: a run costs the training
+        // battle, and a hunt heals after one.
+        let why: Vec<String> = [
+            low.then(|| format!("HP {numbers:?} under {flee_below}‰")),
+            high_risk.then(|| match risk {
+                Some(r) => format!(
+                    "faint risk {:.1}% in 2 turns (stages {:?})",
+                    r * 100.0,
+                    memory.our_stages
+                ),
+                None => format!(
+                    "risk unknown (HP {numbers:?}, foe {:?} Lv{:?})",
+                    battle.opponent_name, battle.opponent_level
+                ),
+            }),
+            no_attacks.then(|| "no attacking move".to_owned()),
+            memory.catch.flee.then(|| "not catching it".to_owned()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let why = why.join(", ");
+        if memory.fled_for.as_deref() != Some(why.as_str()) {
+            events.push(GameEvent::GoalProgress {
+                goal: "Story".into(),
+                phase: "Battle".into(),
+                detail: format!("running: {why}"),
+            });
+            memory.fled_for = Some(why);
+        }
+    }
     Some(match menu {
         BattleMenu::Command { column, row } if flee => step_toward(
             (column, row),
@@ -675,6 +712,22 @@ mod tests {
             &mut events,
         ));
         assert!(d.contains("RUN"), "{d}");
+        // Why is told once.
+        let told = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    GameEvent::GoalProgress { detail, .. } => Some(detail.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(told(&events).len(), 1);
+        assert!(
+            told(&events)[0].starts_with("running: HP Some((3, 22)) under 500‰"),
+            "{:?}",
+            told(&events)
+        );
         // Even a nearly defeated foe is not worth a possible faint.
         let d = label(decide(
             &hud((3, 22), "PIDGEY", 4, 10),
