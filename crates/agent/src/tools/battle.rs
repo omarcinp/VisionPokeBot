@@ -527,6 +527,33 @@ impl ToolStep for BattleStep {
             self.give_up_a_refused_shift(ctx.events);
             // Switch-training: the member being carried started the
             // battle; the carrier comes out at the first command menu.
+            // The trainee fights alone the wild ones it now beats (fleet
+            // worker 2: a Lv10 MANKEY, switch-trained since Lv3, handed
+            // every Lv2–5 RATTATA to CHARMANDER and took half the
+            // experience): the carrier comes out only when the trainee is
+            // at risk against this foe, a faint costing no more than a
+            // SEND OUT (the carrier is there).
+            if let (Some(_), false, Some(BattleMenu::Command { .. })) = (
+                self.shift_to.filter(|_| !self.shifted),
+                self.memory.trainer,
+                b.menu,
+            ) {
+                if let Some(risk) = battle::lead_risk(&data, &self.party, b, self.memory.our_stages)
+                    .filter(|r| *r <= catch::risk_limit(true))
+                {
+                    self.shifted = true;
+                    ctx.events.push(super::progress(
+                        "Battle",
+                        format!(
+                            "{} takes {} Lv{} alone (faint risk {:.1}%)",
+                            b.player_name.clone().unwrap_or_default(),
+                            b.opponent_name.clone().unwrap_or_default(),
+                            b.opponent_level.unwrap_or_default(),
+                            risk * 100.0
+                        ),
+                    ));
+                }
+            }
             if let Some(slot) = self.shift_to.filter(|_| !self.shifted) {
                 if self.active == Some(slot) {
                     self.shifted = true;
@@ -1191,6 +1218,99 @@ mod tests {
             last,
             "fail: whited out: our last Pokémon fainted (CATERPIE)"
         );
+    }
+
+    /// Fleet worker 2: MANKEY, switch-trained since Lv3 with CHARMANDER
+    /// carrying it, was Lv10 and still called back at every Route 22
+    /// battle against Lv2–5 foes, taking half the experience. The trainee
+    /// now fights alone what it beats; the carrier comes out against a foe
+    /// it doesn't.
+    #[test]
+    fn a_trainee_fights_alone_the_wild_ones_it_beats() {
+        use pokebot_state::{BattleObservation, Knowledge, Observation, Observed, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let command = |foe: &str, level: u8| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::BattleCommand,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.battle = Some(BattleObservation {
+                menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+                player_name: Some("MANKEY".into()),
+                player_level: Some(10),
+                player_hp_numbers: Some((31, 31)),
+                opponent_name: Some(foe.into()),
+                opponent_level: Some(level),
+                player_hp: None,
+                opponent_hp: Some(1000),
+                move_pp: None,
+                move_names: Vec::new(),
+                opponent_caught: Some(true),
+                opponent_shiny: None,
+                level_up_stats: None,
+            });
+            o
+        };
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member(
+                        "SPECIES_MANKEY",
+                        10,
+                        31,
+                        &[
+                            "MOVE_SCRATCH",
+                            "MOVE_LEER",
+                            "MOVE_LOW_KICK",
+                            "MOVE_KARATE_CHOP",
+                        ],
+                    ),
+                    member(
+                        "SPECIES_CHARMANDER",
+                        14,
+                        38,
+                        &["MOVE_SCRATCH", "MOVE_EMBER"],
+                    ),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        let mut events = Vec::new();
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false).shifting_to(1);
+        step.started = true;
+        step.in_battle = true;
+        let label = step_label(&step_next(
+            &mut step,
+            &command("RATTATA", 4),
+            &state,
+            &mut events,
+        ));
+        assert!(!label.contains("POKéMON"), "{label}");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                GameEvent::GoalProgress { detail, .. } if detail.starts_with("MANKEY takes RATTATA Lv4 alone"))),
+            "{events:?}"
+        );
+        // A foe it doesn't beat: the carrier comes out.
+        let mut step = BattleStep::new(data, BattlePlan::Fight, false).shifting_to(1);
+        step.started = true;
+        step.in_battle = true;
+        let label = step_label(&step_next(
+            &mut step,
+            &command("PRIMEAPE", 30),
+            &state,
+            &mut events,
+        ));
+        assert!(label.contains("POKéMON"), "{label}");
     }
 
     fn step_next(

@@ -43,6 +43,10 @@ const MAX_FLED_IN_A_ROW: u32 = 8;
 /// no longer heals at the catch policy's bar for extras (`CATCH_MIN_HP`;
 /// flash-1 passed up a SPEAROW at 39/60 HP before that).
 const HEAL_BELOW: u32 = 500;
+/// The same while another member can fight: a faint then costs a SEND OUT
+/// and a heal, not the run (the user's rule: Pokémon may faint as long as
+/// not all of them do), so the hunt goes on longer between heals.
+const BACKED_HEAL_BELOW: u32 = 250;
 /// Heals per hunt before it counts as not working.
 const MAX_HEALS: u32 = 3;
 /// How the step reports a lead that must heal before going on.
@@ -276,16 +280,25 @@ impl ToolStep for HuntStep {
             ));
         }
         if let Some(lead) = self.fighter(&party) {
+            let backed = party
+                .members
+                .iter()
+                .any(|m| m.slot != lead.slot && m.hp.is_some_and(|(hp, _)| hp > 0));
+            let below = if backed {
+                BACKED_HEAL_BELOW
+            } else {
+                HEAL_BELOW
+            };
             if lead
                 .hp
-                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * HEAL_BELOW)
+                .is_some_and(|(hp, max)| u32::from(hp) * 1000 < u32::from(max) * below)
             {
                 return Decision::Fail(format!(
                     "{HEAL_FIRST}: {} is at {}/{} HP, below {:.0} %",
                     lead.display_name(),
                     lead.hp.map_or(0, |h| h.0),
                     lead.hp.map_or(0, |h| h.1),
-                    f64::from(HEAL_BELOW) / 10.0
+                    f64::from(below) / 10.0
                 ));
             }
         }

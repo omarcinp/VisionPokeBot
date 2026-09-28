@@ -42,8 +42,32 @@ use crate::party::{Member, Party};
 use crate::stock::{ball_count, SHINY_RESERVE};
 use crate::{Action, Decision, Expectation};
 
-/// Largest accepted P(our lead faints during the attempt).
+/// Largest accepted P(the Pokémon out faints) when no other member can
+/// fight: its faint is a white-out, and the game restarts.
 pub const RISK_LIMIT: f64 = 0.02;
+/// Largest accepted P(the Pokémon out faints) while another member can
+/// fight: the user's rule is that Pokémon may faint as long as not all of
+/// them do, and a faint then costs a SEND OUT and a heal, not the run.
+pub const BACKED_RISK_LIMIT: f64 = 0.2;
+
+/// The faint risk accepted for the one out; `backed`: another member can
+/// fight.
+pub fn risk_limit(backed: bool) -> f64 {
+    if backed {
+        BACKED_RISK_LIMIT
+    } else {
+        RISK_LIMIT
+    }
+}
+
+/// Whether a member other than the lead (the first) can fight.
+pub fn backed(state: &GameState) -> bool {
+    state.party.value.as_ref().is_some_and(|p| {
+        p.iter()
+            .skip(1)
+            .any(|m| m.hp.value.is_some_and(|(hp, _)| hp > 0))
+    })
+}
 /// Smallest P(catch) a non-shiny attempt starts with.
 pub const MIN_CATCH_CHANCE: f64 = 0.2;
 /// A fainted lead costs this many catches; a shiny is worth far more
@@ -299,9 +323,10 @@ pub fn plan_catch_wanted(
                 plan.summary()
             ));
         }
-        if o.lead_faints > RISK_LIMIT {
+        let limit = risk_limit(backed(state));
+        if o.lead_faints > limit {
             return Err(format!(
-                "risk {:.4} above {RISK_LIMIT} ({})",
+                "risk {:.4} above {limit} ({})",
                 o.lead_faints,
                 plan.summary()
             ));
@@ -841,12 +866,14 @@ pub(crate) fn attempt_decision(
             Choice::Run => return None,
             c => c,
         }
-    } else if odds.choice == Choice::Run || odds.outlook.lead_faints > RISK_LIMIT {
+    } else if odds.choice == Choice::Run || odds.outlook.lead_faints > risk_limit(party.backed()) {
         memory.catch.attempt = None;
         memory.catch.flee = true;
         events.push(log(format!(
-            "{species}: {} with risk {:.4} (limit {RISK_LIMIT}): abandoning the catch",
-            odds.choice, odds.outlook.lead_faints
+            "{species}: {} with risk {:.4} (limit {}): abandoning the catch",
+            odds.choice,
+            odds.outlook.lead_faints,
+            risk_limit(party.backed())
         )));
         return None;
     } else {

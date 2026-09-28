@@ -177,6 +177,15 @@ impl Party {
 
     /// The party with the member in `slot` first (the one in battle), the
     /// others in order; slots are kept.
+    /// Whether a member besides the first (the one out) can fight: its
+    /// faint is then not a white-out.
+    pub fn backed(&self) -> bool {
+        self.members
+            .iter()
+            .skip(1)
+            .any(|m| m.hp.is_some_and(|(hp, _)| hp > 0))
+    }
+
     pub fn with_first(mut self, slot: u8) -> Party {
         if let Some(at) = self.members.iter().position(|m| m.slot == slot) {
             let member = self.members.remove(at);

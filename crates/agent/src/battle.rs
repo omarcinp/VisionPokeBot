@@ -75,32 +75,55 @@ impl BattleMemory {
     }
 }
 
+/// The foe on the HUD, if it can be read.
+pub fn hud_foe(data: &GameData, battle: &BattleObservation) -> Option<catch::Foe> {
+    Some(catch::Foe {
+        species: data
+            .species_named(battle.opponent_name.as_deref()?)?
+            .to_owned(),
+        level: battle.opponent_level?,
+        hp_per_mille: battle.opponent_hp.unwrap_or(1000),
+        status: catch::FoeStatus::None,
+        shiny: false,
+        caught: None,
+    })
+}
+
+/// P(the one out, `party`'s first, faints within two turns) against the
+/// foe on the HUD, with our stat stages; `None` when either can't be read.
+pub fn lead_risk(
+    data: &GameData,
+    party: &Party,
+    battle: &BattleObservation,
+    stages: [i8; 6],
+) -> Option<f64> {
+    let active = party.lead()?;
+    let foe = hud_foe(data, battle)?;
+    let hp = battle.player_hp_numbers.or(active.hp)?;
+    Some(catch::risk_staged(
+        data,
+        &catch::Lead { member: active, hp },
+        &foe,
+        2,
+        stages,
+    ))
+}
+
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
-/// to when the one out is at risk against the foe on the HUD: the
-/// healthy member with the least risk (over three turns: the switch gives
-/// the foe a free attack), when that is safe or half the risk at most.
-/// `party` has the battler out first.
+/// to when the one out is at risk against the foe on the HUD (above
+/// [`catch::risk_limit`]: with others to send out, a faint is not the
+/// end): the healthy member with the least risk (over three turns: the
+/// switch gives the foe a free attack), when that is safe or half the risk
+/// at most. `party` has the battler out first.
 pub fn defensive_switch(
     data: &GameData,
     party: &Party,
     battle: &BattleObservation,
     stages: [i8; 6],
 ) -> Option<u8> {
-    let active = party.lead()?;
-    let species = data
-        .species_named(battle.opponent_name.as_deref()?)?
-        .to_owned();
-    let foe = catch::Foe {
-        species,
-        level: battle.opponent_level?,
-        hp_per_mille: battle.opponent_hp.unwrap_or(1000),
-        status: catch::FoeStatus::None,
-        shiny: false,
-        caught: None,
-    };
-    let hp = battle.player_hp_numbers.or(active.hp)?;
-    let at_risk = catch::risk_staged(data, &catch::Lead { member: active, hp }, &foe, 2, stages);
-    if at_risk <= catch::RISK_LIMIT {
+    let foe = hud_foe(data, battle)?;
+    let at_risk = lead_risk(data, party, battle, stages)?;
+    if at_risk <= catch::risk_limit(party.backed()) {
         return None;
     }
     let (slot, risk) = party
@@ -438,11 +461,16 @@ pub fn decide(
                     memory.our_stages,
                 );
                 risk = Some(r);
-                r > catch::RISK_LIMIT
+                r > catch::risk_limit(usable > 1)
             })
         }
         _ => true,
     };
+    // With another member to send out, the risk decides alone when it
+    // could be priced: a low HP bar is no reason to run from a battle the
+    // one out still wins (the user's rule: Pokémon may faint, as long as
+    // not all of them do).
+    let low = low && !(usable > 1 && risk.is_some());
     let wants_out = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
     // Trapped (ARENA TRAP, MEAN LOOK, WRAP…): the game refuses RUN and
     // puts the menu back; fight on.
@@ -744,6 +772,72 @@ mod tests {
 
     /// Switch goal run: a Lv6 Bulbasaur fought two wild Pidgeys on Route
     /// 1 at 7/22 then 3/22 HP (the bar unread) and whited out.
+    /// The user's rule: Pokémon may faint as long as not all of them do.
+    /// Fleet worker 5's SQUIRTLE (27/30, Defense −4 after two TAIL WHIPs)
+    /// ran from a RATTATA at a fifth of its HP: a 9.7 % faint risk. With
+    /// another member to send out it fights on; alone it still runs.
+    #[test]
+    fn a_member_with_others_behind_it_accepts_more_risk() {
+        use pokebot_state::{BattleMenu, BattleObservation, Observation, Observed};
+        let Some(data) = data() else { return };
+        let squirtle = || {
+            let mut m = Member::new(&data, "SPECIES_SQUIRTLE", 10);
+            m.hp = Some((27, 30));
+            m.moves = vec!["MOVE_TACKLE".into(), "MOVE_BUBBLE".into()];
+            m
+        };
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::BattleCommand,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(BattleObservation {
+            menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+            player_name: Some("SQUIRTLE".into()),
+            player_level: Some(10),
+            player_hp_numbers: Some((27, 30)),
+            opponent_name: Some("RATTATA".into()),
+            opponent_level: Some(5),
+            player_hp: None,
+            opponent_hp: Some(208),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: Some(true),
+            opponent_shiny: None,
+            level_up_stats: None,
+        });
+        let decide_with = |party: Party| {
+            let mut memory = BattleMemory::default();
+            memory.catch.decided = true;
+            memory.our_stages[2] = -4;
+            match decide(
+                &o,
+                &BattlePolicy::default(),
+                &mut memory,
+                &party,
+                &data,
+                &mut Vec::new(),
+            ) {
+                Some(Decision::Act(a)) => a.label,
+                _ => "none".into(),
+            }
+        };
+        let alone = decide_with(Party {
+            members: vec![squirtle()],
+        });
+        assert!(alone.contains("RUN"), "{alone}");
+        let mut charmander = Member::new(&data, "SPECIES_CHARMANDER", 14);
+        charmander.slot = 1;
+        charmander.hp = Some((38, 38));
+        let backed = decide_with(Party {
+            members: vec![squirtle(), charmander],
+        });
+        assert!(backed.contains("FIGHT"), "{backed}");
+    }
+
     #[test]
     fn a_wild_battle_at_low_or_unreadable_hp_is_run_from() {
         use pokebot_state::{BattleMenu, BattleObservation, Observation, Observed};
