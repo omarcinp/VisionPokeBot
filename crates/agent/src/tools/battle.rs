@@ -181,6 +181,45 @@ impl BattleStep {
             })
     }
 
+    /// Our battler `name` fainted: the next is sent out, or, the last
+    /// one, it is the white-out (the restart is for a white-out only).
+    fn faint_seen(&mut self, name: &str, events: &mut Vec<GameEvent>) -> Option<Decision> {
+        if self.fainted.is_some() {
+            return None;
+        }
+        let slot = self
+            .party
+            .members
+            .iter()
+            .find(|m| !name.is_empty() && m.display_name() == name)
+            .map(|m| m.slot)
+            .or(self.active)
+            .unwrap_or(0);
+        self.fainted = Some(slot);
+        if self.replacement().is_none() {
+            return Some(Decision::Fail(format!(
+                "whited out: our last Pokémon fainted ({name})"
+            )));
+        }
+        events.push(super::progress(
+            "Battle",
+            format!("{name} fainted: sending out the next one"),
+        ));
+        None
+    }
+
+    /// "Use next POKéMON?": the one out fainted (its HUD may have hidden
+    /// the 0 HP before the faint counted).
+    fn faint_asked(&mut self, events: &mut Vec<GameEvent>) {
+        let name = self
+            .last_hud
+            .as_ref()
+            .and_then(|b| b.player_name.clone())
+            .unwrap_or_default();
+        // A question only asked while another can fight: no white-out.
+        let _ = self.faint_seen(&name, events);
+    }
+
     /// A SHIFT the game refuses (a trap: ARENA TRAP, MEAN LOOK, WRAP…) is
     /// given up: the one out fights on (asking again only loops).
     fn give_up_a_refused_shift(&mut self, events: &mut Vec<GameEvent>) {
@@ -490,18 +529,9 @@ impl ToolStep for BattleStep {
                 && self.fainted.is_none()
             {
                 let name = b.player_name.clone().unwrap_or_default();
-                if self.replacement().is_none() {
-                    return Decision::Fail(format!(
-                        "whited out: our last Pokémon fainted ({name})"
-                    ));
+                if let Some(white_out) = self.faint_seen(&name, ctx.events) {
+                    return white_out;
                 }
-                // One fainted, others can fight: the game sends out the
-                // next (the restart is for a white-out only).
-                self.fainted = Some(self.active.unwrap_or(0));
-                ctx.events.push(super::progress(
-                    "Battle",
-                    format!("{name} fainted: sending out the next one"),
-                ));
             }
             self.last_hud = Some(b.clone());
             // A trainer's battle can't be run from: a member at risk
@@ -600,6 +630,7 @@ impl ToolStep for BattleStep {
                 // Our battler fainted in a wild battle: "Use next POKéMON?"
                 // → YES (NO would try to run, and a trap refuses it).
                 if battle::is_use_next_question(&page) {
+                    self.faint_asked(ctx.events);
                     return select(menu, 0, "use next Pokémon: YES");
                 }
                 // "Will RED change POKéMON?" → No (the lead fights).
@@ -642,6 +673,7 @@ impl ToolStep for BattleStep {
             }
             if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
                 if battle::is_use_next_question(&d.lines.join(" ")) {
+                    self.faint_asked(ctx.events);
                     return select(menu, 0, "use next Pokémon: YES");
                 }
             }
@@ -659,11 +691,49 @@ impl ToolStep for BattleStep {
                     .observe(&d.lines.join(" "), &lead, &self.data);
                 self.give_up_a_refused_shift(ctx.events);
             }
+            // The one out fainted: a trainer's battle opens this screen
+            // itself, a wild one after YES. The HUD's 0 HP is hidden soon
+            // after it reads, so its faint may not have counted (fleet
+            // workers 2, 4 and 5 pressed B on this screen, which can't be
+            // left, for hours): the FNT on the first panel (the one out)
+            // tells.
+            if let Some(party) = &o.party_menu {
+                let first = party.members.first();
+                if self.fainted.is_none()
+                    && first.is_some_and(|r| r.status == Some(Status::Fainted))
+                {
+                    let name = first.and_then(|r| r.nickname.clone()).unwrap_or_default();
+                    if let Some(white_out) = self.faint_seen(&name, ctx.events) {
+                        return white_out;
+                    }
+                }
+            }
             // Sending out the next one after a faint (the party screen
-            // can't be left).
+            // can't be left): never a member the screen shows fainted.
             if let (Some(party), Some(_)) = (&o.party_menu, self.fainted) {
-                if let Some(slot) = self.replacement() {
-                    let name = self.member_name(ctx.state, slot);
+                let fainted_row = |name: Option<&str>| {
+                    party.members.iter().any(|r| {
+                        name.is_some()
+                            && r.nickname.as_deref() == name
+                            && r.status == Some(Status::Fainted)
+                    })
+                };
+                let choice = self
+                    .replacement()
+                    .map(|slot| (slot, self.member_name(ctx.state, slot)))
+                    .filter(|(_, name)| !fainted_row(name.as_deref()))
+                    .or_else(|| {
+                        party
+                            .members
+                            .iter()
+                            .enumerate()
+                            .find(|(_, r)| {
+                                r.status != Some(Status::Fainted)
+                                    && r.hp.is_none_or(|(hp, _)| hp > 0)
+                            })
+                            .map(|(row, r)| (row as u8, r.nickname.clone()))
+                    });
+                if let Some((slot, name)) = choice {
                     return self.shift_in_party_menu(party, slot, name.as_deref());
                 }
             }
@@ -1217,6 +1287,65 @@ mod tests {
         assert_eq!(
             last,
             "fail: whited out: our last Pokémon fainted (CATERPIE)"
+        );
+    }
+
+    /// Fleet worker 5, a Team Rocket Grunt in Mt. Moon: RATTATA fainted
+    /// and the game opened the party screen (a trainer's battle asks
+    /// nothing). The HUD's 0 HP had hidden before the faint counted, so
+    /// the step pressed B there, which the screen ignores, for hours. The
+    /// FNT on the first panel is the faint: the next one is sent out.
+    #[test]
+    fn a_faint_is_seen_on_the_party_screen() {
+        use pokebot_state::{Knowledge, Observation};
+        use pokebot_vision::{FireRedPerception, PerceptionSystem};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(data), Ok(font)) = (
+            GameData::load(root.join("data/world/gamedata.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let Ok(image) = pokebot_video::png::load(
+            root.join("captures/fixtures/emu-battle-party-lead-fainted.png"),
+        ) else {
+            return;
+        };
+        let Ok(small) = pokebot_vision::text::Font::load(root.join("data/world/font_small.json"))
+        else {
+            return;
+        };
+        let mut vision = FireRedPerception::default()
+            .with_font(Arc::new(font))
+            .with_small_font(Arc::new(small));
+        let frame =
+            pokebot_core::NormalizedFrame::new(1, std::time::Instant::now(), image).unwrap();
+        let o: Observation = vision.observe(&frame);
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member("SPECIES_RATTATA", 9, 26, &["MOVE_TACKLE"]),
+                    member("SPECIES_CHARMELEON", 24, 62, &["MOVE_EMBER"]),
+                    member("SPECIES_GEODUDE", 11, 32, &["MOVE_TACKLE"]),
+                    member("SPECIES_ZUBAT", 8, 25, &["MOVE_LEECH_LIFE"]),
+                    member("SPECIES_MANKEY", 8, 26, &["MOVE_SCRATCH"]),
+                    member("SPECIES_PARAS", 5, 19, &["MOVE_SCRATCH"]),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        // A step begun on this screen (the faint happened in the one before).
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        let mut events = Vec::new();
+        let label = step_label(&step_next(&mut step, &o, &state, &mut events));
+        assert!(label.contains("toward slot"), "{label}");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                GameEvent::GoalProgress { detail, .. } if detail == "RATTATA fainted: sending out the next one")),
+            "{events:?}"
         );
     }
 
