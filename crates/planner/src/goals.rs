@@ -5329,7 +5329,7 @@ fn dedupe_steps(steps: Vec<Step>) -> (Vec<Step>, f64) {
             | Intent::Train { map, .. }
             | Intent::Catch { map, .. }
             | Intent::Buy { map, .. } => here = Some(map.clone()),
-            Intent::Heal { center } => here = Some(center.clone()),
+            Intent::Heal { center } | Intent::Swap { center, .. } => here = Some(center.clone()),
             Intent::Battle { .. }
             | Intent::Teach { .. }
             | Intent::Probe { .. }

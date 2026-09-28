@@ -414,6 +414,15 @@ pub enum Intent {
         hm: String,
         mon: String,
     },
+    /// At `center`'s PC, store party member `deposit` (a species) and take
+    /// `withdraw` (a species in the boxes) into the party: the team's
+    /// roster changes (a member that adds nothing makes way for one that
+    /// covers a gap).
+    Swap {
+        deposit: String,
+        withdraw: String,
+        center: String,
+    },
     Probe {
         fact: ProbeFact,
     },
@@ -439,6 +448,8 @@ pub struct CostParams {
     pub buy_s: f64,
     pub buy_item_s: f64,
     pub teach_s: f64,
+    /// A PC swap: boot the PC, store one, take one, log off.
+    pub swap_s: f64,
     pub save_s: f64,
     pub throw_s: f64,
     pub weaken_s: f64,
@@ -476,6 +487,7 @@ impl Default for CostParams {
             buy_s: 15.0,
             buy_item_s: 1.0,
             teach_s: 20.0,
+            swap_s: 45.0,
             save_s: 8.0,
             throw_s: 8.0,
             weaken_s: 30.0,
@@ -595,6 +607,7 @@ impl Intent {
             Intent::Catch { .. } => "Catch",
             Intent::Buy { .. } => "Buy",
             Intent::Teach { .. } => "Teach",
+            Intent::Swap { .. } => "Swap",
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
@@ -625,6 +638,9 @@ impl Intent {
                 pre
             }
             Intent::Heal { center } => vec![GoalPredicate::at(center)],
+            Intent::Swap {
+                withdraw, center, ..
+            } => vec![GoalPredicate::at(center), GoalPredicate::caught(withdraw)],
             Intent::Beat { trainer, map } => {
                 vec![GoalPredicate::at(map), GoalPredicate::can_beat(trainer)]
             }
@@ -689,7 +705,7 @@ impl Intent {
             Intent::Beat { trainer, .. } => {
                 vec![Effect::Establishes(GoalPredicate::flag(trainer, true))]
             }
-            Intent::Train { .. } => Vec::new(),
+            Intent::Train { .. } | Intent::Swap { .. } => Vec::new(),
             Intent::Catch { species, .. } => {
                 vec![Effect::Establishes(GoalPredicate::caught(species))]
             }
@@ -744,6 +760,7 @@ impl Intent {
             } => catch_cost(ctx, species, map, slot, *balls),
             Intent::Buy { count, .. } => p.buy_s + p.buy_item_s * f64::from(*count),
             Intent::Teach { .. } => p.teach_s,
+            Intent::Swap { .. } => p.swap_s,
             Intent::Probe { fact } => fact.cost_s(),
             Intent::Save => p.save_s,
             Intent::Unstick => p.script_s,
@@ -783,6 +800,9 @@ impl fmt::Display for Intent {
             } => write!(f, "Catch({species} on {map} {slot}, {balls} balls)"),
             Intent::Buy { item, count, map } => write!(f, "Buy({item} x{count} at {map})"),
             Intent::Teach { hm, mon } => write!(f, "Teach({hm} to {mon})"),
+            Intent::Swap {
+                deposit, withdraw, ..
+            } => write!(f, "Swap({deposit} for {withdraw})"),
             Intent::Probe { fact } => write!(f, "Probe({fact})"),
             Intent::Save => write!(f, "Save"),
             Intent::Unstick => write!(f, "Unstick"),

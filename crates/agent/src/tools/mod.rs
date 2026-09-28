@@ -216,6 +216,13 @@ pub enum Intent {
         item: String,
         member: String,
     },
+    /// At the nearest Pokémon Center's PC, store party member `deposit` (a
+    /// species constant) and take `withdraw` (a species in the boxes) into
+    /// the party.
+    PcSwap {
+        deposit: String,
+        withdraw: String,
+    },
     /// Use a field move: `mv` (`MOVE_CUT`) on the obstacle `at` faces
     /// (`Dest::Facing`: Cut, Rock Smash, Strength, Surf, Waterfall), to
     /// the map `at` names (Fly), or where the player stands (Flash).
@@ -261,6 +268,7 @@ impl Intent {
             Intent::Explore { .. } => "Explore",
             Intent::ConfirmLocation => "ConfirmLocation",
             Intent::Teach { .. } => "Teach",
+            Intent::PcSwap { .. } => "PcSwap",
             Intent::FieldMove { .. } => "FieldMove",
         }
     }
@@ -340,6 +348,12 @@ impl Intent {
             P::Teach { hm, mon } => Intent::Teach {
                 item: hm.clone(),
                 member: mon.clone(),
+            },
+            P::Swap {
+                deposit, withdraw, ..
+            } => Intent::PcSwap {
+                deposit: deposit.clone(),
+                withdraw: withdraw.clone(),
             },
             P::Probe { fact } => Intent::Probe {
                 fact: match fact {
@@ -439,6 +453,7 @@ impl std::fmt::Display for Intent {
             Intent::Explore { map: Some(map) } => write!(f, "Explore {map}"),
             Intent::ConfirmLocation => write!(f, "ConfirmLocation"),
             Intent::Teach { item, member } => write!(f, "Teach {item} to {member}"),
+            Intent::PcSwap { deposit, withdraw } => write!(f, "PcSwap {deposit} for {withdraw}"),
             Intent::FieldMove { mv, at, push } => {
                 write!(f, "FieldMove {mv}")?;
                 if let Some(at) = at {
