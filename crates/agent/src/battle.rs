@@ -109,6 +109,38 @@ pub fn lead_risk(
     ))
 }
 
+/// Whether the one out (a switch-trained trainee) should fight the foe on
+/// the HUD itself rather than hand it to `carrier`: it wins, and not so
+/// slowly that the carrier's quick win (half the experience) pays better
+/// (fleet worker 4: a Lv10 PARAS scratched at Lv13–16 ODDISH alone while
+/// VENUSAUR waited).
+pub fn alone_pays(data: &GameData, party: &Party, battle: &BattleObservation, carrier: u8) -> bool {
+    let (Some(active), Some(foe)) = (party.lead(), hud_foe(data, battle)) else {
+        return false;
+    };
+    let Some(hp) = battle.player_hp_numbers.or(active.hp) else {
+        return false;
+    };
+    let Some(alone) = catch::turns_to_win(data, &catch::Lead { member: active, hp }, &foe) else {
+        return false;
+    };
+    let carried = party
+        .members
+        .iter()
+        .find(|m| m.slot == carrier)
+        .and_then(|m| {
+            catch::turns_to_win(
+                data,
+                &catch::Lead {
+                    member: m,
+                    hp: m.hp?,
+                },
+                &foe,
+            )
+        });
+    carried.is_none_or(|c| pokebot_planner::prepare::alone_pays(alone, c))
+}
+
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
 /// to when the one out is at risk against the foe on the HUD (above
 /// [`catch::risk_limit`]: with others to send out, a faint is not the

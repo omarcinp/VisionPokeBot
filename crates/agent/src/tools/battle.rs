@@ -563,13 +563,14 @@ impl ToolStep for BattleStep {
             // experience): the carrier comes out only when the trainee is
             // at risk against this foe, a faint costing no more than a
             // SEND OUT (the carrier is there).
-            if let (Some(_), false, Some(BattleMenu::Command { .. })) = (
+            if let (Some(carrier), false, Some(BattleMenu::Command { .. })) = (
                 self.shift_to.filter(|_| !self.shifted),
                 self.memory.trainer,
                 b.menu,
             ) {
                 if let Some(risk) = battle::lead_risk(&data, &self.party, b, self.memory.our_stages)
                     .filter(|r| *r <= catch::risk_limit(true))
+                    .filter(|_| battle::alone_pays(&data, &self.party, b, carrier))
                 {
                     self.shifted = true;
                     ctx.events.push(super::progress(
@@ -1347,6 +1348,74 @@ mod tests {
                 GameEvent::GoalProgress { detail, .. } if detail == "RATTATA fainted: sending out the next one")),
             "{events:?}"
         );
+    }
+
+    /// Fleet worker 4: PARAS Lv10, switch-trained with VENUSAUR, took
+    /// Lv13–16 ODDISH alone (little risk, many turns of SCRATCH) while
+    /// VENUSAUR, which wins in a turn or two, waited. A slow win is handed
+    /// to the carrier: half the experience in a fraction of the time.
+    #[test]
+    fn a_trainee_hands_a_slow_win_to_its_carrier() {
+        use pokebot_state::{BattleObservation, Knowledge, Observation, Observed, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::BattleCommand,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(BattleObservation {
+            menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+            player_name: Some("PARAS".into()),
+            player_level: Some(10),
+            player_hp_numbers: Some((31, 31)),
+            opponent_name: Some("ODDISH".into()),
+            opponent_level: Some(16),
+            player_hp: None,
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: Some(true),
+            opponent_shiny: None,
+            level_up_stats: None,
+        });
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member(
+                        "SPECIES_PARAS",
+                        10,
+                        31,
+                        &["MOVE_SCRATCH", "MOVE_STUN_SPORE"],
+                    ),
+                    member(
+                        "SPECIES_VENUSAUR",
+                        36,
+                        110,
+                        &[
+                            "MOVE_CUT",
+                            "MOVE_SLEEP_POWDER",
+                            "MOVE_RAZOR_LEAF",
+                            "MOVE_VINE_WHIP",
+                        ],
+                    ),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        let mut events = Vec::new();
+        let mut step = BattleStep::new(data, BattlePlan::Fight, false).shifting_to(1);
+        step.started = true;
+        step.in_battle = true;
+        let label = step_label(&step_next(&mut step, &o, &state, &mut events));
+        assert!(label.contains("POKéMON"), "{label} {events:?}");
     }
 
     /// Fleet worker 2: MANKEY, switch-trained since Lv3 with CHARMANDER

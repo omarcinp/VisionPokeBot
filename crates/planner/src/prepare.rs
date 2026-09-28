@@ -97,6 +97,10 @@ pub struct PreparationPlan {
     pub confidence: Vec<(String, f64)>,
     /// Final party (species, level, moves).
     pub party: Vec<(String, u8, Vec<String>)>,
+    /// Opponents of the targets the prepared party's best fighter is
+    /// expected to beat, added up: how far a best effort gets when no plan
+    /// wins.
+    pub progress: f64,
 }
 
 impl PreparationPlan {
@@ -220,30 +224,56 @@ fn training_cost(
     // level of the training window, by the member itself when it can win
     // its first ones.
     let mid = (member.level + to).div_ceil(2);
-    let (us, share) = if safe_against(data, &combatant(data, member, member.level)?, table) {
-        (combatant(data, member, mid)?, 1.0)
-    } else {
-        let carrier = carrier?;
-        // A wild one that may trap the trainee (ARENA TRAP, SHADOW TAG,
-        // MAGNET PULL) refuses the SHIFT and RUN: the trainee fights it
-        // alone (the Switch: a Lv5 CATERPIE against DIGLETT, Diglett's
-        // Cave), and must win.
-        let alone = combatant(data, member, member.level)?;
-        for slot in &table.slots {
-            if !data.may_trap(&slot.species, &species_now) {
-                continue;
-            }
-            let level = (slot.min_level + slot.max_level) / 2;
-            let moves = data.default_moves(&slot.species, level);
-            let Some(foe) = Combatant::new(data, &slot.species, level, moves, WILD_IV) else {
-                continue;
-            };
-            if matchup_cached(data, &alone, &foe).p_win < 0.5 {
-                return None;
-            }
-        }
-        (combatant(data, carrier, carrier.level)?, 0.5)
+    let alone = safe_against(data, &combatant(data, member, member.level)?, table)
+        .then(|| combatant(data, member, mid))
+        .flatten()
+        .and_then(|us| battles_cost(data, &us, 1.0, 0.0, needed, table, area));
+    let carried = carrier
+        .filter(|_| !traps(data, member, &species_now, table))
+        .and_then(|c| combatant(data, c, c.level))
+        .and_then(|us| battles_cost(data, &us, 0.5, TURN_S, needed, table, area));
+    // Whichever is faster: a trainee that wins, but slowly (fleet worker 4:
+    // a Lv10 PARAS scratching at Lv13–16 ODDISH), is switch-trained when
+    // its carrier wins at once, half the experience for a fraction of the
+    // turns.
+    match (alone, carried) {
+        (Some(a), Some(c)) => Some(if c.0 < a.0 { c } else { a }),
+        (a, c) => a.or(c),
+    }
+}
+
+/// Whether a wild one on `table` may trap the trainee (ARENA TRAP, SHADOW
+/// TAG, MAGNET PULL: the SHIFT and RUN are refused) and beat it: then the
+/// trainee can't be switch-trained there (the Switch: a Lv5 CATERPIE
+/// against DIGLETT, Diglett's Cave, fought alone and had to win).
+fn traps(data: &GameData, member: &PartyMember, species_now: &str, table: &EncounterTable) -> bool {
+    let Some(alone) = combatant(data, member, member.level) else {
+        return true;
     };
+    table.slots.iter().any(|slot| {
+        if !data.may_trap(&slot.species, species_now) {
+            return false;
+        }
+        let level = (slot.min_level + slot.max_level) / 2;
+        let moves = data.default_moves(&slot.species, level);
+        Combatant::new(data, &slot.species, level, moves, WILD_IV)
+            .is_some_and(|foe| matchup_cached(data, &alone, &foe).p_win < 0.5)
+    })
+}
+
+/// Expected minutes and battles for `us` (the trainee, or its carrier) to
+/// win `needed` experience on `table`, `share` of it going to the trainee;
+/// `extra_s`: seconds each battle adds (the SHIFT). `None` when a slot
+/// beats `us` or gives nothing.
+fn battles_cost(
+    data: &GameData,
+    us: &Combatant,
+    share: f64,
+    extra_s: f64,
+    needed: f64,
+    table: &EncounterTable,
+    area: &Area,
+) -> Option<(f64, u32)> {
     let (mut exp, mut seconds, mut damage, mut weight) = (0.0, 0.0, 0.0, 0.0);
     for slot in &table.slots {
         let level = (slot.min_level + slot.max_level) / 2;
@@ -251,13 +281,13 @@ fn training_cost(
         let Some(foe) = Combatant::new(data, &slot.species, level, moves, WILD_IV) else {
             continue;
         };
-        let m = matchup_cached(data, &us, &foe);
+        let m = matchup_cached(data, us, &foe);
         if m.p_win < 0.5 {
             return None; // too dangerous to train here
         }
         let w = f64::from(slot.chance);
         exp += w * exp_gain(data, &slot.species, level, false) as f64 * share;
-        seconds += w * (BATTLE_OVERHEAD_S + TURN_S * m.turns);
+        seconds += w * (BATTLE_OVERHEAD_S + extra_s + TURN_S * m.turns);
         damage += w * f64::from(us.hp.saturating_sub(m.our_hp_after));
         weight += w;
     }
@@ -273,6 +303,13 @@ fn training_cost(
     let heals = (battles / battles_per_heal).floor();
     let minutes = battles * per_battle / 60.0 + heals * area.heal_minutes + area.travel_minutes;
     Some((minutes, battles as u32))
+}
+
+/// Whether a trainee that beats a wild one in `alone` turns should fight
+/// it itself rather than hand it to a carrier that takes `carried`: alone
+/// it earns all the experience, switched half, a turn later (the SHIFT).
+pub fn alone_pays(alone: f64, carried: f64) -> bool {
+    BATTLE_OVERHEAD_S + TURN_S * alone <= 2.0 * (BATTLE_OVERHEAD_S + TURN_S * (carried + 1.0))
 }
 
 /// Expected minutes and Poké Balls to catch `species` in `area`.
@@ -300,13 +337,19 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
-/// Levels the plan's training adds up to.
-fn levels_gained(plan: &PreparationPlan) -> u32 {
-    plan.steps
+/// Opponents of `targets` expected beaten, added up over the targets:
+/// by each one's best fighter alone (as [`best_fighter`] judges a win).
+fn progress(data: &GameData, party: &[Combatant], targets: &[String]) -> f64 {
+    targets
         .iter()
-        .map(|s| match s {
-            PlanStep::Train { from, to, .. } => u32::from(to.saturating_sub(*from)),
-            PlanStep::Catch { .. } => 0,
+        .map(|t| {
+            party
+                .iter()
+                .filter_map(|c| {
+                    crate::evaluate::battle_vs_trainer(data, std::slice::from_ref(c), t)
+                })
+                .map(|e| e.opponents.iter().map(|(_, _, p)| p).sum::<f64>())
+                .fold(0.0, f64::max)
         })
         .sum()
 }
@@ -408,11 +451,15 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 .then_with(|| b.min_confidence().total_cmp(&a.min_confidence()))
         } else {
             // Nothing reaches the target: the most confident best effort,
-            // and at equal confidence the one that trains furthest (the
-            // party is judged again after it), not the one that does least.
+            // and at equal confidence the one that gets furthest against
+            // the targets (the party is judged again after it), cheapest
+            // first. Not the one that adds the most levels: levels on a
+            // member who beats nothing more are time lost (fleet worker 4
+            // trained PARAS, ZUBAT and CLEFAIRY for ERIKA and the Elite
+            // Four, all at 0%).
             b.min_confidence()
                 .total_cmp(&a.min_confidence())
-                .then_with(|| levels_gained(b).cmp(&levels_gained(a)))
+                .then_with(|| b.progress.total_cmp(&a.progress))
                 .then_with(|| a.minutes.total_cmp(&b.minutes))
         }
         .then_with(|| format!("{:?}", a.steps).cmp(&format!("{:?}", b.steps)))
@@ -549,6 +596,12 @@ fn search_levels(
             .filter_map(|(m, (to, _, _))| combatant(data, m, *to))
             .collect();
         let conf = confidence(data, &prepared, &request.targets);
+        // Worth knowing only when nothing wins.
+        let progress = if conf.iter().all(|(_, p)| *p < request.confidence) {
+            progress(data, &prepared, &request.targets)
+        } else {
+            0.0
+        };
         let mut steps = base_steps.to_vec();
         for (m, c) in party.iter().zip(&costs) {
             if let (to, min, Some((map, battles))) = c {
@@ -570,6 +623,7 @@ fn search_levels(
                 .iter()
                 .map(|c| (c.species.clone(), c.level, c.moves.clone()))
                 .collect(),
+            progress,
         };
         if plan.min_confidence() >= request.confidence {
             found += 1;
@@ -667,5 +721,63 @@ mod tests {
             Some(&venusaur),
         );
         assert!(cave.is_some());
+    }
+
+    /// Fleet worker 4 trained PARAS, ZUBAT and CLEFAIRY for ERIKA and the
+    /// Elite Four, all at 0% before and after: a best effort took the plan
+    /// adding the most levels, wherever they went. It now trains the member
+    /// that gets further against the trainer (VENUSAUR against ERIKA), and
+    /// no one where no one does (LORELEI, for now).
+    #[test]
+    fn a_best_effort_trains_only_who_gets_further() {
+        let Some(data) = data() else { return };
+        let party = vec![
+            member("SPECIES_VENUSAUR", 36),
+            member("SPECIES_PARAS", 10),
+            member("SPECIES_ZUBAT", 9),
+            member("SPECIES_GEODUDE", 17),
+            member("SPECIES_CLEFAIRY", 9),
+            member("SPECIES_DIGLETT", 19),
+        ];
+        let trained = |target: &str| -> Vec<String> {
+            let request = Request {
+                party: party.clone(),
+                targets: vec![target.into()],
+                areas: ["Route6", "Route11", "DiglettsCave_B1F", "Route9", "Route5"]
+                    .iter()
+                    .map(|m| area(m))
+                    .collect(),
+                confidence: 0.9,
+                money: 0,
+                data: &data,
+            };
+            let plan = plan_training(&request, 1).remove(0);
+            plan.steps
+                .iter()
+                .filter_map(|s| match s {
+                    PlanStep::Train { species, .. } => Some(species.clone()),
+                    PlanStep::Catch { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_VENUSAUR"]);
+        assert!(trained("TRAINER_ELITE_FOUR_LORELEI").is_empty());
+    }
+
+    /// Fighting alone earns all the experience; a carrier's win half, a
+    /// turn later. A slow win alone doesn't pay.
+    #[test]
+    fn a_slow_win_alone_is_handed_to_the_carrier() {
+        assert!(alone_pays(2.0, 1.0));
+        assert!(!alone_pays(8.0, 1.0));
+        let Some(data) = data() else { return };
+        // PARAS can't face Route 6 alone; VENUSAUR carries it there.
+        let paras = member("SPECIES_PARAS", 10);
+        let venusaur = member("SPECIES_VENUSAUR", 36);
+        assert_eq!(
+            training_cost(&data, &paras, 12, &area("Route6"), None),
+            None
+        );
+        assert!(training_cost(&data, &paras, 12, &area("Route6"), Some(&venusaur)).is_some());
     }
 }

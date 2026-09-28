@@ -548,7 +548,8 @@ pub fn train(
     // One that would lose its first battles here is switch-trained: it
     // starts each battle and the strongest member that can fight here
     // comes out to win it (fleet worker 4: a Lv2 MANKEY led on Route 1
-    // and fainted to a PIDGEY, twice).
+    // and fainted to a PIDGEY, twice). One that wins has the carrier too,
+    // for the battles it would win only slowly (the battle weighs each).
     let as_planned = |m: &crate::party::Member| pokebot_planner::PartyMember {
         species: m.species.clone(),
         level: m.level,
@@ -556,23 +557,21 @@ pub fn train(
         moves: m.moves.iter().filter(|mv| *mv != "?").cloned().collect(),
     };
     let trainee = party.members.iter().find(|m| Some(m.slot) == slot);
-    let carrier = trainee
-        .filter(|t| {
-            pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(t), map) == Some(false)
-        })
-        .map(|t| {
-            party
-                .members
-                .iter()
-                .filter(|m| m.slot != t.slot && m.hp.is_none_or(|(hp, _)| hp > 0))
-                .filter(|m| {
-                    pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(m), map)
-                        == Some(true)
-                })
-                .max_by_key(|m| m.level)
-                .map(|m| m.species.clone())
-        });
+    let alone =
+        trainee.map(|t| pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(t), map));
+    let carrier = trainee.map(|t| {
+        party
+            .members
+            .iter()
+            .filter(|m| m.slot != t.slot && m.hp.is_none_or(|(hp, _)| hp > 0))
+            .filter(|m| {
+                pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(m), map) == Some(true)
+            })
+            .max_by_key(|m| m.level)
+            .map(|m| m.species.clone())
+    });
     let carrier = match carrier {
+        Some(None) if alone == Some(Some(true)) => None,
         Some(None) => {
             return Err(ToolError::Failed(format!(
                 "{} can't train on {map} and no member can carry it there",
