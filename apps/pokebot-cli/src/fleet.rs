@@ -110,6 +110,17 @@ impl Drop for Launcher {
     }
 }
 
+/// Worker `n`'s (1-based) starter and Mt. Moon fossil: every pair in
+/// turn, so six parallel new games play six different games (and meet
+/// different edge cases).
+fn new_game_choice(n: u64) -> (&'static str, &'static str) {
+    let i = n.saturating_sub(1) as usize;
+    (
+        ["bulbasaur", "charmander", "squirtle"][i % 3],
+        ["dome", "helix"][(i / 3) % 2],
+    )
+}
+
 struct Worker {
     child: Child,
     label: String,
@@ -345,9 +356,7 @@ impl State {
                     _ => task,
                 });
                 if task == "autonomy" {
-                    // Starters in turn: parallel new games play different
-                    // games (and meet different edge cases).
-                    let starter = ["bulbasaur", "charmander", "squirtle"][(self.next % 3) as usize];
+                    let (starter, fossil) = new_game_choice(self.next);
                     // The stepped emulator is deterministic: the same inputs
                     // play the same game. A name typed differently shifts
                     // the frames the game's random numbers advance by.
@@ -364,6 +373,8 @@ impl State {
                             "--restart",
                             "--starter",
                             starter,
+                            "--fossil",
+                            fossil,
                             "--player",
                             player,
                             "--gender",
@@ -599,6 +610,16 @@ mod tests {
         (fleet, root)
     }
 
+    /// Six workers play every (starter, fossil) pair once.
+    #[test]
+    fn six_new_games_cover_every_starter_and_fossil() {
+        let pairs: std::collections::BTreeSet<_> = (1..=6).map(new_game_choice).collect();
+        assert_eq!(pairs.len(), 6);
+        assert_eq!(new_game_choice(1), ("bulbasaur", "dome"));
+        assert_eq!(new_game_choice(6), ("squirtle", "helix"));
+        assert_eq!(new_game_choice(7), new_game_choice(1));
+    }
+
     #[test]
     fn batch_stop_validates_names_before_stopping_anything() {
         if available_memory() < WORKER_MEMORY * 2 {
@@ -753,6 +774,10 @@ mod tests {
         }
         let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
         assert!(args.starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
+        assert!(
+            args.contains("--starter\nbulbasaur\n--fossil\ndome\n"),
+            "{args}"
+        );
         assert!(args.contains("--new-game\n--save-game\n"));
         assert!(args.contains(dir.join("progress.json").to_str().unwrap()));
         assert!(args.contains(dir.join("game.sav").to_str().unwrap()));

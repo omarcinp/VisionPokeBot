@@ -90,6 +90,10 @@ pub struct GoalArgs {
     /// the planner prices the script paths giving another species higher
     #[arg(long, value_enum, default_value_t = Starter::Bulbasaur)]
     pub starter: Starter,
+    /// The Mt. Moon fossil to take (the other is left to the Super Nerd);
+    /// by default the planner takes whichever is cheaper.
+    #[arg(long, value_enum)]
+    pub fossil: Option<Fossil>,
     /// Never stop: when the goal run ends (satisfied or not) or fails, wait
     /// --restart-wait seconds (still observing), then soft reset, CONTINUE
     /// the last save and run the goal again. Keeps the Switch in use.
@@ -283,7 +287,13 @@ pub fn run(mut args: GoalArgs, stop: Arc<AtomicBool>) -> Result<()> {
 
 fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()> {
     let planner = pd.planner();
-    let (knowledge, pose) = load_state(args)?;
+    let (mut knowledge, pose) = load_state(args)?;
+    if let Some(fossil) = args.fossil {
+        knowledge
+            .world
+            .infeasible
+            .insert(fossil.other_taking_intent());
+    }
     println!("goal: {goal}");
     match &pose {
         Some(p) => println!("from: {p}"),
@@ -533,6 +543,31 @@ fn execute(
     }
 }
 
+/// The Mt. Moon fossils (`MtMoon_B2F_EventScript_DomeFossil` /
+/// `…HelixFossil`: path 1 answers YES and takes it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Fossil {
+    Dome,
+    Helix,
+}
+
+impl Fossil {
+    /// The planner's intent taking the other fossil.
+    fn other_taking_intent(self) -> String {
+        let other = match self {
+            Fossil::Dome => "Helix",
+            Fossil::Helix => "Dome",
+        };
+        pokebot_planner::intents::Intent::RunScript {
+            script: format!("MtMoon_B2F_EventScript_{other}Fossil"),
+            path: 1,
+            answers: vec!["yes".into()],
+            map: "MtMoon_B2F".into(),
+        }
+        .to_string()
+    }
+}
+
 /// One goal cycle against the devices: bring the game to where the cycle
 /// starts (a new game's menus, CONTINUE, or as it
 /// stands), run the goal loop, save at the end.
@@ -618,6 +653,13 @@ impl CliRunner<'_> {
 
     fn play(&mut self, start: Start) -> Result<GoalReport> {
         let previous = self.bring_up(start)?;
+        // The fossil not chosen is never taken: its path is out of every
+        // plan (session knowledge, so again after each checkpoint).
+        if let Some(fossil) = self.args.fossil {
+            self.runtime.emit(GameEvent::IntentInfeasible {
+                intent: fossil.other_taking_intent(),
+            })?;
+        }
         if self.args.save_game && previous.is_none() {
             bail!(
                 "--save-game needs a progress file to tie the checkpoint to ({})",
