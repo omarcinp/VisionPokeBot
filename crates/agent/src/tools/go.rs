@@ -42,6 +42,8 @@ pub struct GoStep {
     nav: Navigator,
     dest: Destination,
     world: Arc<World>,
+    /// Trainers' sight ([`crate::nav::sight_tiles`]); `None` in tests.
+    data: Option<Arc<pokebot_gamedata::GameData>>,
     /// Done as soon as the player stands on the destination's map.
     any_tile: bool,
     /// Arrivals per tile since the leg last got closer to its goal.
@@ -68,6 +70,8 @@ pub struct NavParts {
     pub blocked: Blocked,
     /// Story passages as the belief stood when the parts were taken.
     pub gates: Arc<GateTiles>,
+    /// The game data (trainers' sight), when the walk has it.
+    pub data: Option<Arc<pokebot_gamedata::GameData>>,
 }
 
 impl NavParts {
@@ -78,6 +82,7 @@ impl NavParts {
             syncer: ctx.syncer.clone(),
             blocked: Arc::clone(&ctx.blocked),
             gates: Arc::new(ctx.gate_tiles()),
+            data: Some(Arc::clone(&ctx.data)),
         }
     }
 }
@@ -106,6 +111,7 @@ impl GoStep {
             nav,
             dest,
             world: Arc::clone(&parts.world),
+            data: parts.data.clone(),
             any_tile: false,
             visits: HashMap::new(),
             best: None,
@@ -189,6 +195,35 @@ fn map_tile(world: &World, map: &str) -> Option<(i32, i32)> {
     best.map(|(_, t)| t)
 }
 
+impl GoStep {
+    /// The sight of the trainers on `map` not believed beaten, while the
+    /// lead is under [`LEAD_HP_MIN`] % HP (walking to heal, typically): a
+    /// trainer's battle can't be fled, so the walk goes round them when
+    /// it can. Empty otherwise.
+    fn trainer_sight(
+        &self,
+        state: &pokebot_state::GameState,
+        map: &str,
+    ) -> pokebot_world::path::Obstacles {
+        use pokebot_planner::intents::LEAD_HP_MIN;
+        let worn = state
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.first())
+            .and_then(|m| m.hp.value)
+            .is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * u32::from(LEAD_HP_MIN));
+        let (Some(data), Some(m)) = (self.data.as_ref().filter(|_| worn), self.world.map(map))
+        else {
+            return Default::default();
+        };
+        let trainers = data.map_trainers.get(map).map_or(&[][..], |t| t.as_slice());
+        crate::nav::sight_tiles(m, trainers, |t| {
+            state.world.flags.get(t).and_then(|k| k.value) == Some(true)
+        })
+    }
+}
+
 impl ToolStep for GoStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         if ctx.quiet_frames < SETTLE_FRAMES {
@@ -214,6 +249,10 @@ impl ToolStep for GoStep {
         }
         if self.nav.stalled() >= MAX_STALLED {
             return Decision::Fail(format!("cannot move toward {:?}", self.dest));
+        }
+        if let Some(pose) = &pose {
+            let avoid = self.trainer_sight(ctx.state, &pose.map);
+            self.nav.set_avoid(&pose.map, avoid);
         }
         match self.nav.next(ctx.observation) {
             NavStatus::Arrived => Decision::Done(format!("arrived at {:?}", self.dest)),
@@ -584,6 +623,7 @@ mod tests {
             syncer: None,
             blocked: Blocked::default(),
             gates: Arc::default(),
+            data: None,
         };
         let mut step = GoStep::with(
             &parts,
@@ -650,6 +690,7 @@ mod tests {
             syncer: None,
             blocked: Blocked::default(),
             gates: Arc::default(),
+            data: None,
         };
         let mut step = GoStep::with(
             &parts,

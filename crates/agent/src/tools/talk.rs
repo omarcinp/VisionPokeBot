@@ -298,6 +298,7 @@ mod tests {
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),
+            data: None,
         };
         // The phases only: a sign at (11, 12), read from (11, 13).
         let (map, sign) = ("PalletTown", (11, 12));

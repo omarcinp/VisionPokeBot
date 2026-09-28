@@ -203,6 +203,10 @@ pub struct Recovery {
     pub score_s: f64,
 }
 
+/// The price of an unbeaten trainer the way to a healer can't avoid: a
+/// battle fought worn risks the faint the healing is for.
+const TRAINER_ON_THE_WAY_S: f64 = 600.0;
+
 /// Price nearby healers using gated tile routes and the added cost of
 /// returning toward the interrupted destination. Encounter exposure is a
 /// map-density heuristic; it is deliberately not an exact probability.
@@ -312,6 +316,20 @@ pub fn recovery(
                         * if urgent { 4.0 } else { 1.0 }
                 })
                 .sum::<f64>();
+            // Trainers whose sight the way can't go round: a battle that
+            // can't be fled, fought worn (fleet worker 3: BULBASAUR at
+            // 10/29 walked on to Pewter's Center through Viridian Forest,
+            // met a Bug Catcher and fainted; Viridian's was behind it).
+            let walks: Vec<_> = out
+                .legs
+                .iter()
+                .filter(|l| matches!(l.kind, EdgeKind::Walk { .. }) && l.from.map == l.to.map)
+                .map(|l| (l.from.map.clone(), (l.from.x, l.from.y), (l.to.x, l.to.y)))
+                .collect();
+            let sightings = crate::nav::unavoidable_sightings(world, data, &walks, |t| {
+                state.world.flags.get(t).and_then(|k| k.value) == Some(true)
+            });
+            let risk = risk + f64::from(sightings) * TRAINER_ON_THE_WAY_S;
             candidates.push(Recovery {
                 map: name.clone(),
                 medicine: None,
@@ -598,5 +616,44 @@ mod tests {
         assert_eq!(choice.map, from.map);
         assert!(choice.medicine.is_none());
         assert!(choice.score_s.is_finite());
+    }
+
+    /// Fleet worker 3: BULBASAUR at 10/29 in Viridian Forest (5, 27) went
+    /// on to Pewter's Center, met Bug Catcher Sammy (7, 22), whose sight
+    /// spans the corridor, and fainted. With the forest's trainers unbeaten
+    /// the healer is Viridian's, behind; with them beaten, Pewter's is fine
+    /// again if it is nearer.
+    #[test]
+    fn a_healer_past_an_unbeaten_trainer_is_priced_for_the_battle() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(d)) = (
+            World::load(root.join("data/world")),
+            GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let graph = graph(&world);
+        let from = PlayerPose {
+            map: "ViridianForest".into(),
+            x: 5,
+            y: 27,
+        };
+        let state = GameState::default();
+        let choice = recovery(&world, &graph, &state, &d, &from, None, true).unwrap();
+        assert_eq!(choice.map, "ViridianCity_PokemonCenter_1F", "{choice:?}");
+        let sammy_seen = crate::nav::unavoidable_sightings(
+            &world,
+            &d,
+            &[("ViridianForest".into(), (5, 27), (5, 17))],
+            |_| false,
+        );
+        assert_eq!(sammy_seen, 1);
+        let sammy_beaten = crate::nav::unavoidable_sightings(
+            &world,
+            &d,
+            &[("ViridianForest".into(), (5, 27), (5, 17))],
+            |t| t == "TRAINER_BUG_CATCHER_SAMMY",
+        );
+        assert_eq!(sammy_beaten, 0);
     }
 }

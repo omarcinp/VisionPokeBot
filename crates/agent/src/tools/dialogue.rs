@@ -1349,6 +1349,7 @@ mod tests {
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),
+            data: None,
         };
         let go = GoStep::with(
             &parts,

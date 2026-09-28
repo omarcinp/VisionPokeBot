@@ -199,6 +199,9 @@ pub struct Navigator {
     gates: Arc<GateTiles>,
     /// Where this walk entered maps.
     entries: MapEntries,
+    /// Tiles walked only when no way round them exists, per map: unbeaten
+    /// trainers' sight while the lead is too worn to fight ([`sight_tiles`]).
+    avoid: HashMap<String, Obstacles>,
 }
 
 /// Times one walk may enter a map at the same tile: a route crosses each
@@ -301,6 +304,7 @@ impl Navigator {
             surf: false,
             gates: Arc::new(GateTiles::default()),
             entries: MapEntries::default(),
+            avoid: HashMap::new(),
         }
     }
 
@@ -321,6 +325,16 @@ impl Navigator {
     pub fn with_surf(mut self, surf: bool) -> Self {
         self.surf = surf;
         self
+    }
+
+    /// The tiles of `map` to go round when a way round exists (replacing
+    /// what was set for it).
+    pub fn set_avoid(&mut self, map: &str, tiles: Obstacles) {
+        if tiles.is_empty() {
+            self.avoid.remove(map);
+        } else {
+            self.avoid.insert(map.to_owned(), tiles);
+        }
     }
 
     /// Hold lengths and timeouts from this timing model instead of the
@@ -547,7 +561,15 @@ impl Navigator {
             surf: self.surf,
             opened: Some(&opened),
         };
-        let Some(path) = find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, heuristic)
+        let avoid = self.avoid.get(&map.name);
+        let extra = |t: (i32, i32)| {
+            if avoid.is_some_and(|a| a.contains(&t)) {
+                AVOID_COST
+            } else {
+                0
+            }
+        };
+        let Some(path) = find_path_with(map, (pose.x, pose.y), &walk, extra, &goal, heuristic)
         else {
             // Learned blocks may be stale (a wandering NPC moved on).
             if self.forget_learned(&map.name) {
@@ -1038,6 +1060,118 @@ pub fn warp_usable(map: &MapData, index: usize) -> bool {
         || !map.warps.iter().any(|w| {
             w.dest_map == warp.dest_map && w.dest_warp == warp.dest_warp && warp_is_marked(map, w)
         })
+}
+
+/// The extra cost of a tile to go round (in tiles walked): a detour of
+/// up to this many steps is preferred to crossing it.
+const AVOID_COST: i32 = 60;
+
+/// The directions an object faces by its movement type: the fixed ones
+/// its name gives (`FACE_LEFT`, `FACE_DOWN_AND_UP`), every direction for
+/// one that looks around, wanders or turns.
+fn facings(movement: &str) -> Vec<Direction> {
+    let named = movement
+        .strip_prefix("MOVEMENT_TYPE_FACE_")
+        .map(|rest| {
+            [
+                ("UP", Direction::Up),
+                ("DOWN", Direction::Down),
+                ("LEFT", Direction::Left),
+                ("RIGHT", Direction::Right),
+            ]
+            .into_iter()
+            .filter(|(w, _)| rest.split('_').any(|p| p == *w))
+            .map(|(_, d)| d)
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if named.is_empty() {
+        vec![
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ]
+    } else {
+        named
+    }
+}
+
+/// The tiles from which an unbeaten trainer on `map` sees the player and
+/// walks up to battle: along each way it faces, up to its sight range,
+/// until a tile that can't be walked (Viridian Forest: a worn BULBASAUR
+/// walking to Pewter's Center crossed a Bug Catcher's line at 10/29 HP and
+/// fainted; a trainer's battle can't be fled).
+pub fn sight_tiles(
+    map: &MapData,
+    trainers: &[pokebot_gamedata::MapTrainer],
+    beaten: impl Fn(&str) -> bool,
+) -> Obstacles {
+    let mut out = Obstacles::new();
+    for t in trainers.iter().filter(|t| !beaten(&t.trainer)) {
+        let Some(object) = map.objects.iter().find(|o| o.local_id == t.local_id) else {
+            continue;
+        };
+        let (Some(x0), Some(y0)) = (t.x.or(object.x), t.y.or(object.y)) else {
+            continue;
+        };
+        for dir in facings(object.movement.as_deref().unwrap_or("")) {
+            let (dx, dy) = match dir {
+                Direction::Up => (0, -1),
+                Direction::Down => (0, 1),
+                Direction::Left => (-1, 0),
+                Direction::Right => (1, 0),
+            };
+            for k in 1..=i32::from(t.sight) {
+                let tile = (x0 + dx * k, y0 + dy * k);
+                if map.tile(tile.0, tile.1).is_none_or(|c| c.collision != 0) {
+                    break;
+                }
+                out.insert(tile);
+            }
+        }
+    }
+    out
+}
+
+/// A walk on one map: the map, from, to.
+pub type MapWalk = (String, (i32, i32), (i32, i32));
+
+/// The walked legs of a route (from, to on one map) whose best path, going
+/// round unbeaten trainers' sight where it can, still crosses it: a
+/// trainer's battle is met on each, and can't be fled.
+pub fn unavoidable_sightings(
+    world: &World,
+    data: &pokebot_gamedata::GameData,
+    walks: &[MapWalk],
+    beaten: impl Fn(&str) -> bool,
+) -> u32 {
+    let mut met = 0;
+    for (name, from, to) in walks {
+        let (Some(map), Some(trainers)) = (world.map(name), data.map_trainers.get(name)) else {
+            continue;
+        };
+        let sight = sight_tiles(map, trainers, &beaten);
+        if sight.is_empty() {
+            continue;
+        }
+        let mut obstacles = object_obstacles(map, &Gone::new());
+        obstacles.remove(from);
+        obstacles.remove(to);
+        let walk = Walk {
+            obstacles: &obstacles,
+            surf: false,
+            opened: None,
+        };
+        let extra = |t: (i32, i32)| if sight.contains(&t) { AVOID_COST } else { 0 };
+        let heuristic = |p: (i32, i32)| (p.0 - to.0).abs() + (p.1 - to.1).abs();
+        if let Some(path) = find_path_with(map, *from, &walk, extra, |t| t == *to, heuristic) {
+            if path.iter().any(|s| sight.contains(&s.to)) {
+                met += 1;
+            }
+        }
+    }
+    met
 }
 
 /// Tiles blocked by objects that don't move: NPCs that only turn, cut trees,
