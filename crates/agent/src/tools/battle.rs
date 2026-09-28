@@ -47,6 +47,12 @@ pub struct BattleStep {
     /// shares the experience); done once that member is out.
     shift_to: Option<u8>,
     shifted: bool,
+    /// Our battler in this party slot fainted and another can fight: the
+    /// next one is sent out ("Use next POKéMON?" YES, SEND OUT). The game
+    /// restarts only when all have fainted (the user's rule).
+    fainted: Option<u8>,
+    /// The HUD last read (the foe a replacement is chosen against).
+    last_hud: Option<pokebot_state::BattleObservation>,
     /// The party slot of our Pokémon in battle, from its HUD name (the
     /// lead until another is sent out).
     active: Option<u8>,
@@ -84,6 +90,8 @@ impl BattleStep {
             zero_hp_since: None,
             shift_to: None,
             shifted: false,
+            fainted: None,
+            last_hud: None,
             active: None,
             trainer,
             started: false,
@@ -108,6 +116,69 @@ impl BattleStep {
     pub fn shifting_to(mut self, slot: u8) -> Self {
         self.shift_to = Some(slot).filter(|s| *s != 0);
         self
+    }
+
+    /// The member to send out after ours fainted: the switch-training
+    /// carrier when it can fight, else the one least at risk against the
+    /// foe last on the HUD, else the highest level; `None` when no other
+    /// can fight (a white-out follows).
+    fn replacement(&self) -> Option<u8> {
+        let out = self.fainted.or(self.active).unwrap_or(0);
+        let able: Vec<&party::Member> = self
+            .party
+            .members
+            .iter()
+            .filter(|m| m.slot != out && m.hp.is_some_and(|(hp, _)| hp > 0))
+            .collect();
+        if let Some(carrier) = self
+            .shift_to
+            .filter(|slot| able.iter().any(|m| m.slot == *slot))
+        {
+            return Some(carrier);
+        }
+        let foe = self.last_hud.as_ref().and_then(|b| {
+            Some(catch::Foe {
+                species: self
+                    .data
+                    .species_named(b.opponent_name.as_deref()?)?
+                    .to_owned(),
+                level: b.opponent_level?,
+                hp_per_mille: b.opponent_hp.unwrap_or(1000),
+                status: catch::FoeStatus::None,
+                shiny: false,
+                caught: None,
+            })
+        });
+        let risk = |m: &party::Member| {
+            foe.as_ref().map_or(0.0, |foe| {
+                let hp = m.hp.unwrap_or_default();
+                catch::risk(&self.data, &catch::Lead { member: m, hp }, foe, 3)
+            })
+        };
+        able.into_iter()
+            .min_by(|a, b| {
+                risk(a)
+                    .total_cmp(&risk(b))
+                    .then_with(|| b.level.cmp(&a.level))
+            })
+            .map(|m| m.slot)
+    }
+
+    /// The party member in `slot`'s name as the party menu prints it.
+    fn member_name(&self, state: &pokebot_state::GameState, slot: u8) -> Option<String> {
+        state
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.get(usize::from(slot)))
+            .and_then(|m| m.nickname.value.clone())
+            .or_else(|| {
+                self.party
+                    .members
+                    .iter()
+                    .find(|m| m.slot == slot)
+                    .map(|m| m.display_name())
+            })
     }
 
     /// A SHIFT the game refuses (a trap: ARENA TRAP, MEAN LOOK, WRAP…) is
@@ -175,7 +246,7 @@ impl BattleStep {
             let Some(row) = party
                 .options
                 .iter()
-                .position(|l| crate::bag::fits("SHIFT", l))
+                .position(|l| crate::bag::fits("SHIFT", l) || crate::bag::fits("SEND OUT", l))
             else {
                 // No SHIFT (the member can't come out): fight on as is.
                 self.shifted = true;
@@ -309,6 +380,16 @@ impl ToolStep for BattleStep {
         {
             self.active = Some(slot);
         }
+        // The replacement is out: a fresh battler.
+        if self
+            .fainted
+            .is_some_and(|f| self.active.is_some_and(|a| a != f))
+        {
+            self.fainted = None;
+            self.zero_hp_since = None;
+            self.memory.our_stages = [0; 6];
+            self.memory.our_accuracy = 0;
+        }
         self.party = match self.active {
             Some(slot) => party.with_first(slot),
             None => party,
@@ -406,12 +487,23 @@ impl ToolStep for BattleStep {
             self.zero_hp_since = since;
             if since.is_some_and(|s| o.frame_id.saturating_sub(s) >= ZERO_HP_FRAMES)
                 && !self.loss_ok
+                && self.fainted.is_none()
             {
-                return Decision::Fail(format!(
-                    "our Pokémon fainted ({})",
-                    b.player_name.clone().unwrap_or_default()
+                let name = b.player_name.clone().unwrap_or_default();
+                if self.replacement().is_none() {
+                    return Decision::Fail(format!(
+                        "whited out: our last Pokémon fainted ({name})"
+                    ));
+                }
+                // One fainted, others can fight: the game sends out the
+                // next (the restart is for a white-out only).
+                self.fainted = Some(self.active.unwrap_or(0));
+                ctx.events.push(super::progress(
+                    "Battle",
+                    format!("{name} fainted: sending out the next one"),
                 ));
             }
+            self.last_hud = Some(b.clone());
             // A trainer's battle can't be run from: a member at risk
             // against the foe out makes way for a safer one (once a battle:
             // the battle's party menu is reordered after a switch).
@@ -460,7 +552,7 @@ impl ToolStep for BattleStep {
             ) {
                 return decision;
             }
-            if let (Some(d), Some(_)) = (&o.dialogue, &o.menu) {
+            if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
                 // The box may belong to the page before (the nickname
                 // question's YES/NO stays while the next page prints):
                 // read the question once it is printed (flash-5: "It"
@@ -477,6 +569,11 @@ impl ToolStep for BattleStep {
                         Expectation::MenuClosed,
                         90,
                     ));
+                }
+                // Our battler fainted in a wild battle: "Use next POKéMON?"
+                // → YES (NO would try to run, and a trap refuses it).
+                if battle::is_use_next_question(&page) {
+                    return select(menu, 0, "use next Pokémon: YES");
                 }
                 // "Will RED change POKéMON?" → No (the lead fights).
                 if battle::is_switch_question(&page) {
@@ -516,6 +613,11 @@ impl ToolStep for BattleStep {
             if let Some(decision) = catch::dismiss_pokedex(&mut self.memory.catch, o) {
                 return decision;
             }
+            if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
+                if battle::is_use_next_question(&d.lines.join(" ")) {
+                    return select(menu, 0, "use next Pokémon: YES");
+                }
+            }
             // The party menu's refusals ("Wild DIGLETT's ARENA TRAP
             // prevents switching!", "X can't be switched out!") show there,
             // without the battle HUD.
@@ -529,6 +631,14 @@ impl ToolStep for BattleStep {
                     .limits
                     .observe(&d.lines.join(" "), &lead, &self.data);
                 self.give_up_a_refused_shift(ctx.events);
+            }
+            // Sending out the next one after a faint (the party screen
+            // can't be left).
+            if let (Some(party), Some(_)) = (&o.party_menu, self.fainted) {
+                if let Some(slot) = self.replacement() {
+                    let name = self.member_name(ctx.state, slot);
+                    return self.shift_in_party_menu(party, slot, name.as_deref());
+                }
             }
             if let (Some(party), Some(slot)) =
                 (&o.party_menu, self.shift_to.filter(|_| !self.shifted))
@@ -557,7 +667,7 @@ impl ToolStep for BattleStep {
             }
             // The party menu with no SHIFT to make (given up): back to the
             // command menu.
-            if o.party_menu.is_some() {
+            if o.party_menu.is_some() && self.fainted.is_none() {
                 return Decision::Act(Action::new(
                     "party menu: nothing to SHIFT, back",
                     vec![ControllerCommand::Press(Button::B)],
@@ -940,6 +1050,147 @@ mod tests {
         );
         let last = run(&observe("switch-arena-trap-party-actions", 3), &mut events);
         assert_eq!(last, "party menu: nothing to SHIFT, back");
+    }
+
+    /// The user's rule: the game restarts only when all the Pokémon have
+    /// fainted. A trapped CATERPIE fainting against DIGLETT is not the end:
+    /// "Use next POKéMON?" YES, and VENUSAUR is sent out. The last one
+    /// fainting is a white-out.
+    #[test]
+    fn a_faint_sends_out_the_next_one_and_only_the_last_is_a_white_out() {
+        use pokebot_state::{
+            BattleObservation, DialogueKind, DialogueObservation, Knowledge, MenuObservation,
+            Observation, Observed, PartyMenuObservation, PartyRowObservation, Region, ScreenState,
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let bare = |id: u64, screen: ScreenState| {
+            Observation::bare(
+                id,
+                Observed {
+                    value: screen,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            )
+        };
+        let fainting = |id: u64| {
+            let mut o = bare(id, ScreenState::BattleText);
+            o.battle = Some(BattleObservation {
+                menu: None,
+                player_name: Some("CATERPIE".into()),
+                player_level: Some(5),
+                player_hp_numbers: Some((0, 20)),
+                opponent_name: Some("DIGLETT".into()),
+                opponent_level: Some(17),
+                player_hp: None,
+                opponent_hp: Some(1000),
+                move_pp: None,
+                move_names: Vec::new(),
+                opponent_caught: None,
+                opponent_shiny: None,
+                level_up_stats: None,
+            });
+            o
+        };
+        let question = |id: u64| {
+            let mut o = bare(id, ScreenState::Dialogue);
+            o.dialogue = Some(DialogueObservation {
+                kind: DialogueKind::BattleText,
+                region: Region::new(8, 119, 224, 34),
+                waiting_for_input: false,
+                arrow: None,
+                stable_frames: 10,
+                text_cells: vec![1; 4],
+                lines: vec!["Use next POKéMON?".into()],
+                help: false,
+            });
+            o.menu = Some(MenuObservation {
+                window: Region::new(180, 60, 50, 40),
+                rows: 2,
+                cursor_row: 0,
+                cursor_y: 70,
+            });
+            o
+        };
+        let row = |name: &str, hp: u16| PartyRowObservation {
+            nickname: Some(name.into()),
+            level: None,
+            hp: Some((hp, hp.max(20))),
+            status: None,
+        };
+        let party_menu = |id: u64, actions: bool| {
+            let mut o = bare(id, ScreenState::PartyMenu);
+            o.party_menu = Some(PartyMenuObservation {
+                count: 2,
+                selected: Some(if actions { 1 } else { 0 }),
+                actions,
+                options: if actions {
+                    vec!["SEND OUT".into(), "SUMMARY".into(), "CANCEL".into()]
+                } else {
+                    Vec::new()
+                },
+                option_cursor: actions.then_some(0),
+                members: vec![row("CATERPIE", 0), row("VENUSAUR", 100)],
+                ..PartyMenuObservation::default()
+            });
+            o
+        };
+        let state = |members: Vec<pokebot_state::PartyMon>| pokebot_state::GameState {
+            party: Knowledge::observed(members, 1),
+            ..pokebot_state::GameState::default()
+        };
+        let two = state(vec![
+            member("SPECIES_CATERPIE", 5, 20, &["MOVE_TACKLE"]),
+            member("SPECIES_VENUSAUR", 33, 100, &["MOVE_RAZOR_LEAF"]),
+        ]);
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        let mut events = Vec::new();
+        let mut last = String::new();
+        for id in [1, 20, 40] {
+            last = step_label(&step_next(&mut step, &fainting(id), &two, &mut events));
+        }
+        assert!(!last.starts_with("fail"), "{last}");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                GameEvent::GoalProgress { detail, .. } if detail == "CATERPIE fainted: sending out the next one")),
+            "{events:?}"
+        );
+        let label = step_label(&step_next(&mut step, &question(50), &two, &mut events));
+        assert_eq!(label, "use next Pokémon: YES");
+        let label = step_label(&step_next(
+            &mut step,
+            &party_menu(60, false),
+            &two,
+            &mut events,
+        ));
+        assert!(label.contains("toward slot 1"), "{label}");
+        let label = step_label(&step_next(
+            &mut step,
+            &party_menu(70, true),
+            &two,
+            &mut events,
+        ));
+        assert_eq!(label, "choose SHIFT");
+
+        // CATERPIE alone: its faint is the white-out.
+        let one = state(vec![member("SPECIES_CATERPIE", 5, 20, &["MOVE_TACKLE"])]);
+        let mut step = BattleStep::new(data, BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        let mut last = String::new();
+        for id in [1, 20, 40] {
+            last = step_label(&step_next(&mut step, &fainting(id), &one, &mut events));
+        }
+        assert_eq!(
+            last,
+            "fail: whited out: our last Pokémon fainted (CATERPIE)"
+        );
     }
 
     fn step_next(

@@ -458,41 +458,36 @@ impl Run<'_, '_> {
         Ok(Executed::Completed)
     }
 
-    /// A faint (the tool's reason, the white-out screen, or HP 0 read on
-    /// the HUD) ends the run: the user's rule is that no Pokémon faints,
-    /// so the session reloads the last save instead of playing on. On the
-    /// white-out the belief gets what the game does: the lead at 0 HP,
-    /// then the party healed and the player at the respawn spot.
+    /// A white-out (the screen, the tool's reason, or every member at 0 HP)
+    /// ends the run: the user's rule is that the game restarts only when
+    /// all the Pokémon have fainted, so the session reloads the last save.
+    /// One member fainting is not the end: the battle sends out the next,
+    /// and the plan heals after it. On the white-out the belief gets what
+    /// the game does: the party healed and the player at the respawn spot.
     fn fainted(
         &mut self,
         ctx: &mut ToolContext<'_>,
         reason: &str,
     ) -> Result<Option<String>, ToolError> {
         let screen = ctx.observation().map(|o| o.screen.value);
-        let whiteout = screen == Some(ScreenState::Whiteout) || reason.contains("whited out");
-        let lead_hp0 = ctx
-            .state()
-            .party
-            .value
-            .as_ref()
-            .and_then(|p| p.first())
-            .and_then(|m| m.hp.value)
-            .is_some_and(|(hp, _)| hp == 0);
-        if !whiteout && !lead_hp0 && !reason.contains("fainted") {
+        let all_fainted = ctx.state().party.value.as_ref().is_some_and(|p| {
+            !p.is_empty() && p.iter().all(|m| m.hp.value.is_some_and(|(hp, _)| hp == 0))
+        });
+        let whiteout =
+            screen == Some(ScreenState::Whiteout) || reason.contains("whited out") || all_fainted;
+        if !whiteout {
             return Ok(None);
         }
         let why = format!("fainted: {reason}");
         ctx.emit(progress(GOAL, why.clone()))?;
-        if whiteout {
-            ctx.emit(GameEvent::WhitedOut)?;
-            let respawn = respawn_pose(ctx);
-            ctx.emit(GameEvent::Healed)?;
-            ctx.runtime.clear_pose_hint();
-            if let Some(pose) = respawn {
-                ctx.info(format!("whited out: the game puts the player at {pose}"));
-                ctx.emit(GameEvent::PlayerLocated { pose: pose.clone() })?;
-                ctx.runtime.set_pose_hint(pose);
-            }
+        ctx.emit(GameEvent::WhitedOut)?;
+        let respawn = respawn_pose(ctx);
+        ctx.emit(GameEvent::Healed)?;
+        ctx.runtime.clear_pose_hint();
+        if let Some(pose) = respawn {
+            ctx.info(format!("whited out: the game puts the player at {pose}"));
+            ctx.emit(GameEvent::PlayerLocated { pose: pose.clone() })?;
+            ctx.runtime.set_pose_hint(pose);
         }
         self.report.outcome = why.clone();
         Ok(Some(why))
@@ -950,8 +945,8 @@ enum Executed {
     Satisfied,
     Completed,
     Replan(String),
-    /// A Pokémon fainted: the run ends (`fainted: …`) for the session to
-    /// reload the save.
+    /// The party whited out (every Pokémon fainted): the run ends
+    /// (`fainted: …`) for the session to reload the save.
     Fainted(String),
 }
 

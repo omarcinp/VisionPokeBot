@@ -100,8 +100,9 @@ pub struct SessionReport {
 /// Runs cycles until stopped, or once without `restart`. Every end of a
 /// cycle (satisfied, given up or failed) is followed by the pause and a
 /// restart: soft reset → CONTINUE → the goal again, so the console never
-/// idles. A faint reloads the last save at once (story's rule: no Pokémon
-/// faints; the whited-out game is not played on). A new game that failed
+/// idles. A white-out (every Pokémon fainted) reloads the last save at
+/// once (the user's rule: the game restarts only when all the Pokémon
+/// have fainted; one fainting, the battle sends out the next). A new game that failed
 /// before its first save is started again; without any save to continue
 /// from, the session waits and looks again.
 pub fn run(session: Session, runner: &mut dyn Runner) -> SessionReport {

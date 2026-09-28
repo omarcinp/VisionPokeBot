@@ -20,7 +20,7 @@ You are continuing **VisionPokeBot / PokéBot FireRed**: a Rust bot that plays P
   - Emulator: `tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --record /tmp/emu-<n>`. It uses the in-process emulator and copies of the saves, so it never touches `roms/*.sav` or `saves/switch/`.
   - `/dev/video0` belongs to group `video`; from a shell that doesn't have the group yet, wrap the Switch launch in `sg video -c '…'`.
 - Verify claims visually: build contact sheets of recorded frames with ffmpeg (`tile=`) and read them. Don't trust "completed" logs alone.
-- The user's rule for battles: **no Pokémon may faint**. On a faint, reload the latest save (`story --continue` handles this via checkpoints) and retry.
+- The user's rule for battles: **restart only when all the Pokémon have fainted** (a white-out): then reload the latest save and retry. One Pokémon fainting is not a restart: the battle sends out the next (`Use next POKéMON?` → YES, SEND OUT the carrier or the one least at risk) and the plan heals afterwards. The planner still avoids a faint where it can (risk limits, defensive switches).
 - Nothing has been committed yet. At the start, run `git status`; there are many untracked files. Ask the user whether to commit (on a branch) before making large changes.
 
 ## Environment

@@ -267,9 +267,10 @@ pub struct BattleEstimate {
 
 /// The party (in order, lead first) against a trainer's team.
 /// The member who beats `trainer` alone with the best chance, and that
-/// chance: the bot lets no Pokémon faint (a faint reloads the save), so
-/// a relay where one member faints and the next finishes never happens;
-/// the one who can win it all leads instead (fleet workers: CHARMANDER
+/// chance: the bot doesn't plan on a Pokémon fainting (the battle sends
+/// out the next when one does, but a relay where one member faints and the
+/// next finishes is not a plan); the one who can win it all leads instead
+/// (fleet workers: CHARMANDER
 /// led against Brock and fainted to ONIX while the MANKEY trained to
 /// finish him waited in the party).
 pub fn best_fighter(data: &GameData, party: &[Combatant], trainer: &str) -> Option<(usize, f64)> {

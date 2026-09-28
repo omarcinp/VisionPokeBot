@@ -999,17 +999,22 @@ fn a_go_failing_twice_stays_plannable() {
     assert_eq!(planner.calls(), 3);
 }
 
-/// A Pokémon fainting ends the run with a `fainted` outcome instead of a
-/// replan (the session reloads the last save), and marks nothing
-/// infeasible.
+/// A white-out (every Pokémon fainted) ends the run with a `fainted`
+/// outcome instead of a replan (the session reloads the last save), and
+/// marks nothing infeasible.
 #[test]
-fn a_faint_ends_the_run_for_the_session_to_reload() {
+fn a_white_out_ends_the_run_for_the_session_to_reload() {
     let (Some(d), Some(frame)) = (data(), overworld()) else {
         return;
     };
     let planner = FakePlanner::new(vec![plan(vec![step(go("Route4")), step(catch())])]);
     let h = Harness::new(vec![
-        ("Go", vec![Err("our Pokémon fainted (BULBASAUR)".into())]),
+        (
+            "Go",
+            vec![Err(
+                "whited out: our last Pokémon fainted (BULBASAUR)".into()
+            )],
+        ),
         ("Catch", vec![Ok(vec![caught()])]),
     ]);
     let (report, infeasible) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
@@ -1022,6 +1027,32 @@ fn a_faint_ends_the_run_for_the_session_to_reload() {
     assert!(infeasible.is_empty());
     assert_eq!(h.seen_names(), vec!["Go"]);
     assert_eq!(planner.calls(), 1);
+}
+
+/// One Pokémon fainting is not the end (the user's rule: the game
+/// restarts only when all have fainted): the step failed, and the plan
+/// goes on.
+#[test]
+fn one_pokemon_fainting_is_a_replan_not_a_reload() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = FakePlanner::new(vec![
+        plan(vec![step(go("Route4")), step(catch())]),
+        plan(vec![step(catch())]),
+    ]);
+    let h = Harness::new(vec![
+        ("Go", vec![Err("our Pokémon fainted (BULBASAUR)".into())]),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(
+        !report.outcome.starts_with("fainted: "),
+        "{}",
+        report.outcome
+    );
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(planner.calls(), 2);
 }
 
 /// With the replans spent, exploring the map that learns something earns

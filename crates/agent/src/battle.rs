@@ -679,6 +679,11 @@ pub(crate) fn step_toward(
 
 /// "Will RED change POKéMON?": asked before a trainer sends the next
 /// Pokémon, when the party has more than one.
+/// "Use next POKéMON?": our battler fainted in a wild battle.
+pub fn is_use_next_question(page: &str) -> bool {
+    page.starts_with("Use next POK")
+}
+
 pub fn is_switch_question(page: &str) -> bool {
     page.starts_with("Will ") && page.contains(" change") && page.contains("POK")
 }
