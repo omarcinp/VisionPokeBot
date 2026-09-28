@@ -124,6 +124,18 @@ impl BattleStep {
                 60,
             ))
         };
+        // The member isn't there (fleet worker 3: a WEEDLE the belief
+        // still held, the battle's party showing BULBASAUR alone, and the
+        // wait for a ▶ on a missing row, B, POKéMON, for 110k frames):
+        // fight on as is.
+        if party.count > 0 && slot >= party.count && !party.actions {
+            self.shifted = true;
+            return press(
+                format!("shift: no slot {slot} in a party of {}, back", party.count),
+                Button::B,
+                Expectation::ScreenIsNot(pokebot_state::ScreenState::PartyMenu),
+            );
+        }
         if party.actions {
             if party.selected != Some(slot) {
                 return press(
@@ -715,5 +727,38 @@ mod tests {
             last = label(&run(&observe(name, id)));
         }
         assert_eq!(last, "choose POKéMON");
+    }
+
+    /// Fleet worker 3, a trainer battle on Route 3: the belief still held a
+    /// WEEDLE in slot 1, so the defensive switch went for it, but the
+    /// battle's party showed BULBASAUR alone and no ▶ to read. It waited,
+    /// pressed B and chose POKéMON again for 110k frames. A slot the menu
+    /// doesn't show is given up: back to the fight.
+    #[test]
+    fn a_shift_to_a_member_the_party_menu_lacks_goes_back() {
+        use pokebot_vision::{FireRedPerception, PerceptionSystem};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(data), Ok(font)) = (
+            GameData::load(root.join("data/world/gamedata.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_normal.json")),
+        ) else {
+            return;
+        };
+        let mut vision = FireRedPerception::default().with_font(Arc::new(font));
+        let image = pokebot_video::png::load(
+            root.join("captures/fixtures/emu-battle-party-one-member.png"),
+        )
+        .unwrap();
+        let frame =
+            pokebot_core::NormalizedFrame::new(1, std::time::Instant::now(), image).unwrap();
+        let o = vision.observe(&frame);
+        let party = o.party_menu.expect("the battle's party menu");
+        assert_eq!(party.count, 1);
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(1);
+        match step.shift_in_party_menu(&party, 1) {
+            Decision::Act(a) => assert!(a.label.starts_with("shift: no slot 1"), "{}", a.label),
+            _ => panic!("no press"),
+        }
+        assert!(step.shifted);
     }
 }
