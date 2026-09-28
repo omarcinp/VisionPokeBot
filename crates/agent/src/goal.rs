@@ -238,6 +238,12 @@ impl Run<'_, '_> {
                 return Ok(());
             }
             plan_no += 1;
+            // A badge earned since the last plan whose giving path went
+            // unread (the leader's opening pages unrecognised) is recorded
+            // before planning, not only at the next cycle's audit (fleet
+            // worker 4: Brock beaten, Pewter's gym-guide gate still shut,
+            // and the cycle's replans spent looking for the way east).
+            crate::tools::dialogue::reconcile_badges(ctx)?;
             let (knowledge, pose) = self.snapshot(ctx)?;
             if self.holds(ctx, &knowledge, pose.clone()) {
                 self.report.satisfied = true;

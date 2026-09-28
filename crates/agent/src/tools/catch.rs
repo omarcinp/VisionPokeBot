@@ -89,9 +89,11 @@ pub struct HuntStep {
     /// The species a training hunt is for (it leads the battles); `None`:
     /// the lead.
     trainee: Option<String>,
-    /// Switch-training: the species that fights the battles the trainee
-    /// starts (the trainee would lose them).
-    carrier: Option<String>,
+    /// Switch-training: the party slot of the member that fights the
+    /// battles the trainee starts (the trainee would lose them). A slot,
+    /// not a species: the carrier evolves on the way (fleet worker 6: its
+    /// BULBASAUR became IVYSAUR at battle 38, and the hunt lost it).
+    carrier: Option<u8>,
     nav: NavParts,
 }
 
@@ -176,10 +178,7 @@ impl HuntStep {
     /// The member whose HP decides heals: the carrier while switch-training
     /// (the trainee doesn't fight), else the lead.
     fn fighter<'p>(&self, party: &'p Party) -> Option<&'p crate::party::Member> {
-        self.carrier
-            .as_ref()
-            .and_then(|c| party.members.iter().find(|m| &m.species == c))
-            .or_else(|| party.lead())
+        carrier_in(party, self.carrier).or_else(|| party.lead())
     }
 
     /// Walks to the grass of `map` (from another map) or to the spin tile.
@@ -256,11 +255,7 @@ impl ToolStep for HuntStep {
         }
         if o.battle.is_some() {
             let battle = BattleStep::new(Arc::clone(&self.data), self.plan(), false);
-            let carrier_slot = self
-                .carrier
-                .as_ref()
-                .and_then(|c| party.members.iter().find(|m| &m.species == c))
-                .map(|m| m.slot);
+            let carrier_slot = carrier_in(&party, self.carrier).map(|m| m.slot);
             self.battle = Some(match (&self.hunt, carrier_slot) {
                 (Hunt::Species(species), _) => battle.sparing(species),
                 (Hunt::Level(_), Some(slot)) => battle.shifting_to(slot),
@@ -274,12 +269,10 @@ impl ToolStep for HuntStep {
         // Lv12 SPEAROW until it fainted).
         if let Some(c) = self
             .carrier
-            .as_ref()
-            .filter(|c| !party.members.iter().any(|m| &m.species == *c))
+            .filter(|_| carrier_in(&party, self.carrier).is_none())
         {
             return Decision::Fail(format!(
-                "{} is to carry the trainee but isn't in the party knowledge",
-                crate::party::display_name(c)
+                "the member in slot {c} is to carry the trainee but isn't in the party knowledge"
             ));
         }
         if let Some(lead) = self.fighter(&party) {
@@ -392,6 +385,12 @@ impl ToolStep for HuntStep {
     }
 }
 
+/// The switch-training carrier in `slot`, whatever it evolved into.
+fn carrier_in(party: &Party, slot: Option<u8>) -> Option<&crate::party::Member> {
+    let slot = slot?;
+    party.members.iter().find(|m| m.slot == slot)
+}
+
 /// Whether any encounter tile of the player's map can be walked to.
 fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -> bool {
     let Some(m) = nav.world.map(&pose.map) else {
@@ -433,7 +432,7 @@ fn hunt_for(
     hunt: Hunt,
     map: Option<&str>,
     trainee: Option<&str>,
-    carrier: Option<&str>,
+    carrier: Option<u8>,
 ) -> Result<(), ToolError> {
     let mut heals = 0;
     let mut buys = 0;
@@ -443,7 +442,7 @@ fn hunt_for(
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.trainee = trainee.map(str::to_owned);
-        step.carrier = carrier.map(str::to_owned);
+        step.carrier = carrier;
         step.restock = restock;
         step.encounters = encounters;
         step.fled_in_a_row = fled_in_a_row;
@@ -584,12 +583,30 @@ pub fn train(
         ))?;
         ctx.drive(&mut super::party_order::LeadWith::new(slot, species))?;
     }
+    // Where the carrier stands once the trainee leads.
+    let carrier = match carrier {
+        Some(c) => Some(
+            Party::from_state(ctx.state())
+                .members
+                .iter()
+                .find(|m| m.species == c)
+                .map(|m| m.slot)
+                .ok_or_else(|| {
+                    ToolError::Failed(format!(
+                        "{} is to carry {} but isn't in the party knowledge",
+                        crate::party::display_name(&c),
+                        crate::party::display_name(species)
+                    ))
+                })?,
+        ),
+        None => None,
+    };
     hunt_for(
         ctx,
         Hunt::Level(level),
         Some(map),
         slot.map(|_| species),
-        carrier.as_deref(),
+        carrier,
     )
 }
 
@@ -638,6 +655,28 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    /// Fleet worker 6: the carrier (slot 1) evolved from BULBASAUR into
+    /// IVYSAUR at battle 38; it is still the carrier.
+    #[test]
+    fn an_evolved_carrier_still_carries() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let member = |slot, species: &str| crate::party::Member {
+            slot,
+            ..crate::party::Member::new(&data, species, 16)
+        };
+        let party = Party {
+            members: vec![member(0, "SPECIES_CATERPIE"), member(1, "SPECIES_IVYSAUR")],
+        };
+        let c = carrier_in(&party, Some(1)).expect("the carrier");
+        assert_eq!(c.species, "SPECIES_IVYSAUR");
+        assert!(carrier_in(&party, Some(2)).is_none());
+        assert!(carrier_in(&party, None).is_none());
+    }
 
     #[test]
     fn a_hunt_heals_after_running_from_what_it_is_for() {

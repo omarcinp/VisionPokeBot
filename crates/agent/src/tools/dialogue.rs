@@ -761,9 +761,25 @@ pub fn reconcile_badges(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
     let Some(events) = world.events() else {
         return Ok(());
     };
+    for (flag, script, path) in unrecorded_badge_paths(events, &ctx.state().world) {
+        ctx.info(format!(
+            "{flag} is held but its path never ran: recording {script}[{path}]"
+        ));
+        record_path(ctx, &script, path)?;
+    }
+    Ok(())
+}
+
+/// For each badge held whose giving path isn't recorded: the badge flag
+/// and the giving path with the fewest effects ([`reconcile_badges`]).
+pub fn unrecorded_badge_paths(
+    events: &pokebot_world::events::Events,
+    belief: &pokebot_state::WorldBelief,
+) -> Vec<(String, String, usize)> {
+    let mut out = Vec::new();
     for n in 1..=8 {
         let flag = format!("FLAG_BADGE{n:02}_GET");
-        if ctx.state().world.flags.get(&flag).and_then(|k| k.value) != Some(true) {
+        if belief.flags.get(&flag).and_then(|k| k.value) != Some(true) {
             continue;
         }
         let wanted = flag.as_str();
@@ -779,7 +795,7 @@ pub fn reconcile_badges(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
                 })
             })
             .collect();
-        let run = &ctx.state().world.paths_run;
+        let run = &belief.paths_run;
         if givers.is_empty()
             || givers
                 .iter()
@@ -789,12 +805,9 @@ pub fn reconcile_badges(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         }
         givers.sort_by_key(|(s, p, len)| (*len, *s, *p));
         let (script, path, _) = givers[0];
-        ctx.info(format!(
-            "{flag} is held but its path never ran: recording {script}[{path}]"
-        ));
-        record_path(ctx, script, path)?;
+        out.push((flag, script.to_owned(), path));
     }
-    Ok(())
+    out
 }
 
 pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Result<(), ToolError> {
@@ -1721,6 +1734,31 @@ mod tests {
         step(&mut c, &won);
         assert!(c.battled);
         assert_eq!(c.resolved(&index), Some((brock.into(), fights)));
+    }
+
+    /// Fleet worker 4: Brock beaten with his opening pages unrecognised,
+    /// the badge held but his path unrecorded, and Pewter's gym-guide gate
+    /// shut for the rest of the cycle. The badge names the path to record;
+    /// once recorded, nothing is left to do.
+    #[test]
+    fn a_badge_held_names_its_unrecorded_giving_path() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let mut belief = pokebot_state::WorldBelief::default();
+        assert!(unrecorded_badge_paths(events, &belief).is_empty());
+        belief.flags.insert(
+            "FLAG_BADGE01_GET".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        let found = unrecorded_badge_paths(events, &belief);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (flag, script, path) = &found[0];
+        assert_eq!(flag, "FLAG_BADGE01_GET");
+        assert_eq!(script, "PewterCity_Gym_EventScript_Brock");
+        belief.record_path(script, *path);
+        assert!(unrecorded_badge_paths(events, &belief).is_empty());
     }
 
     /// Bill's script belongs to him and to the Clefairy he turned into:
