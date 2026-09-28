@@ -19,7 +19,7 @@ use pokebot_gamedata::mechanics::{catch_probability, exp_for_level, exp_gain, St
 use pokebot_gamedata::{EncounterTable, GameData};
 use serde::Serialize;
 
-use crate::evaluate::{best_fighter, matchup, Combatant};
+use crate::evaluate::{team_vs_trainer, Combatant};
 
 /// Seconds per walking step (16 frames at 59.73 Hz).
 const STEP_SECONDS: f64 = 16.0 / 59.7275;
@@ -87,6 +87,13 @@ pub enum PlanStep {
         minutes: f64,
         battles: u32,
     },
+    /// At a Pokémon Center's PC, `deposit` is stored and `withdraw` (just
+    /// caught into the boxes, the party being full) joins the party.
+    Swap {
+        deposit: String,
+        withdraw: String,
+        minutes: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,36 +149,9 @@ fn land<'d>(data: &'d GameData, area: &Area) -> Option<&'d EncounterTable> {
     data.wild.get(&area.map)?.get("land")
 }
 
-/// [`matchup`] remembered: training is priced for every member, target
-/// level and carrier level against the same wild slots.
+/// [`matchup`] remembered (see [`crate::evaluate::matchup_cached`]).
 fn matchup_cached(data: &GameData, us: &Combatant, them: &Combatant) -> crate::evaluate::Matchup {
-    type Key = (String, u8, Vec<String>, u32, [u32; 6], String, u8, u32);
-    thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<Key, crate::evaluate::Matchup>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    let key: Key = (
-        us.species.clone(),
-        us.level,
-        us.moves.clone(),
-        us.hp,
-        us.stats.0,
-        them.species.clone(),
-        them.level,
-        them.hp,
-    );
-    if let Some(m) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        return m;
-    }
-    let m = matchup(data, us, them);
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 200_000 {
-            c.clear();
-        }
-        c.insert(key, m.clone());
-    });
-    m
+    crate::evaluate::matchup_cached(data, us, them)
 }
 
 /// Whether `member` wins its first battles on `map` at the level it has
@@ -337,20 +317,13 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
-/// Opponents of `targets` expected beaten, added up over the targets:
-/// by each one's best fighter alone (as [`best_fighter`] judges a win).
+/// Opponents of `targets` the team is expected to beat, added up over the
+/// targets (see [`team_vs_trainer`]).
 fn progress(data: &GameData, party: &[Combatant], targets: &[String]) -> f64 {
     targets
         .iter()
-        .map(|t| {
-            party
-                .iter()
-                .filter_map(|c| {
-                    crate::evaluate::battle_vs_trainer(data, std::slice::from_ref(c), t)
-                })
-                .map(|e| e.opponents.iter().map(|(_, _, p)| p).sum::<f64>())
-                .fold(0.0, f64::max)
-        })
+        .filter_map(|t| team_vs_trainer(data, party, t))
+        .map(|e| e.opponents.iter().map(|(_, _, p, _)| p).sum::<f64>())
         .sum()
 }
 
@@ -360,10 +333,99 @@ fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(
         .map(|t| {
             (
                 t.clone(),
-                best_fighter(data, party, t).map_or(0.0, |(_, p)| p),
+                team_vs_trainer(data, party, t).map_or(0.0, |e| e.p_win),
             )
         })
         .collect()
+}
+
+/// Party members at most.
+const PARTY_SIZE: usize = 6;
+/// Catches searched for a full party's roster change (the best as caught).
+const ROSTER_OPTIONS: usize = 4;
+/// Minutes of a PC swap at a Pokémon Center (the walk there aside).
+const SWAP_MINUTES: f64 = 1.0;
+/// HM moves: their member keeps its place (the field needs it).
+const HM_MOVES: [&str; 7] = [
+    "MOVE_CUT",
+    "MOVE_FLY",
+    "MOVE_SURF",
+    "MOVE_STRENGTH",
+    "MOVE_FLASH",
+    "MOVE_ROCK_SMASH",
+    "MOVE_WATERFALL",
+];
+
+/// The cheapest area to catch `species` in: (minutes, level, balls) and
+/// the area.
+fn cheapest_catch<'r>(
+    request: &'r Request<'_>,
+    species: &str,
+) -> Option<((f64, u8, u32), &'r Area)> {
+    request
+        .areas
+        .iter()
+        .filter_map(|a| catch_cost(request.data, species, a).map(|c| (c, a)))
+        .min_by(|x, y| {
+            x.0 .0
+                .total_cmp(&y.0 .0)
+                .then_with(|| x.1.map.cmp(&y.1.map))
+        })
+}
+
+/// Each member's worth to the team against `targets`: how much the
+/// team's chance and progress drop without it. Its roles count too: a
+/// member knowing an HM move no other one knows isn't valued (it stays).
+pub fn member_values(
+    data: &GameData,
+    party: &[PartyMember],
+    targets: &[String],
+) -> Vec<Option<f64>> {
+    let fighters = |skip: Option<usize>| -> Vec<Combatant> {
+        party
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != skip)
+            .filter_map(|(_, m)| combatant(data, m, m.level))
+            .collect()
+    };
+    let worth = |team: &[Combatant]| -> f64 {
+        let chance: f64 = confidence(data, team, targets).iter().map(|(_, p)| p).sum();
+        chance + PROGRESS_WEIGHT * progress(data, team, targets)
+    };
+    let all = worth(&fighters(None));
+    party
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let sole_hm = m.moves.iter().any(|mv| {
+                HM_MOVES.contains(&mv.as_str())
+                    && !party
+                        .iter()
+                        .enumerate()
+                        .any(|(j, o)| j != i && o.moves.contains(mv))
+            });
+            (!sole_hm).then(|| all - worth(&fighters(Some(i))))
+        })
+        .collect()
+}
+
+/// Weight of an opponent beaten against a whole battle won, in a member's
+/// worth.
+const PROGRESS_WEIGHT: f64 = 0.1;
+
+/// The member worth least to the team (see [`member_values`]); ties to the
+/// lowest level. `None` when every member has a role.
+fn least_valued(data: &GameData, party: &[PartyMember], targets: &[String]) -> Option<usize> {
+    member_values(data, party, targets)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| Some((i, v?)))
+        .min_by(|a, b| {
+            a.1.total_cmp(&b.1)
+                .then_with(|| party[a.0].level.cmp(&party[b.0].level))
+        })
+        .map(|(i, _)| i)
 }
 
 /// Returns up to `alternatives` plans, cheapest first; the first meets the
@@ -390,18 +452,88 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     let ball_price = data.items.get(POKE_BALL).map_or(200, |i| i.price);
     let mut compositions: Vec<(Vec<PartyMember>, Vec<PlanStep>, f64)> =
         vec![(request.party.clone(), Vec::new(), 0.0)];
-    if catching && request.party.len() < 6 {
+    // A full party changes its roster: the member worth least to the team
+    // against the targets makes way for a catch (fleet worker 4: VENUSAUR,
+    // PARAS, ZUBAT, GEODUDE, CLEFAIRY and DIGLETT, the first six caught,
+    // and nothing among them that hits ERIKA's grass).
+    let spare = (catching && request.party.len() >= PARTY_SIZE)
+        .then(|| least_valued(data, &request.party, &request.targets))
+        .flatten();
+    if let Some(out) = spare {
+        // Only the catches that add most to the team as caught (before any
+        // training) are searched further: each costs a whole level search.
+        let as_is: Vec<Combatant> = request
+            .party
+            .iter()
+            .filter_map(|m| combatant(data, m, m.level))
+            .collect();
+        let mut screened: Vec<(f64, &String)> = catchable
+            .iter()
+            .filter(|species| !request.party.iter().any(|m| &m.species == *species))
+            .filter_map(|species| {
+                let (_, level, _) = cheapest_catch(request, species)?.0;
+                let mut team = as_is.clone();
+                let newcomer = combatant(
+                    data,
+                    &PartyMember {
+                        species: species.clone(),
+                        level,
+                        exp: None,
+                        moves: Vec::new(),
+                    },
+                    level,
+                )?;
+                if out < team.len() {
+                    team[out] = newcomer;
+                }
+                let chance: f64 = confidence(data, &team, &request.targets)
+                    .iter()
+                    .map(|(_, p)| p)
+                    .sum();
+                let worth = chance + PROGRESS_WEIGHT * progress(data, &team, &request.targets);
+                Some((worth, species))
+            })
+            .collect();
+        screened.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        screened.truncate(ROSTER_OPTIONS);
+        for (_, species) in screened {
+            if request.party.iter().any(|m| &m.species == species) {
+                continue;
+            }
+            let Some(((minutes, level, balls), area)) = cheapest_catch(request, species) else {
+                continue;
+            };
+            if balls * ball_price > request.money {
+                continue;
+            }
+            let mut party = request.party.clone();
+            let deposit = party[out].species.clone();
+            party[out] = PartyMember {
+                species: species.clone(),
+                level,
+                exp: None,
+                moves: Vec::new(),
+            };
+            let steps = vec![
+                PlanStep::Catch {
+                    species: species.clone(),
+                    map: area.map.clone(),
+                    level,
+                    minutes,
+                    balls,
+                },
+                PlanStep::Swap {
+                    deposit,
+                    withdraw: species.clone(),
+                    minutes: SWAP_MINUTES,
+                },
+            ];
+            compositions.push((party, steps, minutes + SWAP_MINUTES));
+        }
+    }
+    if catching && request.party.len() < PARTY_SIZE {
         for species in &catchable {
-            let best = request
-                .areas
-                .iter()
-                .filter_map(|a| catch_cost(data, species, a).map(|c| (c, a)))
-                .min_by(|x, y| {
-                    x.0 .0
-                        .total_cmp(&y.0 .0)
-                        .then_with(|| x.1.map.cmp(&y.1.map))
-                });
-            let Some(((minutes, level, balls), area)) = best else {
+            let Some(((minutes, level, balls), area)) = cheapest_catch(request, species) else {
                 continue;
             };
             if balls * ball_price > request.money {
@@ -756,7 +888,7 @@ mod tests {
                 .iter()
                 .filter_map(|s| match s {
                     PlanStep::Train { species, .. } => Some(species.clone()),
-                    PlanStep::Catch { .. } => None,
+                    PlanStep::Catch { .. } | PlanStep::Swap { .. } => None,
                 })
                 .collect()
         };
@@ -779,5 +911,63 @@ mod tests {
             None
         );
         assert!(training_cost(&data, &paras, 12, &area("Route6"), Some(&venusaur)).is_some());
+    }
+
+    /// Fleet worker 4: the party was its first six catches, and nothing in
+    /// it hits ERIKA's grass (VENUSAUR's own grass is resisted). A full
+    /// party now changes its roster: the member worth least against ERIKA
+    /// (not VENUSAUR, not the only one knowing CUT) is stored at a PC for
+    /// a catch that does better.
+    #[test]
+    fn a_full_party_makes_way_for_a_catch_that_covers_a_gap() {
+        let Some(data) = data() else { return };
+        let mut paras = member("SPECIES_PARAS", 10);
+        paras.moves = vec!["MOVE_SCRATCH".into(), "MOVE_CUT".into()];
+        let party = vec![
+            member("SPECIES_VENUSAUR", 36),
+            paras,
+            member("SPECIES_ZUBAT", 9),
+            member("SPECIES_GEODUDE", 17),
+            member("SPECIES_CLEFAIRY", 9),
+            member("SPECIES_DIGLETT", 19),
+        ];
+        let targets = vec!["TRAINER_LEADER_ERIKA".to_string()];
+        // PARAS alone knows CUT: it keeps its place.
+        let values = member_values(&data, &party, &targets);
+        assert_eq!(values[1], None);
+        assert!(values[0] > values[2], "{values:?}");
+        let request = Request {
+            party,
+            targets,
+            areas: [
+                "Route6",
+                "Route11",
+                "Route12",
+                "DiglettsCave_B1F",
+                "Route9",
+                "Route5",
+            ]
+            .iter()
+            .map(|m| area(m))
+            .collect(),
+            confidence: 0.9,
+            money: 20_000,
+            data: &data,
+        };
+        let plan = plan_preparation(&request, 1).remove(0);
+        let swap = plan.steps.iter().find_map(|s| match s {
+            PlanStep::Swap {
+                deposit, withdraw, ..
+            } => Some((deposit.clone(), withdraw.clone())),
+            _ => None,
+        });
+        let (deposit, withdraw) = swap.unwrap_or_else(|| panic!("{:?}", plan.steps));
+        assert!(
+            !["SPECIES_VENUSAUR", "SPECIES_PARAS"].contains(&deposit.as_str()),
+            "{deposit}"
+        );
+        // Caught first (the party is full: into the boxes), then swapped.
+        assert!(matches!(&plan.steps[0], PlanStep::Catch { species, .. } if *species == withdraw));
+        assert!(plan.progress > 1.6, "{}", plan.progress);
     }
 }

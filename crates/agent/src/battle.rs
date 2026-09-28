@@ -109,6 +109,58 @@ pub fn lead_risk(
     ))
 }
 
+/// The species a trainer's page says comes next ("LEADER ERIKA is about
+/// to use VICTREEBEL."), as its constant.
+pub fn next_foe(data: &GameData, page: &str) -> Option<String> {
+    let (_, rest) = page.split_once(" is about to use ")?;
+    let name = rest.split(['.', '!']).next()?.trim();
+    data.species_named(name).map(str::to_owned)
+}
+
+/// Before a trainer's next Pokémon (`foe`) comes out, the member to send
+/// against it: the one that beats it best, when that isn't the one out
+/// (`active`) and beats it clearly better, or as surely in half the turns
+/// or fewer (the HP saved is for the rest of the battle; the SHIFT before
+/// the foe comes out costs no turn). The team is planned this way
+/// (`pokebot_planner::team_vs_trainer`): a VENUSAUR whose grass ERIKA's
+/// VICTREEBEL resists makes way for a flier. With that member's chance
+/// and the one out's.
+pub fn member_against(
+    data: &GameData,
+    party: &Party,
+    active: u8,
+    foe: &catch::Foe,
+) -> Option<(u8, f64, f64)> {
+    let odds = |m: &crate::party::Member| -> Option<(f64, f64)> {
+        let hp = m.hp.filter(|(hp, _)| *hp > 0)?;
+        let m = catch::matchup_against(data, &catch::Lead { member: m, hp }, foe)?;
+        Some((m.p_win, m.turns))
+    };
+    let out = party
+        .members
+        .iter()
+        .find(|m| m.slot == active)
+        .and_then(odds)
+        .unwrap_or((0.0, f64::INFINITY));
+    // Winners (even odds or better) by turns, else by chance.
+    let key = |(p, turns): (f64, f64)| (p >= 0.5, if p >= 0.5 { -turns } else { p });
+    let (slot, best) = party
+        .members
+        .iter()
+        .filter(|m| m.slot != active)
+        .filter_map(|m| Some((m.slot, odds(m)?)))
+        .max_by(|a, b| {
+            let (ka, kb) = (key(a.1), key(b.1));
+            ka.0.cmp(&kb.0)
+                .then(ka.1.total_cmp(&kb.1))
+                .then(b.0.cmp(&a.0))
+        })?;
+    let margin = crate::tools::party_order::LEAD_MARGIN;
+    let clearer = best.0 > out.0 + margin;
+    let faster = best.0 >= out.0 - margin && out.0 >= 0.5 && best.1 * 2.0 <= out.1;
+    (clearer || faster).then_some((slot, best.0, out.0))
+}
+
 /// Whether the one out (a switch-trained trainee) should fight the foe on
 /// the HUD itself rather than hand it to `carrier`: it wins, and not so
 /// slowly that the carrier's quick win (half the experience) pays better

@@ -265,6 +265,136 @@ pub struct BattleEstimate {
     pub matchups: Vec<(String, String, Matchup)>,
 }
 
+/// [`matchup`] remembered: a team is judged against the same opponents
+/// for every training level and roster the preparation search tries.
+pub fn matchup_cached(data: &GameData, us: &Combatant, them: &Combatant) -> Matchup {
+    type Key = (
+        String,
+        u8,
+        Vec<String>,
+        u32,
+        [u32; 6],
+        String,
+        u8,
+        Vec<String>,
+        u32,
+        [u32; 6],
+    );
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<Key, Matchup>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key: Key = (
+        us.species.clone(),
+        us.level,
+        us.moves.clone(),
+        us.hp,
+        us.stats.0,
+        them.species.clone(),
+        them.level,
+        them.moves.clone(),
+        them.hp,
+        them.stats.0,
+    );
+    if let Some(m) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return m;
+    }
+    let m = matchup(data, us, them);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 200_000 {
+            c.clear();
+        }
+        c.insert(key, m.clone());
+    });
+    m
+}
+
+/// The whole party against a trainer's team, as the battle is played.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamEstimate {
+    pub trainer: String,
+    pub p_win: f64,
+    /// The member to lead with (the one met by the first opponent).
+    pub lead: usize,
+    /// Per opponent: (species, level, probability it is defeated, the
+    /// party index of the member sent against it first).
+    pub opponents: Vec<(String, u8, f64, usize)>,
+}
+
+/// The party against `trainer` as a team: each opponent is met by the
+/// member that beats it best, which is how the battle is played (the SHIFT
+/// offered before the trainer's next Pokémon is taken for the member that
+/// matches it; after a faint the one sent out is chosen the same way). A
+/// member that loses wears the opponent down for the next; the battle is
+/// lost only when all have fainted (the user's rule: one Pokémon fainting
+/// is not the end). So a team is worth its coverage: a VENUSAUR whose
+/// GRASS moves ERIKA's team resists needs a member that hits it.
+pub fn team_vs_trainer(
+    data: &GameData,
+    party: &[Combatant],
+    trainer: &str,
+) -> Option<TeamEstimate> {
+    let t = data.trainers.get(trainer)?;
+    let mut ours: Vec<Combatant> = party.to_vec();
+    let mut p_total = 1.0;
+    let mut lead = None;
+    let mut opponents = Vec::new();
+    for mon in &t.party {
+        let moves = mon
+            .moves
+            .clone()
+            .unwrap_or_else(|| data.default_moves(&mon.species, mon.level));
+        let iv = u32::from(mon.iv) * 31 / 255;
+        let Some(mut enemy) = Combatant::new(data, &mon.species, mon.level, moves, iv) else {
+            continue;
+        };
+        let mut p_lose_all = 1.0;
+        let mut by = None;
+        loop {
+            let best = ours
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.hp > 0)
+                .map(|(i, c)| (i, matchup_cached(data, c, &enemy)))
+                .max_by(|(i, a), (j, b)| {
+                    a.p_win
+                        .total_cmp(&b.p_win)
+                        .then(b.turns.total_cmp(&a.turns))
+                        .then(j.cmp(i))
+                });
+            let Some((i, m)) = best else {
+                break;
+            };
+            lead.get_or_insert(i);
+            by.get_or_insert(i);
+            p_lose_all *= 1.0 - m.p_win;
+            if m.p_win >= 0.5 {
+                ours[i].hp = m.our_hp_after;
+                break;
+            }
+            // Expected path: our member faints; the opponent is worn down.
+            enemy.hp = m.their_hp_after.max(1);
+            ours[i].hp = 0;
+        }
+        let p = 1.0 - p_lose_all;
+        opponents.push((mon.species.clone(), mon.level, p, by.unwrap_or(0)));
+        p_total *= p;
+        if ours.iter().all(|c| c.hp == 0) {
+            break;
+        }
+    }
+    if opponents.len() < t.party.len() {
+        p_total = 0.0;
+    }
+    Some(TeamEstimate {
+        trainer: format!("{} ({trainer})", t.name),
+        p_win: p_total,
+        lead: lead?,
+        opponents,
+    })
+}
+
 /// The party (in order, lead first) against a trainer's team.
 /// The member who beats `trainer` alone with the best chance, and that
 /// chance: the bot doesn't plan on a Pokémon fainting (the battle sends

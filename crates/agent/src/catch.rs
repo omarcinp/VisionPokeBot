@@ -336,6 +336,18 @@ pub fn plan_catch_wanted(
 }
 
 /// Our side: the summary's stats when they fit the level, else all at `iv`.
+/// `lead` against `foe` one on one (from their current HP).
+pub fn matchup_against(
+    data: &GameData,
+    lead: &Lead,
+    foe: &Foe,
+) -> Option<pokebot_planner::evaluate::Matchup> {
+    let us = our_combatant(data, lead, 0)?;
+    let mut them = foe_combatant(data, foe, 15)?;
+    them.hp = (them.max_hp() * u32::from(foe.hp_per_mille) / 1000).max(1);
+    Some(pokebot_planner::matchup(data, &us, &them))
+}
+
 /// Expected turns for `lead` to beat `foe` (from their current HP), when it
 /// wins (at least even odds).
 pub fn turns_to_win(data: &GameData, lead: &Lead, foe: &Foe) -> Option<f64> {

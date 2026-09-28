@@ -53,6 +53,8 @@ pub struct BattleStep {
     fainted: Option<u8>,
     /// The HUD last read (the foe a replacement is chosen against).
     last_hud: Option<pokebot_state::BattleObservation>,
+    /// The trainer's next Pokémon, as announced ("… is about to use X.").
+    next_foe: Option<String>,
     /// The party slot of our Pokémon in battle, from its HUD name (the
     /// lead until another is sent out).
     active: Option<u8>,
@@ -92,6 +94,7 @@ impl BattleStep {
             shifted: false,
             fainted: None,
             last_hud: None,
+            next_foe: None,
             active: None,
             trainer,
             started: false,
@@ -179,6 +182,24 @@ impl BattleStep {
                     .find(|m| m.slot == slot)
                     .map(|m| m.display_name())
             })
+    }
+
+    /// The member to send against the trainer's announced next Pokémon
+    /// (see [`battle::member_against`]), at the level of the one before.
+    fn member_for_next(&self, b: &pokebot_state::BattleObservation) -> Option<(u8, f64, f64)> {
+        let species = self.next_foe.clone()?;
+        let level = b
+            .opponent_level
+            .or(self.last_hud.as_ref().and_then(|h| h.opponent_level))?;
+        let foe = catch::Foe {
+            species,
+            level,
+            hp_per_mille: 1000,
+            status: catch::FoeStatus::None,
+            shiny: false,
+            caught: None,
+        };
+        battle::member_against(&self.data, &self.party, self.active.unwrap_or(0), &foe)
     }
 
     /// Our battler `name` fainted: the next is sent out, or, the last
@@ -506,6 +527,13 @@ impl ToolStep for BattleStep {
                 );
             }
             self.observe_battle_text(o, ctx.events);
+            if let Some(species) = o
+                .dialogue
+                .as_ref()
+                .and_then(|d| battle::next_foe(&data, &d.lines.join(" ")))
+            {
+                self.next_foe = Some(species);
+            }
             if let Some(species) = spares(self.spare.as_deref(), &self.memory.catch) {
                 self.memory.catch.flee = true;
                 ctx.events.push(super::progress(
@@ -634,8 +662,28 @@ impl ToolStep for BattleStep {
                     self.faint_asked(ctx.events);
                     return select(menu, 0, "use next Pokémon: YES");
                 }
-                // "Will RED change POKéMON?" → No (the lead fights).
+                // "Will RED change POKéMON?": YES when another member
+                // beats the announced one clearly better (the team plan),
+                // else NO (the one out fights on).
                 if battle::is_switch_question(&page) {
+                    if let Some((slot, p_best, p_out)) = self.member_for_next(b) {
+                        ctx.events.push(super::progress(
+                            "Battle",
+                            format!(
+                                "{} comes out against {} ({:.0} %, the one out {:.0} %)",
+                                self.member_name(ctx.state, slot).unwrap_or_default(),
+                                self.next_foe
+                                    .as_deref()
+                                    .map(party::display_name)
+                                    .unwrap_or_default(),
+                                p_best * 100.0,
+                                p_out * 100.0
+                            ),
+                        ));
+                        self.shift_to = Some(slot);
+                        self.shifted = false;
+                        return select(menu, 0, "change Pokémon: YES");
+                    }
                     return Decision::Act(Action::new(
                         "change Pokémon: NO",
                         vec![ControllerCommand::Press(Button::B)],
@@ -1416,6 +1464,106 @@ mod tests {
         step.in_battle = true;
         let label = step_label(&step_next(&mut step, &o, &state, &mut events));
         assert!(label.contains("POKéMON"), "{label} {events:?}");
+    }
+
+    /// The team plan meets each of a trainer's Pokémon with the member that
+    /// beats it best. ERIKA announces VICTREEBEL: VENUSAUR's grass moves
+    /// are resisted, PIDGEOTTO's flying ones are not, so "Will RED change
+    /// POKéMON?" is YES and PIDGEOTTO comes out. Against a foe VENUSAUR
+    /// beats best (ONIX, weak to grass), NO.
+    #[test]
+    fn a_trainers_next_pokemon_is_met_by_the_member_that_beats_it() {
+        use pokebot_state::{
+            BattleObservation, DialogueKind, DialogueObservation, Knowledge, MenuObservation,
+            Observation, Observed, Region, ScreenState,
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(data) = GameData::load(root.join("data/world/gamedata.json")) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let page = |id: u64, text: &str, question: bool| {
+            let mut o = Observation::bare(
+                id,
+                Observed {
+                    value: ScreenState::BattleText,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.battle = Some(BattleObservation {
+                menu: None,
+                player_name: Some("VENUSAUR".into()),
+                player_level: Some(36),
+                player_hp_numbers: Some((110, 110)),
+                opponent_name: Some("TANGELA".into()),
+                opponent_level: Some(24),
+                player_hp: None,
+                opponent_hp: Some(0),
+                move_pp: None,
+                move_names: Vec::new(),
+                opponent_caught: Some(true),
+                opponent_shiny: None,
+                level_up_stats: None,
+            });
+            o.dialogue = Some(DialogueObservation {
+                kind: DialogueKind::BattleText,
+                region: Region::new(8, 119, 224, 34),
+                waiting_for_input: !question,
+                arrow: None,
+                stable_frames: 30,
+                text_cells: vec![1; 4],
+                lines: vec![text.into()],
+                help: false,
+            });
+            if question {
+                o.menu = Some(MenuObservation {
+                    window: Region::new(180, 60, 50, 40),
+                    rows: 2,
+                    cursor_row: 0,
+                    cursor_y: 70,
+                });
+            }
+            o
+        };
+        let state = pokebot_state::GameState {
+            party: Knowledge::observed(
+                vec![
+                    member(
+                        "SPECIES_VENUSAUR",
+                        36,
+                        110,
+                        &["MOVE_RAZOR_LEAF", "MOVE_VINE_WHIP", "MOVE_SLEEP_POWDER"],
+                    ),
+                    member(
+                        "SPECIES_PIDGEOTTO",
+                        30,
+                        90,
+                        &["MOVE_WING_ATTACK", "MOVE_GUST"],
+                    ),
+                ],
+                1,
+            ),
+            ..pokebot_state::GameState::default()
+        };
+        let answer = |foe: &str| {
+            let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, true);
+            step.started = true;
+            step.in_battle = true;
+            let mut events = Vec::new();
+            let text = format!("LEADER ERIKA is about to use {foe}.");
+            for id in 1..=2 {
+                step_next(&mut step, &page(id, &text, false), &state, &mut events);
+            }
+            step_label(&step_next(
+                &mut step,
+                &page(3, "Will RED change POKéMON?", true),
+                &state,
+                &mut events,
+            ))
+        };
+        assert_eq!(answer("VICTREEBEL"), "change Pokémon: YES");
+        assert_eq!(answer("ONIX"), "change Pokémon: NO");
     }
 
     /// Fleet worker 2: MANKEY, switch-trained since Lv3 with CHARMANDER

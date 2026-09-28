@@ -1,9 +1,9 @@
 //! Putting a party member first (Start → POKéMON → the member → SWITCH →
 //! the first slot), so it leads the next battle. The planner counts on the
-//! member best able to beat a trainer alone (no Pokémon may faint; see
-//! `pokebot_planner::best_fighter`), and the battle is fought by whoever
-//! leads (fleet workers: CHARMANDER led against Brock and fainted to ONIX
-//! while the MANKEY trained for him waited in the party).
+//! team meeting each of a trainer's Pokémon with the member that beats it
+//! best (`pokebot_planner::team_vs_trainer`): the one for the first leads
+//! (fleet workers: CHARMANDER led against Brock and fainted to ONIX while
+//! the MANKEY trained for him waited in the party).
 
 use pokebot_core::Button;
 use pokebot_gamedata::GameData;
@@ -212,9 +212,10 @@ impl ToolStep for LeadWith {
     }
 }
 
-/// The party slot that should lead against `trainer`: the member best
-/// able to beat it alone, when it isn't the lead and its chance beats the
-/// lead's by [`LEAD_MARGIN`]; with that chance and the lead's.
+/// The party slot that should lead against `trainer`: the member the team
+/// sends against its first Pokémon, when it isn't the lead and its chance
+/// against that one beats the lead's by [`LEAD_MARGIN`]; with that chance
+/// and the lead's.
 pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8, f64, f64)> {
     let fighters: Vec<(u8, pokebot_planner::Combatant)> = party
         .members
@@ -238,12 +239,19 @@ pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8,
         })
         .collect();
     let lead = fighters.iter().find(|(slot, _)| *slot == 0)?;
-    let p_lead =
-        pokebot_planner::battle_vs_trainer(data, std::slice::from_ref(&lead.1), trainer)?.p_win;
+    let first = data.trainers.get(trainer)?.party.first()?;
+    let moves = first
+        .moves
+        .clone()
+        .unwrap_or_else(|| data.default_moves(&first.species, first.level));
+    let iv = u32::from(first.iv) * 31 / 255;
+    let foe = pokebot_planner::Combatant::new(data, &first.species, first.level, moves, iv)?;
     let combatants: Vec<_> = fighters.iter().map(|(_, c)| c.clone()).collect();
-    let (best, p_best) = pokebot_planner::best_fighter(data, &combatants, trainer)?;
-    let slot = fighters[best].0;
-    (slot != 0 && p_best > p_lead + LEAD_MARGIN).then_some((slot, p_best, p_lead))
+    let best = pokebot_planner::team_vs_trainer(data, &combatants, trainer)?.lead;
+    let (slot, fighter) = &fighters[best];
+    let p_best = pokebot_planner::matchup(data, fighter, &foe).p_win;
+    let p_lead = pokebot_planner::matchup(data, &lead.1, &foe).p_win;
+    (*slot != 0 && p_best > p_lead + LEAD_MARGIN).then_some((*slot, p_best, p_lead))
 }
 
 /// Before a battle with `trainer`: the member best able to beat it leads.
@@ -261,7 +269,7 @@ pub fn lead_for(ctx: &mut ToolContext<'_>, trainer: &str) -> Result<(), ToolErro
     ctx.emit(progress(
         "Party",
         format!(
-            "{} leads against {trainer} ({:.0} % alone, the lead {:.0} %)",
+            "{} leads against {trainer} ({:.0} % against its first, the lead {:.0} %)",
             crate::party::display_name(&species),
             p_best * 100.0,
             p_lead * 100.0
@@ -283,25 +291,50 @@ mod tests {
         .ok()
     }
 
-    /// Fleet workers: CHARMANDER led against Brock; the MANKEY trained
-    /// for him should.
+    /// Fleet workers: CHARMANDER led against Brock and fainted to ONIX
+    /// while the MANKEY trained for him waited. The team meets each of
+    /// Brock's Pokémon with its best match: MANKEY is sent against ONIX,
+    /// and leads when the lead can't face GEODUDE (a PIDGEY).
     #[test]
-    fn the_member_who_beats_the_trainer_alone_leads() {
+    fn the_member_for_the_trainers_first_pokemon_leads() {
         let Some(d) = data() else { return };
+        let combatant = |m: &Member| {
+            pokebot_planner::Combatant::new(
+                &d,
+                &m.species,
+                m.level,
+                d.default_moves(&m.species, m.level),
+                pokebot_planner::prepare::OUR_IV,
+            )
+            .unwrap()
+        };
+        let pidgey = Member::new(&d, "SPECIES_PIDGEY", 10);
         let charmander = Member::new(&d, "SPECIES_CHARMANDER", 14);
         let mankey = Member {
             slot: 1,
             ..Member::new(&d, "SPECIES_MANKEY", 14)
         };
+        let team = pokebot_planner::team_vs_trainer(
+            &d,
+            &[combatant(&charmander), combatant(&mankey)],
+            "TRAINER_LEADER_BROCK",
+        )
+        .unwrap();
+        let onix = team
+            .opponents
+            .iter()
+            .find(|o| o.0 == "SPECIES_ONIX")
+            .unwrap();
+        assert_eq!(onix.3, 1, "{team:?}");
         let party = Party {
-            members: vec![charmander.clone(), mankey],
+            members: vec![pidgey.clone(), mankey],
         };
         let (slot, p_best, p_lead) = fighter_for(&d, &party, "TRAINER_LEADER_BROCK").unwrap();
         assert_eq!(slot, 1);
         assert!(p_best > p_lead);
-        // A lone lead, or one already best, stays.
+        // A lone lead stays.
         let alone = Party {
-            members: vec![charmander],
+            members: vec![pidgey],
         };
         assert_eq!(fighter_for(&d, &alone, "TRAINER_LEADER_BROCK"), None);
     }

@@ -3808,6 +3808,30 @@ impl<'p, 'a> Session<'p, 'a> {
     /// A heal the session found infeasible is left out, so the others
     /// still stand (the first Switch goal run lost every plan when the
     /// heal at home failed twice).
+    /// The Pokémon Center the walk reaches soonest (of the nearest by maps
+    /// crossed).
+    fn nearest_center(&self, belief: &StateBelief<'a>) -> Option<String> {
+        let mut near: Vec<(u32, &String)> = self
+            .planner
+            .centers
+            .iter()
+            .map(|c| (self.hops.get(c).copied().unwrap_or(u32::MAX), c))
+            .collect();
+        near.sort();
+        near.truncate(NEAREST_SHOPS * 2);
+        near.into_iter()
+            .filter_map(|(_, c)| {
+                let trip = if self.hops.is_empty() {
+                    0.0
+                } else {
+                    self.go_cost(c, belief)?
+                };
+                Some((OrdF64(trip), c))
+            })
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
+            .map(|(_, c)| c.clone())
+    }
+
     fn heal_candidates(&self, belief: &StateBelief<'a>, ctx: &PlanContext<'_>) -> Vec<Candidate> {
         // Only the nearest by maps crossed are priced by a route.
         let mut near: Vec<(u32, &String)> = self
@@ -5150,6 +5174,28 @@ impl<'p, 'a> Session<'p, 'a> {
                     },
                     *minutes,
                 ),
+                PlanStep::Swap {
+                    deposit,
+                    withdraw,
+                    minutes,
+                } => {
+                    let Some(center) = self.nearest_center(belief) else {
+                        return Some(self.unsupported(
+                            format!("no Pokémon Center in reach to swap {deposit} for {withdraw}"),
+                            p,
+                            ctx,
+                        ));
+                    };
+                    (
+                        center.clone(),
+                        Intent::Swap {
+                            deposit: deposit.clone(),
+                            withdraw: withdraw.clone(),
+                            center,
+                        },
+                        *minutes,
+                    )
+                }
             };
             if here.as_deref() != Some(map.as_str()) {
                 let go = Intent::Go { dest: map.clone() };

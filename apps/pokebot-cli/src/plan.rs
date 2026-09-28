@@ -216,6 +216,13 @@ pub fn run(args: PlanArgs) -> Result<()> {
                 } => {
                     println!("     train {species} Lv{from} → Lv{to} on {map}: ~{battles} battles, ~{minutes:.1} min")
                 }
+                PlanStep::Swap {
+                    deposit,
+                    withdraw,
+                    minutes,
+                } => {
+                    println!("     at a PC, store {deposit} and take {withdraw}: ~{minutes:.1} min")
+                }
             }
         }
         for (species, level, moves) in &plan.party {

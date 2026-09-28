@@ -14,7 +14,10 @@ pub mod methods;
 pub mod prepare;
 
 pub use belief_adapter::{load_checkpoint, snapshot_id, StateBelief};
-pub use evaluate::{battle_vs_trainer, best_fighter, matchup, BattleEstimate, Combatant};
+pub use evaluate::{
+    battle_vs_trainer, best_fighter, matchup, team_vs_trainer, BattleEstimate, Combatant,
+    TeamEstimate,
+};
 pub use goals::{parse_goal, Plan, PlanError, PlanOptions, PlannedIntent, Planner};
 pub use intents::{
     CostParams, Effect, GoalBelief, GoalPredicate, Intent, Obtain, PlanContext, ProbeFact,

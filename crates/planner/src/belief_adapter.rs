@@ -16,7 +16,7 @@ use pokebot_world::events::DexCount;
 use pokebot_world::predicate::{BeliefView, Predicate, Truth};
 use serde::Deserialize;
 
-use crate::evaluate::{best_fighter, Combatant};
+use crate::evaluate::{team_vs_trainer, Combatant};
 use crate::intents::{pocket_of, GoalBelief, GoalPredicate};
 use crate::prepare::{PartyMember, OUR_IV};
 
@@ -123,12 +123,11 @@ impl<'a> StateBelief<'a> {
         (!fighters.is_empty()).then_some(fighters)
     }
 
-    /// P(win) against `trainer` with the party as known: the best member
-    /// leads it and wins it alone (no Pokémon may faint; see
-    /// [`crate::evaluate::best_fighter`]).
+    /// P(win) against `trainer` with the party as known, fought as a team
+    /// (see [`crate::evaluate::team_vs_trainer`]).
     pub fn p_win(&self, trainer: &str) -> Option<f64> {
         let party = self.combatants()?;
-        best_fighter(self.data, &party, trainer).map(|(_, p)| p)
+        team_vs_trainer(self.data, &party, trainer).map(|e| e.p_win)
     }
 
     /// Items held in `pocket`, when that pocket was read.
