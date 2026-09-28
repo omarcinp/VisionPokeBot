@@ -152,6 +152,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
   - Cycling Road's downhill slope and Icefall Cave's ice aren't modelled.
   - Elevator script-warp legs have planner edges, but no navigator step to carry them out.
   - The Seagallop ferries (`special DoSeagallopFerryScene` with `VAR_0x8006`), Icefall Cave's coordinate-less `warphole`, and Escape Rope/Dig/Teleport exits have no edges.
+  - Trainers' sight isn't in the planner's route graph: a plan may walk through an unbeaten trainer's unavoidable sight line without planning (or preparing for) its battle (fleet worker 4: BULBASAUR met Bug Catcher Sammy across Viridian Forest at 18/27 and whited out). Gating sight tiles on the trainer being beaten was tried and left no plan at all: reaching a trainer whose sight covers the way to him needs him beaten first. The model needs "walking into the sight is the battle" (a Beat at the sight line, readiness judged). Walks and healer choice already account for sight (`nav::sight_tiles`, `scheduler::recovery`).
 - **Stuck games: the strategy.** Every loop that can repeat has a bound, and every bound fails the step with a reason, so the plan moves on and the logs say why:
   - Walks: a walk entering a map at the same tile a third time fails "going in circles" (`nav::MapEntries`; hunts count across their walks).
   - Actions: the same action sent 40 times on an unchanged screen fails "no progress" (`tools::context::ActRepeats`; waiting actions such as spinning for encounters are exempt).
