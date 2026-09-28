@@ -24,6 +24,9 @@ pub struct Combatant {
     pub stats: Stats,
     pub types: Vec<String>,
     pub hp: u32,
+    /// Accuracy and evasion stages (−6..=6) in the battle; 0 when fresh.
+    pub acc_stage: i8,
+    pub evasion_stage: i8,
 }
 
 impl Combatant {
@@ -44,6 +47,8 @@ impl Combatant {
             stats,
             types: s.types.clone(),
             hp: stats.hp(),
+            acc_stage: 0,
+            evasion_stage: 0,
         })
     }
 
@@ -66,7 +71,7 @@ pub fn best_move(
         let Some(mv) = data.move_(&name) else {
             continue;
         };
-        let Some(rolls) = damage(
+        let Some(mut rolls) = damage(
             data,
             mv,
             &attacker.types,
@@ -77,6 +82,12 @@ pub fn best_move(
         ) else {
             continue;
         };
+        if mv.accuracy > 0 {
+            rolls.hit_chance = staged_accuracy(
+                rolls.hit_chance,
+                attacker.acc_stage - defender.evasion_stage,
+            );
+        }
         let dist = ko_distribution(&rolls, defender.hp);
         let expected = expected_turns(&dist);
         if best.as_ref().is_none_or(|(e, _, _)| expected < *e) {
@@ -84,6 +95,29 @@ pub fn best_move(
         }
     }
     best.map(|(_, n, r)| (n, r))
+}
+
+/// A move's hit chance with the attacker's accuracy stage net of the
+/// defender's evasion (clamped to ±6), as the game scales it
+/// (`sAccuracyStageRatios`: −1 → 75/100, −2 → 60/100, …, +6 → 3/1).
+pub fn staged_accuracy(hit_chance: f64, stage: i8) -> f64 {
+    const RATIOS: [(f64, f64); 13] = [
+        (33.0, 100.0),
+        (36.0, 100.0),
+        (43.0, 100.0),
+        (50.0, 100.0),
+        (60.0, 100.0),
+        (75.0, 100.0),
+        (1.0, 1.0),
+        (133.0, 100.0),
+        (166.0, 100.0),
+        (2.0, 1.0),
+        (233.0, 100.0),
+        (133.0, 50.0),
+        (3.0, 1.0),
+    ];
+    let (num, den) = RATIOS[(i32::from(stage.clamp(-6, 6)) + 6) as usize];
+    (hit_chance * num / den).min(1.0)
 }
 
 /// Probability that `defender` faints within `turns` attacks of `attacker`'s

@@ -191,3 +191,47 @@ fn the_member_who_wins_alone_is_the_fighter() {
     assert!((p - alone(&mankey)).abs() < 1e-9);
     assert!(alone(&mankey) > alone(&charmander));
 }
+
+/// Switch, S.S. Anne: the rival's PIDGEOTTO (SAND-ATTACK) and CHARMELEON
+/// (SMOKESCREEN) cut VENUSAUR's accuracy twice, its TACKLEs missed and
+/// EMBER fainted it; the evaluator had counted every hit. The game scales
+/// a move's accuracy by the attacker's accuracy stage net of the target's
+/// evasion (`sAccuracyStageRatios`).
+#[test]
+fn accuracy_drops_lower_the_chance_to_win() {
+    use pokebot_planner::evaluate::{matchup, staged_accuracy};
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    assert!(close(staged_accuracy(1.0, 0), 1.0));
+    assert!(close(staged_accuracy(0.95, -1), 0.95 * 0.75));
+    assert!(close(staged_accuracy(0.95, -2), 0.95 * 0.6));
+    assert!(close(staged_accuracy(0.95, -9), 0.95 * 0.33));
+    assert!(close(staged_accuracy(0.95, 6), 1.0));
+    let Some(data) = data() else { return };
+    let moves = |m: &[&str]| m.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let mut us = Combatant::new(
+        &data,
+        "SPECIES_VENUSAUR",
+        32,
+        moves(&[
+            "MOVE_TACKLE",
+            "MOVE_SLEEP_POWDER",
+            "MOVE_RAZOR_LEAF",
+            "MOVE_VINE_WHIP",
+        ]),
+        10,
+    )
+    .unwrap();
+    us.hp = 78;
+    let them = Combatant::new(
+        &data,
+        "SPECIES_CHARMELEON",
+        20,
+        data.default_moves("SPECIES_CHARMELEON", 20),
+        31,
+    )
+    .unwrap();
+    let fresh = matchup(&data, &us, &them).p_win;
+    us.acc_stage = -2;
+    let blinded = matchup(&data, &us, &them).p_win;
+    assert!(blinded < fresh, "{blinded} vs {fresh}");
+}

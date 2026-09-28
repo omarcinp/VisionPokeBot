@@ -419,6 +419,7 @@ impl ToolStep for BattleStep {
                 if self.active == Some(slot) {
                     self.shifted = true;
                     self.memory.our_stages = [0; 6];
+                    self.memory.our_accuracy = 0;
                 } else if let Some(BattleMenu::Command { column, row }) = b.menu {
                     return battle::step_toward(
                         (column, row),

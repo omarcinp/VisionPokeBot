@@ -57,6 +57,11 @@ pub struct BattleMemory {
     pub sleep_tries: u8,
     /// Why the battle is being run from, once told.
     pub fled_for: Option<String>,
+    /// Our battler's accuracy stage and the foe's evasion stage (−6..=6)
+    /// from the battle text ("VENUSAUR's accuracy fell!", "Foe X's
+    /// evasiveness rose!"): the evaluator scales hit chances by them.
+    pub our_accuracy: i8,
+    pub foe_evasion: i8,
 }
 
 /// In a battle that can't be run from (a trainer's), the member to SHIFT
@@ -129,6 +134,41 @@ pub fn stage_text(page: &str, lead: &str) -> Option<(usize, i8)> {
     Some((index, delta))
 }
 
+/// Whose stage an accuracy/evasion page is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Ours,
+    Foe,
+}
+
+/// "VENUSAUR's accuracy fell!" (our lead, `lead` its printed name) or
+/// "Foe CHARMELEON's evasiveness rose!": whose, and by how many stages.
+/// Our evasion and the foe's accuracy aren't tracked.
+pub fn accuracy_text(page: &str, lead: &str) -> Option<(Side, i8)> {
+    let (side, rest, stat) = if let Some(rest) = page.strip_prefix("Foe ") {
+        let rest = rest.split_once("’s ").or_else(|| rest.split_once("'s "))?.1;
+        (Side::Foe, rest, "evasiveness")
+    } else {
+        let rest = [format!("{lead}’s "), format!("{lead}'s ")]
+            .iter()
+            .find_map(|p| page.strip_prefix(p.as_str()))?;
+        (Side::Ours, rest, "accuracy")
+    };
+    let rest = rest.strip_prefix(stat)?;
+    let delta = if rest.contains("harshly fell") {
+        -2
+    } else if rest.contains("fell") {
+        -1
+    } else if rest.contains("sharply rose") {
+        2
+    } else if rest.contains("rose") {
+        1
+    } else {
+        return None;
+    };
+    Some((side, delta))
+}
+
 /// DISABLE in battle text about our lead (`lead`, its printed name):
 /// `Some(Some(move))` for "IVYSAUR's VINE WHIP was disabled!" (the foe used
 /// DISABLE) and "… is disabled!" (the move was chosen anyway),
@@ -185,6 +225,14 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
     if page.contains("sent out") {
         memory.foe_asleep = false;
         memory.sleep_tries = 0;
+        memory.foe_evasion = 0;
+    }
+    let lead_name = party.lead().map(|l| l.display_name()).unwrap_or_default();
+    if let Some((whose, delta)) = accuracy_text(page, &lead_name) {
+        match whose {
+            Side::Ours => memory.our_accuracy = (memory.our_accuracy + delta).clamp(-6, 6),
+            Side::Foe => memory.foe_evasion = (memory.foe_evasion + delta).clamp(-6, 6),
+        }
     }
     if let Some(rest) = page.strip_prefix("Foe ") {
         if ["fell asleep!", "is fast asleep", "is already asleep"]
@@ -246,8 +294,11 @@ pub fn choose_move(
     let with_pp = |m: &String| lead.pp_left(data, m) > 0;
     let pick = |usable: Vec<String>| -> Option<String> {
         let best = opponent.and_then(|foe| {
-            let us = Combatant::new(data, &lead.species, lead.level, usable.clone(), 10)?;
-            best_move(data, &us, foe).map(|(m, _)| m)
+            let mut us = Combatant::new(data, &lead.species, lead.level, usable.clone(), 10)?;
+            us.acc_stage = memory.our_accuracy;
+            let mut foe = foe.clone();
+            foe.evasion_stage = memory.foe_evasion;
+            best_move(data, &us, &foe).map(|(m, _)| m)
         });
         // Unknown opponent: strongest usable move by power.
         best.or_else(|| {
@@ -498,7 +549,9 @@ pub fn sleep_opener(
         us.stats = stats;
     }
     us.hp = u32::from(hp.0);
+    us.acc_stage = memory.our_accuracy;
     let mut them = foe.clone();
+    them.evasion_stage = memory.foe_evasion;
     them.hp = (foe.hp * u32::from(battle.opponent_hp.unwrap_or(1000)))
         .div_ceil(1000)
         .max(1);
@@ -940,6 +993,81 @@ mod tests {
         assert_eq!(
             sleep_opener(&data, &party, Some(&charmander), &battle, &wild),
             None
+        );
+    }
+
+    /// Switch, S.S. Anne: SAND-ATTACK and SMOKESCREEN cut VENUSAUR's
+    /// accuracy twice; its TACKLEs missed and CHARMELEON's EMBER fainted
+    /// it. The pages are counted, and at −2 the fight is no sure win:
+    /// SLEEP POWDER first.
+    #[test]
+    fn accuracy_drops_make_a_trainer_fight_open_with_sleep() {
+        assert_eq!(
+            accuracy_text("VENUSAUR’s accuracy fell!", "VENUSAUR"),
+            Some((Side::Ours, -1))
+        );
+        assert_eq!(
+            accuracy_text("Foe PIDGEY’s evasiveness sharply rose!", "VENUSAUR"),
+            Some((Side::Foe, 2))
+        );
+        assert_eq!(
+            accuracy_text("Foe PIDGEY’s accuracy fell!", "VENUSAUR"),
+            None
+        );
+        assert_eq!(accuracy_text("VENUSAUR’s DEFENSE fell!", "VENUSAUR"), None);
+        let Some(data) = data() else { return };
+        let mut venusaur = Member::new(&data, "SPECIES_VENUSAUR", 32);
+        venusaur.moves = [
+            "MOVE_TACKLE",
+            "MOVE_SLEEP_POWDER",
+            "MOVE_RAZOR_LEAF",
+            "MOVE_VINE_WHIP",
+        ]
+        .map(String::from)
+        .to_vec();
+        venusaur.hp = Some((78, 98));
+        let party = Party {
+            members: vec![venusaur],
+        };
+        let charmeleon = Combatant::new(
+            &data,
+            "SPECIES_CHARMELEON",
+            20,
+            data.default_moves("SPECIES_CHARMELEON", 20),
+            15,
+        )
+        .unwrap();
+        let battle = pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
+            player_name: Some("VENUSAUR".into()),
+            player_level: Some(32),
+            player_hp_numbers: Some((78, 98)),
+            opponent_name: None,
+            opponent_level: None,
+            player_hp: None,
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: None,
+        };
+        let mut memory = BattleMemory::default();
+        observe_page(
+            &mut memory,
+            "RIVAL GREEN sent out CHARMELEON!",
+            &party,
+            &data,
+        );
+        let fresh = sleep_opener(&data, &party, Some(&charmeleon), &battle, &memory);
+        for page in ["VENUSAUR’s accuracy fell!", "VENUSAUR’s accuracy fell!"] {
+            observe_page(&mut memory, page, &party, &data);
+        }
+        assert_eq!(memory.our_accuracy, -2);
+        assert_eq!(
+            sleep_opener(&data, &party, Some(&charmeleon), &battle, &memory),
+            Some((1, "MOVE_SLEEP_POWDER".into())),
+            "fresh accuracy: {fresh:?}"
         );
     }
 
