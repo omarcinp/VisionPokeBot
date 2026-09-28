@@ -753,18 +753,11 @@ impl<'a> ToolContext<'a> {
             }
             self.expects = step.expects();
             let before = self.pose();
+            let learned_before = self.learned.len();
             if self.interrupt(&o)? {
-                // A scene at one spot every time the step comes by (a
-                // ticket gate turning the walk back): the way is shut
-                // (fleet worker 5, Pewter Museum: hours of "Come again!").
-                if let Some(pose) = before {
-                    let n = interrupted.entry(pose.clone()).or_default();
-                    *n += 1;
-                    if *n >= MAX_SAME_INTERRUPTS {
-                        return Err(ToolError::Failed(format!(
-                            "interrupted at {pose} {n} times: something there turns the step back"
-                        )));
-                    }
+                let learned = self.learned.get(learned_before..).unwrap_or_default();
+                if let Some(why) = count_interrupt(interrupted, before, learned) {
+                    return Err(ToolError::Failed(why));
                 }
                 // The interrupt ran another tool (a trainer battle can take
                 // minutes): the step's wait starts over from the screen it
@@ -917,6 +910,29 @@ impl<'a> ToolContext<'a> {
         outcome
     }
 }
+/// Counts an interruption at `pose` that learned `learned`; the failure
+/// once the same tile has turned the step back [`MAX_SAME_INTERRUPTS`]
+/// times. A scene at one spot every time the step comes by (a ticket gate
+/// turning the walk back) shuts the way (fleet worker 5, Pewter Museum:
+/// hours of "Come again!"). A trainer beaten is the way forward, not a
+/// turn back, and clears the tile (Switch, Nugget Bridge: Lass Ali's
+/// approach, her battle and a move offer at one tile failed the walk).
+fn count_interrupt(
+    interrupted: &mut std::collections::HashMap<pokebot_state::PlayerPose, u32>,
+    pose: Option<pokebot_state::PlayerPose>,
+    learned: &[GameEvent],
+) -> Option<String> {
+    let pose = pose?;
+    if learned.iter().any(super::dialogue::trainer_won) {
+        interrupted.remove(&pose);
+        return None;
+    }
+    let n = interrupted.entry(pose.clone()).or_default();
+    *n += 1;
+    (*n >= MAX_SAME_INTERRUPTS)
+        .then(|| format!("interrupted at {pose} {n} times: something there turns the step back"))
+}
+
 /// Interruptions (a scene, a conversation) at the same tile within one
 /// step before it fails.
 pub const MAX_SAME_INTERRUPTS: u32 = 3;
@@ -990,6 +1006,32 @@ mod tests {
     use crate::Expectation;
     use pokebot_core::{Button, ControllerCommand};
     use pokebot_state::{Observed, ScreenState};
+
+    /// The museum's ticket gate turns the walk back at one tile: the third
+    /// time fails. Nugget Bridge's trainers interrupt at one tile too, but
+    /// each is beaten: that clears the tile.
+    #[test]
+    fn a_tile_turning_the_step_back_fails_it_but_a_trainer_beaten_does_not() {
+        let at = || {
+            Some(pokebot_state::PlayerPose {
+                map: "Route24".into(),
+                x: 11,
+                y: 28,
+            })
+        };
+        let won = [GameEvent::MoneyChanged {
+            delta: 120,
+            reason: "won a battle".into(),
+        }];
+        let mut seen = std::collections::HashMap::new();
+        assert_eq!(count_interrupt(&mut seen, at(), &[]), None);
+        assert_eq!(count_interrupt(&mut seen, at(), &[]), None);
+        assert_eq!(count_interrupt(&mut seen, at(), &won), None);
+        assert_eq!(count_interrupt(&mut seen, at(), &[]), None);
+        assert_eq!(count_interrupt(&mut seen, at(), &[]), None);
+        assert!(count_interrupt(&mut seen, at(), &[]).is_some_and(|why| why.contains("3 times")));
+        assert_eq!(count_interrupt(&mut seen, None, &[]), None);
+    }
 
     fn screen(state: ScreenState) -> Observation {
         Observation::bare(

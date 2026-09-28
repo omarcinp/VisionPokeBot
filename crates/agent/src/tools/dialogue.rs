@@ -582,7 +582,7 @@ impl Conversation {
 }
 
 /// A trainer battle's win: its prize money (wild battles pay none).
-fn trainer_won(e: &GameEvent) -> bool {
+pub(crate) fn trainer_won(e: &GameEvent) -> bool {
     matches!(e, GameEvent::MoneyChanged { delta, reason } if *delta > 0 && reason == "won a battle")
 }
 
