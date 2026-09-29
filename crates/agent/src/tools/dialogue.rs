@@ -689,7 +689,8 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
     if let Some((frame_id, text)) = &conversation.unknown {
         save_unknown(ctx, *frame_id, text);
     }
-    let Some(events) = ctx.world.events() else {
+    let world = Arc::clone(&ctx.world);
+    let Some(events) = world.events() else {
         return Ok(());
     };
     let index = LabelIndex::build_for(events, &conversation.recognised);
@@ -697,6 +698,26 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         let belief = StateBelief(ctx.state());
         conversation.resolved_in(&index, Some(&belief))
     };
+    // What the text read proves, whatever path ran: a condition every
+    // path printing it shares (Switch, Vermilion: "The ship set sail." is
+    // only printed with the city's scene var at 3, the belief held 1 and
+    // walks went on through the ticket check it turns back).
+    let shown = conditions_shown(events, &index, &conversation.recognised);
+    for event in shown {
+        let differs = match &event {
+            GameEvent::VarObserved { var, value } => {
+                ctx.state().world.vars.get(var).and_then(|k| k.value) != Some(*value)
+            }
+            GameEvent::FlagObserved { flag, value } => {
+                ctx.state().world.flags.get(flag).and_then(|k| k.value) != Some(*value)
+            }
+            _ => false,
+        };
+        if differs {
+            ctx.emit(progress("Dialogue", format!("the text shows {event:?}")))?;
+            ctx.emit(event)?;
+        }
+    }
     let Some((script, path)) = resolved else {
         if !conversation.recognised.is_empty() {
             ctx.emit(progress(
@@ -728,6 +749,51 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         ))),
         _ => Ok(()),
     }
+}
+
+/// The story state `recognised` proves: the conditions every script path
+/// printing all of it shares (a story var at an exact value, a story flag),
+/// as observed facts. Scratch vars and flags (`VAR_TEMP_*`, `VAR_0x*`,
+/// `FLAG_TEMP_*`) prove nothing past the scene.
+pub fn conditions_shown(
+    events: &pokebot_world::events::Events,
+    index: &LabelIndex,
+    recognised: &[String],
+) -> Vec<GameEvent> {
+    use pokebot_world::gates::{is_local_flag, is_local_var};
+    let Some(first) = recognised.first() else {
+        return Vec::new();
+    };
+    let paths: Vec<&pokebot_world::events::ScriptPath> = index
+        .paths_for(first)
+        .iter()
+        .filter_map(|(s, i)| events.script(s)?.paths.get(*i))
+        .filter(|p| {
+            let labels = path_labels(&p.does);
+            recognised.iter().all(|l| labels.contains(&l.as_str()))
+        })
+        .collect();
+    let Some(head) = paths.first() else {
+        return Vec::new();
+    };
+    head.when
+        .iter()
+        .filter(|c| paths.iter().all(|p| p.when.contains(c)))
+        .filter_map(|c| match c {
+            Condition::Var { var, cmp } if !is_local_var(var) => {
+                let value = cmp.eq.as_ref()?.as_int()?;
+                Some(GameEvent::VarObserved {
+                    var: var.clone(),
+                    value: u16::try_from(value).ok()?,
+                })
+            }
+            Condition::Flag { flag, is } if !is_local_flag(flag) => Some(GameEvent::FlagObserved {
+                flag: flag.clone(),
+                value: *is,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether two paths of `script` change the same things (they differ only
@@ -1801,6 +1867,33 @@ mod tests {
         );
         let lab = fights("PalletTown_ProfessorOaksLab_EventScript_RivalBattleTriggerMid");
         assert!(lab.is_empty(), "{lab:?}");
+    }
+
+    /// Switch, Vermilion: the belief held the city's scene var at 1 (the
+    /// S.S. Anne's departure missed), so the ticket check looked passable,
+    /// and "The ship set sail." turned the walk back for half an hour. That
+    /// text is printed only with the var at 3: reading it proves it (and
+    /// no scratch var); nothing read proves nothing.
+    #[test]
+    fn a_text_proves_what_every_path_printing_it_requires() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let said = vec!["VermilionCity_Text_TheShipSetSail".to_owned()];
+        let index = LabelIndex::build_for(events, &said);
+        let shown = conditions_shown(events, &index, &said);
+        assert!(
+            shown.contains(&GameEvent::VarObserved {
+                var: "VAR_MAP_SCENE_VERMILION_CITY".into(),
+                value: 3,
+            }),
+            "{shown:?}"
+        );
+        assert!(!shown.iter().any(|e| matches!(e,
+            GameEvent::VarObserved { var, .. } if var.starts_with("VAR_TEMP") || var.starts_with("VAR_0x"))));
+        let nothing = conditions_shown(events, &index, &[]);
+        assert!(nothing.is_empty());
     }
 
     /// Fleet worker 4: Brock beaten with his opening pages unrecognised,

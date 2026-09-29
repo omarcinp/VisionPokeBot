@@ -157,6 +157,9 @@ pub struct ToolContext<'a> {
     expects: Expects,
     depth: usize,
     learned: Vec<GameEvent>,
+    /// Per step being driven (innermost last): interruptions per tile,
+    /// counted between its actions and during them ([`count_interrupt`]).
+    interrupt_counts: Vec<std::collections::HashMap<pokebot_state::PlayerPose, u32>>,
     quiet_frames: u32,
     last_map: Option<String>,
     last_dialogue_frame: Option<u64>,
@@ -232,6 +235,7 @@ impl<'a> ToolContext<'a> {
             expects: Expects::NONE,
             depth: 0,
             learned: Vec::new(),
+            interrupt_counts: Vec::new(),
             quiet_frames: 0,
             last_map: None,
             last_dialogue_frame: None,
@@ -562,10 +566,32 @@ impl<'a> ToolContext<'a> {
             .cloned()
             .expect("run_action observed");
         self.note_frame(&o)?;
+        let before = self.pose();
+        let learned_before = self.learned.len();
         if self.interrupt(&o)? {
+            // Interrupted mid-action (a walk's hold turned back by a
+            // scene) counts like between actions (Switch, Vermilion: the
+            // ticket check turned a hold Down back for 35 minutes, never
+            // counted).
+            if let Some(why) = self.count_interrupt_here(before, learned_before) {
+                return Err(ToolError::Failed(why));
+            }
             return Ok(Outcome::Interrupted);
         }
         Ok(outcome)
+    }
+
+    /// Counts an interruption at `pose` for the step being driven, with
+    /// what was learnt since `learned_before`; the failure when the tile
+    /// has turned the step back too often.
+    fn count_interrupt_here(
+        &mut self,
+        pose: Option<pokebot_state::PlayerPose>,
+        learned_before: usize,
+    ) -> Option<String> {
+        let counts = self.interrupt_counts.last_mut()?;
+        let learned = self.learned.get(learned_before..).unwrap_or_default();
+        count_interrupt(counts, pose, learned)
     }
 
     /// Handles what `o` shows that the running step doesn't expect. `true`
@@ -723,17 +749,11 @@ impl<'a> ToolContext<'a> {
         let mut waiting_since: Option<(u64, String)> = None;
         let mut nudged = false;
         let mut repeats = ActRepeats::default();
-        let mut interrupted: std::collections::HashMap<pokebot_state::PlayerPose, u32> =
-            std::collections::HashMap::new();
+        self.interrupt_counts.push(std::collections::HashMap::new());
         let saved = self.expects;
-        let result = self.drive_inner(
-            step,
-            &mut waiting_since,
-            &mut nudged,
-            &mut repeats,
-            &mut interrupted,
-        );
+        let result = self.drive_inner(step, &mut waiting_since, &mut nudged, &mut repeats);
         self.expects = saved;
+        self.interrupt_counts.pop();
         result
     }
 
@@ -743,7 +763,6 @@ impl<'a> ToolContext<'a> {
         waiting_since: &mut Option<(u64, String)>,
         nudged: &mut bool,
         repeats: &mut ActRepeats,
-        interrupted: &mut std::collections::HashMap<pokebot_state::PlayerPose, u32>,
     ) -> Result<String, ToolError> {
         loop {
             let o = self.observe()?;
@@ -757,8 +776,7 @@ impl<'a> ToolContext<'a> {
             let before = self.pose();
             let learned_before = self.learned.len();
             if self.interrupt(&o)? {
-                let learned = self.learned.get(learned_before..).unwrap_or_default();
-                if let Some(why) = count_interrupt(interrupted, before, learned) {
+                if let Some(why) = self.count_interrupt_here(before, learned_before) {
                     return Err(ToolError::Failed(why));
                 }
                 // The interrupt ran another tool (a trainer battle can take
