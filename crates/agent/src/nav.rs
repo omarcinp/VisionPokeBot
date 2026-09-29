@@ -179,6 +179,12 @@ pub struct Navigator {
     /// Direction the player is believed to face (after a move or turn);
     /// unknown again after a map change (warps set it).
     facing: Option<Direction>,
+    /// Where the last turn was pressed from, and the frame: a tap meant to
+    /// turn can take a step instead (the Switch: a turn Down right after
+    /// leaving Mt. Moon walked, the next step overshot to the sign, and
+    /// the walk back stepped onto the cave's mouth), and the pose shows it
+    /// only frames later. Nothing moves on until that time has passed.
+    turned: Option<(PlayerPose, u64)>,
     /// The map the player was last located on.
     last_map: Option<String>,
     /// Holds and taps along the current path.
@@ -296,6 +302,7 @@ impl Navigator {
             learned: Blocked::default(),
             forgets: HashMap::new(),
             facing: None,
+            turned: None,
             last_map: None,
             walker: Walker::new(),
             syncer: Arc::new(Mutex::new(Syncer::new("emulator"))),
@@ -606,6 +613,14 @@ impl Navigator {
             return NavStatus::Wait("locating the player".into());
         };
         let sync = self.sync();
+        if let Some((from, at)) = self.turned.take() {
+            let settle = sync.timeout_frames(InputKind::WalkTile, 1);
+            if from == pose && observation.frame_id < at + settle {
+                self.turned = Some((from, at));
+                return NavStatus::Wait(format!("checking the turn {what} didn't step"));
+            }
+            // It stepped: the walk goes on from where the player is.
+        }
         match self
             .walker
             .next(observation, path, self.facing, &sync, Instant::now())
@@ -650,6 +665,7 @@ impl Navigator {
                 timeout_frames,
             } => {
                 self.facing = Some(dir);
+                self.turned = Some((pose, observation.frame_id));
                 NavStatus::Act(
                     Action::new(
                         format!("turn {dir:?} {what}"),
@@ -1927,6 +1943,59 @@ mod tests {
             panic!("expected a step");
         };
         assert!(first.label.starts_with("turn Down"), "{}", first.label);
+    }
+
+    /// The Switch, leaving Mt. Moon: a tap meant to turn walked, the pose
+    /// showed it frames later, and the next step overshot (then, walking
+    /// back, onto the cave's mouth). After a turn nothing moves on until a
+    /// step would have shown; if it did, the walk goes on from there.
+    #[test]
+    fn a_turn_is_checked_for_a_step_before_the_next_move() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let at = |x, y| PlayerPose {
+            map: "Route4".into(),
+            x,
+            y,
+        };
+        let observation = |frame: u64, pose: PlayerPose| {
+            let mut o = Observation::bare(
+                frame,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation { pose, score: 1000 });
+            o
+        };
+        // The Pokémon Center's door, from the cave's mouth, facing Up.
+        let door = Destination::Warp {
+            map: "Route4".into(),
+            warp: 2,
+        };
+        let mut nav = Navigator::new(Arc::new(world), door);
+        nav.facing = Some(Direction::Up);
+        let o = observation(100, at(19, 5));
+        let NavStatus::Act(turn) = nav.next(&o) else {
+            panic!("expected a turn");
+        };
+        assert!(turn.label.starts_with("turn Down"), "{}", turn.label);
+        assert!(nav.on_outcome(&turn, Outcome::Confirmed, &o).is_none());
+        // Right after: the pose hasn't had time to show a step.
+        assert!(matches!(
+            nav.next(&observation(105, at(19, 5))),
+            NavStatus::Wait(w) if w.contains("didn't step")
+        ));
+        // It had stepped: the walk goes on from (19, 6), never Down again.
+        let NavStatus::Act(next) = nav.next(&observation(110, at(19, 6))) else {
+            panic!("expected a move");
+        };
+        assert!(!next.label.contains("Down"), "{}", next.label);
     }
 
     /// Flash-7: on MtMoon_1F a hold stalled because a wild encounter
