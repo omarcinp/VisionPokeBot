@@ -118,6 +118,11 @@ impl Member {
         display_name(&self.species)
     }
 
+    /// Seen at 0 HP (the sensor records a faint as 0 HP).
+    pub fn fainted(&self) -> bool {
+        self.hp.is_some_and(|(hp, _)| hp == 0)
+    }
+
     pub fn pp_left(&self, data: &GameData, mv: &str) -> u8 {
         let max = data.move_(mv).map_or(0, |m| m.pp);
         max.saturating_sub(*self.pp_used.get(mv).unwrap_or(&0))

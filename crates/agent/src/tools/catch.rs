@@ -279,6 +279,16 @@ impl ToolStep for HuntStep {
                 "the member in slot {c} is to carry the trainee but isn't in the party knowledge"
             ));
         }
+        // A fainted trainee earns nothing: the game sends out the next
+        // member in its place, and the carrier fights for no one (fleet
+        // worker 2, Mt. Moon: PARAS fainted at battle 8 of 150 and MANKEY
+        // fought on while PARAS stayed Lv7).
+        if let Some(t) = fainted_trainee(&party, self.trainee.as_deref()) {
+            return Decision::Fail(format!(
+                "{HEAL_FIRST}: {} (training) fainted",
+                t.display_name()
+            ));
+        }
         if let Some(lead) = self.fighter(&party) {
             let backed = party
                 .members
@@ -402,6 +412,19 @@ impl ToolStep for HuntStep {
 fn carrier_in(party: &Party, slot: Option<u8>) -> Option<&crate::party::Member> {
     let slot = slot?;
     party.members.iter().find(|m| m.slot == slot)
+}
+
+/// The member a training hunt is for, when it fainted.
+fn fainted_trainee<'p>(
+    party: &'p Party,
+    trainee: Option<&str>,
+) -> Option<&'p crate::party::Member> {
+    let species = trainee?;
+    party
+        .members
+        .iter()
+        .find(|m| m.species == species)
+        .filter(|m| m.fainted())
 }
 
 /// Whether any encounter tile of the player's map can be walked to.
@@ -538,11 +561,25 @@ pub fn train(
     species: &str,
     level: u8,
 ) -> Result<(), ToolError> {
+    // A fainted trainee is healed first: skipped, the hunt trained no one
+    // (the game sends out the next member for it).
+    let party = Party::from_state(ctx.state());
+    let mut trainees = party.members.iter().filter(|m| m.species == species);
+    if trainees.clone().next().is_some() && trainees.all(|m| m.fainted()) {
+        ctx.emit(progress(
+            "Train",
+            format!(
+                "{} fainted: healing before it trains",
+                crate::party::display_name(species)
+            ),
+        ))?;
+        ctx.invoke(&Intent::Heal { center: None }).result?;
+    }
     let party = Party::from_state(ctx.state());
     let slot = party
         .members
         .iter()
-        .filter(|m| m.hp.is_none_or(|(hp, _)| hp > 0))
+        .filter(|m| !m.fainted())
         .find(|m| m.species == species)
         .map(|m| m.slot);
     // One that would lose its first battles here is switch-trained: it
@@ -726,6 +763,38 @@ mod tests {
             Some("SPECIES_MANKEY"),
             Some((12, 23))
         ));
+    }
+
+    /// Fleet worker 2, Mt. Moon: PARAS, switch-trained with MANKEY
+    /// carrying, fainted at battle 8 of 150; the hunt went on, the game
+    /// sending MANKEY out for it every battle. A fainted trainee heals.
+    #[test]
+    fn a_fainted_trainee_is_healed_before_the_next_battle() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let mut paras = crate::party::Member::new(&data, "SPECIES_PARAS", 7);
+        paras.hp = Some((0, 23));
+        let mankey = crate::party::Member {
+            slot: 1,
+            hp: Some((39, 39)),
+            ..crate::party::Member::new(&data, "SPECIES_MANKEY", 14)
+        };
+        let party = Party {
+            members: vec![paras.clone(), mankey],
+        };
+        let t = fainted_trainee(&party, Some("SPECIES_PARAS")).expect("PARAS fainted");
+        assert_eq!(t.slot, 0);
+        // The carrier's faint is the heal bar's; a living trainee trains.
+        assert!(fainted_trainee(&party, Some("SPECIES_MANKEY")).is_none());
+        assert!(fainted_trainee(&party, None).is_none());
+        paras.hp = Some((5, 23));
+        let party = Party {
+            members: vec![paras],
+        };
+        assert!(fainted_trainee(&party, Some("SPECIES_PARAS")).is_none());
     }
 
     #[test]

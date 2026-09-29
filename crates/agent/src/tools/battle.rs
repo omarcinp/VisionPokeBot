@@ -583,6 +583,21 @@ impl ToolStep for BattleStep {
                 }
             }
             self.give_up_a_refused_shift(ctx.events);
+            // A SHIFT to a member that fainted since it was chosen: the
+            // game refuses it ("There's no will to fight!"); the one out
+            // fights on.
+            if let Some(slot) = self.shift_to.filter(|_| !self.shifted).filter(|s| {
+                self.party
+                    .members
+                    .iter()
+                    .any(|m| m.slot == *s && m.fainted())
+            }) {
+                self.shifted = true;
+                ctx.events.push(super::progress(
+                    "Battle",
+                    format!("not switching to slot {slot}: it fainted"),
+                ));
+            }
             // Switch-training: the member being carried started the
             // battle; the carrier comes out at the first command menu.
             // The trainee fights alone the wild ones it now beats (fleet
