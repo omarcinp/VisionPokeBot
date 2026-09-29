@@ -625,6 +625,8 @@ pub fn decide(
             45,
         )),
         BattleMenu::Moves { column, row } => {
+            let menu_party = with_menu_moves(data, party, battle);
+            let party = menu_party.as_ref().unwrap_or(party);
             let opener = sleep_opener(data, party, opponent.as_ref(), battle, memory);
             if opener.is_some() {
                 memory.sleep_tries += 1;
@@ -647,6 +649,29 @@ pub fn decide(
             )
         }
     })
+}
+
+/// The party with the moves the move menu shows for the one out, when
+/// they differ from what the knowledge holds: the menu is what the cursor
+/// moves over (fleet worker 2 at BROCK: CHARMANDER's METAL CLAW, move 4,
+/// aimed at on WEEDLE's two-move menu after the faint, the one out taken
+/// for the fainted one). `None` when they agree or the menu isn't read.
+fn with_menu_moves(data: &GameData, party: &Party, battle: &BattleObservation) -> Option<Party> {
+    let lead = party.lead()?;
+    let shown: Vec<String> = battle
+        .move_names
+        .iter()
+        .filter(|n| !n.is_empty() && n.as_str() != "-")
+        .map(|n| data.move_named(n).map(str::to_owned))
+        .collect::<Option<_>>()?;
+    if shown.is_empty() || shown == lead.moves {
+        return None;
+    }
+    let mut party = party.clone();
+    let lead = &mut party.members[0];
+    lead.pp_used.retain(|m, _| shown.contains(m));
+    lead.moves = shown;
+    Some(party)
 }
 
 /// Sleep attempts per foe before attacking regardless.
@@ -1116,6 +1141,65 @@ mod tests {
         assert_eq!(fallback_move(&data, &party, &memory), None);
         match decide(&o, &policy, &mut memory, &party, &data, &mut events) {
             Some(Decision::Fail(r)) => assert_eq!(r, "no move has PP left"),
+            _ => panic!("unexpected decision"),
+        }
+    }
+
+    /// Fleet worker 2 at BROCK: CHARMANDER fainted and a WEEDLE came out,
+    /// but the one out was still taken for CHARMANDER, and its METAL CLAW
+    /// (move 4) was aimed at on WEEDLE's two-move menu, Down pressed until
+    /// "no progress". The menu's moves are what is chosen from.
+    #[test]
+    fn the_move_is_chosen_from_the_moves_the_menu_shows() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        let mut charmander = Member::new(&data, "SPECIES_CHARMANDER", 14);
+        charmander.moves = [
+            "MOVE_SCRATCH",
+            "MOVE_GROWL",
+            "MOVE_EMBER",
+            "MOVE_METAL_CLAW",
+        ]
+        .map(String::from)
+        .to_vec();
+        let party = Party {
+            members: vec![charmander],
+        };
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: ScreenState::BattleMoveSelection,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 0 }),
+            player_name: Some("WEEDLE".into()),
+            player_level: Some(5),
+            player_hp_numbers: Some((19, 19)),
+            opponent_name: Some("ONIX".into()),
+            opponent_level: Some(14),
+            player_hp: Some(1000),
+            opponent_hp: Some(354),
+            move_pp: Some((35, 35)),
+            move_names: vec![
+                "POISON STING".into(),
+                "STRING SHOT".into(),
+                "".into(),
+                "".into(),
+            ],
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: None,
+        });
+        let mut memory = BattleMemory {
+            trainer: true,
+            ..BattleMemory::default()
+        };
+        let mut events = Vec::new();
+        match decide(&o, &policy, &mut memory, &party, &data, &mut events) {
+            Some(Decision::Act(a)) => assert_eq!(a.label, "choose move 1 (POISON_STING)"),
             _ => panic!("unexpected decision"),
         }
     }

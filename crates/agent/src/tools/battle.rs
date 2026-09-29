@@ -431,12 +431,21 @@ impl ToolStep for BattleStep {
         // another member (fleet worker 2: BUBBLE, the fainted SQUIRTLE's
         // move, chosen for RATTATA, whose menu has two moves).
         let party = Party::from_state(ctx.state);
+        // Two members of one species (two WEEDLE) make the species name
+        // ambiguous: the nickname tells them apart, as the sensor reads
+        // them (fleet worker 2 at BROCK: the WEEDLE sent out for a fainted
+        // CHARMANDER went unresolved, and CHARMANDER's METAL CLAW, move 4,
+        // was aimed at on WEEDLE's two-move menu until "no progress").
         if let Some(slot) = o
             .battle
             .as_ref()
             .and_then(|b| b.player_name.as_deref())
             .filter(|n| !n.is_empty())
-            .and_then(|n| party.battler_named(&self.data, n))
+            .and_then(|n| {
+                party.battler_named(&self.data, n).or_else(|| {
+                    pokebot_sense::names::member(ctx.state, &self.data, n).map(|m| m.slot)
+                })
+            })
         {
             self.active = Some(slot);
         }
