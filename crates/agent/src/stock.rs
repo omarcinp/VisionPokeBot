@@ -11,12 +11,11 @@ use pokebot_state::GameState;
 
 use crate::catch::balls_held;
 
-/// Balls only a shiny may use.
-pub const SHINY_RESERVE: u16 = 5;
-/// Stock a mart visit restocks to.
-pub const TARGET_STOCK: u16 = 15;
-/// Potions whose price is never spent on balls.
-pub const POTIONS_KEPT: u32 = 2;
+// The policy's numbers and budget are the planner's too (one rule on both
+// sides): see [`pokebot_planner::stock`].
+pub use pokebot_planner::stock::{
+    affordable, ball_budget, spendable, POTIONS_KEPT, SHINY_RESERVE, TARGET_STOCK,
+};
 
 /// All balls in the Poké Balls pocket (the Master Ball excluded); `None`
 /// when the pocket is unknown. A tracked (stale) list counts as known.
@@ -35,17 +34,6 @@ pub fn ball_count(state: &GameState) -> Option<u16> {
 pub fn buy_count(data: &GameData, stock: u16, money: u32) -> u16 {
     let need = TARGET_STOCK.saturating_sub(stock);
     need.min(affordable(data, "ITEM_POKE_BALL", money))
-}
-
-/// How many of `item` `money` pays for while keeping the price of
-/// [`POTIONS_KEPT`] Potions. 0 when either price is missing from the data.
-pub fn affordable(data: &GameData, item: &str, money: u32) -> u16 {
-    let price = |item: &str| data.items.get(item).map(|i| i.price).filter(|p| *p > 0);
-    let (Some(potion), Some(price)) = (price("ITEM_POTION"), price(item)) else {
-        return 0;
-    };
-    let budget = money.saturating_sub(POTIONS_KEPT * potion);
-    u16::try_from(budget / price).unwrap_or(u16::MAX)
 }
 
 /// The stock is known to hold no ball above the shiny reserve, so the catch

@@ -5249,7 +5249,15 @@ impl<'p, 'a> Session<'p, 'a> {
             targets: vec![trainer.to_string()],
             areas,
             confidence: self.planner.options.confidence,
-            money: belief.knowledge.money.value.unwrap_or(0),
+            // What a catch may spend on the balls it throws, by the tools'
+            // own stock rule (Potion money kept, the shiny reserve topped
+            // up first): a catch the mart won't sell the balls for isn't
+            // planned, and readiness looks for another way.
+            money: crate::stock::ball_budget(
+                self.planner.data,
+                belief.knowledge.money.value.unwrap_or(0),
+                u16::try_from(belief.item_count("ITEM_POKE_BALL").unwrap_or(0)).unwrap_or(u16::MAX),
+            ),
             data: self.planner.data,
             // Lost to since last beaten: judged that many levels lower.
             handicap: belief

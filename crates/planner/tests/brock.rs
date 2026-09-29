@@ -283,3 +283,33 @@ fn a_trainers_healing_item_lowers_the_chance_to_win() {
     .p_win;
     assert!(with < without, "with the potion {with}, without {without}");
 }
+
+/// Fleet workers 2 and 5 (CHARMANDER vs Brock, ₽680, no balls): the plan
+/// caught a MANKEY, but keeping the Potion money and the shiny reserve the
+/// mart sold no ball, and the same catch came back fourteen cycles. With
+/// the tools' ball budget no catch is planned; the preparation trains
+/// instead. With money for balls, recruiting stays an option.
+#[test]
+fn a_catch_the_money_cant_buy_balls_for_is_not_planned() {
+    use pokebot_planner::stock::ball_budget;
+    let Some(data) = data() else { return };
+    let mut poor = request(&data, "SPECIES_CHARMANDER", &["MOVE_SCRATCH", "MOVE_GROWL"]);
+    poor.money = ball_budget(&data, 680, 0);
+    assert_eq!(poor.money, 0);
+    let plans = plan_preparation(&poor, 1);
+    let plan = plans.first().expect("a plan without catching");
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|s| matches!(s, PlanStep::Catch { .. })),
+        "{:?}",
+        plan.steps
+    );
+    let mut rich = request(&data, "SPECIES_CHARMANDER", &["MOVE_SCRATCH", "MOVE_GROWL"]);
+    rich.money = ball_budget(&data, 5000, 0);
+    let any_catch = plan_preparation(&rich, 3)
+        .iter()
+        .any(|p| p.steps.iter().any(|s| matches!(s, PlanStep::Catch { .. })));
+    assert!(any_catch, "with money a recruit is still an option");
+}

@@ -317,6 +317,19 @@ impl ToolStep for HuntStep {
             if let Some(n) =
                 ball_count(ctx.state).filter(|n| ball_budget(*n, false) < HUNT_MIN_BALLS)
             {
+                // Counted before walking to a mart: money that can't buy
+                // enough balls (Potion money kept) fails the hunt here,
+                // and the plan looks for another way (fleet workers 2 and
+                // 5: ₽680, "the mart sold none", fourteen trips).
+                if let Some(money) = ctx.state.money.value {
+                    let can_buy = crate::stock::affordable(&self.data, "ITEM_POKE_BALL", money);
+                    if ball_budget(n.saturating_add(can_buy), false) < HUNT_MIN_BALLS {
+                        return Decision::Fail(format!(
+                            "can't afford the balls: {n} held, ₽{money} buys {can_buy} (₽{} kept for Potions), {HUNT_MIN_BALLS} above the shiny reserve needed",
+                            money - crate::stock::spendable(&self.data, money)
+                        ));
+                    }
+                }
                 return Decision::Fail(format!(
                     "{BUY_FIRST}: {n} held, {HUNT_MIN_BALLS} above the shiny reserve needed"
                 ));

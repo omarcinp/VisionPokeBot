@@ -12,6 +12,7 @@ pub mod intents;
 pub mod levels;
 pub mod methods;
 pub mod prepare;
+pub mod stock;
 
 pub use belief_adapter::{load_checkpoint, snapshot_id, StateBelief};
 pub use evaluate::{
