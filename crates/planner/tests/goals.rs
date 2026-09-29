@@ -1264,4 +1264,15 @@ fn a_walk_through_a_trainers_sight_prepares_for_its_battle() {
     };
     assert!(prepares(&unbeaten), "prepares for Route 3's trainers");
     assert!(!prepares(&beaten), "nothing to prepare for");
+    // Where it prepares is short of them: Mt. Moon's grass lies past
+    // Route 3's sight lines, so training there walks the weak lead into
+    // the battles it trains for.
+    for s in &unbeaten.intents {
+        if let Intent::Train { map, .. } | Intent::Catch { map, .. } = &s.intent {
+            assert!(
+                !["MtMoon_1F", "Route3", "Route4"].contains(&map.as_str()),
+                "prepares on {map}, past the trainers it prepares for"
+            );
+        }
+    }
 }

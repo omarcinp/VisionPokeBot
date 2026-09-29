@@ -5411,6 +5411,29 @@ impl<'p, 'a> Session<'p, 'a> {
     /// Nearest maps with a land encounter table, for the readiness
     /// planner: the closest by maps crossed, priced by the route to their
     /// grass (those with none are left out).
+    /// Whether `route` meets on the way a trainer battle the party isn't
+    /// ready for: a trainer it can't go round (sight, trigger), not beaten
+    /// and not `CanBeat`.
+    fn meets_unready(&self, route: &RouteResult, belief: &StateBelief<'a>) -> bool {
+        route.legs.iter().any(|leg| {
+            if !matches!(leg.kind, EdgeKind::Walk { .. })
+                || leg.from.map != leg.to.map
+                || !self.planner.fights_on(&leg.from.map)
+            {
+                return false;
+            }
+            let (from, to) = ((leg.from.x, leg.from.y), (leg.to.x, leg.to.y));
+            let triggered = self
+                .trainers_between(&leg.from.map, from, to)
+                .into_iter()
+                .filter(|t| belief.eval_goal(&GoalPredicate::flag(t, true)) != Truth::True)
+                .map(|t| GoalPredicate::can_beat(&t));
+            triggered
+                .chain(self.sight_needs(&leg.from.map, from, to, belief))
+                .any(|need| belief.eval_goal(&need) != Truth::True)
+        })
+    }
+
     fn training_areas(&self, belief: &StateBelief<'a>) -> Vec<Area> {
         let world = self.planner.world;
         let has_land = |map: &str| self.planner.grass.contains_key(map);
@@ -5451,12 +5474,13 @@ impl<'p, 'a> Session<'p, 'a> {
             })
             .min_by(f64::total_cmp)
             .unwrap_or(120.0);
-        let mut areas: Vec<(OrdF64, Area)> = near
+        let mut areas: Vec<(OrdF64, bool, Area)> = near
             .into_iter()
             .filter_map(|(_, map)| {
                 let (_, route) = self.grass_route(map, belief)?;
                 Some((
                     OrdF64(route.cost_s),
+                    self.meets_unready(&route, belief),
                     Area {
                         map: map.clone(),
                         travel_minutes: route.cost_s / 60.0,
@@ -5465,6 +5489,15 @@ impl<'p, 'a> Session<'p, 'a> {
                 ))
             })
             .collect();
+        // The way to an area that meets a trainer the party can't beat yet
+        // (a sight line it can't go round, a battle trigger) walks the
+        // party it prepares into that battle first (Route 3's trainers on
+        // the way to Mt. Moon's grass, the readiness being for them):
+        // areas short of them, while there are any.
+        if areas.iter().any(|(_, unready, _)| !unready) {
+            areas.retain(|(_, unready, _)| !unready);
+        }
+        let mut areas: Vec<(OrdF64, Area)> = areas.into_iter().map(|(c, _, a)| (c, a)).collect();
         areas.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.map.cmp(&b.1.map)));
         areas.truncate(TRAINING_AREAS);
         areas.into_iter().map(|(_, a)| a).collect()
