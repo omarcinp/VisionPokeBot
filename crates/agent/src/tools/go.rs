@@ -630,13 +630,21 @@ pub fn walk_legs(
                 let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
                 ctx.drive(&mut step)?;
             }
-            EdgeKind::Fly => use_move(
-                ctx,
-                FieldMove::Fly,
-                Some(Dest::Map {
-                    map: leg.to.map.clone(),
-                }),
-            )?,
+            EdgeKind::Fly => {
+                // Flown from where the route prices it: FLY works only
+                // outdoors (fleet worker 5 in the Route 16 house, handed
+                // HM02 there: "Can't use that here." 783 times).
+                if let Some(start) = fly_start(ctx.pose().as_ref(), leg) {
+                    walk_to(ctx, start)?;
+                }
+                use_move(
+                    ctx,
+                    FieldMove::Fly,
+                    Some(Dest::Map {
+                        map: leg.to.map.clone(),
+                    }),
+                )?
+            }
             _ => {
                 // Into a dark map: light it up on arrival when someone
                 // knows Flash.
@@ -651,6 +659,13 @@ pub fn walk_legs(
         Dest::Map { map } => go_to_map(ctx, map),
         other => go(ctx, Destination::from(other)),
     }
+}
+
+/// Where a FLY leg is walked to first: its start, unless the player is
+/// on that map already (anywhere outdoors does).
+fn fly_start<'l>(pose: Option<&PlayerPose>, leg: &'l Leg) -> Option<&'l Place> {
+    pose.is_none_or(|p| p.map != leg.from.map)
+        .then_some(&leg.from)
 }
 
 impl From<&Destination> for Dest {
@@ -670,6 +685,30 @@ mod tests {
     fn world() -> Option<Arc<World>> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
         World::load(&dir).ok().map(Arc::new)
+    }
+
+    /// Fleet worker 5 was handed HM02 in the Route 16 house and used FLY
+    /// there ("Can't use that here.", 783 times): a FLY leg is flown from
+    /// its start, outdoors; from anywhere on that map as it is.
+    #[test]
+    fn a_fly_leg_is_flown_from_outdoors() {
+        let leg = Leg {
+            from: Place::tile("Route16", 10, 5),
+            to: Place::tile("CeladonCity", 48, 12),
+            kind: EdgeKind::Fly,
+            cost_s: 12.0,
+            requires: pokebot_world::route::fly_requirement("CeladonCity"),
+        };
+        let at = |map: &str, x, y| PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        assert_eq!(
+            fly_start(Some(&at("Route16_House", 4, 3)), &leg),
+            Some(&leg.from)
+        );
+        assert_eq!(fly_start(Some(&at("Route16", 20, 8)), &leg), None);
     }
 
     #[test]
