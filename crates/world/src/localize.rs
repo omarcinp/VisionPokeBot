@@ -73,7 +73,7 @@ pub fn score(
     floor: u32,
 ) -> Option<u32> {
     let (cx, cy) = camera(map, x * BLOCK, y * BLOCK);
-    score_at(frame, render, cx, cy, grid, floor)
+    score_at(frame, render, cx, cy, grid, floor, &[])
 }
 
 /// Render pixel shown at the screen's top-left when the player's sprite
@@ -85,7 +85,12 @@ fn camera(map: &MapData, px: i32, py: i32) -> (i32, i32) {
     )
 }
 
-/// [`score`] with the view's top-left at render pixel `(ox, oy)`.
+/// [`score`] with the view's top-left at render pixel `(ox, oy)`. A
+/// sample on a `water` block (render blocks, row-major) that doesn't
+/// match is left out: water animates and the render holds one of its
+/// frames (fleet worker 6 at Route 4's east end, by Cerulean's river:
+/// 840 at the true tile, every miss on the water, the player never
+/// located and the walk waiting for good).
 fn score_at(
     frame: &RgbImage,
     render: &RgbImage,
@@ -93,6 +98,7 @@ fn score_at(
     oy: i32,
     grid: &SampleGrid,
     floor: u32,
+    water: &[bool],
 ) -> Option<u32> {
     let (rw, rh) = (render.width() as i32, render.height() as i32);
     let total = grid.points.len() as u32;
@@ -116,7 +122,14 @@ fn score_at(
                 void += 1;
                 continue;
             }
-            (0..3).all(|c| frame_bytes[fi + c].abs_diff(render_bytes[ri + c]) <= TOLERANCE)
+            let same =
+                (0..3).all(|c| frame_bytes[fi + c].abs_diff(render_bytes[ri + c]) <= TOLERANCE);
+            let block = (ry / BLOCK) * (rw / BLOCK) + rx / BLOCK;
+            if !same && water.get(block as usize).copied().unwrap_or(false) {
+                void += 1;
+                continue;
+            }
+            same
         };
         if !matched {
             misses += 1;
@@ -418,12 +431,13 @@ impl<'w> Localizer<'w> {
             };
             let (cx, cy) = camera(map, px, py);
             // Cheap coarse passes first, then the fine score.
-            if score_at(frame, render, cx, cy, &grids.coarsest, ACCEPT - 200).is_none()
-                || score_at(frame, render, cx, cy, &grids.coarse, ACCEPT - 100).is_none()
+            let water = self.water(map);
+            if score_at(frame, render, cx, cy, &grids.coarsest, ACCEPT - 200, water).is_none()
+                || score_at(frame, render, cx, cy, &grids.coarse, ACCEPT - 100, water).is_none()
             {
                 continue;
             }
-            let Some(s) = score_at(frame, render, cx, cy, &grids.fine, ACCEPT) else {
+            let Some(s) = score_at(frame, render, cx, cy, &grids.fine, ACCEPT, water) else {
                 continue;
             };
             let distance = target.map_or(0, |(tx, ty)| (px - tx).abs() + (py - ty).abs());
@@ -462,6 +476,22 @@ impl<'w> Localizer<'w> {
             return None;
         }
         best
+    }
+
+    /// Which of `map`'s render blocks show water, its connected maps' in
+    /// the padding included (computed once per map).
+    fn water<'m>(&self, map: &'m MapData) -> &'m [bool] {
+        map.water.get_or_init(|| {
+            let (w, h) = (map.width + 2 * map.pad, map.height + 2 * map.pad);
+            (0..h)
+                .flat_map(|by| (0..w).map(move |bx| (bx, by)))
+                .map(|(bx, by)| {
+                    self.resolve(map, bx - map.pad, by - map.pad)
+                        .and_then(|(m, x, y)| m.tile(x, y))
+                        .is_some_and(|t| crate::behavior::is_water(t.behavior))
+                })
+                .collect()
+        })
     }
 
     /// The map and tile the player is on when the camera centres `map`'s
@@ -622,7 +652,7 @@ impl<'w> Localizer<'w> {
             })
             .filter_map(|(px, py)| {
                 let (cx, cy) = camera(map, px, py);
-                let score = score_at(frame, render, cx, cy, &grid, 0)?;
+                let score = score_at(frame, render, cx, cy, &grid, 0, self.water(map))?;
                 Some(Followed { px, py, score })
             })
             .max_by(|a, b| {

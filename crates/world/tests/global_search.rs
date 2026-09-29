@@ -27,6 +27,39 @@ fn a_flat_frame_is_nowhere() {
     }
 }
 
+/// Fleet worker 6 at Route 4's east end, by Cerulean's river (half of it
+/// drawn from Cerulean City, the connected map): the water animates, the
+/// render holds one of its frames, and the true tile scored 840, so the
+/// player was never located and the walk waited for good. Water that
+/// doesn't match is left out.
+#[test]
+fn animated_water_doesnt_hide_the_player() {
+    let Some(world) = world() else {
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Ok(frame) =
+        pokebot_video::png::load(root.join("captures/fixtures/emu-route4-east-water.png"))
+    else {
+        return;
+    };
+    let localizer = Localizer::new(&world);
+    let route4 = world.map("Route4").unwrap();
+    for near in [Some((107, 10)), None] {
+        let found = localizer
+            .locate_in(&frame, route4, near, 3, &[PLAYER_SPRITE])
+            .unwrap_or_else(|| panic!("not located (near {near:?})"));
+        assert_eq!(
+            (found.pose.map.as_str(), found.pose.x, found.pose.y),
+            ("Route4", 107, 10)
+        );
+    }
+    let anywhere = localizer
+        .locate_anywhere(&frame, &[PLAYER_SPRITE])
+        .expect("located");
+    assert_eq!((anywhere.pose.x, anywhere.pose.y), (107, 10));
+}
+
 /// Splitting the search over threads finds what one thread finds.
 #[test]
 fn the_parallel_search_matches_the_sequential_one() {

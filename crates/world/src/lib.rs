@@ -172,6 +172,9 @@ pub struct MapData {
     pub triggers: Vec<Trigger>,
     render_path: PathBuf,
     render: OnceLock<std::result::Result<RgbImage, String>>,
+    /// Per render block (padding included, row-major), whether it shows
+    /// water: see `localize`.
+    pub(crate) water: OnceLock<Vec<bool>>,
 }
 
 impl MapData {
@@ -266,6 +269,7 @@ impl World {
                     triggers: file.triggers,
                     render_path,
                     render: OnceLock::new(),
+                    water: OnceLock::new(),
                 },
             );
         }
