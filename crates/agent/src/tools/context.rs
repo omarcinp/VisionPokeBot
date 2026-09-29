@@ -955,6 +955,9 @@ impl<'a> ToolContext<'a> {
 /// hours of "Come again!"). A trainer beaten is the way forward, not a
 /// turn back, and clears the tile (Switch, Nugget Bridge: Lass Ali's
 /// approach, her battle and a move offer at one tile failed the walk).
+/// Nor is a wild battle: training in grass meets one at the same tile
+/// again and again (Switch, Route 4: three encounters at (84, 12) failed
+/// the Train, and the plan went on to lose to the rival).
 fn count_interrupt(
     interrupted: &mut std::collections::HashMap<pokebot_state::PlayerPose, u32>,
     pose: Option<pokebot_state::PlayerPose>,
@@ -963,6 +966,9 @@ fn count_interrupt(
     let pose = pose?;
     if learned.iter().any(super::dialogue::trainer_won) {
         interrupted.remove(&pose);
+        return None;
+    }
+    if learned.iter().any(|e| matches!(e, GameEvent::BattleEnded)) {
         return None;
     }
     let n = interrupted.entry(pose.clone()).or_default();
@@ -1070,6 +1076,14 @@ mod tests {
         assert_eq!(count_interrupt(&mut seen, at(), &[]), None);
         assert!(count_interrupt(&mut seen, at(), &[]).is_some_and(|why| why.contains("3 times")));
         assert_eq!(count_interrupt(&mut seen, None, &[]), None);
+        // Wild battles at one grass tile, however many: training.
+        let mut grass = std::collections::HashMap::new();
+        for _ in 0..10 {
+            assert_eq!(
+                count_interrupt(&mut grass, at(), &[GameEvent::BattleEnded]),
+                None
+            );
+        }
     }
 
     fn screen(state: ScreenState) -> Observation {
