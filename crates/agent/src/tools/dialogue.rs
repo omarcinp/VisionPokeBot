@@ -1152,12 +1152,16 @@ fn run_script(
     }
     match start.expect("checked above") {
         Start::Object { map, object } => {
+            if let Some(at) = super::lookup::object_tile(&ctx.world, &map, object) {
+                super::go::reach_facing(ctx, &map, at)?;
+            }
             let mut step = TalkStep::new(ctx, &map, object, answers.to_vec())?.with_scene();
             step.scene.conversation = conversation;
             ctx.drive(&mut step)?;
             finish(ctx, step.conversation())
         }
         Start::Sign { map, x, y, facing } => {
+            super::go::reach_facing(ctx, &map, (x, y))?;
             let mut step = TalkStep::toward(
                 ctx,
                 &map,

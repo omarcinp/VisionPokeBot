@@ -237,6 +237,9 @@ pub fn talk(
     object: u32,
     answers: Vec<Answer>,
 ) -> Result<Conversation, ToolError> {
+    if let Some(at) = object_tile(&ctx.world, map, object) {
+        super::go::reach_facing(ctx, map, at)?;
+    }
     let mut step = TalkStep::new(ctx, map, object, answers)?;
     ctx.drive(&mut step)?;
     let conversation = step.scene.conversation;

@@ -506,6 +506,64 @@ pub fn reach_map(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> 
     walk_legs(ctx, &legs, &dest).map(|_| ())
 }
 
+/// Walks next to `at` on `map` through Cut trees (or water) when the
+/// player is on `map` and the navigator can't get next to it on its own
+/// (Switch, Celadon Gym: a Cut tree stands between the door and ERIKA;
+/// [`reach_map`] only brings the player onto the map, and every RunScript
+/// failed "no path next to (6, 4)"). Nothing to do otherwise.
+pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Result<(), ToolError> {
+    let Some(pose) = ctx.pose().filter(|p| p.map == map) else {
+        return Ok(());
+    };
+    let world = Arc::clone(&ctx.world);
+    let Some(m) = world.map(map) else {
+        return Ok(());
+    };
+    let spots: Vec<(i32, i32)> = crate::nav::facing_spots(m, at.0, at.1)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    let mut obstacles = crate::nav::object_obstacles(m, &ctx.gone);
+    obstacles.remove(&(pose.x, pose.y));
+    let walk = Walk {
+        obstacles: &obstacles,
+        surf: false,
+        opened: None,
+    };
+    let plain = find_path_with(
+        m,
+        (pose.x, pose.y),
+        &walk,
+        |_| 0,
+        |t| spots.contains(&t),
+        |_| 0,
+    );
+    if plain.is_some() {
+        return Ok(());
+    }
+    for (x, y) in spots {
+        let dest = Dest::Tile {
+            map: map.to_owned(),
+            x,
+            y,
+        };
+        if let Some(legs) = field_route(ctx, &dest) {
+            ctx.info(format!(
+                "the way next to {map} ({}, {}) needs field moves: {}",
+                at.0,
+                at.1,
+                legs.iter()
+                    .filter(|l| special(&ctx.world, l))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+            return walk_legs(ctx, &legs, &dest).map(|_| ());
+        }
+    }
+    Ok(())
+}
+
 /// Carries out the legs of a route that needs field moves: plain legs are
 /// walked by the navigator up to the next special one, which uses its
 /// move through the `FieldMove` tool.
@@ -838,6 +896,46 @@ mod tests {
         assert_eq!((gate.from.x, gate.from.y), (26, 31));
         assert_eq!((gate.to.x, gate.to.y), (26, 33));
         assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest).is_none());
+    }
+
+    /// Switch, Celadon Gym: a Cut tree stands between the door and ERIKA
+    /// (6, 4); every RunScript failed "no path next to (6, 4)". With CUT and
+    /// the Cascade Badge the way from the door to a tile next to her cuts a
+    /// tree; without the badge there is none.
+    #[test]
+    fn the_way_to_erika_cuts_a_tree_inside_the_gym() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let pose = PlayerPose {
+            map: "CeladonCity_Gym".into(),
+            x: 6,
+            y: 17,
+        };
+        let map = world.map("CeladonCity_Gym").unwrap();
+        let spots: Vec<(i32, i32)> = crate::nav::facing_spots(map, 6, 4)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        let route = |state: &pokebot_state::GameState| {
+            spots.iter().find_map(|&(x, y)| {
+                plan_field_route(
+                    &world,
+                    &graph,
+                    state,
+                    &pose,
+                    &Dest::Tile {
+                        map: "CeladonCity_Gym".into(),
+                        x,
+                        y,
+                    },
+                )
+            })
+        };
+        let legs = route(&cutter(true)).expect("a way next to ERIKA");
+        assert!(legs
+            .iter()
+            .any(|l| matches!(&l.kind, EdgeKind::Gate { kind } if kind == "cut_tree")));
+        assert!(route(&cutter(false)).is_none());
     }
 
     /// Switch goal run: out of Vermilion Gym, on the gym's side of the
