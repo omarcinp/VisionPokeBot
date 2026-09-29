@@ -99,6 +99,23 @@ type SightKey = (String, (i32, i32), (i32, i32));
 /// Prize battles one `Earn` plans at most.
 const MAX_EARN_BATTLES: usize = 8;
 
+/// A prize battle on offer ([`Session::earn_offers`]).
+struct EarnOffer {
+    /// The party already beats the trainer.
+    ready: bool,
+    trainer: String,
+    map: String,
+    prize: u32,
+    /// Route and battle.
+    seconds: f64,
+}
+
+impl EarnOffer {
+    fn rate(&self) -> f64 {
+        f64::from(self.prize) / self.seconds.max(1.0)
+    }
+}
+
 /// Extra tiles a walk accepts to go round a trainer's sight (a detour of up
 /// to this many steps beats a battle that can't be fled).
 const SIGHT_DETOUR_TILES: i32 = 60;
@@ -4106,6 +4123,131 @@ impl<'p, 'a> Session<'p, 'a> {
         out
     }
 
+    /// Prize battles on offer: trainers known not to be beaten yet (one
+    /// the belief can't tell may be long beaten: Brock, his flag unknown in
+    /// an old save), on maps a route reaches, with their prize and the
+    /// seconds it takes (route and battle). Those the party already beats
+    /// first, then the most prize money per second.
+    fn earn_offers(&self, belief: &StateBelief<'a>) -> Vec<EarnOffer> {
+        let battle_s = self.planner.params.trainer_battle_s;
+        let mut offers = Vec::new();
+        for (trainer, maps) in &self.planner.trainer_maps {
+            if belief.eval_goal(&GoalPredicate::flag(trainer, true)) != Truth::False {
+                continue;
+            }
+            let Some(prize) = self.planner.data.prize(trainer).filter(|p| *p > 0) else {
+                continue;
+            };
+            let Some((map, route_s)) = maps
+                .iter()
+                .filter_map(|m| {
+                    let r = self.route_to(m, belief)?;
+                    r.found().then(|| (m.clone(), r.cost_s))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+            else {
+                continue;
+            };
+            offers.push(EarnOffer {
+                ready: belief.eval_goal(&GoalPredicate::can_beat(trainer)) == Truth::True,
+                trainer: trainer.clone(),
+                map,
+                prize,
+                seconds: route_s + battle_s,
+            });
+        }
+        offers.sort_by(|a, b| {
+            b.ready
+                .cmp(&a.ready)
+                .then(b.rate().total_cmp(&a.rate()))
+                .then(a.trainer.cmp(&b.trainer))
+        });
+        offers
+    }
+
+    /// Readiness when money short of the balls a catch needs is earned
+    /// first: the preparation with the budget the prizes of the trainers
+    /// the party already beats would bring, and the `Earn` step for just
+    /// the prizes its catches need. Taken when it gets the party further
+    /// than `current`, or as far for less time (fleet workers 2 and 5: no
+    /// money for the balls MANKEY needed, and nothing but training
+    /// weighed).
+    fn earn_then_catch(
+        &self,
+        request: &Request<'_>,
+        current: Option<&crate::prepare::PreparationPlan>,
+        belief: &StateBelief<'a>,
+    ) -> Option<(crate::prepare::PreparationPlan, Step)> {
+        let money = belief.knowledge.money.value?;
+        let held =
+            u16::try_from(belief.item_count("ITEM_POKE_BALL").unwrap_or(0)).unwrap_or(u16::MAX);
+        let price = self.planner.data.items.get("ITEM_POKE_BALL")?.price;
+        let offers: Vec<EarnOffer> = self
+            .earn_offers(belief)
+            .into_iter()
+            .filter(|o| o.ready)
+            .take(MAX_EARN_BATTLES)
+            .collect();
+        let earnable: u32 = offers.iter().map(|o| o.prize).sum();
+        if earnable == 0 {
+            return None;
+        }
+        let rich = Request {
+            money: crate::stock::ball_budget(self.planner.data, money + earnable, held),
+            ..request.clone()
+        };
+        let plan = plan_preparation(&rich, 1).into_iter().next()?;
+        let balls: u32 = plan
+            .steps
+            .iter()
+            .map(|s| match s {
+                PlanStep::Catch { balls, .. } => *balls,
+                _ => 0,
+            })
+            .sum();
+        // The money whose ball budget pays for them: the Potions kept and
+        // the shiny reserve come first.
+        let mut target = money;
+        while crate::stock::ball_budget(self.planner.data, target, held) < balls * price {
+            target += price;
+        }
+        let missing = target - money;
+        if missing == 0 {
+            return None;
+        }
+        let mut earned = 0;
+        let mut seconds = 0.0;
+        let mut trainers = Vec::new();
+        for o in offers {
+            if earned >= missing {
+                break;
+            }
+            earned += o.prize;
+            seconds += o.seconds;
+            trainers.push((o.trainer, o.map));
+        }
+        if earned < missing {
+            return None;
+        }
+        if let Some(now) = current {
+            let (a, b) = (plan.min_confidence(), now.min_confidence());
+            let further = a > b + 0.01;
+            let cheaper = a >= b && plan.minutes * 60.0 + seconds < now.minutes * 60.0;
+            if !further && !cheaper {
+                return None;
+            }
+        }
+        let earn = Intent::Earn {
+            money: target,
+            trainers,
+        };
+        let step = Step::new(
+            PlannedIntent::new(earn, seconds),
+            vec![GoalPredicate::Money { money: target }],
+        );
+        Some((plan, step))
+    }
+
     /// Earning `money` (a purchase the money on hand can't pay for):
     /// prize battles against trainers not yet beaten, on maps a route
     /// reaches, those the party already beats first, then the most prize
@@ -4128,41 +4270,15 @@ impl<'p, 'a> Session<'p, 'a> {
             )];
         };
         let missing = money.saturating_sub(have);
-        let battle_s = self.planner.params.trainer_battle_s;
-        let mut offers: Vec<(bool, f64, String, String, u32)> = Vec::new();
-        for (trainer, maps) in &self.planner.trainer_maps {
-            // Only a trainer known not to be beaten yet: one the belief
-            // can't tell may be long beaten (Brock, his flag unknown in an
-            // old save, planned as a prize battle).
-            if belief.eval_goal(&GoalPredicate::flag(trainer, true)) != Truth::False {
-                continue;
-            }
-            let Some(prize) = self.planner.data.prize(trainer).filter(|p| *p > 0) else {
-                continue;
-            };
-            let Some((map, route_s)) = maps
-                .iter()
-                .filter_map(|m| {
-                    let r = self.route_to(m, belief)?;
-                    r.found().then(|| (m.clone(), r.cost_s))
-                })
-                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
-            else {
-                continue;
-            };
-            let ready = belief.eval_goal(&GoalPredicate::can_beat(trainer)) == Truth::True;
-            let rate = f64::from(prize) / (route_s + battle_s);
-            offers.push((ready, rate, trainer.clone(), map, prize));
-        }
-        offers.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
+        let offers = self.earn_offers(belief);
         let mut earned = 0;
         let mut trainers = Vec::new();
-        for (_, _, trainer, map, prize) in offers {
+        for offer in offers {
             if earned >= missing || trainers.len() >= MAX_EARN_BATTLES {
                 break;
             }
-            earned += prize;
-            trainers.push((trainer, map));
+            earned += offer.prize;
+            trainers.push((offer.trainer, offer.map));
         }
         if earned < missing || trainers.is_empty() {
             return vec![self.unsupported(
@@ -5339,6 +5455,13 @@ impl<'p, 'a> Session<'p, 'a> {
                 .unwrap_or(0),
         };
         let plans = plan_preparation(&request, 1);
+        // Money short of the balls a better catch needs may be earned
+        // first, when that gets the party further or as far sooner.
+        let earned = self.earn_then_catch(&request, plans.first(), belief);
+        let (plans, earn_step) = match earned {
+            Some((rich, step)) => (vec![rich], Some(step)),
+            None => (plans, None),
+        };
         let Some(plan) = plans.first() else {
             // Nothing within reach improves the odds (the lead is at the
             // top of its window): the battle is fought as the party stands
@@ -5354,6 +5477,13 @@ impl<'p, 'a> Session<'p, 'a> {
         let mut steps: Vec<Step> = Vec::new();
         let mut cost = 0.0;
         let mut here: Option<String> = None;
+        if let Some(earn) = earn_step {
+            cost += earn.planned.cost_s;
+            if let Intent::Earn { trainers, .. } = &earn.planned.intent {
+                here = trainers.last().map(|(_, map)| map.clone());
+            }
+            steps.push(earn);
+        }
         for step in &plan.steps {
             let (map, intent, minutes) = match step {
                 PlanStep::Train {

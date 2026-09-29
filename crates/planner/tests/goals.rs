@@ -1314,3 +1314,61 @@ fn money_short_is_earned_from_trainers_not_yet_beaten() {
     let rich = planner.plan(&goal, &knowledge, pose).unwrap();
     assert!(rich.intents.is_empty(), "{:?}", rich.intents);
 }
+
+/// Fleet workers 2 and 5 looped between a mart with no money for balls and
+/// the MANKEY that needed them. Readiness weighs earning first: a
+/// CHARMANDER facing Brock with ₽1800 (after the Potions kept and the
+/// shiny reserve, one ball) beats Viridian Forest's Bug Catchers for the
+/// second ball, since the MANKEY gets further than training alone (87%).
+#[test]
+fn readiness_short_of_ball_money_earns_it_first() {
+    use pokebot_state::{Knowledge, MoveSlot};
+    let Some(f) = fixture() else { return };
+    if f.data.trainer_class_money.classes.is_empty() {
+        return;
+    }
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = pewter();
+    let mut lead = knowledge.party.value.as_ref().unwrap()[0].clone();
+    lead.species = Knowledge::observed("SPECIES_CHARMANDER".to_owned(), 1);
+    lead.level = Knowledge::observed(8, 1);
+    lead.hp = Knowledge::observed((26, 26), 1);
+    let slot = |mv: &str| {
+        Some(MoveSlot {
+            mv: Knowledge::observed(mv.to_owned(), 1),
+            pp: Knowledge::observed((35, 35), 1),
+        })
+    };
+    lead.moves = [slot("MOVE_SCRATCH"), slot("MOVE_GROWL"), None, None];
+    knowledge.party = Knowledge::observed(vec![lead], 1);
+    for flag in ["FLAG_BADGE01_GET", "TRAINER_LEADER_BROCK"] {
+        knowledge
+            .world
+            .flags
+            .insert(flag.to_owned(), Knowledge::observed(false, 1));
+    }
+    for map in ["ViridianForest", "Route22", "Route2", "PewterCity_Gym"] {
+        for t in f.data.map_trainers.get(map).into_iter().flatten() {
+            knowledge
+                .world
+                .flags
+                .insert(t.trainer.clone(), Knowledge::observed(false, 1));
+        }
+    }
+    knowledge.money = Knowledge::observed(1800, 1);
+    let plan = planner
+        .plan(&parse_goal("badge 1").unwrap(), &knowledge, pose)
+        .unwrap();
+    print(&plan, 20);
+    let earn = position(&plan, |i| matches!(i, Intent::Earn { .. }));
+    let catch = position(&plan, |i| matches!(i, Intent::Catch { .. }));
+    assert!(
+        earn < catch && catch < plan.intents.len(),
+        "earns, then catches"
+    );
+    let Intent::Earn { money, trainers } = &plan.intents[earn].intent else {
+        unreachable!()
+    };
+    assert_eq!(*money, 2000);
+    assert!(trainers.iter().all(|(t, _)| t.contains("BUG_CATCHER")));
+}
