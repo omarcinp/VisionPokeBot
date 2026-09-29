@@ -58,6 +58,19 @@ fn animated_water_doesnt_hide_the_player() {
         .locate_anywhere(&frame, &[PLAYER_SPRITE])
         .expect("located");
     assert_eq!((anywhere.pose.x, anywhere.pose.y), (107, 10));
+    // The Start menu open over the right of the same view (its window
+    // left out of the search, as perception does): leaving out all the
+    // water matched Seven Island's Tanoby Ruins, and the belief moved
+    // there. Somewhere on Route 4 or nowhere, never elsewhere.
+    let menu = pokebot_state::Region {
+        x: 150,
+        y: 0,
+        width: 90,
+        height: 124,
+    };
+    if let Some(found) = localizer.locate_anywhere(&frame, &[PLAYER_SPRITE, menu]) {
+        assert_eq!(found.pose.map, "Route4", "{found:?}");
+    }
 }
 
 /// Splitting the search over threads finds what one thread finds.

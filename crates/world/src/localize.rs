@@ -87,10 +87,13 @@ fn camera(map: &MapData, px: i32, py: i32) -> (i32, i32) {
 
 /// [`score`] with the view's top-left at render pixel `(ox, oy)`. A
 /// sample on a `water` block (render blocks, row-major) that doesn't
-/// match is left out: water animates and the render holds one of its
-/// frames (fleet worker 6 at Route 4's east end, by Cerulean's river:
-/// 840 at the true tile, every miss on the water, the player never
-/// located and the walk waiting for good).
+/// match but shows water on the frame too is left out: water animates
+/// and the render holds one of its frames (fleet worker 6 at Route 4's
+/// east end, by Cerulean's river: 840 at the true tile, every miss on the
+/// water, the player never located and the walk waiting for good). Land
+/// where the render has water still misses (leaving out every water
+/// sample, the same frame with the Start menu open matched Seven
+/// Island's Tanoby Ruins).
 fn score_at(
     frame: &RgbImage,
     render: &RgbImage,
@@ -125,7 +128,10 @@ fn score_at(
             let same =
                 (0..3).all(|c| frame_bytes[fi + c].abs_diff(render_bytes[ri + c]) <= TOLERANCE);
             let block = (ry / BLOCK) * (rw / BLOCK) + rx / BLOCK;
-            if !same && water.get(block as usize).copied().unwrap_or(false) {
+            if !same
+                && water.get(block as usize).copied().unwrap_or(false)
+                && looks_like_water(&frame_bytes[fi..fi + 3])
+            {
                 void += 1;
                 continue;
             }
@@ -180,6 +186,14 @@ pub fn tile_score(
         }
     }
     Some(matched * 1000 / (BLOCK * BLOCK) as u32)
+}
+
+/// A pixel of FireRed's water, whatever its animation frame: clearly blue
+/// (the Route 4 river: (74, 121, 222), (49, 97, 181), (107, 162, 231)),
+/// unlike the fences' blue-grey (148, 162, 181) or any land.
+fn looks_like_water(p: &[u8]) -> bool {
+    let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+    b >= r + 60 && b >= g + 20
 }
 
 /// Whether the sampled frame is one flat colour (a white flash, a fade):
