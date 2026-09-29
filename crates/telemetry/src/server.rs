@@ -31,7 +31,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// `?fps=1..30` lower them (the hub's thumbnails use `scale=1&fps=10`).
 const MJPEG_SCALE: u32 = 3;
 const MJPEG_MAX_FPS: u32 = 30;
-/// `/frames` sends a new frame no sooner than this after the last one: every
+/// `/frames` skips frames arriving sooner than this after the last one sent:
 /// other frame of a 60 fps source, so a steady 30 fps.
 const STREAM_MIN_GAP: Duration = Duration::from_millis(25);
 /// `/frames` repeats the last frame this often when nothing new arrives, so
@@ -173,18 +173,23 @@ fn cached_png(app: &AppState, frame: &FrameSnapshot) -> Bytes {
 
 /// The live picture as a multipart stream of lossless 1x PNGs (smaller than
 /// upscaled JPEGs for pixel art), each part tagged with `X-Frame-Id`. Frames
-/// are pushed as they arrive, at most one per [`STREAM_MIN_GAP`].
+/// are pushed as they arrive; one arriving within [`STREAM_MIN_GAP`] of the
+/// last one sent is skipped.
 async fn frames(State(app): State<AppState>) -> Response {
     let rx = app.telemetry.inner.frame.subscribe();
     let parts = futures_util::stream::unfold(
         (app, rx, None::<u64>, None::<tokio::time::Instant>),
         |(app, mut rx, last_id, last_sent)| async move {
-            if let Some(sent) = last_sent {
-                tokio::time::sleep_until(sent + STREAM_MIN_GAP).await;
-            }
             let frame = loop {
+                // Frames that arrive within the gap are skipped rather than
+                // sent late, which keeps the rate locked to the source's.
                 let latest = rx.borrow_and_update().clone();
-                if let Some(frame) = latest.as_ref().filter(|f| Some(f.frame_id) != last_id) {
+                let due = last_sent
+                    .is_none_or(|sent: tokio::time::Instant| sent.elapsed() >= STREAM_MIN_GAP);
+                if let Some(frame) = latest
+                    .as_ref()
+                    .filter(|f| due && Some(f.frame_id) != last_id)
+                {
                     break frame.clone();
                 }
                 match tokio::time::timeout(STREAM_HEARTBEAT, rx.changed()).await {
