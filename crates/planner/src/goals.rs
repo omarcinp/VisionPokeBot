@@ -5122,6 +5122,13 @@ impl<'p, 'a> Session<'p, 'a> {
             confidence: self.planner.options.confidence,
             money: belief.knowledge.money.value.unwrap_or(0),
             data: self.planner.data,
+            // Lost to since last beaten: judged that many levels lower.
+            handicap: belief
+                .knowledge
+                .handicaps
+                .get(trainer)
+                .copied()
+                .unwrap_or(0),
         };
         let plans = plan_preparation(&request, 1);
         let Some(plan) = plans.first() else {

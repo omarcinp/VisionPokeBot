@@ -107,6 +107,7 @@ impl GameState {
             money: self.money.clone(),
             pc: self.pc.clone(),
             pokedex: self.pokedex.clone(),
+            handicaps: Default::default(),
             // Infeasible intents are about this session, not the save.
             world: crate::WorldBelief {
                 infeasible: Default::default(),

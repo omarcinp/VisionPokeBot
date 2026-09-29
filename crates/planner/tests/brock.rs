@@ -40,6 +40,7 @@ fn request<'a>(data: &'a GameData, species: &str, moves: &[&str]) -> Request<'a>
         confidence: 0.9,
         money: 3000,
         data,
+        handicap: 0,
     }
 }
 

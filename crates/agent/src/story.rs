@@ -602,6 +602,7 @@ impl StoryTask {
             confidence,
             money: 0,
             data,
+            handicap: 0,
         };
         let plans = plan_preparation(&request, 1);
         let plan = plans.first().ok_or("no plan found")?;

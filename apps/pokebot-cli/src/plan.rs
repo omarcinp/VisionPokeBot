@@ -178,6 +178,7 @@ pub fn run(args: PlanArgs) -> Result<()> {
         confidence: args.confidence,
         money: args.money,
         data: &data,
+        handicap: 0,
     };
     let plans = plan_preparation(&request, args.alternatives);
     println!(

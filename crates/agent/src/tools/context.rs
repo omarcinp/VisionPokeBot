@@ -849,7 +849,8 @@ impl<'a> ToolContext<'a> {
         }
         // A trainer battle is fought by the lead, and no Pokémon may
         // faint: the member best able to win it alone leads.
-        if let Some(trainer) = self.trainer_of(intent) {
+        let fights = self.trainer_of(intent);
+        if let Some(trainer) = fights.clone() {
             self.depth += 1;
             let led = super::party_order::lead_for(self, &trainer);
             self.depth -= 1;
@@ -908,6 +909,23 @@ impl<'a> ToolContext<'a> {
         match &outcome.result {
             Ok(()) => self.runtime.info(format!("tool {intent}: done")),
             Err(e) => self.runtime.error(format!("tool {intent}: {e}")),
+        }
+        // A trainer battle's result is kept across reloads: a loss makes
+        // the next plan for that trainer ask for more (the ledger's
+        // handicap), a win clears it.
+        if let Some(trainer) = fights {
+            match &outcome.result {
+                Ok(()) => self.ledger.beat(&trainer),
+                Err(ToolError::Failed(why)) if why.contains("whited out") => {
+                    self.ledger.lost_to(&trainer);
+                    self.runtime
+                        .info(format!("lost to {trainer}: the next plan asks for more"));
+                }
+                Err(_) => {}
+            }
+            if let Err(e) = self.ledger.store() {
+                self.runtime.error(format!("ledger: {e}"));
+            }
         }
         outcome
     }

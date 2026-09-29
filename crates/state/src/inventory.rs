@@ -119,6 +119,11 @@ pub struct SavedKnowledge {
     pub pc: PcStorage,
     pub pokedex: Pokedex,
     pub world: crate::WorldBelief,
+    /// Levels the party is judged below its own against each trainer it
+    /// lost to since last beating them (the agent's ledger, not the save:
+    /// set on the knowledge handed to the planner, never stored).
+    #[serde(skip)]
+    pub handicaps: std::collections::BTreeMap<String, u8>,
 }
 
 #[cfg(test)]

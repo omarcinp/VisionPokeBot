@@ -818,6 +818,10 @@ impl Run<'_, '_> {
         let state = ctx.state();
         let mut knowledge = state.saved_knowledge();
         knowledge.world.infeasible = state.world.infeasible.clone();
+        // Trainers lost to since last beaten, from the ledger (it outlives
+        // the reload after a white-out): the plan asks for more before
+        // meeting them again.
+        knowledge.handicaps = ctx.ledger.handicaps();
         Ok((knowledge, pose))
     }
 

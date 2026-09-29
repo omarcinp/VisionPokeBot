@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 
 /// Talks kept per target (the newest).
 const TALKS_KEPT: usize = 8;
+/// Levels our side is judged below its own against a trainer, per battle
+/// lost to them (see [`Ledger::handicaps`]), and at most.
+const LOSS_HANDICAP_LEVELS: u32 = 3;
+const MAX_HANDICAP_LEVELS: u32 = 15;
 
 /// Everything logged, by map.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,6 +31,10 @@ pub struct Ledger {
     /// Outcomes of each recourse kind (`explore`, `probe`, …).
     #[serde(default)]
     pub recourses: BTreeMap<String, Stats>,
+    /// Trainer battles lost (a white-out) since the trainer was last
+    /// beaten, by trainer id: the battle estimate was wrong about them.
+    #[serde(default)]
+    pub losses: BTreeMap<String, u32>,
     #[serde(skip)]
     path: Option<PathBuf>,
     #[serde(skip)]
@@ -278,6 +286,35 @@ impl Ledger {
         }
     }
 
+    /// A trainer battle was lost: the next plan for it asks for more.
+    pub fn lost_to(&mut self, trainer: &str) {
+        *self.losses.entry(trainer.to_owned()).or_default() += 1;
+        self.dirty = true;
+    }
+
+    /// A trainer was beaten: its losses are over.
+    pub fn beat(&mut self, trainer: &str) {
+        if self.losses.remove(trainer).is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Levels to judge our party below its own against each trainer lost
+    /// to: the estimate that sent it to lose was too kind (fleet worker 5
+    /// lost to MISTY 66 times from the same save, the plan unchanged, her
+    /// STARYU's RECOVER outside the model). Each loss asks for more
+    /// training before the next try, and some other goal may come first.
+    pub fn handicaps(&self) -> BTreeMap<String, u8> {
+        self.losses
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(t, n)| {
+                let levels = (n * LOSS_HANDICAP_LEVELS).min(MAX_HANDICAP_LEVELS);
+                (t.clone(), levels as u8)
+            })
+            .collect()
+    }
+
     pub fn stats(&self, kind: &str) -> Stats {
         self.recourses.get(kind).copied().unwrap_or_default()
     }
@@ -409,5 +446,26 @@ mod tests {
         assert!(l.stats("explore").rate(0.3) < 0.3);
         l.tried("explore", true, 60.0);
         assert!(l.stats("explore").rate(0.3) > 0.2);
+    }
+
+    /// Each loss to a trainer judges the party lower against them, up to
+    /// a limit; beating them clears it.
+    #[test]
+    fn losses_handicap_a_trainer_until_beaten() {
+        let mut l = Ledger::default();
+        assert!(l.handicaps().is_empty());
+        l.lost_to("TRAINER_LEADER_MISTY");
+        l.lost_to("TRAINER_LEADER_MISTY");
+        assert_eq!(l.handicaps().get("TRAINER_LEADER_MISTY"), Some(&6));
+        for _ in 0..10 {
+            l.lost_to("TRAINER_LEADER_MISTY");
+        }
+        assert_eq!(l.handicaps().get("TRAINER_LEADER_MISTY"), Some(&15));
+        l.beat("TRAINER_LEADER_MISTY");
+        assert!(l.handicaps().is_empty());
+        // Kept across a reload (the ledger file).
+        l.lost_to("TRAINER_LEADER_BROCK");
+        let back: Ledger = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.handicaps().get("TRAINER_LEADER_BROCK"), Some(&3));
     }
 }

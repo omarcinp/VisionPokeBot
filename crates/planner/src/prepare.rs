@@ -68,6 +68,10 @@ pub struct Request<'a> {
     pub confidence: f64,
     pub money: u32,
     pub data: &'a GameData,
+    /// Levels our side is judged below its own against the targets: the
+    /// battles lost to them since they were last beaten (the estimate
+    /// was too kind; see the agent's ledger).
+    pub handicap: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,6 +321,23 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
+/// `party` judged `levels` below its own levels (its moves kept): how a
+/// team that lost to a trainer the estimate said it beats is judged
+/// against them again.
+pub fn handicapped(data: &GameData, party: &[Combatant], levels: u8) -> Vec<Combatant> {
+    if levels == 0 {
+        return party.to_vec();
+    }
+    party
+        .iter()
+        .map(|c| {
+            let level = c.level.saturating_sub(levels).max(1);
+            Combatant::new(data, &c.species, level, c.moves.clone(), OUR_IV)
+                .unwrap_or_else(|| c.clone())
+        })
+        .collect()
+}
+
 /// Opponents of `targets` the team is expected to beat, added up over the
 /// targets (see [`team_vs_trainer`]).
 fn progress(data: &GameData, party: &[Combatant], targets: &[String]) -> f64 {
@@ -486,6 +507,7 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 if out < team.len() {
                     team[out] = newcomer;
                 }
+                let team = handicapped(data, &team, request.handicap);
                 let chance: f64 = confidence(data, &team, &request.targets)
                     .iter()
                     .map(|(_, p)| p)
@@ -705,32 +727,19 @@ fn search_levels(
     let minutes_of = |index: &[usize]| -> Option<f64> {
         costs_of(index).map(|c| base_minutes + c.iter().map(|(_, m, _)| m).sum::<f64>())
     };
-    let start = vec![0usize; party.len()];
-    let mut heap: BinaryHeap<Reverse<(Minutes, Vec<usize>)>> = BinaryHeap::new();
-    let mut seen: BTreeSet<Vec<usize>> = BTreeSet::new();
-    if let Some(m) = minutes_of(&start) {
-        heap.push(Reverse((Minutes(m), start.clone())));
-    }
-    seen.insert(start);
-    let mut found = 0;
-    let mut tried = 0;
-    while let Some(Reverse((Minutes(minutes), index))) = heap.pop() {
-        if tried >= MAX_LEVEL_COMBOS {
-            break;
-        }
-        tried += 1;
-        let Some(costs) = costs_of(&index) else {
-            continue;
-        };
+    // The plan a combination makes, and whether it meets the target.
+    let evaluate = |index: &[usize], minutes: f64| -> Option<PreparationPlan> {
+        let costs = costs_of(index)?;
         let prepared: Vec<Combatant> = party
             .iter()
             .zip(&costs)
             .filter_map(|(m, (to, _, _))| combatant(data, m, *to))
             .collect();
-        let conf = confidence(data, &prepared, &request.targets);
+        let judged = handicapped(data, &prepared, request.handicap);
+        let conf = confidence(data, &judged, &request.targets);
         // Worth knowing only when nothing wins.
         let progress = if conf.iter().all(|(_, p)| *p < request.confidence) {
-            progress(data, &prepared, &request.targets)
+            progress(data, &judged, &request.targets)
         } else {
             0.0
         };
@@ -747,7 +756,7 @@ fn search_levels(
                 });
             }
         }
-        let plan = PreparationPlan {
+        Some(PreparationPlan {
             steps,
             minutes,
             confidence: conf,
@@ -756,18 +765,81 @@ fn search_levels(
                 .map(|c| (c.species.clone(), c.level, c.moves.clone()))
                 .collect(),
             progress,
-        };
-        if plan.min_confidence() >= request.confidence {
-            found += 1;
+        })
+    };
+    let worth = |p: &PreparationPlan| {
+        p.confidence.iter().map(|(_, c)| c).sum::<f64>() + PROGRESS_WEIGHT * p.progress
+    };
+    let meets = |p: &PreparationPlan| p.min_confidence() >= request.confidence;
+    let start = vec![0usize; party.len()];
+    let Some(base) = minutes_of(&start).and_then(|m| evaluate(&start, m)) else {
+        return;
+    };
+    let base_worth = worth(&base);
+    let mut found = usize::from(meets(&base));
+    plans.push(base);
+    if found >= wanted {
+        *memo_out = memo.into_inner();
+        return;
+    }
+    // Each member trained alone, level by level (its sweep is complete:
+    // at most the window). One whose training changes nothing against
+    // the targets is left out of the joint search: the cheap levels of a
+    // Lv2 RATTATA that loses to MISTY at any level took the whole budget,
+    // and the CHARMELEON levels that do win were never tried (fleet
+    // worker 5 fought MISTY at 0 %, 66 times).
+    let mut useful = vec![false; party.len()];
+    for k in 0..party.len() {
+        for off in 1..=usize::from(window(&party[k])) {
+            let mut index = start.clone();
+            index[k] = off;
+            let Some(plan) = minutes_of(&index).and_then(|m| evaluate(&index, m)) else {
+                continue;
+            };
+            if worth(&plan) > base_worth + 1e-6 {
+                useful[k] = true;
+            }
+            let won = meets(&plan);
+            plans.push(plan);
+            if won {
+                found += 1;
+                break;
+            }
         }
-        plans.push(plan);
-        if found >= wanted {
+    }
+    if found >= wanted {
+        *memo_out = memo.into_inner();
+        return;
+    }
+    let mut heap: BinaryHeap<Reverse<(Minutes, Vec<usize>)>> = BinaryHeap::new();
+    let mut seen: BTreeSet<Vec<usize>> = BTreeSet::new();
+    heap.push(Reverse((Minutes(0.0), start.clone())));
+    seen.insert(start);
+    let mut tried = 0;
+    while let Some(Reverse((Minutes(minutes), index))) = heap.pop() {
+        if tried >= MAX_LEVEL_COMBOS {
             break;
         }
-        // One member a level target further, each way. A combination with
-        // a member that can't be trained that far isn't searched: it is
-        // reached once its carrier is further on (from that combination).
-        for k in 0..index.len() {
+        tried += 1;
+        // Combinations of two or more trained members (the start and the
+        // sweeps are counted above).
+        if index.iter().filter(|o| **o > 0).count() >= 2 {
+            let Some(plan) = evaluate(&index, minutes) else {
+                continue;
+            };
+            if meets(&plan) {
+                found += 1;
+            }
+            plans.push(plan);
+            if found >= wanted {
+                break;
+            }
+        }
+        // One useful member a level target further, each way. A
+        // combination with a member that can't be trained that far isn't
+        // searched: it is reached once its carrier is further on (from
+        // that combination).
+        for k in (0..index.len()).filter(|k| useful[*k]) {
             let mut next = index.clone();
             next[k] += 1;
             if next[k] <= usize::from(window(&party[k])) && seen.insert(next.clone()) {
@@ -857,9 +929,10 @@ mod tests {
 
     /// Fleet worker 4 trained PARAS, ZUBAT and CLEFAIRY for ERIKA and the
     /// Elite Four, all at 0% before and after: a best effort took the plan
-    /// adding the most levels, wherever they went. It now trains the member
-    /// that gets further against the trainer (VENUSAUR against ERIKA), and
-    /// no one where no one does (LORELEI, for now).
+    /// adding the most levels, wherever they went. It now trains the one
+    /// member that wins (ZUBAT to GOLBAT, WING ATTACK against ERIKA's
+    /// grass; each member's levels are swept on their own), and no one
+    /// where no one gets further (LORELEI, for now).
     #[test]
     fn a_best_effort_trains_only_who_gets_further() {
         let Some(data) = data() else { return };
@@ -882,6 +955,7 @@ mod tests {
                 confidence: 0.9,
                 money: 0,
                 data: &data,
+                handicap: 0,
             };
             let plan = plan_training(&request, 1).remove(0);
             plan.steps
@@ -892,7 +966,7 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_VENUSAUR"]);
+        assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_ZUBAT"]);
         assert!(trained("TRAINER_ELITE_FOUR_LORELEI").is_empty());
     }
 
@@ -914,7 +988,8 @@ mod tests {
     }
 
     /// Fleet worker 4: the party was its first six catches, and nothing in
-    /// it hits ERIKA's grass (VENUSAUR's own grass is resisted). A full
+    /// it hits ERIKA's grass (VENUSAUR's own grass is resisted; a RATTATA
+    /// here for the worker's ZUBAT, whose GOLBAT would). A full
     /// party now changes its roster: the member worth least against ERIKA
     /// (not VENUSAUR, not the only one knowing CUT) is stored at a PC for
     /// a catch that does better.
@@ -926,7 +1001,7 @@ mod tests {
         let party = vec![
             member("SPECIES_VENUSAUR", 36),
             paras,
-            member("SPECIES_ZUBAT", 9),
+            member("SPECIES_RATTATA", 9),
             member("SPECIES_GEODUDE", 17),
             member("SPECIES_CLEFAIRY", 9),
             member("SPECIES_DIGLETT", 19),
@@ -953,6 +1028,7 @@ mod tests {
             confidence: 0.9,
             money: 20_000,
             data: &data,
+            handicap: 0,
         };
         let plan = plan_preparation(&request, 1).remove(0);
         let swap = plan.steps.iter().find_map(|s| match s {
@@ -968,8 +1044,61 @@ mod tests {
         );
         // Caught first (the party is full: into the boxes), then swapped.
         assert!(matches!(&plan.steps[0], PlanStep::Catch { species, .. } if *species == withdraw));
-        // ERIKA's HYPER POTION (counted since `trainer_heal`) doubles one
-        // of her Pokémon's HP: the swap still gets the party the furthest.
-        assert!(plan.progress > 0.5, "{}", plan.progress);
+        // With the catch trained (VENOMOTH), the party wins, ERIKA's HYPER
+        // POTION (`trainer_heal`) counted.
+        assert!(plan.min_confidence() >= 0.9, "{:?}", plan.confidence);
+    }
+
+    /// Fleet worker 5 fought MISTY at 0 %, 66 times: CHARMELEON Lv25,
+    /// MANKEY Lv12, RATTATA Lv2 and PIDGEY Lv2. The level search took its
+    /// whole budget on the cheap levels of the two Lv2s, who lose to her
+    /// at any level, and never tried the CHARMELEON levels that win.
+    #[test]
+    fn a_member_that_wins_alone_is_found_behind_cheap_useless_levels() {
+        let Some(data) = data() else { return };
+        let with = |species: &str, level: u8, moves: &[&str]| PartyMember {
+            moves: moves.iter().map(|m| format!("MOVE_{m}")).collect(),
+            ..member(species, level)
+        };
+        let party = vec![
+            with(
+                "SPECIES_CHARMELEON",
+                25,
+                &["SCRATCH", "GROWL", "EMBER", "METAL_CLAW"],
+            ),
+            with("SPECIES_RATTATA", 2, &["TACKLE", "TAIL_WHIP"]),
+            with(
+                "SPECIES_MANKEY",
+                12,
+                &["SCRATCH", "LEER", "LOW_KICK", "KARATE_CHOP"],
+            ),
+            with("SPECIES_PIDGEY", 2, &["TACKLE"]),
+        ];
+        let request = |handicap: u8| Request {
+            party: party.clone(),
+            targets: vec!["TRAINER_LEADER_MISTY".into()],
+            areas: [
+                "Route1", "Route22", "Route2", "Route3", "Route24", "Route25",
+            ]
+            .iter()
+            .map(|m| area(m))
+            .collect(),
+            confidence: 0.9,
+            money: 5000,
+            data: &data,
+            handicap,
+        };
+        let plan = plan_preparation(&request(0), 1).remove(0);
+        assert!(plan.min_confidence() >= 0.9, "{plan:?}");
+        assert!(!plan.steps.is_empty());
+        // Lost to her since: judged lower, the plan asks for more.
+        // (CHARIZARD Lv36 judged Lv33 still wins: three losses.)
+        let after_a_loss = plan_preparation(&request(9), 1).remove(0);
+        assert!(
+            after_a_loss.minutes > plan.minutes,
+            "{} ≤ {}",
+            after_a_loss.minutes,
+            plan.minutes
+        );
     }
 }

@@ -127,6 +127,10 @@ impl<'a> StateBelief<'a> {
     /// (see [`crate::evaluate::team_vs_trainer`]).
     pub fn p_win(&self, trainer: &str) -> Option<f64> {
         let party = self.combatants()?;
+        // A trainer lost to since last beaten: judged that many levels
+        // lower (the estimate that sent the party to lose was too kind).
+        let handicap = self.knowledge.handicaps.get(trainer).copied().unwrap_or(0);
+        let party = crate::prepare::handicapped(self.data, &party, handicap);
         team_vs_trainer(self.data, &party, trainer).map(|e| e.p_win)
     }
 
