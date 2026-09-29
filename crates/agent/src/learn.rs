@@ -195,7 +195,15 @@ impl MoveLearning {
     /// is one: `Some(true)` = YES.
     pub fn answer(&self, lines: &[String]) -> Option<bool> {
         let page = lines.join(" ");
-        let offer = self.offer.as_ref()?;
+        // No offer followed (it was lost on the way): keep the moves known,
+        // NO to deleting one and YES to stopping (fleet worker 2: "Stop
+        // learning SLASH?" failed the battle as an unknown question).
+        let Some(offer) = self.offer.as_ref() else {
+            if page.contains("Delete a move to make room for") {
+                return Some(false);
+            }
+            return page.contains("Stop learning").then_some(true);
+        };
         if page.contains("Delete a move to make room for") {
             return Some(matches!(offer.choice, LearnChoice::Forget(_)));
         }
@@ -381,6 +389,27 @@ mod tests {
         vec![s.to_owned()]
     }
 
+    /// Fleet worker 2: the offer was lost on the way (the choice failed),
+    /// and "Stop learning SLASH?" failed the battle as an unknown question.
+    /// Without an offer the moves known stay: NO to deleting, YES to
+    /// stopping; other questions are still not answered.
+    #[test]
+    fn without_an_offer_the_moves_known_stay() {
+        let l = MoveLearning::default();
+        assert_eq!(
+            l.answer(&page("Delete a move to make room for SLASH?")),
+            Some(false)
+        );
+        assert_eq!(
+            l.answer(&["Stop learning".to_owned(), "SLASH?".to_owned()]),
+            Some(true)
+        );
+        assert_eq!(
+            l.answer(&page("Give a nickname to the captured PIDGEY?")),
+            None
+        );
+    }
+
     /// Reads `pages` in order; the events of the last one.
     fn read(l: &mut MoveLearning, d: &GameData, party: &Party, pages: &[&str]) -> Vec<GameEvent> {
         let mut events = Vec::new();
@@ -533,9 +562,10 @@ mod tests {
         let Some(d) = data() else { return };
         let party = bulbasaur();
         let mut l = MoveLearning::default();
+        // No offer read: the moves known stay (NO to deleting).
         assert_eq!(
             l.answer(&page("Delete a move to make room for POISONPOWDER?")),
-            None
+            Some(false)
         );
         // Forget: delete a move, don't stop learning.
         read(

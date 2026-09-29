@@ -31,6 +31,11 @@ pub fn choose(data: &GameData, member: &Member, new_move: &str, targets: &[Strin
         value(data, member, &member.moves, targets),
     );
     for slot in 0..member.moves.len() {
+        // An HM move can't be forgotten (the game refuses it: fleet worker
+        // 2's CHARIZARD picked CUT for SLASH 40 times).
+        if crate::tools::teach::is_hm_move(&member.moves[slot]) {
+            continue;
+        }
         let mut moves = member.moves.clone();
         moves[slot] = new_move.to_owned();
         let v = value(data, member, &moves, targets);
@@ -85,6 +90,28 @@ mod tests {
     fn data() -> Option<GameData> {
         GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))
             .ok()
+    }
+
+    /// Fleet worker 2: CHARIZARD Lv44 (WING ATTACK, FLAMETHROWER, CUT,
+    /// METAL CLAW) offered SLASH chose to forget CUT; the game refuses HM
+    /// moves and the pick was sent 40 times. An HM slot is never chosen.
+    #[test]
+    fn an_hm_move_is_never_forgotten() {
+        let Some(data) = data() else { return };
+        let mut charizard = Member::new(&data, "SPECIES_CHARIZARD", 44);
+        charizard.moves = [
+            "MOVE_WING_ATTACK",
+            "MOVE_FLAMETHROWER",
+            "MOVE_CUT",
+            "MOVE_METAL_CLAW",
+        ]
+        .map(String::from)
+        .to_vec();
+        let targets = vec!["TRAINER_LEADER_ERIKA".to_owned()];
+        assert_ne!(
+            choose(&data, &charizard, "MOVE_SLASH", &targets),
+            LearnChoice::Forget(2)
+        );
     }
 
     fn bulbasaur(moves: &[&str]) -> Member {
