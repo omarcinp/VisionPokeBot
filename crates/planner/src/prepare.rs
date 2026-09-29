@@ -968,6 +968,8 @@ mod tests {
         );
         // Caught first (the party is full: into the boxes), then swapped.
         assert!(matches!(&plan.steps[0], PlanStep::Catch { species, .. } if *species == withdraw));
-        assert!(plan.progress > 1.6, "{}", plan.progress);
+        // ERIKA's HYPER POTION (counted since `trainer_heal`) doubles one
+        // of her Pokémon's HP: the swap still gets the party the furthest.
+        assert!(plan.progress > 0.5, "{}", plan.progress);
     }
 }

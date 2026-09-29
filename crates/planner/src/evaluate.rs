@@ -322,6 +322,33 @@ pub struct TeamEstimate {
     pub opponents: Vec<(String, u8, f64, usize)>,
 }
 
+/// HP a trainer's healing item gives the opponent now out, taking the item
+/// (`battle_ai_switch_items.c` `ShouldUseItem`): item `i` past the first
+/// is considered only while at most `items − i + 1` opponents are left;
+/// a heal item is used once the opponent is under ¼ HP or down by more
+/// than it heals, so a fight that gets that far meets the heal (the turn
+/// spent on it isn't counted: the estimate errs against us). Fleet
+/// worker 6: MISTY's SUPER POTION stretched STARYU to six turns, and
+/// WARTORTLE met STARMIE at 26/59.
+fn trainer_heal(items: &mut [Option<&str>], left: usize, max_hp: u32) -> Option<u32> {
+    let n = items.len();
+    for (i, slot) in items.iter_mut().enumerate() {
+        if i > 0 && left > n - i + 1 {
+            continue;
+        }
+        let heal = match (*slot)? {
+            "ITEM_POTION" => 20,
+            "ITEM_SUPER_POTION" => 50,
+            "ITEM_HYPER_POTION" => 200,
+            "ITEM_MAX_POTION" | "ITEM_FULL_RESTORE" => max_hp,
+            _ => continue,
+        };
+        *slot = None;
+        return Some(heal.min(max_hp));
+    }
+    None
+}
+
 /// The party against `trainer` as a team: each opponent is met by the
 /// member that beats it best, which is how the battle is played (the SHIFT
 /// offered before the trainer's next Pokémon is taken for the member that
@@ -336,6 +363,8 @@ pub fn team_vs_trainer(
     trainer: &str,
 ) -> Option<TeamEstimate> {
     let t = data.trainers.get(trainer)?;
+    // The trainer's healing items, each used once (`ShouldUseItem`).
+    let mut items: Vec<Option<&str>> = t.items.iter().map(|i| Some(i.as_str())).collect();
     let mut ours: Vec<Combatant> = party.to_vec();
     let mut p_total = 1.0;
     let mut lead = None;
@@ -349,6 +378,11 @@ pub fn team_vs_trainer(
         let Some(mut enemy) = Combatant::new(data, &mon.species, mon.level, moves, iv) else {
             continue;
         };
+        // A healing item the AI would use on this one counts as its HP.
+        let left = t.party.len() - opponents.len();
+        if let Some(heal) = trainer_heal(&mut items, left, enemy.max_hp()) {
+            enemy.hp += heal;
+        }
         let mut p_lose_all = 1.0;
         let mut by = None;
         loop {
@@ -419,6 +453,8 @@ pub fn battle_vs_trainer(
     trainer: &str,
 ) -> Option<BattleEstimate> {
     let t = data.trainers.get(trainer)?;
+    // The trainer's healing items, each used once (`ShouldUseItem`).
+    let mut items: Vec<Option<&str>> = t.items.iter().map(|i| Some(i.as_str())).collect();
     let mut ours: Vec<Combatant> = party.to_vec();
     let mut active = 0;
     let mut p_total = 1.0;
@@ -433,6 +469,11 @@ pub fn battle_vs_trainer(
         let Some(mut enemy) = Combatant::new(data, &mon.species, mon.level, moves, iv) else {
             continue;
         };
+        // A healing item the AI would use on this one counts as its HP.
+        let left = t.party.len() - opponents.len();
+        if let Some(heal) = trainer_heal(&mut items, left, enemy.max_hp()) {
+            enemy.hp += heal;
+        }
         // Chance this opponent is beaten by one of our remaining members.
         let mut p_lose_all = 1.0;
         while active < ours.len() {

@@ -235,3 +235,50 @@ fn accuracy_drops_lower_the_chance_to_win() {
     let blinded = matchup(&data, &us, &them).p_win;
     assert!(blinded < fresh, "{blinded} vs {fresh}");
 }
+
+/// Fleet worker 6: MISTY's SUPER POTION healed STARYU mid-fight (six
+/// turns instead of three) and WARTORTLE met STARMIE worn and whited out.
+/// A trainer's healing items count in the estimate: the same team is less
+/// likely to win against her with the potion than without it.
+#[test]
+fn a_trainers_healing_item_lowers_the_chance_to_win() {
+    use pokebot_planner::evaluate::battle_vs_trainer;
+    let (Some(data), Some(mut without_items)) = (data(), data()) else {
+        return;
+    };
+    assert_eq!(
+        data.trainers["TRAINER_LEADER_MISTY"].items,
+        vec!["ITEM_SUPER_POTION".to_owned()]
+    );
+    let wartortle = Combatant::new(
+        &data,
+        "SPECIES_WARTORTLE",
+        20,
+        ["MOVE_TACKLE", "MOVE_TAIL_WHIP", "MOVE_BUBBLE", "MOVE_BITE"]
+            .map(String::from)
+            .to_vec(),
+        10,
+    )
+    .unwrap();
+    let with = battle_vs_trainer(
+        &data,
+        std::slice::from_ref(&wartortle),
+        "TRAINER_LEADER_MISTY",
+    )
+    .unwrap()
+    .p_win;
+    without_items
+        .trainers
+        .get_mut("TRAINER_LEADER_MISTY")
+        .unwrap()
+        .items
+        .clear();
+    let without = battle_vs_trainer(
+        &without_items,
+        std::slice::from_ref(&wartortle),
+        "TRAINER_LEADER_MISTY",
+    )
+    .unwrap()
+    .p_win;
+    assert!(with < without, "with the potion {with}, without {without}");
+}
