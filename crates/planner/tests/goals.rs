@@ -1216,3 +1216,52 @@ fn cut_goes_to_the_member_that_can_learn_it() {
         .iter()
         .any(|s| matches!(s.intent, Intent::Catch { .. })));
 }
+
+/// Fleet workers walked a weak lead into trainers whose sight spans the
+/// way (Route 3, Viridian Forest, Mt. Moon's grunts) and whited out: a
+/// walk through an unbeaten trainer's sight is its battle, so it needs
+/// `CanBeat`. From Pewter with a weak IVYSAUR the way to Mt. Moon
+/// prepares for Route 3's trainers; with them beaten it doesn't. (Known
+/// gap: readiness may pick a training area behind the same sight lines,
+/// here Mt. Moon; the areas it considers are readiness's to restrict.)
+#[test]
+fn a_walk_through_a_trainers_sight_prepares_for_its_battle() {
+    use pokebot_state::Knowledge;
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = pewter();
+    if let Some(party) = knowledge.party.value.as_mut() {
+        let lead = &mut party[0];
+        lead.level = Knowledge::observed(8, 1);
+        lead.hp = Knowledge::observed((27, 27), 1);
+        for slot in lead.moves.iter_mut().skip(1) {
+            *slot = None;
+        }
+    }
+    let route3: Vec<String> = f.data.map_trainers["Route3"]
+        .iter()
+        .map(|t| t.trainer.clone())
+        .collect();
+    let with = |beaten: bool| {
+        let mut k = knowledge.clone();
+        for t in &route3 {
+            k.world
+                .flags
+                .insert(t.clone(), Knowledge::observed(beaten, 1));
+        }
+        planner
+            .plan(&parse_goal("at MtMoon_1F").unwrap(), &k, pose.clone())
+            .unwrap()
+    };
+    let unbeaten = with(false);
+    print(&unbeaten, 20);
+    let beaten = with(true);
+    print(&beaten, 20);
+    let prepares = |p: &Plan| {
+        p.intents
+            .iter()
+            .any(|s| matches!(s.intent, Intent::Train { .. } | Intent::Catch { .. }))
+    };
+    assert!(prepares(&unbeaten), "prepares for Route 3's trainers");
+    assert!(!prepares(&beaten), "nothing to prepare for");
+}

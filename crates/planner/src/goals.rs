@@ -58,8 +58,8 @@ use pokebot_state::{Fact, PlayerPose, Priors, SavedKnowledge, WorldBelief};
 use pokebot_world::behavior::TALL_GRASS;
 use pokebot_world::events::{Condition, DexCount, Effect as ScriptEffect};
 use pokebot_world::gates::{is_local_flag, is_local_var};
-use pokebot_world::obstacles::{blockers, static_obstacles, Passage};
-use pokebot_world::path::{reach, Reach, Walk};
+use pokebot_world::obstacles::{blockers, sight_line, static_obstacles, Passage};
+use pokebot_world::path::{find_path_with, reach, Obstacles, Reach, Walk};
 use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
 use pokebot_world::route::{EdgeKind, PlaceGraph, RouteParams, RouteResult, UnknownPolicy};
 use pokebot_world::{MapData, World};
@@ -92,6 +92,13 @@ const LOCALITY_BONUS_S: f64 = 30.0;
 const GRASS_CLUSTERS: usize = 4;
 /// Slack, in tiles, when deciding whether a trigger tile lies on a walk.
 const ON_THE_WAY_SLACK: i32 = 2;
+
+/// A walk on a map: (map, from, to).
+type SightKey = (String, (i32, i32), (i32, i32));
+
+/// Extra tiles a walk accepts to go round a trainer's sight (a detour of up
+/// to this many steps beats a battle that can't be fled).
+const SIGHT_DETOUR_TILES: i32 = 60;
 /// Marts and Centers offered per goal: the nearest by maps crossed, so
 /// that only their routes are priced.
 const NEAREST_SHOPS: usize = 3;
@@ -414,6 +421,9 @@ pub struct Planner<'a> {
     /// flag hides) and what crossing costs; other stationary objects are
     /// walls.
     crossings: BTreeMap<String, BTreeMap<(i32, i32), Crossing>>,
+    /// Map → each trainer and the tiles from which it sees the player
+    /// (`map_trainers` sight, [`sight_line`]): walking there is its battle.
+    sights: BTreeMap<String, Vec<(String, Obstacles)>>,
     /// (map, local id) → an object's tile.
     objects: BTreeMap<(String, u32), (i32, i32)>,
     /// Flags the story sets (scripts, removed objects, trainers) and the
@@ -690,6 +700,20 @@ impl<'a> Planner<'a> {
             .unwrap_or_default();
         centers.sort();
         centers.dedup();
+        // Trainers' sight lines, per map.
+        let sights: BTreeMap<String, Vec<(String, Obstacles)>> = data
+            .map_trainers
+            .iter()
+            .filter_map(|(name, trainers)| {
+                let map = world.map(name)?;
+                let lines: Vec<(String, Obstacles)> = trainers
+                    .iter()
+                    .map(|t| (t.trainer.clone(), sight_line(map, t.local_id, t.sight)))
+                    .filter(|(_, tiles)| !tiles.is_empty())
+                    .collect();
+                (!lines.is_empty()).then(|| (name.clone(), lines))
+            })
+            .collect();
         let mut planner = Planner {
             world,
             graph,
@@ -708,6 +732,7 @@ impl<'a> Planner<'a> {
             trainer_maps,
             battle_triggers,
             crossings,
+            sights,
             objects,
             story: StoryPrior {
                 progress: progress_flags,
@@ -725,6 +750,12 @@ impl<'a> Planner<'a> {
         };
         planner.achievers = planner.build_achievers();
         planner
+    }
+
+    /// Whether a walk on `map` may meet a trainer's battle on the way: a
+    /// battle trigger, or a trainer's sight line.
+    fn fights_on(&self, map: &str) -> bool {
+        self.battle_triggers.contains_key(map) || self.sights.contains_key(map)
     }
 
     /// Plans `goal` from `knowledge` at `pose`. An already-true goal yields
@@ -753,6 +784,7 @@ impl<'a> Planner<'a> {
             routes: RefCell::new(HashMap::new()),
             open_routes: RefCell::new(HashMap::new()),
             reaches: RefCell::new(HashMap::new()),
+            sighted: RefCell::new(HashMap::new()),
             hops: pose
                 .as_ref()
                 .map(|p| hops(self.world, &p.map))
@@ -2200,6 +2232,9 @@ struct Session<'p, 'a> {
     /// Floods from a tile of a map over its static obstacles (trigger
     /// checks): the map as the navigator sees it, no belief involved.
     reaches: RefCell<Reaches>,
+    /// Trainers whose sight a walk on a map can't go round, per (map,
+    /// from, to), as the base belief has them unbeaten.
+    sighted: RefCell<HashMap<SightKey, Vec<String>>>,
     /// Maps crossed from the pose's map: the cheap distance that picks
     /// which shops and areas are worth routing to.
     hops: BTreeMap<String, u32>,
@@ -3082,7 +3117,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 for leg in &r.legs {
                     if matches!(leg.kind, EdgeKind::Walk { .. })
                         && leg.from.map == leg.to.map
-                        && self.planner.battle_triggers.contains_key(&leg.from.map)
+                        && self.planner.fights_on(&leg.from.map)
                     {
                         for trainer in self.trainers_between(
                             &leg.from.map,
@@ -3093,6 +3128,14 @@ impl<'p, 'a> Session<'p, 'a> {
                             if belief.eval_goal(&g) != Truth::True {
                                 push(g);
                             }
+                        }
+                        for g in self.sight_needs(
+                            &leg.from.map,
+                            (leg.from.x, leg.from.y),
+                            (leg.to.x, leg.to.y),
+                            belief,
+                        ) {
+                            push(g);
                         }
                     }
                     for q in &leg.requires {
@@ -3564,6 +3607,80 @@ impl<'p, 'a> Session<'p, 'a> {
         out
     }
 
+    /// The trainers not yet beaten whose sight the walk from `from` to `to`
+    /// on `map` can't go round: walking into a trainer's sight starts its
+    /// battle, which can't be fled, so the walk needs it won (fleet workers:
+    /// Viridian Forest's Bug Catchers, Route 3's trainers and Mt. Moon's
+    /// grunts span their ways, and plans walked a worn lead into them).
+    /// The path prices sight tiles high, so any way round is taken first.
+    fn sighted_between(&self, map: &MapData, from: (i32, i32), to: (i32, i32)) -> Vec<String> {
+        let Some(lines) = self.planner.sights.get(&map.name) else {
+            return Vec::new();
+        };
+        let key = (map.name.clone(), from, to);
+        if let Some(hit) = self.sighted.borrow().get(&key) {
+            return hit.clone();
+        }
+        let unbeaten: Vec<&(String, Obstacles)> = lines
+            .iter()
+            .filter(|(t, _)| self.base.eval_goal(&GoalPredicate::flag(t, true)) != Truth::True)
+            .collect();
+        let mut out = Vec::new();
+        if !unbeaten.is_empty() {
+            let ways = self.planner.crossings.get(&map.name);
+            let mut obstacles = static_obstacles(map);
+            if let Some(ways) = ways {
+                obstacles.retain(|t| !ways.contains_key(t));
+            }
+            obstacles.remove(&from);
+            obstacles.remove(&to);
+            let walk = Walk {
+                obstacles: &obstacles,
+                surf: false,
+                opened: None,
+            };
+            let seen = |t: (i32, i32)| unbeaten.iter().any(|(_, tiles)| tiles.contains(&t));
+            let extra = |t: (i32, i32)| {
+                ways.and_then(|w| w.get(&t)).map_or(0, |w| w.0)
+                    + if seen(t) { SIGHT_DETOUR_TILES } else { 0 }
+            };
+            let heuristic = |p: (i32, i32)| (p.0 - to.0).abs() + (p.1 - to.1).abs();
+            if let Some(path) = find_path_with(map, from, &walk, extra, |t| t == to, heuristic) {
+                let crossed: Vec<(i32, i32)> = std::iter::once(from)
+                    .chain(path.iter().map(|s| s.to))
+                    .collect();
+                for (trainer, tiles) in unbeaten {
+                    if crossed.iter().any(|t| tiles.contains(t)) && !out.contains(trainer) {
+                        out.push(trainer.clone());
+                    }
+                }
+            }
+        }
+        self.sighted.borrow_mut().insert(key, out.clone());
+        out
+    }
+
+    /// What a walk from `from` to `to` on `map` needs for the trainers
+    /// whose sight it can't go round: to be able to win each battle
+    /// (`CanBeat`, readiness: train or heal first). The battle is fought
+    /// on the way, by the walk's battle; no trip to the trainer is planned.
+    fn sight_needs(
+        &self,
+        map: &str,
+        from: (i32, i32),
+        to: (i32, i32),
+        belief: &StateBelief<'a>,
+    ) -> Vec<GoalPredicate> {
+        let Some(m) = self.planner.world.map(map) else {
+            return Vec::new();
+        };
+        self.sighted_between(m, from, to)
+            .into_iter()
+            .filter(|t| belief.eval_goal(&GoalPredicate::flag(t, true)) != Truth::True)
+            .map(|t| GoalPredicate::can_beat(&t))
+            .collect()
+    }
+
     /// Where the player stands on `map` once there: the pose when on it,
     /// else the landing of the route to it.
     fn landing_on(&self, map: &str, belief: &StateBelief<'a>) -> Option<(i32, i32)> {
@@ -3925,7 +4042,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 if !matches!(leg.kind, EdgeKind::Walk { .. }) || leg.from.map != leg.to.map {
                     continue;
                 }
-                if !self.planner.battle_triggers.contains_key(&leg.from.map) {
+                if !self.planner.fights_on(&leg.from.map) {
                     continue;
                 }
                 for trainer in self.trainers_between(
@@ -3934,6 +4051,16 @@ impl<'p, 'a> Session<'p, 'a> {
                     (leg.to.x, leg.to.y),
                 ) {
                     let need = GoalPredicate::flag(&trainer, true);
+                    if !c.preconditions.contains(&need) {
+                        c.preconditions.push(need);
+                    }
+                }
+                for need in self.sight_needs(
+                    &leg.from.map,
+                    (leg.from.x, leg.from.y),
+                    (leg.to.x, leg.to.y),
+                    belief,
+                ) {
                     if !c.preconditions.contains(&need) {
                         c.preconditions.push(need);
                     }
@@ -4086,14 +4213,16 @@ impl<'p, 'a> Session<'p, 'a> {
             // on the map and the object.
             let object = script
                 .local_id
-                .filter(|_| {
-                    self.planner.battle_triggers.contains_key(map)
-                        || self.planner.crossings.contains_key(map)
-                })
+                .filter(|_| self.planner.fights_on(map) || self.planner.crossings.contains_key(map))
                 .and_then(|id| self.planner.objects.get(&(map.clone(), id)))
                 .copied();
             if let (Some((ox, oy)), Some(from)) = (object, self.landing_on(map, belief)) {
                 if let Some(beside) = self.beside(map, ox, oy) {
+                    for need in self.sight_needs(map, from, beside, belief) {
+                        if !c.preconditions.contains(&need) {
+                            c.preconditions.push(need);
+                        }
+                    }
                     for trainer in self.trainers_between(map, from, beside) {
                         let need = GoalPredicate::flag(&trainer, true);
                         if !c.preconditions.contains(&need) {

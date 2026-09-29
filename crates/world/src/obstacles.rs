@@ -99,6 +99,55 @@ fn battled_by(events: &Events, script: &str) -> Option<String> {
         })
 }
 
+/// The directions an object faces by its movement type: the fixed ones its
+/// name gives (`FACE_LEFT`, `FACE_DOWN_AND_UP`), every direction for one
+/// that looks around, wanders or turns.
+pub fn facings(movement: &str) -> Vec<(i32, i32)> {
+    const ALL: [(&str, (i32, i32)); 4] = [
+        ("UP", (0, -1)),
+        ("DOWN", (0, 1)),
+        ("LEFT", (-1, 0)),
+        ("RIGHT", (1, 0)),
+    ];
+    let named: Vec<(i32, i32)> = movement
+        .strip_prefix("MOVEMENT_TYPE_FACE_")
+        .map(|rest| {
+            ALL.iter()
+                .filter(|(w, _)| rest.split('_').any(|p| p == *w))
+                .map(|(_, d)| *d)
+                .collect()
+        })
+        .unwrap_or_default();
+    if named.is_empty() {
+        ALL.iter().map(|(_, d)| *d).collect()
+    } else {
+        named
+    }
+}
+
+/// The tiles from which trainer object `local_id` sees the player and
+/// walks up to battle: along each way it faces, up to `sight` tiles, until
+/// a tile that can't be walked. A trainer's battle can't be fled.
+pub fn sight_line(map: &MapData, local_id: u32, sight: u8) -> Obstacles {
+    let mut out = Obstacles::new();
+    let Some(o) = map.objects.iter().find(|o| o.local_id == local_id) else {
+        return out;
+    };
+    let (Some(x0), Some(y0)) = (o.x, o.y) else {
+        return out;
+    };
+    for (dx, dy) in facings(o.movement.as_deref().unwrap_or("")) {
+        for k in 1..=i32::from(sight) {
+            let tile = (x0 + dx * k, y0 + dy * k);
+            if map.tile(tile.0, tile.1).is_none_or(|t| t.collision != 0) {
+                break;
+            }
+            out.insert(tile);
+        }
+    }
+    out
+}
+
 /// An NPC that walks around (`MOVEMENT_TYPE_WANDER_*`, `WALK_*`), so any
 /// tile in its area may be blocked when the player gets there.
 pub fn is_wanderer(o: &ObjectEvent) -> bool {

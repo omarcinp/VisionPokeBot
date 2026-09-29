@@ -1066,37 +1066,6 @@ pub fn warp_usable(map: &MapData, index: usize) -> bool {
 /// up to this many steps is preferred to crossing it.
 const AVOID_COST: i32 = 60;
 
-/// The directions an object faces by its movement type: the fixed ones
-/// its name gives (`FACE_LEFT`, `FACE_DOWN_AND_UP`), every direction for
-/// one that looks around, wanders or turns.
-fn facings(movement: &str) -> Vec<Direction> {
-    let named = movement
-        .strip_prefix("MOVEMENT_TYPE_FACE_")
-        .map(|rest| {
-            [
-                ("UP", Direction::Up),
-                ("DOWN", Direction::Down),
-                ("LEFT", Direction::Left),
-                ("RIGHT", Direction::Right),
-            ]
-            .into_iter()
-            .filter(|(w, _)| rest.split('_').any(|p| p == *w))
-            .map(|(_, d)| d)
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if named.is_empty() {
-        vec![
-            Direction::Up,
-            Direction::Down,
-            Direction::Left,
-            Direction::Right,
-        ]
-    } else {
-        named
-    }
-}
-
 /// The tiles from which an unbeaten trainer on `map` sees the player and
 /// walks up to battle: along each way it faces, up to its sight range,
 /// until a tile that can't be walked (Viridian Forest: a worn BULBASAUR
@@ -1107,31 +1076,11 @@ pub fn sight_tiles(
     trainers: &[pokebot_gamedata::MapTrainer],
     beaten: impl Fn(&str) -> bool,
 ) -> Obstacles {
-    let mut out = Obstacles::new();
-    for t in trainers.iter().filter(|t| !beaten(&t.trainer)) {
-        let Some(object) = map.objects.iter().find(|o| o.local_id == t.local_id) else {
-            continue;
-        };
-        let (Some(x0), Some(y0)) = (t.x.or(object.x), t.y.or(object.y)) else {
-            continue;
-        };
-        for dir in facings(object.movement.as_deref().unwrap_or("")) {
-            let (dx, dy) = match dir {
-                Direction::Up => (0, -1),
-                Direction::Down => (0, 1),
-                Direction::Left => (-1, 0),
-                Direction::Right => (1, 0),
-            };
-            for k in 1..=i32::from(t.sight) {
-                let tile = (x0 + dx * k, y0 + dy * k);
-                if map.tile(tile.0, tile.1).is_none_or(|c| c.collision != 0) {
-                    break;
-                }
-                out.insert(tile);
-            }
-        }
-    }
-    out
+    trainers
+        .iter()
+        .filter(|t| !beaten(&t.trainer))
+        .flat_map(|t| pokebot_world::obstacles::sight_line(map, t.local_id, t.sight))
+        .collect()
 }
 
 /// A walk on one map: the map, from, to.
