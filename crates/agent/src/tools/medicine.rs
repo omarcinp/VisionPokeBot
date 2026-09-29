@@ -73,6 +73,10 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
     }
     Ok(())
 }
+/// Frames after the A on the lead with the list still showing and no
+/// message before it is pressed again.
+const MEDICINE_RETRY_FRAMES: u64 = 30;
+
 struct UseMedicine {
     item: String,
     data: Arc<GameData>,
@@ -92,7 +96,26 @@ impl ToolStep for UseMedicine {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         let o = ctx.observation;
         if let Some(frame) = self.applied {
-            if o.frame_id.saturating_sub(frame) < 120 {
+            let since = o.frame_id.saturating_sub(frame);
+            // The A on the lead can land while the party screen still
+            // fades in and do nothing (fleet worker 4 in Viridian Forest at
+            // 4/23 HP: the screen stayed, then closed, the Potion unused).
+            // Used, the game answers with its message and goes back to the
+            // bag; still on the list without one, the A is pressed again.
+            if since >= MEDICINE_RETRY_FRAMES
+                && o.party_menu.as_ref().is_some_and(|p| p.selected == Some(0))
+                && o.dialogue.is_none()
+                && !self.retries.exhausted()
+            {
+                self.applied = Some(o.frame_id);
+                return self.retries.act(
+                    "use medicine on lead (again: the A did nothing)",
+                    Button::A,
+                    Expectation::InputsDone,
+                    SCREEN_FRAMES,
+                );
+            }
+            if since < 120 {
                 return Decision::Wait("waiting for medicine result".into());
             }
             return self.closer.next(o, "medicine input applied; verify menus");
@@ -141,5 +164,94 @@ impl ToolStep for UseMedicine {
             .0;
         }
         open_start_menu(&mut self.retries, o, ctx.quiet_frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pokebot_state::{
+        DialogueKind, DialogueObservation, GameState, Observation, Observed, PartyMenuObservation,
+        Region, ScreenState,
+    };
+
+    fn run(step: &mut UseMedicine, o: &Observation) -> Decision {
+        let state = GameState::default();
+        let mut events = Vec::new();
+        step.next(&mut StepContext {
+            observation: o,
+            state: &state,
+            events: &mut events,
+            quiet_frames: 0,
+            frame: None,
+            learned: &[],
+        })
+    }
+
+    fn frame(id: u64, screen: ScreenState) -> Observation {
+        Observation::bare(
+            id,
+            Observed {
+                value: screen,
+                detector: "test".into(),
+            },
+            Default::default(),
+        )
+    }
+
+    fn party(id: u64) -> Observation {
+        let mut o = frame(id, ScreenState::PartyMenu);
+        o.party_menu = Some(PartyMenuObservation {
+            count: 1,
+            selected: Some(0),
+            prompt: "Use on which POKéMON?".into(),
+            ..PartyMenuObservation::default()
+        });
+        o
+    }
+
+    /// Fleet worker 4 in Viridian Forest at 4/23 HP: the A on the lead
+    /// landed while the party screen faded in and did nothing; the screen
+    /// stayed, then closed, the Potion unused. Still on the list with no
+    /// message, the A is pressed again; once the game answers, it isn't.
+    #[test]
+    fn an_a_the_party_screen_ignored_is_pressed_again() {
+        let Ok(data) = GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let mut step = UseMedicine {
+            item: "ITEM_POTION".into(),
+            data: Arc::new(data),
+            retries: Retries::default(),
+            closer: Closer::default(),
+            applied: None,
+        };
+        let label = |d: Decision| match d {
+            Decision::Act(a) => a.label,
+            Decision::Wait(w) => format!("wait: {w}"),
+            _ => "other".into(),
+        };
+        assert_eq!(label(run(&mut step, &party(100))), "use medicine on lead");
+        // Too soon to tell.
+        assert!(matches!(run(&mut step, &party(110)), Decision::Wait(_)));
+        assert!(label(run(&mut step, &party(140))).contains("again"));
+        // The message came: nothing more.
+        let mut used = party(180);
+        used.dialogue = Some(DialogueObservation {
+            kind: DialogueKind::MessageBox,
+            region: Region::new(8, 119, 224, 34),
+            waiting_for_input: true,
+            arrow: None,
+            stable_frames: 10,
+            text_cells: vec![1; 4],
+            lines: vec![
+                "BULBASAUR's HP was restored".into(),
+                "by 20 point(s).".into(),
+            ],
+            help: false,
+        });
+        assert!(matches!(run(&mut step, &used), Decision::Wait(_)));
     }
 }
