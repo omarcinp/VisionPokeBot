@@ -31,6 +31,9 @@ pub struct BattleTool;
 /// Frames our HUD must read 0 HP before the Pokémon counts as fainted.
 const ZERO_HP_FRAMES: u64 = 30;
 
+/// Action windows a SHIFT opens before it is given up.
+const MAX_SHIFT_OPENS: u8 = 6;
+
 pub struct BattleStep {
     data: Arc<GameData>,
     plan: BattlePlan,
@@ -47,6 +50,11 @@ pub struct BattleStep {
     /// shares the experience); done once that member is out.
     shift_to: Option<u8>,
     shifted: bool,
+    /// The SHIFT target's row, once read by name on the party list (the
+    /// action window hides the names below it).
+    shift_row: Option<u8>,
+    /// Action windows opened for the SHIFT (bounded: [`MAX_SHIFT_OPENS`]).
+    shift_opens: u8,
     /// Our battler in this party slot fainted and another can fight: the
     /// next one is sent out ("Use next POKéMON?" YES, SEND OUT). The game
     /// restarts only when all have fainted (the user's rule).
@@ -92,6 +100,8 @@ impl BattleStep {
             zero_hp_since: None,
             shift_to: None,
             shifted: false,
+            shift_row: None,
+            shift_opens: 0,
             fainted: None,
             last_hud: None,
             next_foe: None,
@@ -267,14 +277,24 @@ impl BattleStep {
         // first, then as switches left it; `UpdatePartyToBattleOrder`):
         // the member's row is where its name is, its slot only when no
         // name was read.
-        let slot = name
+        // The row read by name on the list is kept: the action window
+        // covers the lower panels' names, and falling back to the slot
+        // there opened and closed the windows for two hours (fleet worker
+        // 3: WARTORTLE's row, "close another member's actions").
+        let by_name = name
             .and_then(|n| {
                 party
                     .members
                     .iter()
                     .position(|r| r.nickname.as_deref() == Some(n))
             })
-            .map_or(slot, |row| row as u8);
+            .map(|row| row as u8);
+        if !party.actions {
+            if let Some(row) = by_name {
+                self.shift_row = Some(row);
+            }
+        }
+        let slot = self.shift_row.or(by_name).unwrap_or(slot);
         let press = |label: String, button: Button, expect: Expectation| {
             Decision::Act(Action::new(
                 label,
@@ -338,6 +358,16 @@ impl BattleStep {
             return Decision::Wait("reading the selected member".into());
         };
         if at == slot {
+            self.shift_opens += 1;
+            if self.shift_opens > MAX_SHIFT_OPENS {
+                // Opened again and again without a SHIFT: fight on as is.
+                self.shifted = true;
+                return press(
+                    format!("shift: gave up after {MAX_SHIFT_OPENS} tries, back"),
+                    Button::B,
+                    Expectation::ScreenIsNot(pokebot_state::ScreenState::PartyMenu),
+                );
+            }
             return press(
                 "shift: open the member's actions".into(),
                 Button::A,
@@ -1007,10 +1037,50 @@ mod tests {
             label(step.shift_in_party_menu(&menu, 2, Some("BEEDRILL"))),
             "shift: open the member's actions"
         );
+        // The action window opens on BEEDRILL and hides the names below
+        // it: the row read on the list stands (fleet worker 3 closed and
+        // reopened it for two hours), and SHIFT is chosen.
+        let hidden = pokebot_state::PartyRowObservation {
+            nickname: None,
+            level: None,
+            hp: None,
+            status: None,
+        };
+        let mut actions = pokebot_state::PartyMenuObservation {
+            count: 3,
+            selected: Some(1),
+            actions: true,
+            options: vec!["SHIFT".into(), "SUMMARY".into(), "CANCEL".into()],
+            option_cursor: Some(0),
+            members: vec![row("RATTATA"), hidden.clone(), hidden],
+            ..Default::default()
+        };
+        assert_eq!(
+            label(step.shift_in_party_menu(&actions, 2, Some("BEEDRILL"))),
+            "choose SHIFT"
+        );
+        // Opened again and again without a SHIFT: given up, fight on.
+        actions.actions = false;
+        for _ in 0..MAX_SHIFT_OPENS - 1 {
+            step.shift_in_party_menu(&menu, 2, Some("BEEDRILL"));
+        }
+        assert!(label(step.shift_in_party_menu(&menu, 2, Some("BEEDRILL"))).contains("gave up"));
         // No name read: the slot.
+        let mut fresh = BattleStep::new(
+            Arc::new(
+                pokebot_gamedata::GameData::load(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../data/world/gamedata.json"),
+                )
+                .unwrap(),
+            ),
+            BattlePlan::Fight,
+            false,
+        )
+        .shifting_to(2);
         menu.selected = Some(0);
         assert_eq!(
-            label(step.shift_in_party_menu(&menu, 2, None)),
+            label(fresh.shift_in_party_menu(&menu, 2, None)),
             "shift: Down toward slot 2"
         );
     }
