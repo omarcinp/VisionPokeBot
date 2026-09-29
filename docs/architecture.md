@@ -158,7 +158,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 - **Stuck games: the strategy.** Every loop that can repeat has a bound, and every bound fails the step with a reason, so the plan moves on and the logs say why:
   - Walks: a walk entering a map at the same tile a third time fails "going in circles" (`nav::MapEntries`; hunts count across their walks).
   - Actions: the same action sent 40 times on an unchanged screen fails "no progress" (`tools::context::ActRepeats`; waiting actions such as spinning for encounters are exempt).
-  - Waits: the existing stuck-waiting rule. A "fade" that stays unchanged for 30 frames counts as the screen, not a fade (a dark map with almost nothing bright).
+  - Waits: the existing stuck-waiting rule. A "fade" that stays unchanged for 30 frames counts as the screen, not a fade (a dark map with almost nothing bright). A scene has settled on a still picture even when the localizer can't place the player (`scene::Stillness`); only a moving picture without a located player counts as a scene.
   - Cycles: the session calls out a failure that ended 3 cycles in a row ("stuck: the same failure ended N cycles in a row"). The startup audit only fails on the party; another screen that fails is closed and skipped with a warning.
   - Battles: moves are chosen for the member the HUD names, not the lead.
   - Beliefs about passages: a script path that changes the world isn't recorded on the plan's word when the text shown wasn't recognised (`Conversation::resolved_in`).

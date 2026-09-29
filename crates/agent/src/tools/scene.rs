@@ -62,11 +62,17 @@ impl Stillness {
         if pose.is_some() {
             self.last_pose = pose;
         }
+        // A player not located on a still picture is the player standing
+        // with control where the localizer can't place it (fleet workers,
+        // Route 4's east end by Cerulean: the pose came and went, and the
+        // walk waited for the scene to settle until it failed); on a
+        // moving picture it is a scene.
+        let lost = o.player.is_none() && o.metrics.changed_pixels >= MOTION_PIXELS;
         let busy = o.dialogue.is_some()
             || o.menu.is_some()
             || o.battle.is_some()
             || o.screen.value == ScreenState::Transition
-            || o.player.is_none();
+            || lost;
         if busy || moved {
             self.quiet = 0;
             self.still = 0;
@@ -179,5 +185,48 @@ impl ToolStep for SettleStep {
             return Decision::Done("settled".into());
         }
         Decision::Wait("letting the scene settle".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pokebot_state::{FrameMetrics, Observed};
+
+    fn frame(id: u64, changed_pixels: u32) -> Observation {
+        Observation::bare(
+            id,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            FrameMetrics {
+                changed_pixels,
+                ..FrameMetrics::default()
+            },
+        )
+    }
+
+    /// Fleet workers at Route 4's east end: the localizer lost the player
+    /// on a still overworld, and the walk waited for the scene to settle
+    /// until it failed. A still picture settles, located or not; a moving
+    /// one without a located player is a scene.
+    #[test]
+    fn a_still_picture_settles_even_without_a_located_player() {
+        let mut still = Stillness::default();
+        for id in 1..=100 {
+            still.observe(&frame(id, 0));
+        }
+        assert!(
+            still.settled(90),
+            "{} quiet, {} still",
+            still.quiet,
+            still.still
+        );
+        let mut moving = Stillness::default();
+        for id in 1..=100 {
+            moving.observe(&frame(id, 500));
+        }
+        assert!(!moving.settled(90));
     }
 }
