@@ -994,12 +994,15 @@ function renderTiming(timing) {
 
 // ---------------------------------------------------------------- frames
 
-/// Streams the live picture from `frames` (PNG parts pushed at up to
-/// 30 fps). Draws only fully decoded frames, so the screen never blanks
-/// between two (swapping an <img> src can paint an empty box while it
-/// decodes, on Safari), and skips frames that arrive while one decodes.
-/// The server repeats the last frame every second, so a silent stream is a
-/// dead one: it is dropped and reopened.
+/// Streams the live picture from `frames`: PNG parts pushed as fast as the
+/// connection takes them, so the page shows the source's own rate (60 fps
+/// from the Switch card) and a slow link skips frames rather than lagging.
+/// Draws only fully decoded frames, so the screen never blanks between two
+/// (swapping an <img> src can paint an empty box while it decodes, on
+/// Safari), and skips frames that arrive while one decodes. The server
+/// repeats the last frame every second, so a silent stream is a dead one: it
+/// is dropped and reopened. A browser that never gets a part from the stream
+/// falls back to fetching `frame.png` one at a time.
 async function drawFrame(blob) {
   let source, done = () => {};
   if (window.createImageBitmap) {
@@ -1025,6 +1028,7 @@ async function drawFrame(blob) {
 
 const frames = {
   shown: null, lastOk: performance.now(), failures: 0, ctl: null, next: null, drawing: false,
+  silent: 0, polling: false,
   paused() { return $('pause').checked || document.hidden; },
   pump() {
     if (this.paused()) { this.stop(); return; }
@@ -1033,8 +1037,10 @@ const frames = {
   stop() { if (this.ctl) { this.ctl.abort(); this.ctl = null; } },
   async run() {
     const ctl = this.ctl = new AbortController();
-    this.lastOk = performance.now();
+    const started = this.lastOk = performance.now();
+    let parts = 0;
     try {
+      if (this.polling) await this.poll(ctl);
       const r = await fetch('frames', { cache: 'no-store', signal: ctl.signal });
       if (!r.ok || !r.body) throw new Error(r.status);
       const reader = r.body.getReader();
@@ -1046,6 +1052,7 @@ const frames = {
         let part;
         while ((part = takePart(buf))) {
           buf = part.rest;
+          parts++;
           this.lastOk = performance.now();
           this.failures = 0;
           if (part.id !== this.shown) this.draw(part.id, new Blob([part.body], { type: 'image/png' }));
@@ -1054,9 +1061,25 @@ const frames = {
     } catch (e) {
       if (this.ctl === ctl) this.failures++;
     }
+    if (parts) this.silent = 0;
+    else if (!this.polling && performance.now() - started > 2500 && ++this.silent >= 2) this.polling = true;
     if (this.ctl !== ctl) return;
     this.ctl = null;
     setTimeout(() => this.pump(), Math.min(250 * this.failures, 2000));
+  },
+  /// One frame at a time, for browsers that can't read the stream. Throws
+  /// on failure; returns only when stopped.
+  async poll(ctl) {
+    while (this.ctl === ctl) {
+      const r = await fetch('frame.png', { cache: 'no-store', signal: ctl.signal });
+      if (!r.ok) throw new Error(r.status);
+      const id = Number(r.headers.get('x-frame-id'));
+      const blob = await r.blob();
+      this.lastOk = performance.now();
+      this.failures = 0;
+      if (id !== this.shown) { await drawFrame(blob); this.shown = id; }
+    }
+    throw new Error('stopped');
   },
   async draw(id, blob) {
     this.next = { id, blob };

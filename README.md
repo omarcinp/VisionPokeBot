@@ -121,12 +121,12 @@ reloads the last save and retries.
 
 `--web [addr]` on `run` and `play` serves a live dashboard:
 
-- the normalized 240×160 frame the bot sees, streamed lossless at 30 fps (`/frames`), plus `/stream.mjpg` for VLC/OBS;
+- the normalized 240×160 frame the bot sees, streamed lossless at the source's own rate (`/frames`; 60 fps from the Switch card, fewer on a slow link), plus `/stream.mjpg` for VLC/OBS;
 - the game's sound on the Switch (the **sound** checkbox; the capture card's own audio input, `/audio.pcm`);
 - inferred `GameState` with provenance (screen, sync, inputs, dropped frames) and the current observation;
 - a filterable log of actions (controller commands) and events (screen changes, dropped frames, errors).
 
-Endpoints: `/frame.png`, `/frames` (multipart PNG, `X-Frame-Id` per part), `/stream.mjpg`, `/audio.pcm` (mono s16le, rate in `X-Audio-Rate`; 404 without sound), `/api/snapshot`, `/api/stream` (server-sent events).
+Endpoints: `/frame.png`, `/frames` (PNG parts, each after a MIME-style head with `Content-Length` and `X-Frame-Id`), `/stream.mjpg`, `/audio.pcm` (mono s16le, rate in `X-Audio-Rate`; 404 without sound), `/api/snapshot`, `/api/stream` (server-sent events).
 
 `--instance-label <text>` names the run in `/api/snapshot` (default `Local`). The page only uses relative URLs, so it works standalone at `/` and behind the hub.
 

@@ -31,9 +31,6 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// `?fps=1..30` lower them (the hub's thumbnails use `scale=1&fps=10`).
 const MJPEG_SCALE: u32 = 3;
 const MJPEG_MAX_FPS: u32 = 30;
-/// `/frames` skips frames arriving sooner than this after the last one sent:
-/// other frame of a 60 fps source, so a steady 30 fps.
-const STREAM_MIN_GAP: Duration = Duration::from_millis(25);
 /// `/frames` repeats the last frame this often when nothing new arrives, so
 /// the page can tell a quiet source from a dead connection.
 const STREAM_HEARTBEAT: Duration = Duration::from_secs(1);
@@ -171,25 +168,21 @@ fn cached_png(app: &AppState, frame: &FrameSnapshot) -> Bytes {
     }
 }
 
-/// The live picture as a multipart stream of lossless 1x PNGs (smaller than
-/// upscaled JPEGs for pixel art), each part tagged with `X-Frame-Id`. Frames
-/// are pushed as they arrive; one arriving within [`STREAM_MIN_GAP`] of the
-/// last one sent is skipped.
+/// The live picture as lossless 1x PNGs (smaller than upscaled JPEGs for
+/// pixel art), each preceded by a MIME-style part head with `Content-Length`
+/// and `X-Frame-Id`. There is no fixed rate: whenever the connection takes
+/// more data it gets the newest frame, so a fast link sees every frame of the
+/// source (60 fps from the Switch card) and a slow one skips frames instead
+/// of falling behind. Served as a plain byte stream: Safari and Firefox
+/// treat `multipart/x-mixed-replace` specially and never hand it to `fetch`.
 async fn frames(State(app): State<AppState>) -> Response {
     let rx = app.telemetry.inner.frame.subscribe();
     let parts = futures_util::stream::unfold(
-        (app, rx, None::<u64>, None::<tokio::time::Instant>),
-        |(app, mut rx, last_id, last_sent)| async move {
+        (app, rx, None::<u64>),
+        |(app, mut rx, last_id)| async move {
             let frame = loop {
-                // Frames that arrive within the gap are skipped rather than
-                // sent late, which keeps the rate locked to the source's.
                 let latest = rx.borrow_and_update().clone();
-                let due = last_sent
-                    .is_none_or(|sent: tokio::time::Instant| sent.elapsed() >= STREAM_MIN_GAP);
-                if let Some(frame) = latest
-                    .as_ref()
-                    .filter(|f| due && Some(f.frame_id) != last_id)
-                {
+                if let Some(frame) = latest.as_ref().filter(|f| Some(f.frame_id) != last_id) {
                     break frame.clone();
                 }
                 match tokio::time::timeout(STREAM_HEARTBEAT, rx.changed()).await {
@@ -211,22 +204,15 @@ async fn frames(State(app): State<AppState>) -> Response {
             .into_bytes();
             part.extend_from_slice(&png);
             part.extend_from_slice(b"\r\n");
-            let next = (
-                app,
-                rx,
-                Some(frame.frame_id),
-                Some(tokio::time::Instant::now()),
-            );
+            let next = (app, rx, Some(frame.frame_id));
             Some((Ok::<_, Infallible>(Bytes::from(part)), next))
         },
     );
     (
         [
-            (
-                header::CONTENT_TYPE,
-                "multipart/x-mixed-replace; boundary=frame",
-            ),
+            (header::CONTENT_TYPE, "application/octet-stream"),
             (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         Body::from_stream(parts),
     )

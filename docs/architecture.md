@@ -343,7 +343,7 @@ SoftReset → AwaitTitle (Start skips intro) → Title (Start) → AfterTitle
 - An embedded axum server serves:
   - the page;
   - `/frame.png` (lossless);
-  - `/frames` (the page's picture: lossless PNG parts pushed as frames arrive, at most every 25 ms, so 30 fps from a 60 fps card; the last frame repeats every second);
+  - `/frames` (the page's picture: lossless PNG parts; whenever the connection takes more data it gets the newest frame, so no fixed rate: every frame of a 60 fps card on a fast link, skipped frames rather than lag on a slow one; the last frame repeats every second; served as `application/octet-stream` because Safari and Firefox special-case `multipart/x-mixed-replace`; the page falls back to polling `frame.png` if the stream never delivers);
   - `/audio.pcm` (the Switch device session only: the capture card's sound, read by `arecord` from the ALSA card on the same USB device, mono s16le 48 kHz in 20 ms chunks);
   - `/stream.mjpg`;
   - `/api/snapshot`;
