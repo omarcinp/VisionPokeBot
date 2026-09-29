@@ -5,6 +5,11 @@
 //! (33, 3) took the player to 1F (4, 2), the dim frames still matched B1F,
 //! and the walk stepped off and on the ladder, up and down, until it
 //! failed "looping").
+//!
+//! Only a warp stepped onto: arriving on one (a cave's mouth) and standing
+//! there fires nothing, so the fades that follow an arrival say nothing
+//! (Switch, Mt. Moon's exit to Route 4 (19, 5): each fade after arriving
+//! put the belief back in the cave, and the walk out re-entered it).
 
 use pokebot_state::{GameEvent, GameState, Observation, PlayerPose, ScreenState};
 use pokebot_world::behavior::warp_fires;
@@ -15,6 +20,10 @@ pub(crate) struct WarpTaken {
     /// The destination of the warp under the player when a fade began.
     to: Option<PlayerPose>,
     in_fade: bool,
+    /// Where the player was when the current map was entered.
+    entered: Option<PlayerPose>,
+    /// The player has left that tile since.
+    stepped: bool,
 }
 
 impl WarpTaken {
@@ -24,10 +33,19 @@ impl WarpTaken {
         o: &Observation,
         state: &GameState,
     ) -> Vec<GameEvent> {
+        let pose = state.player.pose.value.as_ref();
+        if self.entered.as_ref().map(|p| &p.map) != pose.map(|p| &p.map) {
+            self.entered = pose.cloned();
+            self.stepped = false;
+        } else if pose != self.entered.as_ref() {
+            self.stepped = true;
+        }
         if o.screen.value == ScreenState::Transition {
             if !self.in_fade {
                 self.in_fade = true;
-                self.to = world.and_then(|w| destination(w, state.player.pose.value.as_ref()?));
+                self.to = world
+                    .filter(|_| self.stepped)
+                    .and_then(|w| destination(w, pose?));
             }
             return Vec::new();
         }
@@ -103,6 +121,12 @@ mod tests {
         let Some(world) = world() else { return };
         let ladder = at("RockTunnel_B1F", 33, 3);
         let mut w = WarpTaken::default();
+        // Stepped onto it from the floor next to it.
+        w.observe(
+            Some(&world),
+            &frame(0, ScreenState::Unknown),
+            &at("RockTunnel_B1F", 33, 4),
+        );
         assert!(w
             .observe(Some(&world), &frame(1, ScreenState::Transition), &ladder)
             .is_empty());
@@ -132,5 +156,38 @@ mod tests {
         assert!(w
             .observe(Some(&world), &frame(2, ScreenState::Unknown), &floor)
             .is_empty());
+    }
+
+    /// Switch: leaving Mt. Moon puts the player on Route 4's cave mouth
+    /// (19, 5), a warp. The fades after arriving aren't that warp: the
+    /// belief stays on Route 4. Stepping off and back on is.
+    #[test]
+    fn arriving_on_a_warp_is_not_taking_it() {
+        let Some(world) = world() else { return };
+        let mouth = at("Route4", 19, 5);
+        assert!(destination(&world, mouth.player.pose.value.as_ref().unwrap()).is_some());
+        let mut w = WarpTaken::default();
+        let inside = at("MtMoon_1F", 18, 37);
+        w.observe(Some(&world), &frame(0, ScreenState::Unknown), &inside);
+        // Arrived: the first frames on Route 4, then a fade.
+        w.observe(Some(&world), &frame(1, ScreenState::Unknown), &mouth);
+        w.observe(Some(&world), &frame(2, ScreenState::Transition), &mouth);
+        assert!(w
+            .observe(Some(&world), &frame(3, ScreenState::Unknown), &mouth)
+            .is_empty());
+        // Off it and back on: taken.
+        let p = mouth.player.pose.value.clone().unwrap();
+        w.observe(
+            Some(&world),
+            &frame(4, ScreenState::Unknown),
+            &at(&p.map, p.x, p.y + 1),
+        );
+        w.observe(Some(&world), &frame(5, ScreenState::Unknown), &mouth);
+        w.observe(Some(&world), &frame(6, ScreenState::Transition), &mouth);
+        assert_eq!(
+            w.observe(Some(&world), &frame(7, ScreenState::Unknown), &mouth)
+                .len(),
+            1
+        );
     }
 }
