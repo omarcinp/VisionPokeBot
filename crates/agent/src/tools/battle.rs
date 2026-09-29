@@ -4,6 +4,7 @@
 //! handled here, as in `StoryTask` (whose battle branch this copies; to be
 //! removed there once the story runs on tools).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use pokebot_core::{Button, ControllerCommand};
@@ -55,6 +56,9 @@ pub struct BattleStep {
     shift_row: Option<u8>,
     /// Action windows opened for the SHIFT (bounded: [`MAX_SHIFT_OPENS`]).
     shift_opens: u8,
+    /// Members the game refused to send out ("ZUBAT has no energy left to
+    /// battle!"): never chosen again this battle.
+    no_energy: BTreeSet<String>,
     /// Our battler in this party slot fainted and another can fight: the
     /// next one is sent out ("Use next POKéMON?" YES, SEND OUT). The game
     /// restarts only when all have fainted (the user's rule).
@@ -102,6 +106,7 @@ impl BattleStep {
             shifted: false,
             shift_row: None,
             shift_opens: 0,
+            no_energy: BTreeSet::new(),
             fainted: None,
             last_hud: None,
             next_foe: None,
@@ -792,10 +797,23 @@ impl ToolStep for BattleStep {
                     .lead()
                     .map(|l| l.display_name())
                     .unwrap_or_default();
-                self.memory
-                    .limits
-                    .observe(&d.lines.join(" "), &lead, &self.data);
+                let text = d.lines.join(" ");
+                self.memory.limits.observe(&text, &lead, &self.data);
                 self.give_up_a_refused_shift(ctx.events);
+                // The member chosen has fainted (its panel unread, the
+                // belief not knowing): another is chosen, afresh (fleet
+                // worker 6 chose ZUBAT again and again, then pressed B on
+                // a screen that can't be left).
+                if let Some(name) = no_energy(&text) {
+                    if self.no_energy.insert(name.clone()) {
+                        ctx.events.push(super::progress(
+                            "Battle",
+                            format!("{name} can't battle: choosing another"),
+                        ));
+                    }
+                    self.shift_row = None;
+                    self.shift_opens = 0;
+                }
             }
             // The one out fainted: a trainer's battle opens this screen
             // itself, a wild one after YES. The HUD's 0 HP is hidden soon
@@ -827,7 +845,18 @@ impl ToolStep for BattleStep {
                 // A double battle's other member out, left, can't be sent
                 // (emulator worker 2, Route 16: PRIMEAPE, the highest level,
                 // is "already in battle").
-                let in_battle: &[u8] = if party.double { &[0, 1] } else { &[] };
+                let mut in_battle: Vec<u8> = if party.double { vec![0, 1] } else { Vec::new() };
+                in_battle.extend(
+                    self.party
+                        .members
+                        .iter()
+                        .filter(|m| {
+                            self.member_name(ctx.state, m.slot)
+                                .is_some_and(|n| self.no_energy.contains(&n))
+                        })
+                        .map(|m| m.slot),
+                );
+                let in_battle = in_battle.as_slice();
                 let choice = self
                     .replacement(in_battle)
                     .map(|slot| (slot, self.member_name(ctx.state, slot)))
@@ -838,7 +867,10 @@ impl ToolStep for BattleStep {
                             .iter()
                             .enumerate()
                             .find(|(row, r)| {
-                                !in_battle.contains(&(*row as u8))
+                                (!party.double || *row > 1)
+                                    && r.nickname
+                                        .as_ref()
+                                        .is_none_or(|n| !self.no_energy.contains(n))
                                     && r.status != Some(Status::Fainted)
                                     && r.hp.is_none_or(|(hp, _)| hp > 0)
                             })
@@ -981,6 +1013,14 @@ pub fn loss_allowed(ctx: &ToolContext<'_>) -> bool {
             })
         })
     })
+}
+
+/// The member the party screen refused to send out: "ZUBAT has no energy
+/// left to battle!" (`gText_PkmnHasNoEnergy`).
+fn no_energy(text: &str) -> Option<String> {
+    let (name, _) = text.split_once(" has no energy")?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 #[cfg(test)]
@@ -1447,6 +1487,60 @@ mod tests {
             m.members = vec![row("VENUSAUR", 100), row("CATERPIE", 0), row("PIDGEY", 30)];
         }
         let label = step_label(&step_next(&mut step, &double, &three, &mut events));
+        assert!(label.contains("toward slot 2"), "{label}");
+
+        // The one chosen has fainted, its panel unread and the belief not
+        // knowing (fleet worker 6, Cerulean's rival: ZUBAT chosen again
+        // and again, then B on a screen that can't be left): once the game
+        // says so, another is chosen.
+        let others = state(vec![
+            member("SPECIES_CATERPIE", 5, 20, &["MOVE_TACKLE"]),
+            member("SPECIES_VENUSAUR", 33, 100, &["MOVE_RAZOR_LEAF"]),
+            member("SPECIES_PIDGEY", 9, 30, &["MOVE_TACKLE"]),
+        ]);
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        for id in [1, 20, 40] {
+            step_next(&mut step, &fainting(id), &others, &mut events);
+        }
+        let menu = |id: u64| {
+            let mut o = party_menu(id, false);
+            if let Some(m) = o.party_menu.as_mut() {
+                m.count = 3;
+                m.members = vec![
+                    row("CATERPIE", 0),
+                    PartyRowObservation {
+                        nickname: None,
+                        level: None,
+                        hp: None,
+                        status: None,
+                    },
+                    row("PIDGEY", 30),
+                ];
+            }
+            o
+        };
+        let label = step_label(&step_next(&mut step, &menu(60), &others, &mut events));
+        assert!(label.contains("toward slot 1"), "{label}");
+        let refused = |id: u64| {
+            let mut o = bare(id, ScreenState::Dialogue);
+            o.dialogue = Some(DialogueObservation {
+                kind: DialogueKind::MessageBox,
+                region: Region::new(8, 119, 224, 34),
+                waiting_for_input: true,
+                arrow: None,
+                stable_frames: 10,
+                text_cells: vec![1; 4],
+                lines: vec!["VENUSAUR has no energy".into(), "left to battle!".into()],
+                help: false,
+            });
+            o
+        };
+        for id in [70, 72] {
+            step_next(&mut step, &refused(id), &others, &mut events);
+        }
+        let label = step_label(&step_next(&mut step, &menu(80), &others, &mut events));
         assert!(label.contains("toward slot 2"), "{label}");
 
         // CATERPIE alone: its faint is the white-out.
