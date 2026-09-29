@@ -112,7 +112,39 @@ pub fn heal(ctx: &mut ToolContext<'_>, center: Option<&str>) -> Result<(), ToolE
             y: spot.y,
         })?;
     }
+    restock_potions(ctx, &map)?;
     Ok(())
+}
+
+/// Whether two of a town's buildings: their maps share the town's name
+/// (`PewterCity_Mart`, `PewterCity_PokemonCenter_1F`).
+fn same_town(a: &str, b: &str) -> bool {
+    let town = |m: &str| m.split('_').next().unwrap_or(m).to_owned();
+    a != b && town(a) == town(b)
+}
+
+/// After a Center's heal, the Potions short of
+/// [`crate::stock::POTIONS_KEPT`] are bought at the same town's mart (a
+/// town's Center and mart share its name: `PewterCity_…`). Fleet worker 2
+/// healed in Pewter, never bought balls (so never saw a mart), and met Mt.
+/// Moon's trainers with no Potion: whited out on the way back. A failed
+/// purchase doesn't fail the heal.
+fn restock_potions(ctx: &mut ToolContext<'_>, center: &str) -> Result<(), ToolError> {
+    use crate::stock::{potion_count, potions_to_buy};
+    let money = ctx.state().money.value.unwrap_or(0);
+    let count = potions_to_buy(&ctx.data, potion_count(ctx.state()), money);
+    let Some(pose) = ctx.pose().filter(|_| count > 0) else {
+        return Ok(());
+    };
+    let mart = crate::shop::nearest_mart(&ctx.world, &ctx.data, &pose, "ITEM_POTION", &ctx.gone);
+    if !mart.is_some_and(|(mart, _)| same_town(&mart, center)) {
+        return Ok(());
+    }
+    match super::buy::buy(ctx, "ITEM_POTION", count) {
+        Ok(_) => Ok(()),
+        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
+        Err(e) => ctx.emit(progress("Heal", format!("Potions not bought: {e}"))),
+    }
 }
 
 impl Tool for HealTool {
@@ -129,5 +161,40 @@ impl Tool for HealTool {
             return ToolOutcome::failed("not a Heal");
         };
         heal(ctx, center.as_deref()).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pewter's Center has Pewter's mart next door; Route 4's Center has
+    /// none (the nearest, Cerulean's, is a trip).
+    #[test]
+    fn potions_are_bought_only_at_the_town_s_own_mart() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(data)) = (
+            pokebot_world::World::load(root.join("data/world")),
+            pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let gone = crate::nav::Gone::new();
+        for (center, pose, own) in [
+            ("PewterCity_PokemonCenter_1F", (7, 4), true),
+            ("Route4_PokemonCenter_1F", (7, 4), false),
+        ] {
+            let pose = pokebot_state::PlayerPose {
+                map: center.into(),
+                x: pose.0,
+                y: pose.1,
+            };
+            let mart = crate::shop::nearest_mart(&world, &data, &pose, "ITEM_POTION", &gone);
+            assert_eq!(
+                mart.as_ref().is_some_and(|(m, _)| same_town(m, center)),
+                own,
+                "{center}: {mart:?}"
+            );
+        }
     }
 }
