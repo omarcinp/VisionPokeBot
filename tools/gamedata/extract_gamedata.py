@@ -166,6 +166,19 @@ def trainers(src):
     return out
 
 
+def trainer_class_money(src):
+    """Per trainer class, the money multiplier of `gTrainerMoneyTable`
+    (`battle_main.c`); the 0xFF terminator row's value is the default a
+    class missing from the table gets. A trainer's prize is
+    4 x its last Pokémon's level x this (x2 in a double battle)."""
+    text = (src / "battle_main.c").read_text()
+    body = text[text.index("gTrainerMoneyTable[] ="):]
+    body = body[: body.index("};")]
+    table = {c: int(v) for c, v in re.findall(r"\{\s*(TRAINER_CLASS_\w+),\s*(\d+)\s*\}", body)}
+    default = re.search(r"\{\s*0xFF,\s*(\d+)\s*\}", body)
+    return {"classes": table, "default": int(default.group(1)) if default else 0}
+
+
 def map_scripts(pret, maps):
     """Trainer objects and marts per map (from data/maps/*/scripts.inc; route
     trainers' scripts are shared in data/scripts/trainers.inc)."""
@@ -241,6 +254,7 @@ def main():
         "moves": move_data(src),
         "type_chart": type_chart(src),
         "trainers": trainers(src),
+        "trainer_class_money": trainer_class_money(src),
         "map_trainers": map_trainers,
         "wild": wild(src, id_to_name),
         "marts": marts,

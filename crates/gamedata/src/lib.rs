@@ -152,9 +152,42 @@ pub struct GameData {
     /// Map name → items sold there.
     pub marts: HashMap<String, Vec<String>>,
     pub items: HashMap<String, Item>,
+    /// Prize money per trainer class (`gTrainerMoneyTable`); empty in data
+    /// built before it was extracted.
+    #[serde(default)]
+    pub trainer_class_money: TrainerClassMoney,
+}
+
+/// `gTrainerMoneyTable`: a class's multiplier, and the value of the
+/// table's terminator for a class missing from it.
+#[derive(Debug, Default, Deserialize)]
+pub struct TrainerClassMoney {
+    pub classes: HashMap<String, u32>,
+    pub default: u32,
 }
 
 impl GameData {
+    /// The money beating `trainer` pays (`battle_script_commands.c`
+    /// `GetTrainerMoneyToGive`): 4 × its last Pokémon's level × its class's
+    /// multiplier, doubled in a double battle. `None` when the trainer, its
+    /// party or the class table is unknown.
+    pub fn prize(&self, trainer: &str) -> Option<u32> {
+        let t = self.trainers.get(trainer)?;
+        let last = t.party.last()?;
+        let table = &self.trainer_class_money;
+        if table.classes.is_empty() {
+            return None;
+        }
+        let per = t
+            .class
+            .as_ref()
+            .and_then(|c| table.classes.get(c))
+            .copied()
+            .unwrap_or(table.default);
+        let double = if t.double { 2 } else { 1 };
+        Some(4 * u32::from(last.level) * per * double)
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<GameData> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
