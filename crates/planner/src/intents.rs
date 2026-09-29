@@ -390,6 +390,12 @@ pub enum Intent {
         trainer: String,
         map: String,
     },
+    /// Earn prize money: beat `trainers` (trainer, map) in order until the
+    /// money reaches `money` (a purchase the money on hand can't pay for).
+    Earn {
+        money: u32,
+        trainers: Vec<(String, String)>,
+    },
     /// Raise a member to `level` in the wild on `map`.
     Train {
         map: String,
@@ -603,6 +609,7 @@ impl Intent {
             Intent::Heal { .. } => "Heal",
             Intent::Battle { .. } => "Battle",
             Intent::Beat { .. } => "Beat",
+            Intent::Earn { .. } => "Earn",
             Intent::Train { .. } => "Train",
             Intent::Catch { .. } => "Catch",
             Intent::Buy { .. } => "Buy",
@@ -644,6 +651,12 @@ impl Intent {
             Intent::Beat { trainer, map } => {
                 vec![GoalPredicate::at(map), GoalPredicate::can_beat(trainer)]
             }
+            // Each battle must be one the party wins; the tool walks to
+            // every trainer itself.
+            Intent::Earn { trainers, .. } => trainers
+                .iter()
+                .map(|(t, _)| GoalPredicate::can_beat(t))
+                .collect(),
             Intent::Train { map, .. } => {
                 vec![GoalPredicate::at(map), GoalPredicate::lead_hp(LEAD_HP_MIN)]
             }
@@ -705,6 +718,15 @@ impl Intent {
             Intent::Beat { trainer, .. } => {
                 vec![Effect::Establishes(GoalPredicate::flag(trainer, true))]
             }
+            Intent::Earn { money, trainers } => {
+                let mut out = vec![Effect::Establishes(GoalPredicate::Money { money: *money })];
+                out.extend(
+                    trainers
+                        .iter()
+                        .map(|(t, _)| Effect::Establishes(GoalPredicate::flag(t, true))),
+                );
+                out
+            }
             Intent::Train { .. } | Intent::Swap { .. } => Vec::new(),
             Intent::Catch { species, .. } => {
                 vec![Effect::Establishes(GoalPredicate::caught(species))]
@@ -751,6 +773,12 @@ impl Intent {
             }
             Intent::Heal { .. } => p.heal_s,
             Intent::Battle { .. } | Intent::Beat { .. } => p.trainer_battle_s,
+            Intent::Earn { trainers, .. } => trainers
+                .iter()
+                .map(|(_, map)| {
+                    ctx.route_to(map).map_or(f64::INFINITY, |r| r.cost_s) + p.trainer_battle_s
+                })
+                .sum(),
             Intent::Train { .. } => 0.0,
             Intent::Catch {
                 species,
@@ -787,6 +815,15 @@ impl fmt::Display for Intent {
             Intent::Heal { center } => write!(f, "Heal({center})"),
             Intent::Battle { policy } => write!(f, "Battle({policy})"),
             Intent::Beat { trainer, .. } => write!(f, "Beat({trainer})"),
+            Intent::Earn { money, trainers } => write!(
+                f,
+                "Earn(₽{money}: {})",
+                trainers
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Intent::Train {
                 map,
                 species,

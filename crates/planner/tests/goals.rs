@@ -1276,3 +1276,41 @@ fn a_walk_through_a_trainers_sight_prepares_for_its_battle() {
         }
     }
 }
+
+/// Fleet workers 2 and 5 had no money for the balls a catch needed and no
+/// plan earned it. From Pewter with ₽100, having ₽1000 is planned as
+/// prize battles (an Earn) against trainers known not to be beaten; Brock
+/// (badge held, his flag unknown here) is no prize. With the money on hand
+/// nothing is planned. (A purchase weighs this against other ways: for
+/// Poké Balls, Oak's gift after the parcel is cheaper.)
+#[test]
+fn money_short_is_earned_from_trainers_not_yet_beaten() {
+    use pokebot_state::Knowledge;
+    let Some(f) = fixture() else { return };
+    if f.data.trainer_class_money.classes.is_empty() {
+        return;
+    }
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = pewter();
+    // Route 3's trainers are known not beaten (a new game knows them all).
+    for t in &f.data.map_trainers["Route3"] {
+        knowledge
+            .world
+            .flags
+            .insert(t.trainer.clone(), Knowledge::observed(false, 1));
+    }
+    let goal = GoalPredicate::Money { money: 1000 };
+    knowledge.money = Knowledge::observed(100, 1);
+    let poor = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
+    print(&poor, 10);
+    let Intent::Earn { money, trainers } = &poor.intents[0].intent else {
+        panic!("{:?}", poor.intents[0].intent);
+    };
+    assert_eq!(*money, 1000);
+    assert!(trainers.iter().all(|(t, _)| t != "TRAINER_LEADER_BROCK"));
+    let prizes: u32 = trainers.iter().filter_map(|(t, _)| f.data.prize(t)).sum();
+    assert!(prizes >= 900, "{prizes}");
+    knowledge.money = Knowledge::observed(20_000, 1);
+    let rich = planner.plan(&goal, &knowledge, pose).unwrap();
+    assert!(rich.intents.is_empty(), "{:?}", rich.intents);
+}

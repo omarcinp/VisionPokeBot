@@ -96,6 +96,9 @@ const ON_THE_WAY_SLACK: i32 = 2;
 /// A walk on a map: (map, from, to).
 type SightKey = (String, (i32, i32), (i32, i32));
 
+/// Prize battles one `Earn` plans at most.
+const MAX_EARN_BATTLES: usize = 8;
+
 /// Extra tiles a walk accepts to go round a trainer's sight (a detour of up
 /// to this many steps beats a battle that can't be fled).
 const SIGHT_DETOUR_TILES: i32 = 60;
@@ -3873,9 +3876,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 .readiness_candidate(can_beat, p, belief, &ctx, &surround.passive)
                 .into_iter()
                 .collect(),
-            GoalPredicate::Money { money } => {
-                vec![self.unsupported(format!("earning ₽{money} is not planned"), p, &ctx)]
-            }
+            GoalPredicate::Money { money } => self.earn_candidates(*money, p, belief, &ctx),
             GoalPredicate::Healed { .. } | GoalPredicate::LeadHp { .. } => {
                 self.heal_candidates(belief, &ctx)
             }
@@ -4103,6 +4104,76 @@ impl<'p, 'a> Session<'p, 'a> {
             ));
         }
         out
+    }
+
+    /// Earning `money` (a purchase the money on hand can't pay for):
+    /// prize battles against trainers not yet beaten, on maps a route
+    /// reaches, those the party already beats first, then the most prize
+    /// money per second (route and battle), until their prizes cover what's
+    /// missing (`GameData::prize`). Weighed against the plan's other ways
+    /// by its cost, like any candidate (fleet workers 2 and 5: no money for
+    /// the balls a catch needed, and nothing planned to earn it).
+    fn earn_candidates(
+        &self,
+        money: u32,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        ctx: &PlanContext<'_>,
+    ) -> Vec<Candidate> {
+        let Some(have) = belief.knowledge.money.value else {
+            return vec![self.unsupported(
+                format!("earning ₽{money}: the money held is unknown"),
+                p,
+                ctx,
+            )];
+        };
+        let missing = money.saturating_sub(have);
+        let battle_s = self.planner.params.trainer_battle_s;
+        let mut offers: Vec<(bool, f64, String, String, u32)> = Vec::new();
+        for (trainer, maps) in &self.planner.trainer_maps {
+            // Only a trainer known not to be beaten yet: one the belief
+            // can't tell may be long beaten (Brock, his flag unknown in an
+            // old save, planned as a prize battle).
+            if belief.eval_goal(&GoalPredicate::flag(trainer, true)) != Truth::False {
+                continue;
+            }
+            let Some(prize) = self.planner.data.prize(trainer).filter(|p| *p > 0) else {
+                continue;
+            };
+            let Some((map, route_s)) = maps
+                .iter()
+                .filter_map(|m| {
+                    let r = self.route_to(m, belief)?;
+                    r.found().then(|| (m.clone(), r.cost_s))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+            else {
+                continue;
+            };
+            let ready = belief.eval_goal(&GoalPredicate::can_beat(trainer)) == Truth::True;
+            let rate = f64::from(prize) / (route_s + battle_s);
+            offers.push((ready, rate, trainer.clone(), map, prize));
+        }
+        offers.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
+        let mut earned = 0;
+        let mut trainers = Vec::new();
+        for (_, _, trainer, map, prize) in offers {
+            if earned >= missing || trainers.len() >= MAX_EARN_BATTLES {
+                break;
+            }
+            earned += prize;
+            trainers.push((trainer, map));
+        }
+        if earned < missing || trainers.is_empty() {
+            return vec![self.unsupported(
+                format!("earning ₽{money}: the trainers left pay ₽{earned} of ₽{missing}"),
+                p,
+                ctx,
+            )];
+        }
+        let intent = Intent::Earn { money, trainers };
+        let cost = intent.cost_s(ctx);
+        vec![Candidate::single(intent, ctx, cost)]
     }
 
     /// `Beat` for every map with an object whose script fights `trainer`.
@@ -5553,6 +5624,11 @@ fn dedupe_steps(steps: Vec<Step>) -> (Vec<Step>, f64) {
             | Intent::Catch { map, .. }
             | Intent::Buy { map, .. } => here = Some(map.clone()),
             Intent::Heal { center } | Intent::Swap { center, .. } => here = Some(center.clone()),
+            Intent::Earn { trainers, .. } => {
+                if let Some((_, map)) = trainers.last() {
+                    here = Some(map.clone());
+                }
+            }
             Intent::Battle { .. }
             | Intent::Teach { .. }
             | Intent::Probe { .. }

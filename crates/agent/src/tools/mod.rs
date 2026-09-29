@@ -166,6 +166,12 @@ pub enum Intent {
         map: String,
         object: u32,
     },
+    /// Beat `trainers` (trainer, map, object) in order until the money
+    /// reaches `money` (prize money for a purchase).
+    Earn {
+        money: u32,
+        trainers: Vec<(String, String, u32)>,
+    },
     /// Play the battle on screen.
     Battle {
         #[serde(default)]
@@ -259,6 +265,7 @@ impl Intent {
             Intent::RunScript { .. } => "RunScript",
             Intent::Heal { .. } => "Heal",
             Intent::Beat { .. } => "Beat",
+            Intent::Earn { .. } => "Earn",
             Intent::Battle { .. } => "Battle",
             Intent::Catch { .. } => "Catch",
             Intent::Train { .. } => "Train",
@@ -329,6 +336,22 @@ impl Intent {
                     object,
                 }
             }
+            P::Earn { money, trainers } => Intent::Earn {
+                money: *money,
+                trainers: trainers
+                    .iter()
+                    .map(|(trainer, map)| {
+                        let object = world
+                            .and_then(|w| trainer_object(w, map, trainer))
+                            .ok_or_else(|| {
+                                ToolError::Unsupported(format!(
+                                    "no object on {map} fights {trainer}"
+                                ))
+                            })?;
+                        Ok((trainer.clone(), map.clone(), object))
+                    })
+                    .collect::<Result<_, ToolError>>()?,
+            },
             P::Train {
                 map,
                 species,
@@ -436,6 +459,15 @@ impl std::fmt::Display for Intent {
                 map,
                 object,
             } => write!(f, "Beat {trainer} ({map}#{object})"),
+            Intent::Earn { money, trainers } => write!(
+                f,
+                "Earn ₽{money} from {}",
+                trainers
+                    .iter()
+                    .map(|(t, _, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Intent::Battle { policy } => write!(f, "Battle {policy:?}"),
             Intent::Catch { species, map } => match map {
                 Some(map) => write!(f, "Catch {species} on {map}"),
@@ -572,6 +604,7 @@ impl Default for Toolbox {
             Box::new(DialogueTool),
             Box::new(heal::HealTool),
             Box::new(beat::BeatTool),
+            Box::new(beat::EarnTool),
             Box::new(battle::BattleTool),
             Box::new(catch::CatchTool),
             Box::new(catch::TrainTool),

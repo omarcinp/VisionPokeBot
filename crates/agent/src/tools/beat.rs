@@ -120,6 +120,52 @@ impl Tool for BeatTool {
     }
 }
 
+/// Earns prize money: beats the planned trainers in order (each a `Beat`,
+/// which heals first when the lead isn't ready) until the money held
+/// reaches the target. A trainer already beaten is skipped; the prizes are
+/// the sensor's ("RED got ¥N for winning!").
+pub struct EarnTool;
+
+impl Tool for EarnTool {
+    fn name(&self) -> &str {
+        "Earn"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::Earn { .. })
+    }
+
+    fn run(&mut self, intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        let Intent::Earn { money, trainers } = intent else {
+            return ToolOutcome::failed("not an Earn");
+        };
+        for (trainer, map, object) in trainers {
+            if ctx.state().money.value.is_some_and(|m| m >= *money) {
+                break;
+            }
+            let beaten = ctx.state().world.flags.get(trainer).and_then(|k| k.value) == Some(true);
+            if beaten {
+                continue;
+            }
+            if let Err(e) = ctx.emit(progress("Earn", format!("{trainer} for prize money"))) {
+                return e.into();
+            }
+            let outcome = ctx.invoke(&Intent::Beat {
+                trainer: trainer.clone(),
+                map: map.clone(),
+                object: *object,
+            });
+            if let Err(e) = outcome.result {
+                return e.into();
+            }
+        }
+        match ctx.state().money.value {
+            Some(m) if m < *money => ToolOutcome::failed(format!("earned up to ₽{m} of ₽{money}")),
+            _ => ToolOutcome::ok(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
