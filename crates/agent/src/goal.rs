@@ -52,6 +52,12 @@ pub trait GoalPlanner {
         knowledge: &SavedKnowledge,
         pose: Option<PlayerPose>,
     ) -> Result<Plan, PlanError>;
+
+    /// The win probability a `CanBeat` is planned to (`PlanOptions`): a
+    /// step expecting less leaves readiness to be judged again.
+    fn confidence(&self) -> f64 {
+        pokebot_planner::PlanOptions::default().confidence
+    }
 }
 
 impl GoalPlanner for Planner<'_> {
@@ -63,7 +69,15 @@ impl GoalPlanner for Planner<'_> {
     ) -> Result<Plan, PlanError> {
         Planner::plan(self, goal, knowledge, pose)
     }
+
+    fn confidence(&self) -> f64 {
+        self.options.confidence
+    }
 }
+
+/// Readiness judged again at most this many times in a run without
+/// counting as a replan.
+const MAX_REJUDGES: u32 = 24;
 
 /// What the loop shows while it runs (the web UI's goal panel).
 #[derive(Debug, Clone, Default, Serialize)]
@@ -173,6 +187,8 @@ struct Run<'g, 'p> {
     recourses_run: u32,
     /// Probes a recourse has run in this run.
     probed: BTreeSet<ProbeFact>,
+    /// Times readiness was judged again after a step that fell short.
+    rejudges: u32,
 }
 
 /// Runs `goal` to completion or until the replans run out (spec §8).
@@ -212,6 +228,7 @@ pub fn run(
         last_reason: None,
         recourses_run: 0,
         probed: BTreeSet::new(),
+        rejudges: 0,
     };
     let outcome = run.main(ctx);
     let stopped = matches!(outcome, Err(ToolError::Stopped));
@@ -301,6 +318,15 @@ impl Run<'_, '_> {
                     return Ok(());
                 }
                 Executed::Replan(why) => reason = why,
+                Executed::Rejudge(why) => {
+                    // The party is what the step made it: progress, so
+                    // the replans start over (bounded).
+                    reason = why;
+                    self.rejudges += 1;
+                    if self.rejudges <= MAX_REJUDGES {
+                        plan_no = 0;
+                    }
+                }
                 Executed::Fainted(why) => {
                     self.report.outcome = why;
                     return Ok(());
@@ -436,6 +462,15 @@ impl Run<'_, '_> {
                     if self.holds(ctx, &knowledge, pose) {
                         self.set_status("done", "goal satisfied".into(), k, Some(step), ctx);
                         return Ok(Executed::Satisfied);
+                    }
+                    // Readiness planned this step knowing it falls short
+                    // ("reaches only …: judged again after"): the plan
+                    // doesn't go on to that battle (fleet workers 2 and
+                    // 5 caught a second PIDGEY, then fought Brock at an
+                    // expected 0% and whited out).
+                    if let Some(why) = short_of(step, self.planner.confidence()) {
+                        self.set_status("rejudge", why.clone(), k, Some(step), ctx);
+                        return Ok(Executed::Rejudge(why));
                     }
                 }
                 Err(ToolError::Replan(why)) => return Ok(Executed::Replan(why)),
@@ -949,9 +984,27 @@ enum Executed {
     Satisfied,
     Completed,
     Replan(String),
+    /// A step readiness knew falls short of a battle ran: plan again
+    /// with the party it made.
+    Rejudge(String),
     /// The party whited out (every Pokémon fainted): the run ends
     /// (`fainted: …`) for the session to reload the save.
     Fainted(String),
+}
+
+/// Why readiness is judged again after `step`: it was planned expecting
+/// a `CanBeat` below `confidence`.
+fn short_of(step: &PlannedIntent, confidence: f64) -> Option<String> {
+    step.expected
+        .iter()
+        .find(|(p, prob)| matches!(p, GoalPredicate::CanBeat { .. }) && *prob < confidence)
+        .map(|(p, prob)| {
+            format!(
+                "readiness judged again after {}: {p} expected {:.0}%",
+                step.intent,
+                prob * 100.0
+            )
+        })
 }
 
 /// Where the game puts the player after a white-out: the respawn heal
@@ -1130,6 +1183,40 @@ mod health_tests {
             ),
             ..Default::default()
         }
+    }
+
+    /// Fleet workers 2 and 5: readiness caught a second PIDGEY knowing
+    /// the party still reached 0% against Brock ("judged again after"),
+    /// and the plan went on to fight him. A step expecting a `CanBeat`
+    /// short of the confidence is judged again; one expecting it met, or
+    /// only a catch, isn't.
+    #[test]
+    fn a_step_readiness_knew_falls_short_is_judged_again() {
+        let step = |expected: Vec<(GoalPredicate, f64)>| PlannedIntent {
+            intent: pokebot_planner::Intent::Catch {
+                species: "SPECIES_PIDGEY".into(),
+                map: "Route1".into(),
+                slot: "land".into(),
+                balls: 7,
+            },
+            cost_s: 80.0,
+            assumes: Vec::new(),
+            unless: Vec::new(),
+            note: None,
+            route: Vec::new(),
+            expected,
+        };
+        let brock = GoalPredicate::can_beat("TRAINER_LEADER_BROCK");
+        let why = short_of(&step(vec![(brock.clone(), 0.0)]), 0.9).expect("judged again");
+        assert!(why.contains("TRAINER_LEADER_BROCK"), "{why}");
+        assert_eq!(short_of(&step(vec![(brock, 0.95)]), 0.9), None);
+        assert_eq!(
+            short_of(
+                &step(vec![(GoalPredicate::caught("SPECIES_PIDGEY"), 0.5)]),
+                0.9
+            ),
+            None
+        );
     }
 
     #[test]
