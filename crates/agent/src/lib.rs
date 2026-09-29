@@ -30,6 +30,8 @@ pub mod progress;
 pub mod recourse;
 pub mod save;
 pub mod scheduler;
+pub mod shiny_plan;
+pub mod shiny_starter;
 pub mod shop;
 pub mod stock;
 pub mod story;

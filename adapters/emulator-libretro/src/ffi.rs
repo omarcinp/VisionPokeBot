@@ -128,6 +128,9 @@ pub struct CoreApi {
     pub load_game: unsafe extern "C" fn(*const RetroGameInfo) -> bool,
     pub unload_game: unsafe extern "C" fn(),
     pub run: unsafe extern "C" fn(),
+    /// The console's power switch: off and on again (the cartridge keeps
+    /// its save, as a battery does).
+    pub reset: unsafe extern "C" fn(),
     library: Library,
 }
 
@@ -161,6 +164,7 @@ impl CoreApi {
             load_game: sym!("retro_load_game"),
             unload_game: sym!("retro_unload_game"),
             run: sym!("retro_run"),
+            reset: sym!("retro_reset"),
             library,
         })
     }

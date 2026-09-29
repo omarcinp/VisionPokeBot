@@ -228,6 +228,13 @@ impl Controller for BotController {
             .controller
             .console_link()
     }
+    fn power_cycle(&mut self) -> Result<bool> {
+        let mut s = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.bot {
+            return Err(Error::Device("bot stopped by web control".into()));
+        }
+        s.controller.power_cycle()
+    }
 }
 
 #[cfg(test)]

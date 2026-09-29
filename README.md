@@ -103,6 +103,19 @@ reloads the last save and retries.
 ./target/release/pokebot plan --against LEADER_BROCK --party BULBASAUR:6:TACKLE,GROWL
 ```
 
+### Hunt a shiny starter
+
+From a save in Oak's lab: stand in front of the ball, save, then time the
+title press (RNG seed) and the last A (advance). Each summary tells which
+frame was hit, and the next attempt aims at a shiny one (trainer IDs from the
+`.sav`). Emulator: a shiny in ~20 attempts; the Switch needs a hard reset
+first. Details: [`docs/shiny-starter.md`](docs/shiny-starter.md).
+
+```bash
+./target/release/pokebot story --new-game --save-game --until MeetOak --save /tmp/sh/game.sav --progress /tmp/sh/progress.json
+./target/release/pokebot shiny-starter --prepare --starter charmander --save /tmp/sh/game.sav --hunt /tmp/sh/hunt.json
+```
+
 ### In-process emulator (fast, deterministic)
 
 ```bash

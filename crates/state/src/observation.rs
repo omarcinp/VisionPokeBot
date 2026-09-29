@@ -215,6 +215,10 @@ pub struct SummaryObservation {
     pub hp: Option<(u16, u16)>,
     pub status: Option<crate::Status>,
     pub moves: Vec<(String, Option<(u8, u8)>)>,
+    /// INFO and SKILLS pages: the game's shiny star, cross-checked on INFO
+    /// against the picture's palette when the species' palettes are known.
+    #[serde(default)]
+    pub shiny: Option<ShinyReading>,
 }
 
 /// The region map (the Fly destination map, or the Town Map): which fly spots

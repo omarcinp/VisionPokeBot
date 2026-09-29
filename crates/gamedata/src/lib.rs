@@ -4,6 +4,8 @@
 //! `MOVE_VINE_WHIP`, `TYPE_GRASS`, ...).
 
 pub mod mechanics;
+pub mod rng;
+pub mod sav;
 pub mod training;
 
 use std::collections::HashMap;

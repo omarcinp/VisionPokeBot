@@ -366,6 +366,14 @@ session/
 - `events.jsonl` is flushed on every write and `frames.jsonl` about once a second; `controller.jsonl` is buffered and flushed only by `SessionRecorder::flush()` (at the end of a run) or when the recorder is dropped.
 - SIGINT and SIGTERM shut the bot down cleanly.
 
+## Shiny starter hunt (`gamedata::rng`, `gamedata::sav`, `agent::shiny_*`)
+
+- `pokebot shiny-starter`: soft or hard reset (`Controller::power_cycle`, the emulator's power switch).
+- One timed `Sequence` per attempt: the title press picks the seed, the last A the advance.
+- Closed-loop readout of the summary: the nature, the stats, and the shiny star cross-checked with the picture's palette.
+- (seed, advance) identification by brute force over the Gen III LCG, and a planner that learns each title's seed.
+- Theory, mGBA measurements (soft resets don't repeat; per-title seeds) and the Switch plan: [`shiny-starter.md`](shiny-starter.md).
+
 ## Next
 
 - **Switch acceptance of the Route 3 → Cascade Badge milestones.** All live runs so far are on the emulator; the physical Switch is the target. Acceptance needs `PrepareForRoute3` first (the Switch save is at `BeatBrock`), and it is pending because the console's video was black (the controller is mounted but there's no HDMI image).

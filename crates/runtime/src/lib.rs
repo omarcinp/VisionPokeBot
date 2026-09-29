@@ -303,6 +303,16 @@ impl Runtime {
         Ok(self.last_frame.insert(frame))
     }
 
+    /// Turns the console off and on (see [`Controller::power_cycle`]);
+    /// `Ok(false)` when the controller can't.
+    pub fn power_cycle(&mut self) -> Result<bool> {
+        let done = self.devices.controller.power_cycle()?;
+        if done {
+            self.info("power cycle: the console restarts");
+        }
+        Ok(done)
+    }
+
     pub fn execute(&mut self, command: ControllerCommand) -> Result<ControllerReceipt> {
         let receipt = match self.devices.controller.execute(command.clone()) {
             Ok(receipt) => receipt,

@@ -269,6 +269,13 @@ impl Controller for EmulatorController {
     fn is_idle(&self) -> Result<bool> {
         Ok(self.link.shared.lock().schedule.is_idle())
     }
+
+    /// Stepped, the frame already requested still plays before the power
+    /// goes off; every later frame comes from the new boot.
+    fn power_cycle(&mut self) -> Result<bool> {
+        self.link.request(|reply| Request::PowerCycle { reply })?;
+        Ok(true)
+    }
 }
 
 struct Shared {
@@ -303,6 +310,10 @@ enum Request {
     },
     DevSnapshot {
         reply: Sender<Result<Vec<u8>>>,
+    },
+    /// Off and on again, before the next frame emulated.
+    PowerCycle {
+        reply: Sender<Result<()>>,
     },
     Shutdown,
 }
@@ -388,6 +399,10 @@ fn run_stepped(core: &mut Core, shared: &Shared, requests: &Receiver<Request>) -
             Request::DevSnapshot { reply } => {
                 let _ = reply.send(core.dev_snapshot());
             }
+            Request::PowerCycle { reply } => {
+                core.power_cycle();
+                let _ = reply.send(Ok(()));
+            }
             Request::Shutdown => break,
         }
     }
@@ -412,6 +427,11 @@ fn run_realtime(
             }
             Ok(Request::DevSnapshot { reply }) => {
                 let _ = reply.send(core.dev_snapshot());
+                continue;
+            }
+            Ok(Request::PowerCycle { reply }) => {
+                core.power_cycle();
+                let _ = reply.send(Ok(()));
                 continue;
             }
             // Only the stepped source sends steps.
@@ -615,6 +635,12 @@ impl Core {
             _rom: rom,
             _rom_path: rom_path,
         })
+    }
+
+    /// Turns the console off and on again.
+    fn power_cycle(&mut self) {
+        // SAFETY: game is loaded; called on the thread that loaded it.
+        unsafe { (self.api.reset)() };
     }
 
     fn run_frame(&mut self, buttons: ButtonSet) -> RgbImage {

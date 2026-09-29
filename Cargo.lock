@@ -994,6 +994,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "pokebot-capture-card",
+ "pokebot-controller",
  "pokebot-core",
  "pokebot-emulator-libretro",
  "pokebot-gamedata",

@@ -237,6 +237,13 @@ pub trait Controller {
     fn console_link(&mut self) -> Result<ConsoleLink> {
         Ok(ConsoleLink::Unknown)
     }
+
+    /// Turns the console off and on again, if this device can (the
+    /// emulator's power switch). `Ok(false)`: it can't; a Switch restarts
+    /// the software from the HOME menu instead.
+    fn power_cycle(&mut self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 impl<C: Controller + ?Sized> Controller for Box<C> {
@@ -250,6 +257,10 @@ impl<C: Controller + ?Sized> Controller for Box<C> {
 
     fn console_link(&mut self) -> Result<ConsoleLink> {
         (**self).console_link()
+    }
+
+    fn power_cycle(&mut self) -> Result<bool> {
+        (**self).power_cycle()
     }
 }
 

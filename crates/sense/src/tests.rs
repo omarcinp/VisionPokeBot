@@ -209,6 +209,7 @@ fn summary(frame: u64, page: SummaryPage) -> Observation {
             ("TACKLE".into(), Some((30, 35))),
             ("SAND-ATTACK".into(), Some((15, 15))),
         ],
+        shiny: None,
     });
     o
 }

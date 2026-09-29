@@ -7,6 +7,7 @@ mod plan;
 mod scenario;
 mod script;
 mod serve;
+mod shiny;
 mod switch_device;
 #[cfg(feature = "viewer")]
 mod viewer;
@@ -196,6 +197,10 @@ enum Command {
     /// checkpoint (`--dry-run` prints them; execution arrives with the goal
     /// loop).
     Goal(goal::GoalArgs),
+    /// Hunt a shiny starter: from a save in front of the starter's Poké
+    /// Ball, time the title press (RNG seed) and the last A (advance), read
+    /// each result from the summary, aim at a shiny frame (docs/shiny-starter.md).
+    ShinyStarter(shiny::ShinyArgs),
     /// The development scenario library (`goal --dev-snapshots`)
     Scenario(scenario::ScenarioArgs),
     /// Serve every instance's web UI under one address: /switch/, /emu/.
@@ -256,6 +261,7 @@ fn main() -> Result<()> {
         | Command::NewGame { output, .. }
         | Command::Story { output, .. } => output.instance_file.is_some(),
         Command::Goal(args) => args.output.instance_file.is_some(),
+        Command::ShinyStarter(args) => args.output.instance_file.is_some(),
         _ => false,
     };
     if managed {
@@ -368,6 +374,7 @@ fn main() -> Result<()> {
         }
         Command::Plan(args) => plan::run(args),
         Command::Goal(args) => goal::run(args, Arc::clone(&stop)),
+        Command::ShinyStarter(args) => shiny::run(args, Arc::clone(&stop)),
         Command::Scenario(args) => scenario::run(args),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {

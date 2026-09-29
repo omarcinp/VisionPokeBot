@@ -386,7 +386,10 @@ impl FireRedPerception {
             return Some(observation);
         }
         if let Some(font) = self.font.as_deref() {
-            let summary = detect::party::summary(image, font);
+            let mut summary = detect::party::summary(image, font);
+            if let (Some(s), Some(palettes)) = (&mut summary, &self.palettes) {
+                summary_shiny_cross_check(image, s, palettes);
+            }
             let mut party_menu = if summary.is_none() {
                 detect::party::menu(image, font)
             } else {
@@ -892,6 +895,31 @@ impl FireRedPerception {
             mean_luma,
             changed_pixels,
         }
+    }
+}
+
+/// On INFO, the picture's palette must agree with the star; a picture that
+/// reads the other way (or can't decide) makes the reading `Unclear`.
+fn summary_shiny_cross_check(
+    image: &RgbImage,
+    summary: &mut pokebot_state::SummaryObservation,
+    palettes: &shiny::SpritePalettes,
+) {
+    if summary.page != pokebot_state::SummaryPage::Info {
+        return;
+    }
+    let Some(star) = summary.shiny else { return };
+    let Some(key) = summary
+        .species
+        .as_deref()
+        .and_then(|name| detect::hud::resolve(name, palettes.keys().map(String::as_str)))
+    else {
+        return;
+    };
+    let (normal, shiny_palette) = &palettes[key];
+    let picture = shiny::classify(image, detect::party::SUMMARY_PICTURE, normal, shiny_palette);
+    if picture != star {
+        summary.shiny = Some(pokebot_state::ShinyReading::Unclear);
     }
 }
 
@@ -1628,6 +1656,50 @@ mod tests {
     fn fixture(name: &str) -> Option<RgbImage> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         pokebot_video::png::load(root.join("captures/fixtures").join(name)).ok()
+    }
+
+    /// The summary's shiny star, checked against the picture's palette: a
+    /// shiny CHARMANDER from the emulator's shiny-starter hunt, a normal
+    /// IVYSAUR, and the shiny one with its star painted over.
+    #[test]
+    fn the_summary_star_and_picture_agree() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(font), Ok(data)) = (
+            text::Font::load(root.join("data/world/font_normal.json")),
+            pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let mut palettes = shiny::SpritePalettes::new();
+        for name in ["CHARMANDER", "IVYSAUR"] {
+            let p = data.species[&format!("SPECIES_{name}")]
+                .palettes
+                .clone()
+                .unwrap();
+            palettes.insert(
+                name.into(),
+                (p.normal.try_into().unwrap(), p.shiny.try_into().unwrap()),
+            );
+        }
+        let mut p = FireRedPerception::default()
+            .with_font(std::sync::Arc::new(font))
+            .with_palettes(std::sync::Arc::new(palettes));
+        use pokebot_state::ShinyReading::{Normal, Shiny, Unclear};
+        let mut read = |image: RgbImage| p.observe(&frame(0, image)).summary.and_then(|s| s.shiny);
+        if let Some(image) = fixture("emu-summary-info.png") {
+            assert_eq!(read(image), Some(Normal));
+        }
+        let Some(mut image) = fixture("emu-summary-info-shiny.png") else {
+            return;
+        };
+        assert_eq!(read(image.clone()), Some(Shiny));
+        let r = detect::party::SHINY_STAR;
+        for y in r.y..r.y + r.height {
+            for x in r.x..r.x + r.width {
+                image.put_pixel(x, y, [239, 235, 239]);
+            }
+        }
+        assert_eq!(read(image), Some(Unclear));
     }
 
     /// Wild battles on the command menu: the opponent, whether the caught

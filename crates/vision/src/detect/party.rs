@@ -4,7 +4,8 @@ use super::share;
 use crate::text::Font;
 use pokebot_core::RgbImage;
 use pokebot_state::{
-    PartyMenuObservation, PartyRowObservation, Region, Status, SummaryObservation, SummaryPage,
+    PartyMenuObservation, PartyRowObservation, Region, ShinyReading, Status, SummaryObservation,
+    SummaryPage,
 };
 
 fn read(image: &RgbImage, font: &Font, x: u32, y: u32, w: u32, h: u32) -> String {
@@ -113,6 +114,13 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
         (share(image, Region::new(0, 34, 32, 8), [239, 227, 247], 1) > 650)
             .then_some(Status::Healthy)
     });
+    let shiny = matches!(page, SummaryPage::Info | SummaryPage::Skills).then(|| {
+        if shiny_star(image) {
+            ShinyReading::Shiny
+        } else {
+            ShinyReading::Normal
+        }
+    });
     Some(SummaryObservation {
         details,
         page,
@@ -123,7 +131,31 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
         hp,
         status,
         moves,
+        shiny,
     })
+}
+
+/// Where INFO and SKILLS draw the shiny star (`CreateShinyStarObj`: an 8×8
+/// sprite centred at (106, 40)).
+pub const SHINY_STAR: Region = Region::new(102, 36, 8, 8);
+/// The monster picture on INFO (`CreateMonPicSprite` at (60, 65), 64×64).
+pub const SUMMARY_PICTURE: Region = Region::new(28, 33, 64, 64);
+
+/// Without the star, [`SHINY_STAR`] shows only the panel's pale grey and
+/// white rows; the star's coloured pixels stand out from both.
+fn shiny_star(image: &RgbImage) -> bool {
+    let r = SHINY_STAR;
+    let mut ink = 0;
+    for y in r.y..r.y + r.height {
+        for x in r.x..r.x + r.width {
+            let [red, green, blue] = image.pixel(x, y);
+            let (lo, hi) = (red.min(green).min(blue), red.max(green).max(blue));
+            if lo < 200 || hi - lo > 40 {
+                ink += 1;
+            }
+        }
+    }
+    ink >= 8
 }
 
 /// The ailment icon (`status_icons`, 32×8) drawn in `region`: its
@@ -433,6 +465,44 @@ mod tests {
         let s = summary(&skills, &font).unwrap();
         assert!(s.details.defense.is_none());
         assert_eq!(s.details.attack, Some(33));
+    }
+
+    #[test]
+    fn the_shiny_star_is_read_on_info_and_skills() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        for name in [
+            "emu-summary-info.png",
+            "emu-summary-skills.png",
+            "switch-summary-info-hasty.png",
+            "switch-summary-skills-27.png",
+        ] {
+            let Ok(mut image) = pokebot_video::png::load(root.join("captures/fixtures").join(name))
+            else {
+                continue;
+            };
+            let s = summary(&image, &font).unwrap();
+            assert_eq!(s.shiny, Some(ShinyReading::Normal), "{name}");
+            // A yellow star drawn where the game puts it.
+            super::super::testing::fill(&mut image, 104, 37, 4, 6, [255, 213, 0]);
+            let s = summary(&image, &font).unwrap();
+            assert_eq!(s.shiny, Some(ShinyReading::Shiny), "{name}");
+        }
+        // The emulator's shiny-starter hunt: a real star, on both pages.
+        for name in ["emu-summary-info-shiny.png", "emu-summary-skills-shiny.png"] {
+            if let Ok(image) = pokebot_video::png::load(root.join("captures/fixtures").join(name)) {
+                let s = summary(&image, &font).unwrap();
+                assert_eq!(s.shiny, Some(ShinyReading::Shiny), "{name}");
+            }
+        }
+        let Ok(moves) =
+            pokebot_video::png::load(root.join("captures/fixtures/emu-summary-moves.png"))
+        else {
+            return;
+        };
+        assert_eq!(summary(&moves, &font).unwrap().shiny, None);
     }
 
     #[test]
