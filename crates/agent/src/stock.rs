@@ -44,6 +44,42 @@ pub fn must_buy(stock: Option<u16>) -> bool {
     stock.is_some_and(|n| n <= SHINY_RESERVE)
 }
 
+/// Potions held (the Items pocket); `None` when the pocket is unknown.
+pub fn potion_count(state: &GameState) -> Option<u16> {
+    let items = state
+        .bag
+        .pockets
+        .get(&pokebot_state::Pocket::Items)?
+        .value
+        .as_ref()?;
+    Some(
+        items
+            .iter()
+            .filter(|(item, _)| item == "ITEM_POTION")
+            .fold(0u16, |sum, (_, n)| sum.saturating_add(*n)),
+    )
+}
+
+/// Potions to buy on a mart visit: up to [`POTIONS_KEPT`], from the money
+/// kept for them (fleet worker 2 kept that money, bought none, and met Mt.
+/// Moon's trainers with nothing to heal with: whited out on the way back
+/// to the Center). Nothing when the pocket is unknown.
+pub fn potions_to_buy(data: &GameData, held: Option<u16>, money: u32) -> u16 {
+    let Some(held) = held else { return 0 };
+    let Some(price) = data
+        .items
+        .get("ITEM_POTION")
+        .map(|i| i.price)
+        .filter(|p| *p > 0)
+    else {
+        return 0;
+    };
+    let need = u16::try_from(POTIONS_KEPT)
+        .unwrap_or(0)
+        .saturating_sub(held);
+    need.min(u16::try_from(money / price).unwrap_or(u16::MAX))
+}
+
 /// Worth buying at a mart: stock unknown or below the target.
 pub fn should_buy(stock: Option<u16>) -> bool {
     stock.is_none_or(|n| n < TARGET_STOCK)
@@ -61,6 +97,17 @@ mod tests {
     fn data() -> Option<GameData> {
         GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))
             .ok()
+    }
+
+    #[test]
+    fn potions_are_topped_up_to_the_kept_two_from_the_money_kept() {
+        let Some(data) = data() else { return };
+        // ¥600 is the kept money itself: it buys the two.
+        assert_eq!(potions_to_buy(&data, Some(0), 600), 2);
+        assert_eq!(potions_to_buy(&data, Some(1), 5000), 1);
+        assert_eq!(potions_to_buy(&data, Some(2), 5000), 0);
+        assert_eq!(potions_to_buy(&data, Some(0), 299), 0);
+        assert_eq!(potions_to_buy(&data, None, 5000), 0);
     }
 
     #[test]

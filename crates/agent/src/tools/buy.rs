@@ -13,7 +13,7 @@ use super::{
 };
 use crate::nav::Destination;
 use crate::shop::{nearest_mart, Purchase};
-use crate::stock::ball_count;
+use crate::stock::{ball_count, potion_count, potions_to_buy};
 use crate::{Action, Decision, Expectation, Outcome};
 
 pub struct BuyTool;
@@ -86,12 +86,55 @@ pub fn buy(ctx: &mut ToolContext<'_>, item: &str, count: u16) -> Result<String, 
     let mut step = BuyStep {
         data: Arc::clone(&ctx.data),
         phase: Phase::Approach,
-        go: GoStep::new(ctx, Destination::Facing { map, x, y }),
+        go: GoStep::new(
+            ctx,
+            Destination::Facing {
+                map: map.clone(),
+                x,
+                y,
+            },
+        ),
         purchase: Purchase::new(item, count).with_stock(stock),
     };
     let summary = ctx.drive(&mut step)?;
     ctx.emit(progress("Mart", summary.clone()))?;
+    top_up_potions(ctx, &map, clerk, (x, y))?;
     Ok(summary)
+}
+
+/// At the counter anyway: the Potions the money is kept for, when this
+/// mart sells them and fewer than [`crate::stock::POTIONS_KEPT`] are held.
+fn top_up_potions(
+    ctx: &mut ToolContext<'_>,
+    map: &str,
+    clerk: u32,
+    (x, y): (i32, i32),
+) -> Result<(), ToolError> {
+    let Some(pose) = ctx.pose() else {
+        return Ok(());
+    };
+    let sells = nearest_mart(&ctx.world, &ctx.data, &pose, "ITEM_POTION", &ctx.gone)
+        .is_some_and(|(m, c)| m == map && c == clerk);
+    let money = ctx.state().money.value.unwrap_or(0);
+    let count = potions_to_buy(&ctx.data, potion_count(ctx.state()), money);
+    if !sells || count == 0 {
+        return Ok(());
+    }
+    let mut step = BuyStep {
+        data: Arc::clone(&ctx.data),
+        phase: Phase::Approach,
+        go: GoStep::new(
+            ctx,
+            Destination::Facing {
+                map: map.to_owned(),
+                x,
+                y,
+            },
+        ),
+        purchase: Purchase::new("ITEM_POTION", count),
+    };
+    let summary = ctx.drive(&mut step)?;
+    ctx.emit(progress("Mart", summary))
 }
 
 impl Tool for BuyTool {

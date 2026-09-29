@@ -410,8 +410,13 @@ impl Purchase {
             return Ok(0);
         };
         // An explicit count keeps the Potion money too, like the stock
-        // policy's.
-        let affordable = affordable(data, &self.item, money).min(MAX_QUANTITY);
+        // policy's; Potions are what it is kept for.
+        let affordable = if self.item == "ITEM_POTION" {
+            u16::try_from(money / price).unwrap_or(u16::MAX)
+        } else {
+            affordable(data, &self.item, money)
+        }
+        .min(MAX_QUANTITY);
         let count = want.min(affordable);
         if count == 0 {
             self.log(
@@ -1108,6 +1113,21 @@ mod tests {
         assert_eq!(a.expect, Expectation::ShopQuantity(2));
         let a = act(twice(&mut p, quantity(6, 1000, 2), &data, &mut events));
         assert_eq!(a.expect, Expectation::Question);
+    }
+
+    /// The Potion money is kept for Potions: ¥600 buys the two.
+    #[test]
+    fn potions_may_spend_the_money_kept_for_them() {
+        let Some(data) = data() else { return };
+        let mut p = Purchase::new("ITEM_POTION", 2);
+        let mut events = Vec::new();
+        act(p.next(&mart_menu(1, 0), &data, &mut events));
+        let a = act(twice(&mut p, list(2, 600, 1), &data, &mut events));
+        assert_eq!(a.expect, Expectation::ShopQuantity(1));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::GoalProgress { detail, .. } if detail.contains("buys only") || detail.contains("buying 0")
+        )));
     }
 
     #[test]
