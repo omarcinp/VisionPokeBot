@@ -1,11 +1,12 @@
 //! Independent processes are required by libretro's process-global callbacks.
 //! Workers share only read-only assets; cartridge saves, progress and logs are private.
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -108,6 +109,162 @@ impl Drop for Launcher {
             let _ = thread.join();
         }
     }
+}
+
+/// What a worker runs, for [`worker_stages`].
+struct StageArgs<'a> {
+    task: &'a str,
+    /// The worker's number (1-based).
+    n: u64,
+    dir: &'a Path,
+    core: &'a Path,
+    rom: &'a Path,
+    data: &'a Path,
+    instance_file: &'a Path,
+    label: &'a str,
+    scenarios: &'a Path,
+}
+
+/// The processes a worker runs in turn, each one's arguments. An autonomy
+/// worker starts a new game with a shiny starter: the story up to Oak's
+/// "choose!" (saved there), the shiny-starter hunt from it
+/// (docs/shiny-starter.md: power cycles and aimed timings, the shiny saved
+/// in game), then the goal loop continuing that save. A hunt that ends
+/// without one leaves the save in front of the ball, and the goal picks
+/// the starter as usual.
+fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
+    let os = |s: &str| OsString::from(s);
+    let path = |p: &Path| p.as_os_str().to_owned();
+    let output = |hold: bool| {
+        let mut v = vec![
+            os("--core"),
+            path(a.core),
+            os("--rom"),
+            path(a.rom),
+            os("--save"),
+            path(&a.dir.join("game.sav")),
+            os("--web"),
+            os("127.0.0.1:0"),
+        ];
+        if hold {
+            v.push(os("--hold"));
+        }
+        v.extend([
+            os("--telemetry-hz"),
+            os("5"),
+            os("--instance-label"),
+            os(a.label),
+            os("--instance-file"),
+            path(a.instance_file),
+        ]);
+        v
+    };
+    let progress = || {
+        vec![
+            os("--save-game"),
+            os("--progress"),
+            path(&a.dir.join("progress.json")),
+            os("--world"),
+            path(&a.data.join("world")),
+        ]
+    };
+    match a.task {
+        "autonomy" => {
+            let (starter, fossil) = new_game_choice(a.n);
+            // The stepped emulator is deterministic: the same inputs
+            // play the same game. A name typed differently shifts
+            // the frames the game's random numbers advance by.
+            let player =
+                ["RED", "LEAF", "ASH", "KRIS", "GOLD", "JADE", "BLUE", "ROSE"][(a.n % 8) as usize];
+            let gender = if a.n % 2 == 0 { "boy" } else { "girl" };
+            let mut story = vec![
+                os("story"),
+                os("--new-game"),
+                os("--until"),
+                os("MeetOak"),
+                os("--gender"),
+                os(gender),
+                os("--starter"),
+                os(starter),
+            ];
+            story.extend(progress());
+            story.extend(output(false));
+            let mut hunt = vec![
+                os("shiny-starter"),
+                os("--prepare"),
+                os("--starter"),
+                os(starter),
+                os("--hunt"),
+                path(&a.dir.join("hunt.json")),
+                os("--world"),
+                path(&a.data.join("world")),
+            ];
+            hunt.extend(output(false));
+            let mut goal: Vec<OsString> = [
+                "goal",
+                "flag FLAG_SYS_GAME_CLEAR",
+                "--plan-budget-secs",
+                "240",
+                "--max-replans",
+                "8",
+                "--restart",
+                "--starter",
+                starter,
+                "--fossil",
+                fossil,
+                "--player",
+                player,
+                "--gender",
+                gender,
+                "--dev-snapshots",
+            ]
+            .map(os)
+            .into();
+            goal.push(path(a.scenarios));
+            goal.push(os("--continue"));
+            goal.extend(progress());
+            goal.extend(output(true));
+            vec![story, hunt, goal]
+        }
+        task => {
+            let mut args = vec![os(if task == "observe" { "run" } else { task })];
+            args.extend(output(true));
+            if task == "story" {
+                args.push(os("--new-game"));
+                args.extend(progress());
+            }
+            vec![args]
+        }
+    }
+}
+
+/// One stage runs as the executable itself; several in turn under `sh`,
+/// in a process group of their own so a stop (SIGTERM to the shell)
+/// reaches the stage running.
+fn chain(executable: &Path, stages: &[Vec<OsString>]) -> Command {
+    if let [only] = stages {
+        let mut command = Command::new(executable);
+        command.args(only);
+        return command;
+    }
+    let quote = |s: &OsString| format!("'{}'", s.to_string_lossy().replace('\'', "'\\''"));
+    let line = |stage: &Vec<OsString>| {
+        std::iter::once(quote(&executable.as_os_str().to_owned()))
+            .chain(stage.iter().map(quote))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let (last, first) = stages.split_last().expect("stages");
+    let (head, middle) = first.split_first().expect("two stages at least");
+    let mut script = String::from("trap 'trap - TERM; kill 0' TERM\nrun() { \"$@\" & wait $!; }\n");
+    script += &format!("run {} || exit $?\n", line(head));
+    for stage in middle {
+        script += &format!("run {}\n", line(stage));
+    }
+    script += &format!("exec {}\n", line(last));
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(script).process_group(0);
+    command
 }
 
 /// Worker `n`'s (1-based) starter and Mt. Moon fossil: every pair in
@@ -349,68 +506,23 @@ impl State {
                 std::fs::create_dir(&dir)?;
                 std::os::unix::fs::symlink(&data, dir.join("data"))?;
                 let log = File::create(dir.join("worker.log"))?;
-                let mut command = Command::new(&self.executable);
-                command.current_dir(&dir).arg(match task {
-                    "observe" => "run",
-                    "autonomy" => "goal",
-                    _ => task,
+                let stages = worker_stages(&StageArgs {
+                    task,
+                    n: self.next,
+                    dir: &dir,
+                    core: &core,
+                    rom: &rom,
+                    data: &data,
+                    instance_file: &self.registry.join(format!("{name}.json")),
+                    label: &label,
+                    scenarios: &self.args.scenario_library,
                 });
-                if task == "autonomy" {
-                    let (starter, fossil) = new_game_choice(self.next);
-                    // The stepped emulator is deterministic: the same inputs
-                    // play the same game. A name typed differently shifts
-                    // the frames the game's random numbers advance by.
-                    let player = ["RED", "LEAF", "ASH", "KRIS", "GOLD", "JADE", "BLUE", "ROSE"]
-                        [(self.next % 8) as usize];
-                    let gender = if self.next % 2 == 0 { "boy" } else { "girl" };
-                    command
-                        .args([
-                            "flag FLAG_SYS_GAME_CLEAR",
-                            "--plan-budget-secs",
-                            "240",
-                            "--max-replans",
-                            "8",
-                            "--restart",
-                            "--starter",
-                            starter,
-                            "--fossil",
-                            fossil,
-                            "--player",
-                            player,
-                            "--gender",
-                            gender,
-                            "--dev-snapshots",
-                        ])
-                        .arg(&self.args.scenario_library);
-                }
+                let mut command = chain(&self.executable, &stages);
                 command
-                    .args(["--core"])
-                    .arg(&core)
-                    .arg("--rom")
-                    .arg(&rom)
-                    .arg("--save")
-                    .arg(dir.join("game.sav"))
-                    .args([
-                        "--web",
-                        "127.0.0.1:0",
-                        "--hold",
-                        "--telemetry-hz",
-                        "5",
-                        "--instance-label",
-                    ])
-                    .arg(&label)
-                    .arg("--instance-file")
-                    .arg(self.registry.join(format!("{name}.json")))
+                    .current_dir(&dir)
                     .stdin(Stdio::null())
                     .stdout(log.try_clone()?)
                     .stderr(log);
-                if matches!(task, "story" | "autonomy") {
-                    command
-                        .args(["--new-game", "--save-game", "--progress"])
-                        .arg(dir.join("progress.json"))
-                        .arg("--world")
-                        .arg(data.join("world"));
-                }
                 // Linux also stops workers if the supervisor dies unexpectedly.
                 let parent = std::process::id();
                 // SAFETY: only async-signal-safe libc calls in the forked child.
@@ -772,18 +884,110 @@ mod tests {
         while !dir.join("args.txt").exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
+        // The first stage runs: the story up to Oak, on the worker's save.
         let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
-        assert!(args.starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
         assert!(
-            args.contains("--starter\nbulbasaur\n--fossil\ndome\n"),
+            args.starts_with("story\n--new-game\n--until\nMeetOak\n"),
             "{args}"
         );
-        assert!(args.contains("--new-game\n--save-game\n"));
         assert!(args.contains(dir.join("progress.json").to_str().unwrap()));
         assert!(args.contains(dir.join("game.sav").to_str().unwrap()));
-        use clap::Parser;
-        crate::Cli::try_parse_from(std::iter::once("pokebot").chain(args.lines())).unwrap();
         drop(fleet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every worker starts a new game with a shiny starter (the user's
+    /// ask): story to Oak, the hunt, then the goal loop continuing that
+    /// save. Each stage is a command the CLI takes, on the worker's own
+    /// save, hunt and progress files.
+    #[test]
+    fn autonomy_hunts_a_shiny_starter_before_the_goal_loop() {
+        use clap::Parser;
+        let dir = PathBuf::from("/runs/emu-1");
+        let stages = worker_stages(&StageArgs {
+            task: "autonomy",
+            n: 2,
+            dir: &dir,
+            core: Path::new("/core.so"),
+            rom: Path::new("/game.gba"),
+            data: Path::new("/data"),
+            instance_file: Path::new("/registry/emu-1.json"),
+            label: "Emulator 2",
+            scenarios: Path::new("/scenarios"),
+        });
+        let lines: Vec<String> = stages
+            .iter()
+            .map(|s| {
+                s.iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("story\n--new-game\n--until\nMeetOak\n"));
+        assert!(lines[1].starts_with("shiny-starter\n--prepare\n--starter\ncharmander\n"));
+        assert!(lines[1].contains("/runs/emu-1/hunt.json"));
+        assert!(lines[2].starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
+        assert!(lines[2].contains("--starter\ncharmander\n--fossil\ndome\n"));
+        assert!(lines[2].contains("--continue\n--save-game\n"));
+        assert!(!lines[2].contains("--new-game"));
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("/runs/emu-1/game.sav"));
+            // Only the last stage keeps observing when done.
+            assert_eq!(line.contains("--hold"), i == 2, "{line}");
+            crate::Cli::try_parse_from(std::iter::once("pokebot").chain(line.lines()))
+                .unwrap_or_else(|e| panic!("stage {i}: {e}"));
+        }
+    }
+
+    /// The chain runs its stages in turn and a SIGTERM to it stops the one
+    /// running, not just the shell.
+    #[test]
+    fn a_chain_runs_its_stages_in_turn_and_stops_as_a_whole() {
+        let root = std::env::temp_dir().join(format!("vpb-chain-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("stage");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\necho \"$1\" >> ran.txt\n[ \"$1\" = last ] && exec sleep 60\n[ \"$1\" = \"it's\" ] && sleep 60\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let stages = |names: &[&str]| -> Vec<Vec<OsString>> {
+            names.iter().map(|n| vec![OsString::from(*n)]).collect()
+        };
+        let ran = || std::fs::read_to_string(root.join("ran.txt")).unwrap_or_default();
+        let wait_for = |want: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ran().ends_with(want) {
+                assert!(Instant::now() < deadline, "{:?}", ran());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let mut child = chain(&exe, &stages(&["first", "second", "last"]))
+            .current_dir(&root)
+            .spawn()
+            .unwrap();
+        wait_for("first\nsecond\nlast\n");
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        child.wait().unwrap();
+        std::fs::remove_file(root.join("ran.txt")).unwrap();
+        // Stopped mid-stage (a quote in an argument, too): nothing is left.
+        let mut child = chain(&exe, &stages(&["first", "it's", "last"]))
+            .current_dir(&root)
+            .spawn()
+            .unwrap();
+        wait_for("first\nit's\n");
+        let group = child.id() as libc::pid_t;
+        unsafe { libc::kill(group, libc::SIGTERM) };
+        child.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(-group, 0) } == 0 {
+            assert!(Instant::now() < deadline, "a stage outlived the stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ran(), "first\nit's\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 
