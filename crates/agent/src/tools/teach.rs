@@ -1028,6 +1028,7 @@ mod tests {
                 Some(false),
             ],
             members: Vec::new(),
+            double: false,
         });
         let (b, label) = pressed(&run(&mut step, &o, &mut events)).unwrap();
         assert_eq!((b, label.as_str()), (Button::A, "teach slot 0"));
@@ -1140,6 +1141,7 @@ mod tests {
             option_cursor: None,
             able: vec![Some(false), Some(false)],
             members: Vec::new(),
+            double: false,
         });
         let d = step.next(&mut StepContext {
             observation: &o,

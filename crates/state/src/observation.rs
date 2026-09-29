@@ -175,6 +175,10 @@ pub struct PartyMenuObservation {
     /// with ABLE!/NOT ABLE!, an ailment replaces the level with its icon.
     #[serde(default)]
     pub members: Vec<PartyRowObservation>,
+    /// A double battle's layout (`PARTY_LAYOUT_DOUBLE`): slots 0 and 1,
+    /// left, are the two in battle.
+    #[serde(default)]
+    pub double: bool,
 }
 
 /// One party menu panel as read; `None` where it didn't read (or isn't

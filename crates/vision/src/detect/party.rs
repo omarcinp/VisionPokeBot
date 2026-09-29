@@ -144,19 +144,59 @@ fn ailment_icon(image: &RgbImage, region: Region, background: crate::color::Rgb)
     .find_map(|(color, status)| (share(image, region, color, 1) > 300).then_some(status))
 }
 
-pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
-    // Dialogue can also say "POKéMON". Require the party menu's striped
-    // teal background, outside all six panels, the bottom message and a
-    // field move's description box (over the prompt, from y 112).
-    if super::share_any(
-        image,
-        Region::new(16, 80, 70, 28),
-        &[[74, 170, 165], [57, 138, 140]],
-        2,
-    ) < 850
-    {
-        return None;
+/// Where the party menu puts its panels (`PARTY_LAYOUT_*`): a double
+/// battle shows the two members in battle on the left, one above the
+/// other, and the other four on the right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Single,
+    Double,
+}
+
+impl Layout {
+    /// Dialogue can also say "POKéMON". Require the party menu's striped
+    /// teal background, outside all six panels, the bottom message and a
+    /// field move's description box (over the prompt, from y 112): under
+    /// the lead's panel in the single layout; between the right column's
+    /// panels in the double one (whose slot 1 panel sits under the lead's;
+    /// emulator worker 2, a double battle on Route 16 stuck on its
+    /// "Choose a POKéMON." after a faint).
+    fn of(image: &RgbImage) -> Option<Layout> {
+        let teal = |r: Region| super::share_any(image, r, &[[74, 170, 165], [57, 138, 140]], 2);
+        if teal(Region::new(16, 80, 70, 28)) >= 850 {
+            return Some(Layout::Single);
+        }
+        // The gaps between slots 2 and 3 and slots 3 and 4 (y 32..40 and
+        // 64..72 across the right column) are panels in the single layout.
+        let gaps = [Region::new(96, 33, 140, 6), Region::new(96, 65, 140, 6)];
+        gaps.iter()
+            .all(|&r| teal(r) * 10 >= 140 * 6 * 9)
+            .then_some(Layout::Double)
     }
+
+    /// Members on the left in big panels.
+    fn big(self) -> u8 {
+        match self {
+            Layout::Single => 1,
+            Layout::Double => 2,
+        }
+    }
+
+    /// The top-left of `slot`'s panel window (`s*PartyMenuWindowTemplate`,
+    /// tiles × 8).
+    fn window(self, slot: u8) -> (u32, u32) {
+        let slot = u32::from(slot);
+        match self {
+            Layout::Single if slot == 0 => (8, 24),
+            Layout::Single => (96, 8 + 24 * (slot - 1)),
+            Layout::Double if slot < 2 => (8, 8 + 56 * slot),
+            Layout::Double => (96, 8 + 32 * (slot - 2)),
+        }
+    }
+}
+
+pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
+    let layout = Layout::of(image)?;
     // A message over the party screen ("IVYSAUR wants to learn …") is the
     // full-width message box (its mauve band runs along the whole bottom,
     // unlike the prompt box's or the action window's): dialogue, not the
@@ -186,21 +226,28 @@ pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
     let occupied = |r| share(image, r, [74, 170, 165], 1) < 500;
     let probe_x = if options.is_empty() { 164 } else { 116 };
     let mut count = 1;
-    for i in 0..5 {
-        if occupied(Region::new(probe_x, 12 + 24 * i, 16, 12)) {
+    for slot in 1..6 {
+        let (x, y) = layout.window(slot);
+        let probe = if slot < layout.big() {
+            Region::new(x + 8, y + 16, 64, 24)
+        } else {
+            Region::new(probe_x, y + 4, 16, 12)
+        };
+        if occupied(probe) {
             count += 1;
         } else {
             break;
         }
     }
     let selected = (0..count).find(|&i| {
-        let r = if i == 0 {
-            Region::new(8, 26, 77, 2)
+        let (x, y) = layout.window(i);
+        let r = if i < layout.big() {
+            Region::new(x, y + 2, 77, 2)
         } else {
             // The panel's orange top border: rows 10..=11 (measured); left
             // of the action window when it is open.
             let width = if options.is_empty() { 142 } else { 48 };
-            Region::new(96, 9 + 24 * (i - 1) as u32, width, 3)
+            Region::new(x, y + 1, width, 3)
         };
         share(image, r, [255, 131, 49], 1) > 200
     });
@@ -209,10 +256,11 @@ pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
     // of theirs).
     let able: Vec<Option<bool>> = (0..count)
         .map(|i| {
-            let text = if i == 0 {
-                read(image, font, 8, 56, 80, 14)
+            let (x, y) = layout.window(i);
+            let text = if i < layout.big() {
+                read(image, font, x, y + 32, 80, 14)
             } else {
-                read(image, font, 168, 10 + 24 * (u32::from(i) - 1), 70, 14)
+                read(image, font, x + 72, y + 2, 70, 14)
             };
             match text.as_str() {
                 "ABLE!" => Some(true),
@@ -235,12 +283,14 @@ pub fn menu(image: &RgbImage, font: &Font) -> Option<PartyMenuObservation> {
         option_cursor,
         able,
         members: Vec::new(),
+        double: layout == Layout::Double,
     })
 }
 
 /// Where one panel prints its facts (`sPartyBoxInfoRects` in the windows
 /// of `sSinglePartyMenuWindowTemplate`, in FONT_SMALL glyph cells): the
-/// lead's window is at (8, 24), the others' at (96, 8 + 24(i − 1)).
+/// lead's window is at (8, 24), the others' at (96, 8 + 24(i − 1));
+/// [`Layout::window`] for a double battle's.
 /// Measured on `emu-party-cant-use.png`: the white ink sits in cell rows
 /// 4..=10 with its shadow on row 11.
 struct Panel {
@@ -256,25 +306,25 @@ struct Panel {
     icon: Region,
 }
 
-fn panel(slot: u8) -> Panel {
-    if slot == 0 {
+fn panel(layout: Layout, slot: u8) -> Panel {
+    let (x, y) = layout.window(slot);
+    if slot < layout.big() {
         return Panel {
-            name: Region::new(32, 35, 56, 12),
-            level: Region::new(40, 44, 32, 12),
-            hp: Region::new(38, 60, 50, 12),
-            level_overlap: Region::new(40, 44, 32, 3),
-            hp_overlap: Region::new(38, 60, 50, 4),
-            icon: Region::new(40, 48, 32, 8),
+            name: Region::new(x + 24, y + 11, 56, 12),
+            level: Region::new(x + 32, y + 20, 32, 12),
+            hp: Region::new(x + 30, y + 36, 50, 12),
+            level_overlap: Region::new(x + 32, y + 20, 32, 3),
+            hp_overlap: Region::new(x + 30, y + 36, 50, 4),
+            icon: Region::new(x + 32, y + 24, 32, 8),
         };
     }
-    let y = 8 + 24 * (u32::from(slot) - 1);
     Panel {
-        name: Region::new(118, y + 3, 50, 12),
-        level: Region::new(128, y + 12, 32, 12),
-        hp: Region::new(196, y + 12, 42, 12),
-        level_overlap: Region::new(128, y + 12, 32, 3),
-        hp_overlap: Region::new(196, y + 12, 42, 3),
-        icon: Region::new(128, y + 15, 32, 8),
+        name: Region::new(x + 22, y + 3, 50, 12),
+        level: Region::new(x + 32, y + 12, 32, 12),
+        hp: Region::new(x + 100, y + 12, 42, 12),
+        level_overlap: Region::new(x + 32, y + 12, 32, 3),
+        hp_overlap: Region::new(x + 100, y + 12, 42, 3),
+        icon: Region::new(x + 32, y + 15, 32, 8),
     }
 }
 
@@ -299,9 +349,10 @@ pub fn members(
     // The small font's 0 and O are the same bitmap (ties read as the
     // letter): numbers read with O for 0.
     let number = |r: Region, exclude: &[Region]| text(r, exclude).map(|t| t.replace('O', "0"));
+    let layout = Layout::of(image).unwrap_or(Layout::Single);
     (0..menu.count)
         .map(|slot| {
-            let p = panel(slot);
+            let p = panel(layout, slot);
             let nickname = text(p.name, &[]).filter(|n| !n.is_empty());
             let level = number(p.level, &[p.level_overlap])
                 .and_then(|t| t.strip_prefix("Lv").and_then(|n| n.trim().parse().ok()))
@@ -643,6 +694,32 @@ mod tests {
             if let Some(r) = rows(name) {
                 assert_eq!(r, vec![row("BULBASAUR", level, Some(hp))], "{name}");
             }
+        }
+        // A double battle's layout (emulator worker 2, Route 16): the two
+        // in battle on the left, RATTATA just fainted.
+        if let Some(r) = rows("emu-battle-party-double.png") {
+            let fainted = PartyRowObservation {
+                nickname: Some(String::from("RATTATA")),
+                level: None,
+                hp: Some((0, 24)),
+                status: Some(Status::Fainted),
+            };
+            assert_eq!(
+                r,
+                vec![
+                    row("PRIMEAPE", 48, Some((126, 135))),
+                    fainted,
+                    row("CHARMELEON", 24, Some((69, 69))),
+                    row("WEEDLE", 5, Some((19, 19))),
+                    row("CATERPIE", 3, Some((16, 16))),
+                    row("DUGTRIO", 29, Some((60, 60))),
+                ]
+            );
+            let image = load("emu-battle-party-double.png").unwrap();
+            let m = menu(&image, &font).unwrap();
+            assert_eq!(m.selected, Some(0));
+            assert!(m.double);
+            assert_eq!(m.prompt, "Choose a POKéMON.");
         }
         // 60/ 60: the zeros read as the letter O in the small font.
         if let Some(r) = rows("switch-party-choose-ivysaur-60.png") {

@@ -134,14 +134,17 @@ impl BattleStep {
     /// The member to send out after ours fainted: the switch-training
     /// carrier when it can fight, else the one least at risk against the
     /// foe last on the HUD, else the highest level; `None` when no other
-    /// can fight (a white-out follows).
-    fn replacement(&self) -> Option<u8> {
+    /// can fight (a white-out follows). Never one of `in_battle` (a double
+    /// battle's other member out: "already in battle").
+    fn replacement(&self, in_battle: &[u8]) -> Option<u8> {
         let out = self.fainted.or(self.active).unwrap_or(0);
         let able: Vec<&party::Member> = self
             .party
             .members
             .iter()
-            .filter(|m| m.slot != out && m.hp.is_some_and(|(hp, _)| hp > 0))
+            .filter(|m| {
+                m.slot != out && !in_battle.contains(&m.slot) && m.hp.is_some_and(|(hp, _)| hp > 0)
+            })
             .collect();
         if let Some(carrier) = self
             .shift_to
@@ -227,7 +230,7 @@ impl BattleStep {
             .or(self.active)
             .unwrap_or(0);
         self.fainted = Some(slot);
-        if self.replacement().is_none() {
+        if self.replacement(&[]).is_none() {
             return Some(Decision::Fail(format!(
                 "whited out: our last Pokémon fainted ({name})"
             )));
@@ -821,8 +824,12 @@ impl ToolStep for BattleStep {
                             && r.status == Some(Status::Fainted)
                     })
                 };
+                // A double battle's other member out, left, can't be sent
+                // (emulator worker 2, Route 16: PRIMEAPE, the highest level,
+                // is "already in battle").
+                let in_battle: &[u8] = if party.double { &[0, 1] } else { &[] };
                 let choice = self
-                    .replacement()
+                    .replacement(in_battle)
                     .map(|slot| (slot, self.member_name(ctx.state, slot)))
                     .filter(|(_, name)| !fainted_row(name.as_deref()))
                     .or_else(|| {
@@ -830,8 +837,9 @@ impl ToolStep for BattleStep {
                             .members
                             .iter()
                             .enumerate()
-                            .find(|(_, r)| {
-                                r.status != Some(Status::Fainted)
+                            .find(|(row, r)| {
+                                !in_battle.contains(&(*row as u8))
+                                    && r.status != Some(Status::Fainted)
                                     && r.hp.is_none_or(|(hp, _)| hp > 0)
                             })
                             .map(|(row, r)| (row as u8, r.nickname.clone()))
@@ -1417,6 +1425,29 @@ mod tests {
             &mut events,
         ));
         assert_eq!(label, "choose SHIFT");
+
+        // A double battle (emulator worker 2, Route 16): CATERPIE fainted
+        // beside VENUSAUR, the highest level, which is already in battle
+        // (left, slot 0): the next one is PIDGEY, from the right.
+        let three = state(vec![
+            member("SPECIES_VENUSAUR", 33, 100, &["MOVE_RAZOR_LEAF"]),
+            member("SPECIES_CATERPIE", 5, 20, &["MOVE_TACKLE"]),
+            member("SPECIES_PIDGEY", 9, 30, &["MOVE_TACKLE"]),
+        ]);
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        for id in [1, 20, 40] {
+            step_next(&mut step, &fainting(id), &three, &mut events);
+        }
+        let mut double = party_menu(60, false);
+        if let Some(m) = double.party_menu.as_mut() {
+            m.count = 3;
+            m.double = true;
+            m.members = vec![row("VENUSAUR", 100), row("CATERPIE", 0), row("PIDGEY", 30)];
+        }
+        let label = step_label(&step_next(&mut step, &double, &three, &mut events));
+        assert!(label.contains("toward slot 2"), "{label}");
 
         // CATERPIE alone: its faint is the white-out.
         let one = state(vec![member("SPECIES_CATERPIE", 5, 20, &["MOVE_TACKLE"])]);

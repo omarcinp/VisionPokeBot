@@ -1181,6 +1181,7 @@ mod tests {
             option_cursor: cursor,
             able: Vec::new(),
             members: Vec::new(),
+            double: false,
         }
     }
 
