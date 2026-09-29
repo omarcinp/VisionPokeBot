@@ -577,15 +577,15 @@ async fn handle(
                 let entry = &list_instances_for(std::slice::from_ref(r), dir)[0];
                 entry["alive"] == true
             });
-        let video = matches!(
-            stripped.split('?').next(),
-            Some("/frame.png" | "/stream.mjpg")
-        );
+        let path = stripped.split('?').next();
+        let video = matches!(path, Some("/frame.png" | "/stream.mjpg" | "/frames"));
+        // Only the device session hears the card; bots have no sound.
+        let audio = path == Some("/audio.pcm");
         let bot_alive = list_instances_for(std::slice::from_ref(route), dir)[0]["alive"] == true;
         let ready = device.is_some_and(|r| {
             list_instances_for(std::slice::from_ref(r), dir)[0]["video_ready"] == true
         });
-        if (video && ready) || !bot_alive {
+        if (video && ready) || audio || !bot_alive {
             device.map_or(route.backend, |r| r.backend)
         } else {
             route.backend

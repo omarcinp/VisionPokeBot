@@ -121,11 +121,12 @@ reloads the last save and retries.
 
 `--web [addr]` on `run` and `play` serves a live dashboard:
 
-- the normalized 240×160 frame the bot sees (lossless), plus `/stream.mjpg` for VLC/OBS;
+- the normalized 240×160 frame the bot sees, streamed lossless at 30 fps (`/frames`), plus `/stream.mjpg` for VLC/OBS;
+- the game's sound on the Switch (the **sound** checkbox; the capture card's own audio input, `/audio.pcm`);
 - inferred `GameState` with provenance (screen, sync, inputs, dropped frames) and the current observation;
 - a filterable log of actions (controller commands) and events (screen changes, dropped frames, errors).
 
-Endpoints: `/frame.png`, `/stream.mjpg`, `/api/snapshot`, `/api/stream` (server-sent events).
+Endpoints: `/frame.png`, `/frames` (multipart PNG, `X-Frame-Id` per part), `/stream.mjpg`, `/audio.pcm` (mono s16le, rate in `X-Audio-Rate`; 404 without sound), `/api/snapshot`, `/api/stream` (server-sent events).
 
 `--instance-label <text>` names the run in `/api/snapshot` (default `Local`). The page only uses relative URLs, so it works standalone at `/` and behind the hub.
 
@@ -150,7 +151,7 @@ tools/live-run.sh --instance switch /tmp/sw.log story --video capture-card:/dev/
 tools/live-run.sh --instance emu /tmp/emu.log story --continue --save-game --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --record /tmp/emu-<n>
 ```
 
-Each process runs in its own systemd user unit (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`; `systemctl --user status <unit>`), so runs outlive the shell or agent session that started them. `sg video` gives the unit access to the capture card.
+Each process runs in its own systemd user unit (`pokebot-switch`, `pokebot-emu`, `pokebot-hub`, `pokebot-disk-guard`; `systemctl --user status <unit>`), so runs outlive the shell or agent session that started them. `sg video` and `sg audio` give the unit access to the capture card's picture and sound.
 
 ### Trainer badges and Pokémon details
 

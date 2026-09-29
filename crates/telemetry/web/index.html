@@ -309,9 +309,11 @@
     <div class="toolbar">
       <label><input type="checkbox" id="show-pad" checked> gamepad</label>
       <label><input type="checkbox" id="pause"> pause</label>
+      <label title="Live game sound (Switch capture card)"><input type="checkbox" id="sound"> sound <span id="sound-note"></span></label>
       <span class="sp"></span>
       <a href="frame.png" target="_blank">frame.png</a>
       <a href="stream.mjpg" target="_blank">mjpeg</a>
+      <a href="audio.pcm" target="_blank" title="raw mono s16le PCM">pcm</a>
     </div>
   </section>
 
@@ -915,7 +917,6 @@ function setStatus(status) {
   setText('video-src', s.video_source);
   setText('controller', s.controller);
   setText('uptime', fmtTime(s.uptime_ms).replace(/\.\d+$/, ''));
-  if (s.frame_id != null) frames.want(s.frame_id);
 
   const st = status.state || {};
   const ob = status.observation || {};
@@ -993,10 +994,12 @@ function renderTiming(timing) {
 
 // ---------------------------------------------------------------- frames
 
-/// Fetches the newest frame, one request at a time. Every request has a
-/// timeout, so a dropped connection can never leave the picture frozen.
-/// Draws only fully decoded frames, so the screen never blanks between two
-/// (swapping an <img> src can paint an empty box while it decodes, on Safari).
+/// Streams the live picture from `frames` (PNG parts pushed at up to
+/// 30 fps). Draws only fully decoded frames, so the screen never blanks
+/// between two (swapping an <img> src can paint an empty box while it
+/// decodes, on Safari), and skips frames that arrive while one decodes.
+/// The server repeats the last frame every second, so a silent stream is a
+/// dead one: it is dropped and reopened.
 async function drawFrame(blob) {
   let source, done = () => {};
   if (window.createImageBitmap) {
@@ -1021,34 +1024,144 @@ async function drawFrame(blob) {
 }
 
 const frames = {
-  wanted: null, shown: null, busy: false, lastOk: performance.now(), failures: 0,
-  want(id) { this.wanted = id; this.pump(); },
-  async pump() {
-    if (this.busy || this.wanted == null || this.wanted === this.shown || $('pause').checked || document.hidden) return;
-    this.busy = true;
-    const id = this.wanted;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 2500);
-    let ok = false;
+  shown: null, lastOk: performance.now(), failures: 0, ctl: null, next: null, drawing: false,
+  paused() { return $('pause').checked || document.hidden; },
+  pump() {
+    if (this.paused()) { this.stop(); return; }
+    if (!this.ctl) this.run();
+  },
+  stop() { if (this.ctl) { this.ctl.abort(); this.ctl = null; } },
+  async run() {
+    const ctl = this.ctl = new AbortController();
+    this.lastOk = performance.now();
     try {
-      const r = await fetch(`frame.png?f=${id}`, { cache: 'no-store', signal: ctl.signal });
-      if (!r.ok) throw new Error(r.status);
-      await drawFrame(await r.blob());
-      this.shown = Number(r.headers.get('x-frame-id')) || id;
-      if (this.shown !== id && this.wanted === id) this.wanted = this.shown;
-      this.lastOk = performance.now();
-      this.failures = 0;
-      ok = true;
+      const r = await fetch('frames', { cache: 'no-store', signal: ctl.signal });
+      if (!r.ok || !r.body) throw new Error(r.status);
+      const reader = r.body.getReader();
+      let buf = new Uint8Array(0);
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) throw new Error('stream ended');
+        buf = concatBytes(buf, value);
+        let part;
+        while ((part = takePart(buf))) {
+          buf = part.rest;
+          this.lastOk = performance.now();
+          this.failures = 0;
+          if (part.id !== this.shown) this.draw(part.id, new Blob([part.body], { type: 'image/png' }));
+        }
+      }
     } catch (e) {
-      this.failures++;
-    } finally {
-      clearTimeout(timer);
-      this.busy = false;
+      if (this.ctl === ctl) this.failures++;
     }
-    if (this.wanted !== this.shown) setTimeout(() => this.pump(), ok ? 0 : Math.min(250 * this.failures, 2000));
+    if (this.ctl !== ctl) return;
+    this.ctl = null;
+    setTimeout(() => this.pump(), Math.min(250 * this.failures, 2000));
+  },
+  async draw(id, blob) {
+    this.next = { id, blob };
+    if (this.drawing) return;
+    this.drawing = true;
+    while (this.next) {
+      const { id, blob } = this.next;
+      this.next = null;
+      try { await drawFrame(blob); this.shown = id; } catch (_) { /* skip a bad frame */ }
+    }
+    this.drawing = false;
   },
 };
+
+function concatBytes(a, b) {
+  if (!a.length) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a);
+  out.set(b, a.length);
+  return out;
+}
+
+/// The first complete multipart part in `buf`: its frame id, body and the
+/// bytes after it, or null until more arrive.
+function takePart(buf) {
+  let end = -1;
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) { end = i; break; }
+  }
+  if (end < 0) return null;
+  const head = new TextDecoder().decode(buf.subarray(0, end));
+  const length = Number(/content-length:\s*(\d+)/i.exec(head)?.[1]);
+  const id = Number(/x-frame-id:\s*(\d+)/i.exec(head)?.[1]);
+  const start = end + 4;
+  if (!(length >= 0) || buf.length < start + length) return null;
+  return { id, body: buf.slice(start, start + length), rest: buf.subarray(start + length) };
+}
 $('pause').addEventListener('change', () => frames.pump());
+
+// ---------------------------------------------------------------- sound
+
+/// Plays `audio.pcm` (mono s16le) through Web Audio: each chunk is scheduled
+/// right after the previous one, about 120 ms ahead of now. A playhead that
+/// falls behind (network hiccup) or drifts too far ahead restarts there, so
+/// the sound never lags the picture by more than a moment.
+const sound = {
+  ctx: null, ctl: null, at: 0, failures: 0,
+  LEAD: 0.12, MAX_LEAD: 0.4,
+  toggle(on) {
+    if (!on) { this.stop(); return; }
+    // Browsers only start audio from a user gesture: create it here.
+    this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+    this.ctx.resume();
+    if (!this.ctl) this.run();
+  },
+  stop() {
+    if (this.ctl) { this.ctl.abort(); this.ctl = null; }
+    if (this.ctx) this.ctx.suspend();
+    setText('sound-note', '');
+  },
+  async run() {
+    const ctl = this.ctl = new AbortController();
+    try {
+      const r = await fetch('audio.pcm', { cache: 'no-store', signal: ctl.signal });
+      if (r.status === 404) { setText('sound-note', 'no sound'); $('sound').checked = false; this.ctl = null; return; }
+      if (!r.ok || !r.body) throw new Error(r.status);
+      const rate = Number(r.headers.get('x-audio-rate')) || 48000;
+      setText('sound-note', '');
+      this.at = 0;
+      const reader = r.body.getReader();
+      let odd = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) throw new Error('stream ended');
+        let bytes = odd ? concatBytes(odd, value) : value;
+        odd = bytes.length % 2 ? bytes.slice(-1) : null;
+        if (odd) bytes = bytes.subarray(0, bytes.length - 1);
+        this.failures = 0;
+        this.play(bytes, rate);
+      }
+    } catch (e) {
+      if (this.ctl === ctl) this.failures++;
+    }
+    if (this.ctl !== ctl) return;
+    this.ctl = null;
+    setText('sound-note', 'reconnecting…');
+    setTimeout(() => { if ($('sound').checked) this.toggle(true); }, Math.min(500 * this.failures, 3000));
+  },
+  play(bytes, rate) {
+    const n = bytes.length / 2;
+    if (!n) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+    const buffer = this.ctx.createBuffer(1, n, rate);
+    const out = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) out[i] = view.getInt16(2 * i, true) / 32768;
+    const now = this.ctx.currentTime;
+    if (this.at < now || this.at > now + this.MAX_LEAD) this.at = now + this.LEAD;
+    const node = this.ctx.createBufferSource();
+    node.buffer = buffer;
+    node.connect(this.ctx.destination);
+    node.start(this.at);
+    this.at += buffer.duration;
+  },
+};
+$('sound').addEventListener('change', (e) => sound.toggle(e.target.checked));
 
 // ---------------------------------------------------------------- instances
 
@@ -1100,7 +1213,7 @@ const link = {
     es.addEventListener('ping', alive);
     es.addEventListener('status', (e) => { alive(); setStatus(JSON.parse(e.data)); });
     es.addEventListener('log', (e) => { alive(); addEntry(JSON.parse(e.data), true); });
-    es.addEventListener('frame', (e) => { alive(); frames.want(Number(e.data)); });
+    es.addEventListener('frame', alive);
   },
   check() {
     if (document.hidden) return;
@@ -1110,23 +1223,23 @@ const link = {
       this.state('down', 'reconnecting');
       this.connect();
     }
-    // The picture is stuck if newer frames exist but none loaded lately.
-    const stuck = frames.wanted !== frames.shown && now - frames.lastOk > 3000 && !$('pause').checked;
+    // The picture stream repeats its frame every second: silence means stuck.
+    const stuck = !frames.paused() && now - frames.lastOk > 3000;
     $('stale').classList.toggle('on', stuck || quiet > 4000 || this.es.readyState !== 1);
-    if (stuck && !frames.busy) frames.pump();
+    if (stuck) { frames.stop(); frames.pump(); }
   },
 };
 $('conn').querySelector('b').id = 'conn-text';
 new ResizeObserver(() => document.documentElement.style.setProperty('--hdr', `${document.querySelector('header').offsetHeight}px`))
   .observe(document.querySelector('header'));
 new GameControls($('game-controls'), './');
-// Keep the device preview live even while the bot is planning or stopped.
-setInterval(() => { if (!document.hidden && !$('pause').checked && !frames.busy) frames.want(Date.now()); }, 100);
+// The device preview streams even while the bot is planning or stopped.
+frames.pump();
 link.connect();
 setInterval(() => link.check(), 1000);
 // Phones suspend background tabs; come back with a fresh connection.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
+  if (document.hidden) { frames.stop(); return; }
   pad.releaseAll();
   if (performance.now() - link.lastMsg > 2500) link.connect();
   frames.pump();

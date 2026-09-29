@@ -31,6 +31,12 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// `?fps=1..30` lower them (the hub's thumbnails use `scale=1&fps=10`).
 const MJPEG_SCALE: u32 = 3;
 const MJPEG_MAX_FPS: u32 = 30;
+/// `/frames` sends a new frame no sooner than this after the last one: every
+/// other frame of a 60 fps source, so a steady 30 fps.
+const STREAM_MIN_GAP: Duration = Duration::from_millis(25);
+/// `/frames` repeats the last frame this often when nothing new arrives, so
+/// the page can tell a quiet source from a dead connection.
+const STREAM_HEARTBEAT: Duration = Duration::from_secs(1);
 /// The page reconnects when it hears nothing for a few of these.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 /// Species folders (`front.png`, `shiny.pal`) from the decompilation.
@@ -83,6 +89,8 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Re
         )
         .route("/frame.png", get(frame_png))
         .route("/stream.mjpg", get(mjpeg))
+        .route("/frames", get(frames))
+        .route("/audio.pcm", get(audio))
         .route("/sprite/{species}", get(sprite))
         .route("/world/{file}", get(world_file))
         .route("/api/control", get(control_status).post(control_request))
@@ -129,21 +137,7 @@ async fn frame_png(State(app): State<AppState>) -> Response {
     let Some(frame) = app.telemetry.inner.frame.borrow().clone() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "no frame yet").into_response();
     };
-    let cached = app
-        .png_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .filter(|(id, _)| *id == frame.frame_id);
-    let bytes = match cached {
-        Some((_, bytes)) => bytes,
-        None => {
-            let bytes = Bytes::from(encode_png(&frame.image));
-            *app.png_cache.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some((frame.frame_id, bytes.clone()));
-            bytes
-        }
-    };
+    let bytes = cached_png(&app, &frame);
     (
         [
             (header::CONTENT_TYPE, "image/png".to_owned()),
@@ -154,6 +148,115 @@ async fn frame_png(State(app): State<AppState>) -> Response {
             ),
         ],
         bytes,
+    )
+        .into_response()
+}
+
+/// One PNG per frame, shared by every page and stream that asks for it.
+fn cached_png(app: &AppState, frame: &FrameSnapshot) -> Bytes {
+    let cached = app
+        .png_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|(id, _)| *id == frame.frame_id);
+    match cached {
+        Some((_, bytes)) => bytes,
+        None => {
+            let bytes = Bytes::from(encode_png(&frame.image));
+            *app.png_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((frame.frame_id, bytes.clone()));
+            bytes
+        }
+    }
+}
+
+/// The live picture as a multipart stream of lossless 1x PNGs (smaller than
+/// upscaled JPEGs for pixel art), each part tagged with `X-Frame-Id`. Frames
+/// are pushed as they arrive, at most one per [`STREAM_MIN_GAP`].
+async fn frames(State(app): State<AppState>) -> Response {
+    let rx = app.telemetry.inner.frame.subscribe();
+    let parts = futures_util::stream::unfold(
+        (app, rx, None::<u64>, None::<tokio::time::Instant>),
+        |(app, mut rx, last_id, last_sent)| async move {
+            if let Some(sent) = last_sent {
+                tokio::time::sleep_until(sent + STREAM_MIN_GAP).await;
+            }
+            let frame = loop {
+                let latest = rx.borrow_and_update().clone();
+                if let Some(frame) = latest.as_ref().filter(|f| Some(f.frame_id) != last_id) {
+                    break frame.clone();
+                }
+                match tokio::time::timeout(STREAM_HEARTBEAT, rx.changed()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => return None,
+                    Err(_) => {
+                        if let Some(frame) = latest {
+                            break frame;
+                        }
+                    }
+                }
+            };
+            let png = cached_png(&app, &frame);
+            let mut part = format!(
+                "--frame\r\nContent-Type: image/png\r\nContent-Length: {}\r\nX-Frame-Id: {}\r\n\r\n",
+                png.len(),
+                frame.frame_id
+            )
+            .into_bytes();
+            part.extend_from_slice(&png);
+            part.extend_from_slice(b"\r\n");
+            let next = (
+                app,
+                rx,
+                Some(frame.frame_id),
+                Some(tokio::time::Instant::now()),
+            );
+            Some((Ok::<_, Infallible>(Bytes::from(part)), next))
+        },
+    );
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "multipart/x-mixed-replace; boundary=frame",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(parts),
+    )
+        .into_response()
+}
+
+/// Live sound as raw mono signed 16-bit little-endian PCM; the rate is in
+/// `X-Audio-Rate`. 404 when this source has no sound (emulators, a card
+/// without an audio interface).
+async fn audio(State(app): State<AppState>) -> Response {
+    let Some(rate) = app.telemetry.audio_rate() else {
+        return (StatusCode::NOT_FOUND, "no sound from this source").into_response();
+    };
+    // Late listeners start at the newest chunk; slow ones skip ahead.
+    let chunks = BroadcastStream::new(app.telemetry.inner.audio.subscribe())
+        .filter_map(|chunk| chunk.ok())
+        .map(Ok::<_, Infallible>);
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (
+                header::HeaderName::from_static("x-audio-rate"),
+                rate.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-audio-channels"),
+                "1".to_owned(),
+            ),
+            (
+                header::HeaderName::from_static("x-audio-format"),
+                "s16le".to_owned(),
+            ),
+        ],
+        Body::from_stream(chunks),
     )
         .into_response()
 }
@@ -499,6 +602,82 @@ mod tests {
         let body = reply.split("\r\n\r\n").nth(1).unwrap();
         let snap: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(snap["instance_label"], "Emulator");
+    }
+
+    /// Opens `path` and reads until `done` accepts what arrived (or 5 s).
+    fn read_stream(
+        addr: SocketAddr,
+        path: &str,
+        mut done: impl FnMut(&[u8]) -> bool,
+        mut between: impl FnMut(),
+    ) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let mut sock = std::net::TcpStream::connect(addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        write!(sock, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let (mut got, mut chunk) = (Vec::new(), [0u8; 65536]);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(&got) && std::time::Instant::now() < until {
+            if let Ok(n) = sock.read(&mut chunk) {
+                got.extend_from_slice(&chunk[..n]);
+            }
+            between();
+        }
+        got
+    }
+
+    fn count(haystack: &[u8], needle: &str) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|w| *w == needle.as_bytes())
+            .count()
+    }
+
+    #[test]
+    fn frames_stream_pushes_tagged_pngs_and_repeats_a_quiet_frame() {
+        let telemetry = Telemetry::new("video", "controller");
+        let server = serve(telemetry.clone(), "127.0.0.1:0".parse().unwrap(), "Switch").unwrap();
+        telemetry.publish_preview(7, RgbImage::filled(4, 2, [0; 3]));
+        // No new frames: the heartbeat repeats frame 7.
+        let got = read_stream(
+            server.addr,
+            "/frames",
+            |g| count(g, "X-Frame-Id: 7") >= 2,
+            || {},
+        );
+        assert_eq!(count(&got, "X-Frame-Id: 7"), 2);
+        assert_eq!(count(&got, "Content-Type: image/png"), 2);
+        // New frames go out as they arrive.
+        let mut id = 7;
+        let got = read_stream(
+            server.addr,
+            "/frames",
+            |g| count(g, "X-Frame-Id: 12") > 0,
+            || {
+                id += 1;
+                telemetry.publish_preview(id, RgbImage::filled(4, 2, [0; 3]));
+                std::thread::sleep(Duration::from_millis(30));
+            },
+        );
+        assert!(count(&got, "X-Frame-Id: 12") > 0);
+    }
+
+    #[test]
+    fn audio_streams_published_pcm_once_there_is_sound() {
+        let telemetry = Telemetry::new("video", "controller");
+        let server = serve(telemetry.clone(), "127.0.0.1:0".parse().unwrap(), "Switch").unwrap();
+        let got = read_stream(server.addr, "/audio.pcm", |g| g.ends_with(b"source"), || {});
+        assert!(got.starts_with(b"HTTP/1.1 404"));
+        telemetry.publish_audio(48_000, &[1, 2]);
+        let got = read_stream(
+            server.addr,
+            "/audio.pcm",
+            |g| count(g, "PCMDATA") > 0,
+            || telemetry.publish_audio(48_000, b"PCMDATA"),
+        );
+        assert!(got.starts_with(b"HTTP/1.1 200"));
+        assert_eq!(count(&got, "x-audio-rate: 48000"), 1);
     }
 
     #[test]

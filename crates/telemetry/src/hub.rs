@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use pokebot_core::{NormalizedFrame, RgbImage};
 use serde::Serialize;
 use serde_json::Value;
@@ -79,6 +81,9 @@ pub(crate) struct Inner {
     pub(crate) frame: watch::Sender<Option<FrameSnapshot>>,
     pub(crate) status: watch::Sender<Status>,
     pub(crate) log_tx: broadcast::Sender<LogEntry>,
+    /// Live sound: mono S16LE chunks at `audio_rate` Hz (0 = no sound yet).
+    pub(crate) audio: broadcast::Sender<Bytes>,
+    pub(crate) audio_rate: AtomicU32,
     log: Mutex<Log>,
     fps_window: Mutex<VecDeque<Instant>>,
     publish_clock: Mutex<PublishClock>,
@@ -115,6 +120,9 @@ impl Telemetry {
                 frame: watch::Sender::new(None),
                 status: watch::Sender::new(status),
                 log_tx: broadcast::Sender::new(1024),
+                // About 1 s of 20 ms chunks; slower listeners skip ahead.
+                audio: broadcast::Sender::new(50),
+                audio_rate: AtomicU32::new(0),
                 log: Mutex::new(Log {
                     entries: VecDeque::new(),
                     next_seq: 0,
@@ -144,6 +152,17 @@ impl Telemetry {
             s.stats.uptime_ms = self.elapsed_ms();
             s.stats.frames_seen += 1;
         });
+    }
+
+    /// Publishes a chunk of live sound (mono S16LE at `rate` Hz) to
+    /// `/audio.pcm` listeners.
+    pub fn publish_audio(&self, rate: u32, pcm: &[u8]) {
+        self.inner.audio_rate.store(rate, Ordering::Relaxed);
+        let _ = self.inner.audio.send(Bytes::copy_from_slice(pcm));
+    }
+
+    pub(crate) fn audio_rate(&self) -> Option<u32> {
+        Some(self.inner.audio_rate.load(Ordering::Relaxed)).filter(|&r| r > 0)
     }
 
     pub fn clear_preview(&self) {

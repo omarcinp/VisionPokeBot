@@ -1,6 +1,7 @@
 //! Persistent Switch capture owned by the hub, independent of bot lifetime.
 use crate::devices::{CaptureSizeArg, CardControlsArg, ControllerSpec, ViewportArg};
 use anyhow::Result;
+use pokebot_capture_card::audio::{self, AudioCapture};
 use pokebot_capture_card::{broker::CaptureBroker, CaptureCardConfig};
 use pokebot_core::{
     ConsoleLink, Controller, ControllerCommand, ControllerReceipt, Error, GbaOnSwitch,
@@ -73,6 +74,16 @@ impl SwitchDevice {
             ));
         }
         telemetry.info("Switch capture is independent of the bot");
+        let sound = telemetry.clone();
+        let sound_status = telemetry.clone();
+        let audio = AudioCapture::start(
+            device.clone(),
+            move |pcm| sound.publish_audio(audio::SAMPLE_RATE, pcm),
+            move |device| match device {
+                Some(device) => sound_status.info(format!("Switch sound from {device}")),
+                None => sound_status.info("Switch sound stopped"),
+            },
+        );
         let server = pokebot_telemetry::serve(telemetry.clone(), "127.0.0.1:0".parse()?, "Switch")?;
         let manifest = registry.join("switch-device.json");
         hub_proxy::register_worker(&manifest, "Switch capture", server.addr.port())?;
@@ -82,7 +93,11 @@ impl SwitchDevice {
             let mut last = None;
             let mut connected = None;
             while !done.load(Ordering::Relaxed) {
-                let frame = broker.latest();
+                // Every new frame, as soon as it arrives: the page's stream
+                // then paces a steady 30 fps from a 60 fps card.
+                let frame = broker
+                    .next_after(last, Duration::from_millis(250))
+                    .or_else(|| broker.latest());
                 let active = (device.exists(), frame.is_some());
                 if connected != Some(active) {
                     connected = Some(active);
@@ -107,8 +122,8 @@ impl SwitchDevice {
                         Err(error) => telemetry.error(error.to_string()),
                     }
                 }
-                std::thread::sleep(Duration::from_millis(33));
             }
+            drop(audio);
             drop(broker);
             let _ = std::fs::remove_file(manifest);
         });

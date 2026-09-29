@@ -135,6 +135,24 @@ impl CaptureBroker {
             .clone()
             .filter(|f| f.captured_at.elapsed() < TIMEOUT)
     }
+
+    /// The first live frame newer than `last`, waiting up to `timeout`.
+    pub fn next_after(&self, last: Option<u64>, timeout: Duration) -> Option<Arc<CapturedFrame>> {
+        let until = Instant::now() + timeout;
+        let mut frame = self.shared.frame.lock().unwrap();
+        loop {
+            if let Some(f) = frame.as_ref().filter(|f| {
+                last.is_none_or(|last| f.frame_id > last) && f.captured_at.elapsed() < TIMEOUT
+            }) {
+                return Some(f.clone());
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.shared.stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            frame = self.shared.ready.wait_timeout(frame, left).unwrap().0;
+        }
+    }
 }
 
 impl Drop for CaptureBroker {

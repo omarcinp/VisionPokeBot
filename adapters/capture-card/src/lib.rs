@@ -5,6 +5,7 @@
 //! slow reader never sees stale video. Frame ids follow the driver's sequence
 //! numbers, so frames the bot skipped show up as gaps.
 
+pub mod audio;
 pub mod broker;
 mod decode;
 

@@ -51,7 +51,8 @@ NAME="pokebot-${INSTANCE}"
 # `setsid nohup` child still dies with the launching service's cgroup (on
 # 2026-09-24 a restart of the agent host killed the Switch run and the hub,
 # and the idle Switch then went to sleep). Units are named after the process.
-# The user manager lacks the video/dialout groups: `sg` adds them. A unit
+# The user manager lacks the video/audio groups: nested `sg` adds both (the
+# capture card's picture and its sound). A unit
 # that exits with an error (the capture card or the ESP32 missing at start)
 # is restarted after 30 s.
 start_unit() {
@@ -63,7 +64,7 @@ start_unit() {
     -p KillSignal=SIGINT -p TimeoutStopSec=10 \
     -p Restart=on-failure -p RestartSec=30 \
     -p StandardOutput="append:${log}" -p StandardError="append:${log}" \
-    sg video -c "exec $(printf '%q ' "$@")"
+    sg video -c "exec sg audio -c $(printf '%q' "exec $(printf '%q ' "$@")")"
 }
 
 unit_pid() {
