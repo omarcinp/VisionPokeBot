@@ -131,7 +131,8 @@ struct StageArgs<'a> {
 /// (docs/shiny-starter.md: power cycles and aimed timings, the shiny saved
 /// in game), then the goal loop continuing that save. A hunt that ends
 /// without one leaves the save in front of the ball, and the goal picks
-/// the starter as usual.
+/// the starter as usual. The goal farms the Nugget Bridge before fighting
+/// its grunt.
 fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
     let os = |s: &str| OsString::from(s);
     let path = |p: &Path| p.as_os_str().to_owned();
@@ -221,6 +222,9 @@ fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
             .map(os)
             .into();
             goal.push(path(a.scenarios));
+            // The Nugget Bridge grunt's NUGGETs, farmed before the plan
+            // beats him (a win ends them for good).
+            goal.extend([os("--nugget-farm"), os("200")]);
             goal.push(os("--continue"));
             goal.extend(progress());
             goal.extend(output(true));
@@ -930,7 +934,7 @@ mod tests {
         assert!(lines[1].contains("/runs/emu-1/hunt.json"));
         assert!(lines[2].starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
         assert!(lines[2].contains("--starter\ncharmander\n--fossil\ndome\n"));
-        assert!(lines[2].contains("--continue\n--save-game\n"));
+        assert!(lines[2].contains("--nugget-farm\n200\n--continue\n--save-game\n"));
         assert!(!lines[2].contains("--new-game"));
         for (i, line) in lines.iter().enumerate() {
             assert!(line.contains("/runs/emu-1/game.sav"));

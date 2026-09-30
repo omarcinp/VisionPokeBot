@@ -492,6 +492,39 @@ fn park(ctx: &mut ToolContext<'_>, file: &mut FarmFile) -> Result<(), ToolError>
     Ok(())
 }
 
+/// Before [`ROCKET`] is fought: the farm, while it can still be run. A
+/// win against him ends it for good, so the goal loop farms first. `None`
+/// when there's nothing to farm: done, the grunt already beaten, or every
+/// member of a known party able to beat him (none to lose with).
+pub fn before_the_grunt(
+    ctx: &mut ToolContext<'_>,
+    config: &FarmConfig,
+) -> Result<Option<String>, ToolError> {
+    let file = FarmFile::load(&config.file)?;
+    if file.phase == FarmPhase::Done {
+        return Ok(None);
+    }
+    if file.phase == FarmPhase::Prepare {
+        if ctx
+            .state()
+            .world
+            .var(SCENE_VAR)
+            .value
+            .is_some_and(|v| v != 0)
+        {
+            return Ok(None);
+        }
+        let party = Party::from_state(ctx.state());
+        if !party.members.is_empty() && keeper(&ctx.data, &party).is_none() {
+            ctx.info(format!(
+                "nugget farm: every member could beat {ROCKET}; no farm"
+            ));
+            return Ok(None);
+        }
+    }
+    run(ctx, config).map(Some)
+}
+
 /// Runs the farm from the phase its file is at. What it did, when done.
 pub fn run(ctx: &mut ToolContext<'_>, config: &FarmConfig) -> Result<String, ToolError> {
     let path = config.file.as_path();

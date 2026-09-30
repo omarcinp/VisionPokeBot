@@ -29,6 +29,7 @@ use pokebot_world::predicate::{Predicate, Truth};
 use serde::Serialize;
 
 use crate::ledger::fingerprint;
+use crate::nugget_farm::{self, FarmConfig};
 use crate::recourse::{self, Recourse, Stall};
 use crate::tools::{progress, Intent, ToolContext, ToolError};
 
@@ -117,6 +118,8 @@ pub struct GoalOptions {
     /// Where `plan.jsonl` goes (the recording's session directory).
     pub session_dir: Option<PathBuf>,
     pub on_status: Option<StatusSink>,
+    /// The Nugget Bridge farm, run before its grunt is fought.
+    pub nugget_farm: Option<FarmConfig>,
 }
 
 impl Default for GoalOptions {
@@ -126,6 +129,7 @@ impl Default for GoalOptions {
             save_game: false,
             session_dir: None,
             on_status: None,
+            nugget_farm: None,
         }
     }
 }
@@ -429,6 +433,23 @@ impl Run<'_, '_> {
                     "assumes": step.assumes.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 }),
             );
+            if let (Intent::Beat { trainer, .. }, Some(config)) = (&intent, &self.opts.nugget_farm)
+            {
+                if trainer == nugget_farm::ROCKET {
+                    match nugget_farm::before_the_grunt(ctx, config) {
+                        Ok(Some(done)) => {
+                            ctx.emit(progress(GOAL, format!("nugget farm: {done}")))?
+                        }
+                        Ok(None) => {}
+                        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                        Err(e) => {
+                            let why = self.failed(ctx, plan, step, &format!("nugget farm: {e}"))?;
+                            self.set_status("failed", why.clone(), k, Some(step), ctx);
+                            return Ok(Executed::Replan(why));
+                        }
+                    }
+                }
+            }
             ctx.scheduler.assumptions = step.assumes.clone();
             let outcome = ctx.invoke(&intent);
             ctx.scheduler.assumptions.clear();

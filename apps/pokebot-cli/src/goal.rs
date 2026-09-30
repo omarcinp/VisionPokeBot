@@ -11,6 +11,7 @@ use pokebot_agent::checkpoint;
 use pokebot_agent::goal::{self, GoalOptions, GoalReport, DEFAULT_MAX_REPLANS};
 use pokebot_agent::goal_session::{self, CycleEnd, Runner, Session, Start};
 use pokebot_agent::ledger::Ledger;
+use pokebot_agent::nugget_farm::FarmConfig;
 use pokebot_agent::tools::{Intent, Tool, ToolContext, ToolError, ToolOutcome, Toolbox};
 use pokebot_agent::{Executor, ExecutorError, NewGameConfig, Progress, Starter};
 use pokebot_core::Error;
@@ -112,6 +113,11 @@ pub struct GoalArgs {
     /// Keep observing after finishing until Ctrl-C
     #[arg(long)]
     pub hold: bool,
+    /// Farm this many NUGGETs from the Nugget Bridge grunt before the plan
+    /// fights him (`pokebot nugget-farm`; its progress in
+    /// `nugget-farm.json` beside the progress file)
+    #[arg(long, requires = "save_game")]
+    pub nugget_farm: Option<u32>,
     /// Where debug bundles of failed runs go
     #[arg(long, default_value = "captures/stuck")]
     pub bundles: PathBuf,
@@ -718,6 +724,11 @@ impl CliRunner<'_> {
             save_game: self.args.save_game,
             session_dir: self.session_dir.clone(),
             on_status,
+            nugget_farm: self.args.nugget_farm.map(|nuggets| FarmConfig {
+                nuggets,
+                save_every: 10,
+                file: self.progress_path.with_file_name("nugget-farm.json"),
+            }),
         };
         ctx.info(format!("goal: {}", self.goal));
         let report = goal::run(self.goal, &mut ctx, &planner, opts);

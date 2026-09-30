@@ -1167,3 +1167,68 @@ fn a_goal_out_of_budget_plays_the_next_badge_as_a_stepping_stone() {
         report.plans[0].reason
     );
 }
+
+fn beat_the_grunt() -> Planned {
+    Planned::Beat {
+        trainer: pokebot_agent::nugget_farm::ROCKET.into(),
+        map: pokebot_agent::nugget_farm::MAP.into(),
+    }
+}
+
+/// A plan beating the Nugget Bridge grunt farms him first: fleet worker 1
+/// beat him as step 2 of its plan, which ends the NUGGETs for good. The
+/// farm runs before the Beat (a farm that fails fails the step, the grunt
+/// unfought); a farm done lets the Beat go on.
+#[test]
+fn the_nugget_bridge_grunt_is_farmed_before_he_is_fought() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let dir = temp_dir("nugget-farm");
+    let file = dir.join("nugget-farm.json");
+    let farm = |file: &Path| pokebot_agent::nugget_farm::FarmConfig {
+        nuggets: 200,
+        save_every: 10,
+        file: file.to_path_buf(),
+    };
+
+    // The farm fails (its file unreadable): the grunt isn't fought.
+    std::fs::write(&file, "not json").unwrap();
+    let planner = FakePlanner::new(vec![
+        plan(vec![step(beat_the_grunt()), step(catch())]),
+        plan(vec![step(catch())]),
+    ]);
+    let h = Harness::new(vec![
+        ("Beat", vec![Ok(vec![])]),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let opts = GoalOptions {
+        nugget_farm: Some(farm(&file)),
+        ..GoalOptions::default()
+    };
+    let (report, _) = h.run(&d, frame.clone(), &planner, opts, vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["Catch"]);
+    assert!(report.failures[0].contains("nugget farm"), "{report:?}");
+
+    // The farm done: the plan beats him.
+    pokebot_agent::nugget_farm::FarmFile {
+        phase: pokebot_agent::nugget_farm::FarmPhase::Done,
+        ..Default::default()
+    }
+    .store(&file)
+    .unwrap();
+    let planner = FakePlanner::new(vec![plan(vec![step(beat_the_grunt()), step(catch())])]);
+    let h = Harness::new(vec![
+        ("Beat", vec![Ok(vec![])]),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let opts = GoalOptions {
+        nugget_farm: Some(farm(&file)),
+        ..GoalOptions::default()
+    };
+    let (report, _) = h.run(&d, frame, &planner, opts, vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["Beat", "Catch"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
