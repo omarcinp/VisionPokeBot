@@ -69,6 +69,9 @@ pub struct BattleMemory {
     pub limits: crate::limits::Limits,
     /// Our battler's status, as the party and the battle text tell it.
     pub lead_status: Option<pokebot_state::Status>,
+    /// Move types the foe out took nothing from ("It doesn't affect …"),
+    /// until another foe comes out.
+    pub no_effect: Vec<String>,
 }
 
 impl BattleMemory {
@@ -77,6 +80,10 @@ impl BattleMemory {
     pub fn allows(&self, data: &GameData, mv: &str) -> bool {
         self.disabled.as_deref() != Some(mv)
             && self.limits.allows(data, mv, self.last_move.as_deref())
+            && !data
+                .move_(mv)
+                .and_then(|m| m.kind.as_deref())
+                .is_some_and(|k| self.no_effect.iter().any(|t| t == k))
     }
 }
 
@@ -342,10 +349,27 @@ pub fn lead_status_text(page: &str, lead: &str) -> Option<Status> {
 pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: &GameData) {
     if page.starts_with("Wild ") && page.contains("appeared") {
         memory.trainer = false;
+        memory.no_effect.clear();
     } else if page.contains("sent out") || page.contains("would like to battle") {
         memory.trainer = true;
     }
+    // Our move did nothing to the foe (Switch, Pokémon Tower: VENUSAUR
+    // used TACKLE on a GASTLY twice, "It doesn't affect Wild GASTLY…",
+    // the foe not yet read off the HUD): its type is out for this foe.
+    if page.starts_with("It doesn") && page.contains("t affect") {
+        if let Some(kind) = memory
+            .last_move
+            .as_deref()
+            .and_then(|m| data.move_(m))
+            .and_then(|m| m.kind.clone())
+        {
+            if !memory.no_effect.contains(&kind) {
+                memory.no_effect.push(kind);
+            }
+        }
+    }
     if page.contains("sent out") {
+        memory.no_effect.clear();
         memory.foe_asleep = false;
         memory.sleep_tries = 0;
         memory.foe_evasion = 0;
@@ -1141,6 +1165,28 @@ mod tests {
             &mut events,
         ));
         assert!(d.contains("FIGHT"), "{d}");
+    }
+
+    /// Switch, Pokémon Tower: VENUSAUR used TACKLE twice on a GASTLY it
+    /// hadn't identified ("It doesn't affect Wild GASTLY…"). Once told, a
+    /// Normal move is out for that foe; a new foe clears it.
+    #[test]
+    fn a_move_that_did_nothing_is_not_used_again_on_that_foe() {
+        let Some(data) = data() else { return };
+        let party = ivysaur(&data, &[]);
+        let policy = BattlePolicy::default();
+        let mut memory = BattleMemory {
+            last_move: Some("MOVE_TACKLE".into()),
+            ..BattleMemory::default()
+        };
+        observe_page(&mut memory, "It doesn’t affect Wild GASTLY…", &party, &data);
+        assert_eq!(memory.no_effect, vec!["TYPE_NORMAL".to_string()]);
+        assert_eq!(
+            choose_move(&data, &party, None, &memory, &policy).map(|(_, m)| m),
+            Some("MOVE_VINE_WHIP".into())
+        );
+        observe_page(&mut memory, "Wild RATTATA appeared!", &party, &data);
+        assert!(memory.no_effect.is_empty());
     }
 
     /// A move that takes two turns lands half as often per turn: SLASH
