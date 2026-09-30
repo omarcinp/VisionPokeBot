@@ -207,6 +207,9 @@ const FOG_GREY: std::ops::RangeInclusive<i32> = 60..=215;
 /// may change over them.
 const FOG_SPAN: i32 = 4;
 const FOG_STEP: i32 = 20;
+/// A frame channel this bright may be the blend's saturation (the GBA
+/// clamps a blended channel to its brightest).
+const FOG_SATURATED: i32 = 245;
 /// Least spread (standard deviation) of the fog's brightness over the
 /// matching samples: its clouds are streaked light and dark down the
 /// screen (19–20 on the Switch's Pokémon Tower 3F). A flat frame that
@@ -226,8 +229,8 @@ const FOG_MIN_SPREAD: i64 = 12;
 /// bright as a sample [`FOG_SPAN`] pixels beside it (the clouds are
 /// streaked sideways; they change a lot down the screen). Half the
 /// render's colour off leaves a tint, and its edges off a step in
-/// brightness. Samples on the render's void are left out: the fog is all
-/// that shows there. A plain frame is no fogged one: half the map's
+/// brightness. Samples on the render's void where the fog alone shows are
+/// left out; the map showing there is a miss. A plain frame is no fogged one: half the map's
 /// colours are left over, tinted.
 fn score_fogged(
     frame: &RgbImage,
@@ -258,12 +261,20 @@ fn score_fogged(
         let r = std::array::from_fn(|c| i32::from(render_bytes[ri + c]));
         Some((f, r))
     };
-    // Twice the fog's share (frame × 2 − render), per channel.
-    let fog =
-        |(f, r): ([i32; 3], [i32; 3])| -> [i32; 3] { std::array::from_fn(|c| 2 * f[c] - r[c]) };
-    let tint = |p: [i32; 3]| p.iter().max().unwrap() - p.iter().min().unwrap();
-    // Twice a channel sum over three channels: six times the brightness.
-    let level = |p: [i32; 3]| p.iter().sum::<i32>();
+    // The fog's share (frame × 2 − render, per channel): six times its
+    // brightness and its tint. A channel the blend saturated (the orange
+    // tombstones of 7F, bright fog over them: (255, 253, 250) for render
+    // (247, 235, 165)) only bounds the fog from below: it counts towards
+    // the tint when above the others, never to the brightness. `None`
+    // when all are: white says nothing.
+    let fog = |(f, r): ([i32; 3], [i32; 3])| -> Option<(i32, i32)> {
+        let share: [i32; 3] = std::array::from_fn(|c| 2 * f[c] - r[c]);
+        let open = || (0..3).filter(|&c| f[c] < FOG_SATURATED).map(|c| share[c]);
+        let n = open().count() as i32;
+        let lo = open().min()?;
+        let hi = share.into_iter().max().unwrap();
+        Some((open().sum::<i32>() * 3 / n, hi - lo))
+    };
     let mut misses = 0;
     let mut void = 0;
     // Sum and sum of squares of the matching samples' fog levels.
@@ -271,24 +282,34 @@ fn score_fogged(
     for &(sx, sy) in &grid.points {
         let matched = match at(sx, sy) {
             None => false,
-            Some((_, r)) if r.iter().all(|&c| c <= i32::from(VOID)) => {
-                void += 1;
-                continue;
-            }
             Some(here) => {
-                let fog_here = fog(here);
+                let Some((level, tint)) = fog(here) else {
+                    void += 1;
+                    continue;
+                };
+                let outside = here.1.iter().all(|&c| c <= i32::from(VOID));
                 // Whether the fog's brightness carries on beside the sample.
                 let beside = [sx - FOG_SPAN, sx + FOG_SPAN]
                     .into_iter()
-                    .filter_map(|x| at(x, sy))
-                    .map(|n| (level(fog(n)) - level(fog_here)).abs() <= 6 * FOG_STEP)
+                    .filter_map(|x| fog(at(x, sy)?))
+                    .map(|(l, _)| (l - level).abs() <= 6 * FOG_STEP)
                     .reduce(|a, b| a || b)
                     .unwrap_or(true);
-                let matched = tint(fog_here) <= 2 * FOG_CHROMA
-                    && (6 * FOG_GREY.start()..=6 * FOG_GREY.end()).contains(&level(fog_here))
+                let matched = tint <= 2 * FOG_CHROMA
+                    && (6 * FOG_GREY.start()..=6 * FOG_GREY.end()).contains(&level)
                     && beside;
-                if matched {
-                    let l = i64::from(level(fog_here));
+                // Outside the map (the render's void) the fog alone shows,
+                // the same wherever the view is: only the map showing
+                // there says something (Pokémon Tower 3F, the player among
+                // its channelers: 5F's corner matched at 861, its void
+                // over 3F's fogged floor left out).
+                if outside {
+                    if matched {
+                        void += 1;
+                        continue;
+                    }
+                } else if matched {
+                    let l = i64::from(level);
                     sum += l;
                     squares += l * l;
                 }
