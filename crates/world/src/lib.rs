@@ -145,6 +145,8 @@ struct MapFile {
     map_type: Option<String>,
     #[serde(default)]
     requires_flash: bool,
+    #[serde(default)]
+    weather: Option<String>,
     tiles: Vec<Vec<[u16; 4]>>,
     warps: Vec<Warp>,
     connections: Vec<Connection>,
@@ -164,6 +166,8 @@ pub struct MapData {
     pub map_type: Option<String>,
     /// Dark until Flash is used (the decomp's `requires_flash`).
     pub requires_flash: bool,
+    /// The map header's weather (`WEATHER_FOG_HORIZONTAL`, ...).
+    pub weather: Option<String>,
     tiles: Vec<Tile>,
     pub warps: Vec<Warp>,
     pub connections: Vec<Connection>,
@@ -193,6 +197,13 @@ impl MapData {
             .get_or_init(|| pokebot_video::png::load(&self.render_path).map_err(|e| e.to_string()))
             .as_ref()
             .map_err(|e| Error::InvalidData(e.clone()))
+    }
+
+    /// Fog drifts over the field (Pokémon Tower 3F–7F, the Lost Cave):
+    /// frames match the render only through the fog model (see
+    /// `localize`).
+    pub fn is_foggy(&self) -> bool {
+        self.weather.as_deref() == Some("WEATHER_FOG_HORIZONTAL")
     }
 
     pub fn is_outdoor(&self) -> bool {
@@ -261,6 +272,7 @@ impl World {
                     pad: file.pad,
                     map_type: file.map_type,
                     requires_flash: file.requires_flash,
+                    weather: file.weather,
                     tiles,
                     warps: file.warps,
                     connections: file.connections,

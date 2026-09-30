@@ -273,6 +273,10 @@ def main():
             "pad": PAD,
             "map_type": m.get("map_type"),
             "requires_flash": bool(m.get("requires_flash")),
+            # Fog (Pokémon Tower 3F-7F, the Lost Cave) is blended over the
+            # field in play, not drawn into the render: the localizer
+            # matches those maps' frames by a fog model.
+            "weather": m.get("weather"),
             "tiles": tiles,
             "warps": [
                 # Dynamic warps (e.g. building exits back to "where you came

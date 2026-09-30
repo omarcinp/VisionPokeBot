@@ -31,6 +31,10 @@ const COARSEST_STEP: u32 = 16;
 /// A tracking match this good ends the search early (standing or walking
 /// frames of the right pose score 960–1000, JPEG-softened Switch ones too).
 const CLEAR: u32 = 950;
+/// [`CLEAR`] through fog: the Switch's fogged frames of the right pose
+/// score 920–940 (JPEG edges and the fog's own steps cost a few percent),
+/// the next tile below 800.
+const FOG_CLEAR: u32 = 900;
 
 /// Pixels compared for one search, with excluded regions removed.
 pub struct SampleGrid {
@@ -73,7 +77,48 @@ pub fn score(
     floor: u32,
 ) -> Option<u32> {
     let (cx, cy) = camera(map, x * BLOCK, y * BLOCK);
-    score_at(frame, render, cx, cy, grid, floor, &[])
+    let look = Look {
+        water: &[],
+        fog: map.is_foggy(),
+    };
+    score_at(frame, render, cx, cy, grid, floor, look)
+}
+
+/// The score that makes a match clear on `map` ([`CLEAR`], [`FOG_CLEAR`]).
+fn clear(map: &MapData) -> u32 {
+    if map.is_foggy() {
+        FOG_CLEAR
+    } else {
+        CLEAR
+    }
+}
+
+/// What of a map's look the render leaves out.
+#[derive(Clone, Copy)]
+struct Look<'a> {
+    /// Per render block (row-major), whether it shows water.
+    water: &'a [bool],
+    /// Fog drifts over the field ([`MapData::is_foggy`]).
+    fog: bool,
+}
+
+/// [`score_plain`], or on a foggy map the better of it and
+/// [`score_fogged`]: the fog fades in over the first frames on the map,
+/// and those match the render as it is.
+fn score_at(
+    frame: &RgbImage,
+    render: &RgbImage,
+    ox: i32,
+    oy: i32,
+    grid: &SampleGrid,
+    floor: u32,
+    look: Look,
+) -> Option<u32> {
+    let plain = score_plain(frame, render, ox, oy, grid, floor, look.water);
+    if !look.fog || plain.is_some_and(|s| s >= CLEAR) {
+        return plain;
+    }
+    plain.max(score_fogged(frame, render, ox, oy, grid, floor))
 }
 
 /// Render pixel shown at the screen's top-left when the player's sprite
@@ -94,7 +139,7 @@ fn camera(map: &MapData, px: i32, py: i32) -> (i32, i32) {
 /// where the render has water still misses (leaving out every water
 /// sample, the same frame with the Start menu open matched Seven
 /// Island's Tanoby Ruins).
-fn score_at(
+fn score_plain(
     frame: &RgbImage,
     render: &RgbImage,
     ox: i32,
@@ -146,6 +191,125 @@ fn score_at(
     }
     let informative = total - void;
     if informative * 1000 < total * MIN_INFORMATIVE {
+        return None;
+    }
+    let s = (informative - misses) * 1000 / informative;
+    (s >= floor).then_some(s)
+}
+
+/// Brightest a fog sample's colour channels may differ (see
+/// [`score_fogged`]).
+const FOG_CHROMA: i32 = 20;
+/// The fog's share of a pixel, from none to its brightest (the Switch
+/// Pokémon Tower's shows 105–185 over the void).
+const FOG_GREY: std::ops::RangeInclusive<i32> = 60..=215;
+/// Pixels to the samples beside one, and how much the fog's brightness
+/// may change over them.
+const FOG_SPAN: i32 = 4;
+const FOG_STEP: i32 = 20;
+/// Least spread (standard deviation) of the fog's brightness over the
+/// matching samples: its clouds are streaked light and dark down the
+/// screen (19–20 on the Switch's Pokémon Tower 3F). A flat frame that
+/// happens to be half a map's colours plus a grey is no fog: Oak's
+/// pale mint intro screen, less half Pokémon Tower 5F's green floor,
+/// matched its corner at 917, spread 7–8.
+const FOG_MIN_SPREAD: i64 = 12;
+
+/// [`score_plain`] through fog (`WEATHER_FOG_HORIZONTAL`: Pokémon Tower
+/// 3F–7F, the Lost Cave). The fog is grey cloud sprites drifting sideways
+/// over the field, blended as 12/16 of the fog plus 8/16 of the map
+/// (`field_weather_effects.c`: `Weather_SetTargetBlendCoeffs(12, 8, 3)`),
+/// so no pixel is the render's colour: the Switch run arriving on Pokémon
+/// Tower 3F matched nowhere ("stuck waiting: locating the player"). The
+/// fog's share of a pixel, the frame less half the render, is what a
+/// sample is judged by: grey, no brighter than the fog gets, and about as
+/// bright as a sample [`FOG_SPAN`] pixels beside it (the clouds are
+/// streaked sideways; they change a lot down the screen). Half the
+/// render's colour off leaves a tint, and its edges off a step in
+/// brightness. Samples on the render's void are left out: the fog is all
+/// that shows there. A plain frame is no fogged one: half the map's
+/// colours are left over, tinted.
+fn score_fogged(
+    frame: &RgbImage,
+    render: &RgbImage,
+    ox: i32,
+    oy: i32,
+    grid: &SampleGrid,
+    floor: u32,
+) -> Option<u32> {
+    let (rw, rh) = (render.width() as i32, render.height() as i32);
+    let fw = frame.width() as i32;
+    let total = grid.points.len() as u32;
+    if total == 0 {
+        return None;
+    }
+    let allowed_misses = total - (total * floor).div_ceil(1000);
+    let (frame_bytes, render_bytes) = (frame.as_bytes(), render.as_bytes());
+    // The frame's and the render's colour at a screen pixel, `None` off
+    // either.
+    let at = |sx: i32, sy: i32| -> Option<([i32; 3], [i32; 3])> {
+        let (rx, ry) = (ox + sx, oy + sy);
+        if sx < 0 || sx >= fw || rx < 0 || ry < 0 || rx >= rw || ry >= rh {
+            return None;
+        }
+        let fi = ((sy * fw + sx) * 3) as usize;
+        let ri = ((ry * rw + rx) * 3) as usize;
+        let f = std::array::from_fn(|c| i32::from(frame_bytes[fi + c]));
+        let r = std::array::from_fn(|c| i32::from(render_bytes[ri + c]));
+        Some((f, r))
+    };
+    // Twice the fog's share (frame × 2 − render), per channel.
+    let fog =
+        |(f, r): ([i32; 3], [i32; 3])| -> [i32; 3] { std::array::from_fn(|c| 2 * f[c] - r[c]) };
+    let tint = |p: [i32; 3]| p.iter().max().unwrap() - p.iter().min().unwrap();
+    // Twice a channel sum over three channels: six times the brightness.
+    let level = |p: [i32; 3]| p.iter().sum::<i32>();
+    let mut misses = 0;
+    let mut void = 0;
+    // Sum and sum of squares of the matching samples' fog levels.
+    let (mut sum, mut squares) = (0i64, 0i64);
+    for &(sx, sy) in &grid.points {
+        let matched = match at(sx, sy) {
+            None => false,
+            Some((_, r)) if r.iter().all(|&c| c <= i32::from(VOID)) => {
+                void += 1;
+                continue;
+            }
+            Some(here) => {
+                let fog_here = fog(here);
+                // Whether the fog's brightness carries on beside the sample.
+                let beside = [sx - FOG_SPAN, sx + FOG_SPAN]
+                    .into_iter()
+                    .filter_map(|x| at(x, sy))
+                    .map(|n| (level(fog(n)) - level(fog_here)).abs() <= 6 * FOG_STEP)
+                    .reduce(|a, b| a || b)
+                    .unwrap_or(true);
+                let matched = tint(fog_here) <= 2 * FOG_CHROMA
+                    && (6 * FOG_GREY.start()..=6 * FOG_GREY.end()).contains(&level(fog_here))
+                    && beside;
+                if matched {
+                    let l = i64::from(level(fog_here));
+                    sum += l;
+                    squares += l * l;
+                }
+                matched
+            }
+        };
+        if !matched {
+            misses += 1;
+            if misses > allowed_misses {
+                return None;
+            }
+        }
+    }
+    let informative = total - void;
+    if informative * 1000 < total * MIN_INFORMATIVE {
+        return None;
+    }
+    let matched = i64::from(informative - misses);
+    // Variance × matched², in levels (six times the brightness).
+    let spread = squares * matched - sum * sum;
+    if matched == 0 || spread < (6 * FOG_MIN_SPREAD * matched).pow(2) {
         return None;
     }
     let s = (informative - misses) * 1000 / informative;
@@ -364,7 +528,7 @@ impl<'w> Localizer<'w> {
         for (r, steps) in [(radius, false), (radius.min(1), true)] {
             let window = self.window(map, near, r, steps);
             if let Some(found) = self.best(frame, map, render, grids, window, Some(target)) {
-                if found.score >= CLEAR {
+                if found.score >= clear(map) {
                     return Some(found);
                 }
             }
@@ -445,13 +609,13 @@ impl<'w> Localizer<'w> {
             };
             let (cx, cy) = camera(map, px, py);
             // Cheap coarse passes first, then the fine score.
-            let water = self.water(map);
-            if score_at(frame, render, cx, cy, &grids.coarsest, ACCEPT - 200, water).is_none()
-                || score_at(frame, render, cx, cy, &grids.coarse, ACCEPT - 100, water).is_none()
+            let look = self.look(map);
+            if score_at(frame, render, cx, cy, &grids.coarsest, ACCEPT - 200, look).is_none()
+                || score_at(frame, render, cx, cy, &grids.coarse, ACCEPT - 100, look).is_none()
             {
                 continue;
             }
-            let Some(s) = score_at(frame, render, cx, cy, &grids.fine, ACCEPT, water) else {
+            let Some(s) = score_at(frame, render, cx, cy, &grids.fine, ACCEPT, look) else {
                 continue;
             };
             let distance = target.map_or(0, |(tx, ty)| (px - tx).abs() + (py - ty).abs());
@@ -481,7 +645,7 @@ impl<'w> Localizer<'w> {
             }
         }
         let ((x0, y0), (x1, y1)) = span;
-        let apart = if target.is_some() && best.is_some_and(|b| b.score < CLEAR) {
+        let apart = if target.is_some() && best.is_some_and(|b| b.score < clear(map)) {
             x1 - x0 > 1 || y1 - y0 > 1
         } else {
             target.is_none() && (x1 > x0 || y1 > y0)
@@ -490,6 +654,13 @@ impl<'w> Localizer<'w> {
             return None;
         }
         best
+    }
+
+    fn look<'m>(&self, map: &'m MapData) -> Look<'m> {
+        Look {
+            water: self.water(map),
+            fog: map.is_foggy(),
+        }
     }
 
     /// Which of `map`'s render blocks show water, its connected maps' in
@@ -666,7 +837,7 @@ impl<'w> Localizer<'w> {
             })
             .filter_map(|(px, py)| {
                 let (cx, cy) = camera(map, px, py);
-                let score = score_at(frame, render, cx, cy, &grid, 0, self.water(map))?;
+                let score = score_at(frame, render, cx, cy, &grid, 0, self.look(map))?;
                 Some(Followed { px, py, score })
             })
             .max_by(|a, b| {
