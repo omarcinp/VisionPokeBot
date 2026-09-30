@@ -167,7 +167,12 @@ impl PerceptionSystem for FireRedPerception {
             );
         }
         let scene = scene(image);
-        let fading = scene.is_some_and(|(_, d)| d == "fade");
+        // A fade or a battle's wipe changes every frame; unchanged, the
+        // "transition" is the screen itself (Switch, Route 16's gatehouse:
+        // the player on its west mat, the map's black edge filling the
+        // left of the view, read as a battle wipe, and the walk waited for
+        // it to end).
+        let fading = scene.is_some_and(|(_, d)| d == "fade" || d == "battle-wipe");
         self.static_fade = match fading && metrics.changed_pixels < STATIC_PIXELS {
             true => self.static_fade + 1,
             false => 0,
@@ -2267,6 +2272,36 @@ mod tests {
                 assert_eq!(seen, Some(pose("RockTunnel_1F", 27, 9)));
             }
         }
+    }
+
+    /// Switch, Route 16's north gatehouse: standing on the west mat, the
+    /// map's black edge fills the left of the view and read as a battle
+    /// wipe; the walk waited for it to end. A wipe changes every frame;
+    /// unchanged, it is the screen, and the player is located.
+    #[test]
+    fn an_unchanging_wipe_is_the_screen() {
+        let (Some(world), Some(image)) = (world(), fixture("switch-gatehouse-west-mat.png")) else {
+            return;
+        };
+        let mut p = FireRedPerception::with_world(world);
+        p.set_pose_hint(PlayerPose {
+            map: "Route16_NorthEntrance_1F".into(),
+            x: 1,
+            y: 3,
+        });
+        let first = p.observe(&frame(0, image.clone()));
+        assert_eq!(first.screen.value, ScreenState::Transition);
+        let later: Vec<_> = (1..=u64::from(STATIC_FADE_FRAMES) + 2)
+            .map(|i| p.observe(&frame(i, image.clone())))
+            .collect();
+        let last = later.last().unwrap();
+        assert_ne!(last.screen.value, ScreenState::Transition);
+        assert_eq!(
+            last.player
+                .as_ref()
+                .map(|o| (o.pose.map.as_str(), o.pose.x, o.pose.y)),
+            Some(("Route16_NorthEntrance_1F", 1, 3))
+        );
     }
 
     /// Fleet workers 4 and 6, Viridian Forest (19, 21): in the tall grass
