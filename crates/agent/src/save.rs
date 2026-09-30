@@ -165,6 +165,8 @@ pub struct ContinueTask {
     phase: ContinuePhase,
     located: u32,
     attempts: u32,
+    /// B presses in the recap without the player located.
+    skips: u32,
 }
 
 impl Default for ContinueTask {
@@ -173,9 +175,15 @@ impl Default for ContinueTask {
             phase: ContinuePhase::SoftReset,
             located: 0,
             attempts: 0,
+            skips: 0,
         }
     }
 }
+
+/// B presses past the recap before the continue gives up: the recap takes
+/// a few; the rest mean the player can't be located (Switch: 15 minutes of
+/// B on Rocket Hideout B4F, the tracker looking elsewhere, and no restart).
+const MAX_RECAP_SKIPS: u32 = 120;
 
 impl Task for ContinueTask {
     fn name(&self) -> &str {
@@ -239,6 +247,12 @@ impl Task for ContinueTask {
                     return Decision::Wait("confirming we're in control".into());
                 }
                 self.located = 0;
+                self.skips += 1;
+                if self.skips > MAX_RECAP_SKIPS {
+                    return Decision::Fail(format!(
+                        "the player isn't located after {MAX_RECAP_SKIPS} presses past the recap"
+                    ));
+                }
                 // The recap plays by itself; B skips it.
                 Decision::Act(Action::new(
                     "press B to skip the recap",

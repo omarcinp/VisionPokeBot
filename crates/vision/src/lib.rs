@@ -58,6 +58,12 @@ pub struct FireRedPerception {
     hint: Option<PlayerPose>,
     /// The map of an inferred hint: poses tracked on it are inferred too.
     inferred: Option<String>,
+    /// The hint last given from outside (the pose a save was made at): a
+    /// title screen or the main menu puts it back, as the game reloads
+    /// there (Switch: frames of the elevator before the soft reset took
+    /// the hint over; after CONTINUE onto Rocket Hideout B4F, the tracker
+    /// kept looking at the elevator and its neighbours for 15 minutes).
+    given: Option<PlayerPose>,
     frames_since_global_search: u32,
     /// The last frame of a battle (its HUD or text): the player is on the
     /// map they fought on, so no whole-world search replaces it for
@@ -153,6 +159,53 @@ const BRIGHT_LUMA: u8 = 232;
 
 impl PerceptionSystem for FireRedPerception {
     fn observe(&mut self, frame: &NormalizedFrame) -> Observation {
+        let observation = self.observe_frame(frame);
+        // The game reloads from here: the hint given (the pose saved at)
+        // holds again, whatever was tracked before the reset.
+        if matches!(
+            observation.screen.value,
+            ScreenState::TitleScreen | ScreenState::MainMenu
+        ) {
+            if let Some(given) = self.given.clone() {
+                if self.hint.as_ref() != Some(&given) {
+                    self.forget_reckoning_unless(&given);
+                    self.hint = Some(given);
+                    self.inferred = None;
+                }
+            }
+        }
+        observation
+    }
+
+    fn set_pose_hint(&mut self, pose: PlayerPose) {
+        self.forget_reckoning_unless(&pose);
+        self.given = Some(pose.clone());
+        self.hint = Some(pose);
+        self.inferred = None;
+    }
+
+    fn set_pose_hint_inferred(&mut self, pose: PlayerPose) {
+        self.forget_reckoning_unless(&pose);
+        self.inferred = Some(pose.map.clone());
+        self.hint = Some(pose);
+    }
+
+    /// Drops the hint and searches every map on the next frame (global
+    /// search is switched on: without it nothing could be located again).
+    fn clear_pose_hint(&mut self) {
+        self.given = None;
+        self.hint = None;
+        self.inferred = None;
+        self.reckoned = None;
+        self.global_search = true;
+        self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
+    }
+}
+
+impl FireRedPerception {
+    /// What `frame` shows ([`PerceptionSystem::observe`] without the hint
+    /// put back on a reload).
+    fn observe_frame(&mut self, frame: &NormalizedFrame) -> Observation {
         let image = frame.image();
         let metrics = self.metrics(image);
         let screen = |value, detector: &str| Observed {
@@ -289,6 +342,7 @@ impl PerceptionSystem for FireRedPerception {
         if in_battle || observation.screen.value == ScreenState::BattleText {
             self.last_battle_frame = Some(frame.frame_id);
         }
+
         if !in_battle {
             let popup = detect::map_popup::detect(image);
             if let (Some(popup), Some(font)) = (&popup, &self.font) {
@@ -309,30 +363,6 @@ impl PerceptionSystem for FireRedPerception {
         observation
     }
 
-    fn set_pose_hint(&mut self, pose: PlayerPose) {
-        self.forget_reckoning_unless(&pose);
-        self.hint = Some(pose);
-        self.inferred = None;
-    }
-
-    fn set_pose_hint_inferred(&mut self, pose: PlayerPose) {
-        self.forget_reckoning_unless(&pose);
-        self.inferred = Some(pose.map.clone());
-        self.hint = Some(pose);
-    }
-
-    /// Drops the hint and searches every map on the next frame (global
-    /// search is switched on: without it nothing could be located again).
-    fn clear_pose_hint(&mut self) {
-        self.hint = None;
-        self.inferred = None;
-        self.reckoned = None;
-        self.global_search = true;
-        self.frames_since_global_search = GLOBAL_SEARCH_INTERVAL;
-    }
-}
-
-impl FireRedPerception {
     /// Perception that also locates the player on the world model.
     pub fn with_world(world: Arc<World>) -> Self {
         Self {
@@ -1936,6 +1966,45 @@ mod tests {
     fn world() -> Option<Arc<World>> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         World::load(root.join("data/world")).ok().map(Arc::new)
+    }
+
+    /// Switch: saved on Rocket Hideout B4F by the lift, the run began in
+    /// the elevator; tracking its frames before the soft reset took over
+    /// the saved pose's hint, and after CONTINUE the tracker looked at the
+    /// elevator and its neighbours (its door leads nowhere fixed) for 15
+    /// minutes. The title screen puts the given hint back.
+    #[test]
+    fn a_reload_tracks_from_the_pose_given_again() {
+        let (Some(world), Some(lift), Some(title), Some(b4f)) = (
+            world(),
+            fixture("switch-rocket-elevator.png"),
+            fixture("switch-title-screen.png"),
+            fixture("switch-rocket-b4f-lift-doors.png"),
+        ) else {
+            return;
+        };
+        let saved = PlayerPose {
+            map: "RocketHideout_B4F".into(),
+            x: 20,
+            y: 24,
+        };
+        let on_b4f = |o: Option<pokebot_state::PoseObservation>| o.is_some_and(|f| f.pose == saved);
+        let mut p = FireRedPerception::with_world(Arc::clone(&world));
+        p.set_pose_hint(saved.clone());
+        // The car, a neighbour of B4F: tracked there, the hint follows.
+        let car = p.observe(&frame(0, lift.clone())).player;
+        assert!(car.is_some_and(|f| f.pose.map.ends_with("_Elevator")));
+        // Without the title screen, B4F isn't searched from the car.
+        let mut stuck = FireRedPerception::with_world(Arc::clone(&world));
+        stuck.set_pose_hint(saved.clone());
+        stuck.observe(&frame(0, lift));
+        assert!((1..5).all(|i| stuck.observe(&frame(i, b4f.clone())).player.is_none()));
+        // The reload: the title screen, then the map the save was made on.
+        assert_eq!(
+            p.observe(&frame(1, title)).screen.value,
+            ScreenState::TitleScreen
+        );
+        assert!(on_b4f(p.observe(&frame(2, b4f)).player));
     }
 
     /// Switch audit: after the hint went stale (the player was elsewhere
