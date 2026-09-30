@@ -986,3 +986,38 @@ fn a_trigger_battle_is_a_gate_until_it_is_won() {
         assert_eq!(scene_values, vec![3], "(33, {y}): {:?}", gate.ways);
     }
 }
+
+/// An elevator's floor paths test whether the car is already on the
+/// floor chosen (VAR_ELEVATOR_FLOOR `==` / `!=` it) and land at the same
+/// door either way: one ride, needing neither. Split, a var nothing
+/// tracks blocked every ride (Switch, Rocket Hideout B4F).
+#[test]
+fn an_elevator_ride_does_not_need_the_floor_the_car_is_on() {
+    let Some(world) = world() else { return };
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let rides: Vec<Vec<Predicate>> = graph
+        .edges_from("RocketHideout_Elevator", 0, 3)
+        .iter()
+        .filter(|e| e.to.map == "RocketHideout_B4F")
+        .map(|e| e.requires.clone())
+        .collect();
+    assert_eq!(
+        rides,
+        vec![vec![Predicate::Flag {
+            name: "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
+            is: true
+        }]]
+    );
+    let from = pose("RocketHideout_Elevator", 0, 3);
+    let lift = MapBelief::default().flag("FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT", true);
+    let r = route(
+        &world,
+        &graph,
+        &lift,
+        &from,
+        &Place::tile("RocketHideout_B4F", 20, 23),
+        UnknownPolicy::Pessimistic,
+    );
+    print("Rocket Hideout lift -> B4F", &r);
+    assert!(r.found());
+}

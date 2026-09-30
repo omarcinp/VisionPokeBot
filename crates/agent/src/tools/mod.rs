@@ -42,12 +42,14 @@ pub use unstick::UnstickTool;
 
 use crate::nav::Destination;
 
-/// YES or NO to a question in dialogue.
+/// YES or NO to a question in dialogue, or a row of a script's
+/// multichoice menu (an elevator's floor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Answer {
     Yes,
     No,
+    Menu(u8),
 }
 
 /// Where a `Go` ends. Mirrors [`Destination`] (which has no `Deserialize`).
@@ -413,15 +415,22 @@ impl Intent {
     }
 }
 
-/// The planner's `YES`/`NO` answers; menu choices (`choice=N`) are not
-/// answers to questions and are left out.
-fn parse_answers(answers: &[String]) -> Vec<Answer> {
+/// The planner's answers: `YES`/`NO`, and a multichoice's row
+/// (`MULTICHOICE_…=n`, [`pokebot_planner::intents::path_answers`]). A
+/// YES/NO box's own `MULTICHOICE_YES_NO=n` is left out: its NO branches
+/// test `ne 0` and give no answer, so the rows would fall out of order.
+pub(crate) fn parse_answers(answers: &[String]) -> Vec<Answer> {
     answers
         .iter()
         .filter_map(|a| match a.to_ascii_uppercase().as_str() {
             "YES" => Some(Answer::Yes),
             "NO" => Some(Answer::No),
-            _ => None,
+            a => {
+                let (choice, row) = a.split_once('=')?;
+                (choice != "MULTICHOICE_YES_NO")
+                    .then(|| row.trim().parse().ok().map(Answer::Menu))
+                    .flatten()
+            }
         })
         .collect()
 }

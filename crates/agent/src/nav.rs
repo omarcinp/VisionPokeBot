@@ -411,13 +411,14 @@ impl Navigator {
         let Some(map) = world.map(&pose.map) else {
             return NavStatus::Fail(format!("unknown map {}", pose.map));
         };
-        // A warp is done once we stand on the map it leads to.
+        // A warp is done once we stand on the map it leads to; an
+        // elevator's door (to `MAP_DYNAMIC`, set by its panel) once we
+        // stand off the car.
         if let Destination::Warp { map: from, warp } = &self.destination {
-            let dest = world
-                .map(from)
-                .and_then(|m| m.warps.get(*warp))
-                .and_then(|w| world.name_of(&w.dest_map));
-            if dest == Some(pose.map.as_str()) {
+            let target = world.map(from).and_then(|m| m.warps.get(*warp));
+            let dest = target.and_then(|w| world.name_of(&w.dest_map));
+            let dynamic = target.is_some_and(|w| w.dest_map == "MAP_DYNAMIC");
+            if dest == Some(pose.map.as_str()) || (dynamic && pose.map != *from) {
                 return NavStatus::Arrived;
             }
         }

@@ -352,36 +352,130 @@ impl Tool for GoTool {
     }
 }
 
-/// Whether `leg` needs a field move (or enters a dark map).
+/// Whether `leg` needs a field move (or enters a dark map), or is a ride
+/// in an elevator.
 fn special(world: &World, leg: &Leg) -> bool {
     match &leg.kind {
         EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        EdgeKind::ScriptWarp { .. } => ride(world, leg),
         _ => field::is_dark(world, &leg.to.map) && !field::is_dark(world, &leg.from.map),
     }
 }
 
+/// Whether `leg` rides an elevator: a script (the floor panel) sets where
+/// the car's door leads (a warp to `MAP_DYNAMIC`), then the player walks
+/// out onto another map.
+fn ride(world: &World, leg: &Leg) -> bool {
+    matches!(leg.kind, EdgeKind::ScriptWarp { .. })
+        && leg.to.map != leg.from.map
+        && dynamic_door(world, &leg.from.map).is_some()
+}
+
+/// The first warp of `map` whose destination a script sets (an
+/// elevator's door).
+fn dynamic_door(world: &World, map: &str) -> Option<usize> {
+    world
+        .map(map)?
+        .warps
+        .iter()
+        .position(|w| w.dest_map == "MAP_DYNAMIC")
+}
+
+/// The path of elevator panel `script` that takes the car to `to`, and
+/// its answers (the floor's row of the menu): among the paths whose warp
+/// lands on `to` and whose conditions the belief doesn't know false,
+/// those it knows true first, then the one doing the most (a floor path
+/// tests whether the car is already there, VAR_ELEVATOR_FLOOR, which
+/// nothing tracks: the ride that sets it records where the car is).
+pub fn ride_path(
+    world: &World,
+    script: &str,
+    to: &str,
+    belief: &dyn pokebot_world::predicate::BeliefView,
+) -> Option<(usize, Vec<super::Answer>)> {
+    use pokebot_world::events::Effect;
+    use pokebot_world::predicate::Truth;
+    let s = world.events()?.script(script)?;
+    s.paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.does.iter().any(|e| match e {
+                Effect::Warp { warp, .. } | Effect::SetWarp { set_warp: warp, .. } => {
+                    world.name_of(warp) == Some(to)
+                }
+                _ => false,
+            })
+        })
+        .filter_map(|(i, p)| {
+            let req = route::requirement_of(&p.when)?;
+            let truth: Vec<Truth> = req.iter().map(|q| belief.eval(q)).collect();
+            if truth.contains(&Truth::False) {
+                return None;
+            }
+            let known = truth.iter().all(|t| *t == Truth::True);
+            Some((i, known, p.does.len()))
+        })
+        .max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| b.0.cmp(&a.0))
+        })
+        .map(|(i, _, _)| {
+            let answers = pokebot_planner::intents::path_answers(&s.paths[i]);
+            (i, super::parse_answers(&answers))
+        })
+}
+
 /// The route to `dest` from where the player stands, when it needs field
-/// moves (a Cut or Rock Smash gate, Surf, Fly) or enters a dark map with
-/// a Flash user in the party; `None` when the navigator alone walks it.
-/// Requirements the belief doesn't know count as unmet (the planner
-/// establishes them first).
+/// moves (a Cut or Rock Smash gate, Surf, Fly), enters a dark map with a
+/// Flash user in the party, or rides an elevator the navigator can't get
+/// there without; `None` when the navigator alone walks it. Requirements
+/// the belief doesn't know count as unmet (the planner establishes them
+/// first).
 pub fn field_route(ctx: &mut ToolContext<'_>, dest: &Dest) -> Option<Vec<Leg>> {
     let pose = ctx.pose()?;
     let world = Arc::clone(&ctx.world);
+    let gone = ctx.gone.clone();
+    let gates = ctx.gate_tiles();
+    let walks = || navigable(&world, &pose, dest, &gone, &gates);
     let graph = ctx
         .scheduler
         .graph
         .get_or_insert_with(|| crate::scheduler::graph(&world));
-    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest)
+    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest, walks)
 }
 
-/// [`field_route`] without a context.
+/// Whether the navigator finds a way from `pose` to `dest` on its own
+/// (warps, edges and walks; no script's warp).
+fn navigable(
+    world: &World,
+    pose: &PlayerPose,
+    dest: &Dest,
+    gone: &Gone,
+    gates: &GateTiles,
+) -> bool {
+    let search = |map: &str, goal: &dyn Fn((i32, i32)) -> bool| {
+        crate::nav::route_search_via(world, pose, map, goal, gone, gates).is_some()
+    };
+    match dest {
+        Dest::Map { map } => search(map, &|_| true),
+        Dest::Tile { map, x, y } => search(map, &|p| p == (*x, *y)),
+        Dest::Facing { .. } | Dest::Warp { .. } => true,
+    }
+}
+
+/// [`field_route`] without a context; `walks` tells whether the navigator
+/// gets there alone (asked only when the route rides an elevator: a ride
+/// is taken only when there is no walking there, stairs are the
+/// navigator's).
 pub fn plan_field_route(
     world: &World,
     graph: &route::PlaceGraph,
     state: &pokebot_state::GameState,
     pose: &PlayerPose,
     dest: &Dest,
+    walks: impl FnOnce() -> bool,
 ) -> Option<Vec<Leg>> {
     let belief = StateBelief(state);
     let result = match dest {
@@ -405,10 +499,12 @@ pub fn plan_field_route(
     let flash = field::carrier(state, FieldMove::Flash.move_id()).is_some();
     let needed = result.legs.iter().any(|l| match &l.kind {
         EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        EdgeKind::ScriptWarp { .. } => false,
         // Entering a dark map matters only with someone to use Flash.
         _ => special(world, l) && flash,
     });
-    needed.then_some(result.legs)
+    let rides = result.legs.iter().any(|l| ride(world, l));
+    (needed || rides && !walks()).then_some(result.legs)
 }
 
 /// Walks to a place of the route (the navigator routes across maps).
@@ -629,6 +725,46 @@ pub fn walk_legs(
                 };
                 let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
                 ctx.drive(&mut step)?;
+            }
+            EdgeKind::ScriptWarp { script } => {
+                // Switch, Rocket Hideout B4F: the stairs from B3F land west
+                // of a wall, Giovanni's side is the lift's; every Beat of
+                // the grunts there failed "no path next to (19, 14)". The
+                // panel is read, the floor chosen, and the door walked out.
+                walk_to(ctx, &leg.from)?;
+                let (path, answers) = {
+                    let belief = StateBelief(ctx.state());
+                    ride_path(&world, script, &leg.to.map, &belief)
+                }
+                .ok_or_else(|| {
+                    ToolError::Failed(format!(
+                        "{script}: no path takes the lift to {}",
+                        leg.to.map
+                    ))
+                })?;
+                ctx.invoke(&Intent::RunScript {
+                    script: script.clone(),
+                    path: Some(path),
+                    answers,
+                })
+                .result?;
+                if ctx.pose().is_some_and(|p| p.map == leg.from.map) {
+                    if let Some(warp) = dynamic_door(&world, &leg.from.map) {
+                        go(
+                            ctx,
+                            Destination::Warp {
+                                map: leg.from.map.clone(),
+                                warp,
+                            },
+                        )?;
+                    }
+                }
+                if let Some(p) = ctx.pose().filter(|p| p.map != leg.to.map) {
+                    return Err(ToolError::Failed(format!(
+                        "the lift left the player on {}, not {}",
+                        p.map, leg.to.map
+                    )));
+                }
             }
             EdgeKind::Fly => {
                 // Flown from where the route prices it: FLY works only
@@ -926,7 +1062,7 @@ mod tests {
             x: 26,
             y: 33,
         };
-        let legs = plan_field_route(&world, &graph, &cutter(true), &pose, &dest)
+        let legs = plan_field_route(&world, &graph, &cutter(true), &pose, &dest, || true)
             .expect("a route through the tree");
         let gate = legs
             .iter()
@@ -934,7 +1070,7 @@ mod tests {
             .expect("a gate leg");
         assert_eq!((gate.from.x, gate.from.y), (26, 31));
         assert_eq!((gate.to.x, gate.to.y), (26, 33));
-        assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest).is_none());
+        assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest, || true).is_none());
     }
 
     /// Switch, Celadon Gym: a Cut tree stands between the door and ERIKA
@@ -967,6 +1103,7 @@ mod tests {
                         x,
                         y,
                     },
+                    || true,
                 )
             })
         };
@@ -998,7 +1135,7 @@ mod tests {
         let dest = Dest::Map {
             map: "VermilionCity_PokemonCenter_1F".into(),
         };
-        let legs = plan_field_route(&world, &graph, &state, &pose, &dest)
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest, || true)
             .expect("the Center is past the tree");
         assert!(legs
             .iter()
@@ -1012,5 +1149,131 @@ mod tests {
         let m = world.map("PalletTown").unwrap();
         assert_eq!(m.tile(x, y).unwrap().collision, 0);
         assert!((x - m.width / 2).abs() + (y - m.height / 2).abs() < 6);
+    }
+
+    /// Rocket Hideout B4F from the B3F stairs, (11, 15): Giovanni's side,
+    /// where TRAINER_TEAM_ROCKET_GRUNT_17 stands at (19, 14), is the
+    /// lift's (Switch: "no path next to (19, 14)"). With the Lift Key's
+    /// flag the way beside him rides the elevator (whose floor paths test
+    /// VAR_ELEVATOR_FLOOR, which nothing tracks); without it there is
+    /// none. The navigator doesn't walk it, so it is a field route.
+    #[test]
+    fn the_way_to_the_lift_side_of_b4f_rides_the_elevator() {
+        use pokebot_state::Knowledge;
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let mut state = pokebot_state::GameState::default();
+        // A B1F grunt stands on the way to the car until beaten.
+        state.world.flags.insert(
+            "TRAINER_TEAM_ROCKET_GRUNT_12".into(),
+            Knowledge::observed(true, 1),
+        );
+        let pose = PlayerPose {
+            map: "RocketHideout_B4F".into(),
+            x: 11,
+            y: 15,
+        };
+        let dest = Dest::Tile {
+            map: "RocketHideout_B4F".into(),
+            x: 19,
+            y: 15,
+        };
+        let gone = Gone::new();
+        let gates = GateTiles::believed(&world, graph.gates(), &StateBelief(&state));
+        assert!(!navigable(&world, &pose, &dest, &gone, &gates));
+        assert!(plan_field_route(&world, &graph, &state, &pose, &dest, || false).is_none());
+        state.world.flags.insert(
+            "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
+            Knowledge::observed(true, 1),
+        );
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest, || false)
+            .expect("a ride to Giovanni's side");
+        let lift = legs
+            .iter()
+            .find(|l| ride(&world, l))
+            .expect("an elevator leg");
+        assert_eq!(lift.from.map, "RocketHideout_Elevator");
+        assert_eq!(
+            (lift.to.map.as_str(), lift.to.x, lift.to.y),
+            ("RocketHideout_B4F", 20, 23)
+        );
+        assert!(special(&world, lift));
+        assert_eq!(dynamic_door(&world, "RocketHideout_Elevator"), Some(0));
+        // Where the navigator walks there alone, the stairs are its.
+        assert!(plan_field_route(&world, &graph, &state, &pose, &dest, || true).is_none());
+
+        // (b) The panel's path to B4F: its set_warp lands there, and the
+        // answer is B4F's row of the menu.
+        let EdgeKind::ScriptWarp { script } = &lift.kind else {
+            unreachable!()
+        };
+        assert_eq!(script, "RocketHideout_Elevator_EventScript_FloorSelect");
+        let (path, answers) = ride_path(&world, script, "RocketHideout_B4F", &StateBelief(&state))
+            .expect("a path to B4F");
+        let p = &world.events().unwrap().script(script).unwrap().paths[path];
+        assert!(p.does.iter().any(|e| matches!(e,
+            pokebot_world::events::Effect::SetWarp { set_warp, .. } if set_warp == "MAP_ROCKET_HIDEOUT_B4F")));
+        assert_eq!(answers, vec![super::super::Answer::Menu(2)]);
+        // The car's floor unknown, the path that rides (and records it).
+        assert!(p.does.iter().any(|e| matches!(e,
+            pokebot_world::events::Effect::Set { set } if set == "FLAG_TEMP_2")));
+        // Without the key no path goes.
+        let mut locked = state.clone();
+        locked.world.flags.insert(
+            "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
+            Knowledge::observed(false, 1),
+        );
+        assert!(ride_path(&world, script, "RocketHideout_B4F", &StateBelief(&locked)).is_none());
+    }
+
+    /// An elevator's door leads to `MAP_DYNAMIC` (its panel sets where):
+    /// walking out of it is done on whatever map the player stands on
+    /// next, not never.
+    #[test]
+    fn walking_out_of_an_elevator_is_done_off_the_car() {
+        use pokebot_state::{GameState, Observation, Observed, PoseObservation, ScreenState};
+        let Some(world) = world() else { return };
+        let parts = NavParts {
+            world,
+            gone: Gone::new(),
+            syncer: None,
+            blocked: Blocked::default(),
+            gates: Arc::default(),
+            data: None,
+        };
+        let mut step = GoStep::with(
+            &parts,
+            Destination::Warp {
+                map: "RocketHideout_Elevator".into(),
+                warp: 0,
+            },
+        );
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation {
+            pose: PlayerPose {
+                map: "RocketHideout_B4F".into(),
+                x: 20,
+                y: 23,
+            },
+            score: 1000,
+        });
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut ctx = StepContext {
+            observation: &o,
+            state: &state,
+            events: &mut events,
+            quiet_frames: SETTLE_FRAMES,
+            frame: None,
+            learned: &[],
+        };
+        assert!(matches!(step.next(&mut ctx), Decision::Done(_)));
     }
 }

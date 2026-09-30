@@ -926,6 +926,7 @@ impl PlaceGraph {
         extra: &[Predicate],
         domains: &BTreeMap<String, BTreeSet<i64>>,
     ) {
+        let mut warps: Vec<((String, i32, i32), Requirement)> = Vec::new();
         {
             for path in &script.paths {
                 if path.does.iter().any(|e| matches!(e, Effect::Battle { .. })) {
@@ -996,23 +997,26 @@ impl PlaceGraph {
                     if !dest.in_bounds(dx, dy) {
                         continue;
                     }
-                    let from = self.add_place(&map.name, ox, oy, PlaceKind::Script);
-                    let to = self.add_place(&dest.name, dx, dy, PlaceKind::Warp);
-                    self.add_edge(
-                        &from,
-                        Edge {
-                            to,
-                            kind: EdgeKind::ScriptWarp {
-                                script: label.to_string(),
-                            },
-                            cost_s: self.params.talk_s + self.params.warp_s,
-                            requires: requires.clone(),
-                        },
-                    );
+                    warps.push(((dest.name.clone(), dx, dy), requires.clone()));
                     // One warp per path is all a script does before it ends.
                     break;
                 }
             }
+        }
+        for ((dest, dx, dy), requires) in either_way(warps) {
+            let from = self.add_place(&map.name, ox, oy, PlaceKind::Script);
+            let to = self.add_place(&dest, dx, dy, PlaceKind::Warp);
+            self.add_edge(
+                &from,
+                Edge {
+                    to,
+                    kind: EdgeKind::ScriptWarp {
+                        script: label.to_string(),
+                    },
+                    cost_s: self.params.talk_s + self.params.warp_s,
+                    requires,
+                },
+            );
         }
     }
 
@@ -1262,6 +1266,56 @@ impl PlaceGraph {
 
 fn step_len(from: (i32, i32), to: (i32, i32)) -> u32 {
     ((to.0 - from.0).abs() + (to.1 - from.1).abs()) as u32
+}
+
+/// Warps of one script to the same place whose requirements differ only
+/// in a var being `== v` on one and `!= v` on the other are one warp
+/// needing neither: an elevator's floor paths test whether the car is
+/// already on the floor chosen (to skip the ride), and both land at the
+/// same door. Unmerged, a var nobody tracks (VAR_ELEVATOR_FLOOR) blocked
+/// every ride (Switch, Rocket Hideout B4F: the lift side unreachable).
+fn either_way<K: PartialEq>(mut warps: Vec<(K, Requirement)>) -> Vec<(K, Requirement)> {
+    use crate::predicate::CmpOp;
+    let complementary = |a: &Predicate, b: &Predicate| match (a, b) {
+        (
+            Predicate::Var {
+                name: n1,
+                op: o1,
+                value: v1,
+            },
+            Predicate::Var {
+                name: n2,
+                op: o2,
+                value: v2,
+            },
+        ) => {
+            n1 == n2
+                && v1 == v2
+                && matches!((o1, o2), (CmpOp::Eq, CmpOp::Ne) | (CmpOp::Ne, CmpOp::Eq))
+        }
+        _ => false,
+    };
+    'merge: loop {
+        for i in 0..warps.len() {
+            for j in i + 1..warps.len() {
+                let (a, b) = (&warps[i], &warps[j]);
+                if a.0 != b.0 || a.1.len() != b.1.len() {
+                    continue;
+                }
+                let only_a: Vec<&Predicate> = a.1.iter().filter(|p| !b.1.contains(p)).collect();
+                let only_b: Vec<&Predicate> = b.1.iter().filter(|p| !a.1.contains(p)).collect();
+                if let ([x], [y]) = (only_a.as_slice(), only_b.as_slice()) {
+                    if complementary(x, y) {
+                        let x = (*x).clone();
+                        warps.remove(j);
+                        warps[i].1.retain(|p| *p != x);
+                        continue 'merge;
+                    }
+                }
+            }
+        }
+        return warps;
+    }
 }
 
 /// The belief-checkable requirement of a script path, or `None` when a

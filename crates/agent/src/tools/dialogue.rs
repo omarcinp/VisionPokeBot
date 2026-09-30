@@ -409,6 +409,14 @@ impl Conversation {
     /// The answer to the question on screen: the plan's next answer, else
     /// the branch policy.
     fn answer(&mut self, menu: &MenuObservation) -> Decision {
+        if let Some(&Answer::Menu(row)) = self.answers.get(self.answers_used) {
+            // A multichoice (an elevator's floors): the plan's row, from
+            // wherever the game put the cursor (the car's own floor). A
+            // menu too short for it isn't the one planned.
+            if row < menu.rows {
+                return select(menu, row, &format!("choose row {row} (planned)"));
+            }
+        }
         if menu.rows > 2 {
             // A menu the plan doesn't need: B.
             return Decision::Act(Action::new(
@@ -418,13 +426,18 @@ impl Conversation {
                 90,
             ));
         }
-        let (answer, why) = match self.answers.get(self.answers_used) {
-            Some(a) => (*a, "planned"),
-            None => (policy_answer(self.script_data(), &self.answered), "policy"),
+        let (yes, why) = match self.answers.get(self.answers_used) {
+            Some(Answer::Yes) => (true, "planned"),
+            Some(Answer::No) => (false, "planned"),
+            _ => (
+                policy_answer(self.script_data(), &self.answered) == Answer::Yes,
+                "policy",
+            ),
         };
-        match answer {
-            Answer::Yes => select(menu, 0, &format!("answer YES ({why})")),
-            Answer::No => select(menu, 1, &format!("answer NO ({why})")),
+        if yes {
+            select(menu, 0, &format!("answer YES ({why})"))
+        } else {
+            select(menu, 1, &format!("answer NO ({why})"))
         }
     }
 
@@ -598,7 +611,11 @@ impl ToolStep for Conversation {
             if let Some(menu) = &o.menu {
                 // A menu without text (a multichoice after the text closed,
                 // or one we don't know): B, unless the plan is answering.
-                if self.answers.get(self.answers_used).is_some() && menu.rows <= 2 {
+                if self
+                    .answers
+                    .get(self.answers_used)
+                    .is_some_and(|a| matches!(a, Answer::Menu(_)) || menu.rows <= 2)
+                {
                     return self.answer(menu);
                 }
                 return Decision::Act(Action::new(
@@ -669,12 +686,19 @@ impl ToolStep for Conversation {
     }
 
     fn on_outcome(&mut self, action: &Action, outcome: Outcome, _ctx: &mut StepContext<'_>) {
-        if outcome == Outcome::Confirmed && action.label.starts_with("answer ") {
+        // The row confirmed with A answers; the cursor's moves toward it
+        // (`…: cursor Down`) don't.
+        if outcome != Outcome::Confirmed || action.label.contains(": cursor ") {
+            return;
+        }
+        if action.label.starts_with("answer ") {
             let yes = action.label.starts_with("answer YES");
             self.answered.push(yes);
-            if self.answers.get(self.answers_used).is_some() {
-                self.answers_used += 1;
-            }
+        } else if !action.label.starts_with("choose row ") {
+            return;
+        }
+        if action.label.contains("(planned)") && self.answers.get(self.answers_used).is_some() {
+            self.answers_used += 1;
         }
     }
 
@@ -2050,5 +2074,140 @@ mod tests {
             start_of(&world, bill, None),
             Some(Start::Object { map: m, .. }) if m == map
         ));
+    }
+
+    /// Rocket Hideout's lift: "Which floor do you want?" over a menu of
+    /// B1F, B2F, B4F and EXIT, the cursor on the car's own floor. The
+    /// plan's row (B4F, 2) is walked to from wherever the cursor is and
+    /// confirmed with A; only the A counts as the answer.
+    #[test]
+    fn a_planned_menu_row_moves_the_cursor_there_and_presses_a() {
+        use pokebot_state::{Observed, Region};
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let answers = super::super::parse_answers(&[
+            "MULTICHOICE_ROCKET_HIDEOUT_ELEVATOR=2".into(),
+            "MULTICHOICE_YES_NO=0".into(),
+            "yes".into(),
+        ]);
+        assert_eq!(answers, vec![Answer::Menu(2), Answer::Yes]);
+        let mut c = Conversation::new(
+            world,
+            data,
+            Some("RocketHideout_Elevator_EventScript_FloorSelect".into()),
+            None,
+            answers,
+        );
+        let menu = |cursor_row: u8| MenuObservation {
+            window: Region::new(8, 8, 64, 68),
+            rows: 4,
+            cursor_row,
+            cursor_y: 12 + 16 * u32::from(cursor_row),
+        };
+        let act = |d: Decision| match d {
+            Decision::Act(a) => a,
+            _ => panic!("expected an act"),
+        };
+        let observation = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut ctx = StepContext {
+            observation: &observation,
+            state: &state,
+            events: &mut events,
+            quiet_frames: 0,
+            frame: None,
+            learned: &[],
+        };
+        // The car is on B1F: down twice, then A.
+        let down = act(c.answer(&menu(0)));
+        assert_eq!(down.commands, vec![ControllerCommand::Press(Button::Down)]);
+        c.on_outcome(&down, Outcome::Confirmed, &mut ctx);
+        assert_eq!(c.answers_used, 0, "a cursor move is no answer");
+        let down = act(c.answer(&menu(1)));
+        assert_eq!(down.commands, vec![ControllerCommand::Press(Button::Down)]);
+        let press = act(c.answer(&menu(2)));
+        assert_eq!(press.commands, vec![ControllerCommand::Press(Button::A)]);
+        assert_eq!(press.expect, Expectation::MenuClosed);
+        c.on_outcome(&press, Outcome::Confirmed, &mut ctx);
+        assert_eq!(c.answers_used, 1);
+        assert!(c.answered.is_empty(), "a floor is no YES/NO");
+        // From below (EXIT), up.
+        let mut c2 = Conversation::new(
+            Arc::clone(&c.world),
+            Arc::clone(&c.data),
+            None,
+            None,
+            vec![Answer::Menu(2)],
+        );
+        let up = act(c2.answer(&menu(3)));
+        assert_eq!(up.commands, vec![ControllerCommand::Press(Button::Up)]);
+        // The next planned answer, YES, on a YES/NO box.
+        let yes_no = MenuObservation { rows: 2, ..menu(0) };
+        let press = act(c.answer(&yes_no));
+        assert_eq!(press.commands, vec![ControllerCommand::Press(Button::A)]);
+        assert!(press.label.starts_with("answer YES (planned)"));
+        // Without a plan, a tall menu is still closed with B.
+        let mut c3 = Conversation::new(
+            Arc::clone(&c.world),
+            Arc::clone(&c.data),
+            None,
+            None,
+            Vec::new(),
+        );
+        let close = act(c3.answer(&menu(0)));
+        assert_eq!(close.commands, vec![ControllerCommand::Press(Button::B)]);
+    }
+
+    /// A planned NO starts with the cursor on YES: the move down to NO is
+    /// not the answer (it was counted, and the A then answered NO again
+    /// by policy, two answers for one question).
+    #[test]
+    fn a_planned_no_is_answered_once() {
+        use pokebot_state::{Observed, Region};
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let mut c = Conversation::new(world, data, None, None, vec![Answer::No]);
+        let menu = |cursor_row: u8| MenuObservation {
+            window: Region::new(8, 8, 40, 36),
+            rows: 2,
+            cursor_row,
+            cursor_y: 12 + 16 * u32::from(cursor_row),
+        };
+        let observation = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut ctx = StepContext {
+            observation: &observation,
+            state: &state,
+            events: &mut events,
+            quiet_frames: 0,
+            frame: None,
+            learned: &[],
+        };
+        for cursor in [0, 1] {
+            let Decision::Act(a) = c.answer(&menu(cursor)) else {
+                panic!("expected an act");
+            };
+            c.on_outcome(&a, Outcome::Confirmed, &mut ctx);
+        }
+        assert_eq!(c.answered, vec![false]);
+        assert_eq!(c.answers_used, 1);
     }
 }
