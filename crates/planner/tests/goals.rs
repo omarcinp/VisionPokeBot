@@ -1393,29 +1393,45 @@ fn giovanni_in_the_hideout_waits_for_the_barrier_grunts() {
         x: 11,
         y: 15,
     });
-    let goal = parse_goal("flag TRAINER_BOSS_GIOVANNI").unwrap();
-    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
-    print(&plan, 30);
-    let beats = |who: &str| {
+    // Giovanni the goal, and Giovanni what the Silph Scope's appearing
+    // needs (the Switch's plan: Beat him first, the grunts after).
+    for goal in [
+        "flag TRAINER_BOSS_GIOVANNI",
+        "item SILPH_SCOPE",
+        "flag FLAG_SYS_GAME_CLEAR",
+    ] {
+        let plan = planner
+            .plan(&parse_goal(goal).unwrap(), &knowledge, pose.clone())
+            .unwrap();
+        print(&plan, 30);
+        barrier_grunts_first(&plan);
+    }
+}
+
+/// The trainers (a `Beat`, or their object's script) in the plan's order:
+/// the Lift Key, the barrier's grunts, then Giovanni.
+fn barrier_grunts_first(plan: &Plan) {
+    let beats = |who: &str, script_name: &str| {
         let who = who.to_string();
+        let script_name = format!("RocketHideout_B4F_EventScript_{script_name}");
         move |i: &Intent| match i {
             Intent::Beat { trainer, .. } => *trainer == who,
-            Intent::RunScript { script, .. } => script.contains(&who),
+            Intent::RunScript { script, .. } => *script == script_name,
             _ => false,
         }
     };
-    let giovanni = position(&plan, beats("TRAINER_BOSS_GIOVANNI"));
+    let giovanni = position(plan, beats("TRAINER_BOSS_GIOVANNI", "Giovanni"));
     assert!(giovanni < plan.intents.len(), "Giovanni missing");
     // B4F's stairs land west of a wall: the grunts' side is the lift's.
     let key = position(
-        &plan,
+        plan,
         |i| matches!(i, Intent::RunScript { script, .. } if script == "RocketHideout_B4F_EventScript_LiftKey"),
     );
-    for grunt in [
-        "TRAINER_TEAM_ROCKET_GRUNT_16",
-        "TRAINER_TEAM_ROCKET_GRUNT_17",
+    for (grunt, script) in [
+        ("TRAINER_TEAM_ROCKET_GRUNT_16", "Grunt2"),
+        ("TRAINER_TEAM_ROCKET_GRUNT_17", "Grunt3"),
     ] {
-        let at = position(&plan, beats(grunt));
+        let at = position(plan, beats(grunt, script));
         assert!(
             key < at && at < giovanni,
             "Lift Key at {key}, {grunt} at {at}, Giovanni at {giovanni}"

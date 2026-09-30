@@ -3878,7 +3878,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 if self.planner.trainer_maps.contains_key(name) =>
             {
                 let mut v = self.script_candidates(p, belief, &ctx);
-                v.extend(self.beat_candidates(name, p, belief, &ctx));
+                v.extend(self.beat_candidates(name, p, &ctx));
                 v
             }
             GoalPredicate::World(_) => self.script_candidates(p, belief, &ctx),
@@ -4297,7 +4297,6 @@ impl<'p, 'a> Session<'p, 'a> {
         &self,
         trainer: &str,
         p: &GoalPredicate,
-        belief: &StateBelief<'a>,
         ctx: &PlanContext<'_>,
     ) -> Vec<Candidate> {
         self.planner
@@ -4316,16 +4315,11 @@ impl<'p, 'a> Session<'p, 'a> {
                 // As for a script: on a map whose passages the story
                 // opens, what the walk to the trainer needs comes first
                 // (Giovanni's room in the Rocket Hideout: the Lift Key, then
-                // the two grunts whose defeat opens the barrier). The first
-                // listed runs last, so the walk's order is listed reversed.
-                let at = c
-                    .preconditions
-                    .iter()
-                    .position(|q| q.at_map().is_some())
-                    .map_or(0, |i| i + 1);
-                for need in self.trainer_spot_needs(trainer, map, belief) {
+                // the two grunts whose defeat opens the barrier). The last
+                // listed runs first, so the walk's order is listed reversed.
+                for need in self.trainer_spot_needs(trainer, map).into_iter().rev() {
                     if need != *p && !c.preconditions.contains(&need) {
-                        c.preconditions.insert(at, need);
+                        c.preconditions.push(need);
                     }
                 }
                 c
@@ -4333,14 +4327,47 @@ impl<'p, 'a> Session<'p, 'a> {
             .collect()
     }
 
-    /// What the walk to `trainer`'s object on `map` needs beyond what
-    /// holds, when the map has gates ([`Self::spot_needs`]).
-    fn trainer_spot_needs(
-        &self,
-        trainer: &str,
-        map: &str,
-        belief: &StateBelief<'a>,
-    ) -> Vec<GoalPredicate> {
+    /// `needs` (of a walk on `map`, in the walk's order) with each moved
+    /// after the needs whose own walk needs it: the first listed runs last,
+    /// so it runs before them (the Rocket Hideout's Lift Key before the
+    /// barrier's grunts, on the lift's side of B4F). The rest keep their
+    /// order.
+    fn dependents_first(&self, map: &str, mut needs: Vec<GoalPredicate>) -> Vec<GoalPredicate> {
+        let deps: Vec<Vec<GoalPredicate>> = needs
+            .iter()
+            .map(|need| match need {
+                GoalPredicate::World(Predicate::Flag { name, is: true })
+                    if self.planner.trainer_maps.contains_key(name) =>
+                {
+                    self.trainer_spot_needs(name, map)
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        let mut deps_of: Vec<(GoalPredicate, Vec<GoalPredicate>)> =
+            needs.iter().cloned().zip(deps).collect();
+        // Bounded: each move puts a need after one that depends on it.
+        for _ in 0..needs.len() * needs.len() {
+            let moved = (0..deps_of.len()).find_map(|i| {
+                (i + 1..deps_of.len())
+                    .rev()
+                    .find(|&j| deps_of[j].1.contains(&deps_of[i].0))
+                    .map(|j| (i, j))
+            });
+            let Some((i, j)) = moved else { break };
+            let d = deps_of.remove(i);
+            deps_of.insert(j, d);
+        }
+        needs = deps_of.into_iter().map(|(n, _)| n).collect();
+        needs
+    }
+
+    /// What the walk to `trainer`'s object on `map` needs beyond what is
+    /// known to hold, when the map has gates ([`Self::spot_needs`]). Judged
+    /// against the knowledge, not the plan: what the plan establishes for
+    /// the step that needs him runs after him (Giovanni, needed beaten by
+    /// his post-battle path, went ahead of the grunts that open his room).
+    fn trainer_spot_needs(&self, trainer: &str, map: &str) -> Vec<GoalPredicate> {
         if !self.planner.graph.has_gates(map) {
             return Vec::new();
         }
@@ -4362,8 +4389,10 @@ impl<'p, 'a> Session<'p, 'a> {
         }
         spots.sort_unstable();
         spots.dedup();
-        let after = belief.with_established([GoalPredicate::flag(trainer, true)].into());
-        self.spot_needs(map, &spots, below, belief)
+        let after = self
+            .base
+            .with_established([GoalPredicate::flag(trainer, true)].into());
+        self.spot_needs(map, &spots, below, &self.base)
             .unwrap_or_default()
             .into_iter()
             .filter(|need| after.eval_goal(need) != Truth::True)
@@ -4431,10 +4460,10 @@ impl<'p, 'a> Session<'p, 'a> {
                 // only comes after it in the story.
                 let after = belief.with_established(c.effects().into_iter().collect());
                 let below = self.levels.fired(&label, idx).unwrap_or(u32::MAX);
-                for need in self
+                let needs = self
                     .spot_needs(map, &spots, below, belief)
-                    .unwrap_or_default()
-                {
+                    .unwrap_or_default();
+                for need in self.dependents_first(map, needs) {
                     if *p != need && after.eval_goal(&need) != Truth::True && !start.contains(&need)
                     {
                         start.push(need);
