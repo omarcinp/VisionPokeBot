@@ -19,8 +19,11 @@ use super::{progress, ToolContext, ToolError};
 const PREFIX: &str = "VermilionCity_Gym_EventScript_TrashCan";
 /// Set once both switches are found; the door stays open.
 pub const FLAG: &str = "FLAG_FOUND_BOTH_VERMILION_GYM_SWITCHES";
-/// Cans pressed before the search gives up.
-const MAX_PRESSES: u32 = 60;
+/// Cans pressed before the search gives up. A search takes about 25 on
+/// average (8 cans to the first switch, and a wrong neighbour, 1 in 2 to 3
+/// in 4, starts it over), with a long tail: fleet worker 5 found the first
+/// switch six times in 60 presses and missed its neighbour five.
+const MAX_PRESSES: u32 = 200;
 
 /// The can a trash-can script is for (1..=15).
 pub fn can_of(script: &str) -> Option<u8> {
@@ -157,9 +160,12 @@ pub fn solve(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
                 first = None;
                 tried.clear();
             }
-            Answer::Trash | Answer::Unknown => {
+            Answer::Trash => {
                 tried.insert(can);
             }
+            // Not read: the can is pressed again (ruled out unread, it could
+            // have been the switch).
+            Answer::Unknown => {}
         }
     }
     Err(ToolError::Failed(format!(
