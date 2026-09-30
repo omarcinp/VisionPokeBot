@@ -242,6 +242,12 @@ const TRAINER_ON_THE_WAY_S: f64 = 600.0;
 /// Price nearby healers using gated tile routes and the added cost of
 /// returning toward the interrupted destination. Encounter exposure is a
 /// map-density heuristic; it is deliberately not an exact probability.
+/// Warps and edges a healer may lie from where the player stands (Switch,
+/// Pokémon Tower 6F: Lavender's Center is seven maps away, and with a
+/// search of five "no known safe route to a healer" repeated until the
+/// out-of-replans restart).
+const HEALER_HOPS: usize = 12;
+
 pub fn recovery(
     world: &World,
     graph: &PlaceGraph,
@@ -256,7 +262,7 @@ pub fn recovery(
     let mut queue = VecDeque::from([from.map.clone()]);
     while let Some(name) = queue.pop_front() {
         let d = distance[&name];
-        if d >= 5 {
+        if d >= HEALER_HOPS {
             continue;
         }
         let Some(map) = world.map(&name) else {
@@ -689,6 +695,35 @@ mod tests {
         assert_eq!(choice.map, from.map);
         assert!(choice.medicine.is_none());
         assert!(choice.score_s.is_finite());
+    }
+
+    /// Switch, Pokémon Tower 6F, the lead worn: Lavender's Center is seven
+    /// maps down and out; the search for a healer reaches it.
+    #[test]
+    fn a_healer_seven_maps_away_is_found() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let d = data();
+        let graph = graph(&world);
+        let from = PlayerPose {
+            map: "PokemonTower_6F".into(),
+            x: 17,
+            y: 10,
+        };
+        // As on the Switch: the Silph Scope held, the rival met on 2F.
+        let mut state = GameState::default();
+        state.bag.pockets.insert(
+            pokebot_state::Pocket::KeyItems,
+            pokebot_state::Knowledge::observed(vec![("ITEM_SILPH_SCOPE".into(), 1)], 1),
+        );
+        state.world.vars.insert(
+            "VAR_MAP_SCENE_POKEMON_TOWER_2F".into(),
+            pokebot_state::Knowledge::observed(1, 1),
+        );
+        let choice = recovery(&world, &graph, &state, &d, &from, None, true).expect("a healer");
+        assert_eq!(choice.map, "LavenderTown_PokemonCenter_1F", "{choice:?}");
     }
 
     /// Fleet worker 3: BULBASAUR at 10/29 in Viridian Forest (5, 27) went
