@@ -114,15 +114,16 @@ const NORTH_SEA: Region = Region {
     width: 48,
     height: 24,
 };
-/// Tiles (3..=18, 4): the mountains north of Pewter and Mt. Moon, below
-/// the box naming the cursor's place (rows 2..=3, drawn over the map on
-/// the Switch's Fly map: "ROUTE 16" covered the land read higher up, and
-/// the map wasn't seen).
+/// Tiles (3..=4, 8..=12): the land along the map's west side, clear of
+/// the box naming the cursor's place (the Switch's Fly map draws it over
+/// the north-west, one line for "ROUTE 16", two for "LAVENDER TOWN /
+/// POKéMON TOWER": the land read there hid the map) and of every cell
+/// the cursor or the player's icon can be on.
 const NORTH_LAND: Region = Region {
     x: 24,
-    y: 32,
-    width: 128,
-    height: 8,
+    y: 64,
+    width: 12,
+    height: 40,
 };
 /// Tiles (0..=2, 2..=19): the map's left edge.
 const WEST_EDGE: Region = Region {
@@ -373,6 +374,11 @@ mod tests {
         );
         let named = detect(&named).expect("the map under the name box");
         assert_eq!(named.cursor, Some((7, 6)));
+        // Two lines ("LAVENDER TOWN", "POKéMON TOWER") reach further down.
+        if let Some(lavender) = fixture("switch-fly-map-lavender.png") {
+            let map = detect(&lavender).expect("the map under a two-line name box");
+            assert_eq!(map.cursor, Some((18, 6)));
+        }
     }
 
     #[test]
