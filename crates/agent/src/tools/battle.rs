@@ -452,6 +452,7 @@ impl BattleStep {
                 .filter(|s| self.lead_status != Some(*s))
             {
                 self.lead_status = Some(status);
+                self.memory.lead_status = Some(status);
                 events.push(GameEvent::PartyObserved {
                     slot: self.active.unwrap_or(0),
                     species: None,
@@ -513,6 +514,7 @@ impl ToolStep for BattleStep {
             .as_ref()
             .and_then(|p| p.get(active))
             .and_then(|m| m.status.value);
+        self.memory.lead_status = self.lead_status;
         let data = Arc::clone(&self.data);
 
         // New moves and evolution: every finished page is read, and the

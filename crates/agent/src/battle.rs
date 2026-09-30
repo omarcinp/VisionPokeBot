@@ -67,6 +67,8 @@ pub struct BattleMemory {
     pub foe_evasion: i8,
     /// What the foe's moves and abilities forbid (a trap, a refused move).
     pub limits: crate::limits::Limits,
+    /// Our battler's status, as the party and the battle text tell it.
+    pub lead_status: Option<pokebot_state::Status>,
 }
 
 impl BattleMemory {

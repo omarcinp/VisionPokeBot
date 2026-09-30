@@ -749,6 +749,16 @@ pub fn identify(
 /// the balls left) and their choice is played: throw, the status move, an
 /// attack, or RUN. A non-shiny attempt is abandoned for RUN when the odds
 /// say RUN or put the lead's risk above the limit; a shiny one throws.
+/// HP a status takes from our battler at the end of each turn: an eighth of
+/// its maximum for poison (the first turn of a bad poison too) and a burn.
+pub fn status_tick(status: Option<pokebot_state::Status>, max_hp: u16) -> u16 {
+    use pokebot_state::Status;
+    match status {
+        Some(Status::Poisoned | Status::BadlyPoisoned | Status::Burned) => (max_hp / 8).max(1),
+        _ => 0,
+    }
+}
+
 pub(crate) fn attempt_decision(
     o: &Observation,
     policy: &BattlePolicy,
@@ -801,6 +811,24 @@ pub(crate) fn attempt_decision(
     }
     let attempt = memory.catch.attempt.clone()?;
     let plan = &attempt.plan;
+    // Poison and a burn take an eighth of the lead's HP each turn, outside
+    // the odds' model: priced one turn on (fleet worker 6: a poisoned
+    // WARTORTLE threw ball after ball at an EKANS down to 11/66 and fainted
+    // to POISON STING and the poison, whiting out).
+    let us_hp = (
+        us_hp
+            .0
+            .saturating_sub(status_tick(memory.lead_status, us_hp.1)),
+        us_hp.1,
+    );
+    if us_hp.0 == 0 && !plan.shiny {
+        memory.catch.attempt = None;
+        memory.catch.flee = true;
+        events.push(log(format!(
+            "{species}: the lead's status would faint it within a turn: abandoning the catch"
+        )));
+        return None;
+    }
     let lead = Lead { member, hp: us_hp };
     let foe = Foe {
         species: species.clone(),
@@ -1765,6 +1793,19 @@ mod tests {
         assert_eq!(best_ball(&data, &held(&[("ITEM_POKE_BALL", 0)])), None);
     }
 
+    /// Fleet worker 6: a poisoned WARTORTLE threw ball after ball at an
+    /// EKANS down to 11/66 and fainted to the poison. A status's tick is
+    /// an eighth of the maximum; none without one.
+    #[test]
+    fn poison_and_a_burn_take_an_eighth_each_turn() {
+        use pokebot_state::Status;
+        assert_eq!(status_tick(Some(Status::Poisoned), 66), 8);
+        assert_eq!(status_tick(Some(Status::Burned), 66), 8);
+        assert_eq!(status_tick(Some(Status::BadlyPoisoned), 7), 1);
+        assert_eq!(status_tick(Some(Status::Healthy), 66), 0);
+        assert_eq!(status_tick(None, 66), 0);
+    }
+
     #[test]
     fn every_broke_free_variant_means_throw_again() {
         for page in [
@@ -2438,6 +2479,48 @@ mod tests {
             decide_on(&data, &party, &mut memory, &mid),
             "cursor to RUN: Down"
         );
+    }
+
+    /// Fleet worker 6: a poisoned lead kept throwing and fainted to the
+    /// poison. At 10/54 a healthy lead plays on; poisoned, the next ticks
+    /// are priced in and the attempt is abandoned for RUN.
+    #[test]
+    fn a_poisoned_lead_abandons_what_a_healthy_one_plays_on() {
+        let Some(data) = data() else { return };
+        let party = Party {
+            members: vec![ivysaur(&data)],
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let command = BattleMenu::Command { column: 0, row: 0 };
+        let decision = |poisoned: bool| {
+            let mut memory = BattleMemory::default();
+            let mut events = Vec::new();
+            for f in [1, 2] {
+                identify(
+                    &wild(f, command, 1000),
+                    &data,
+                    &state,
+                    &party,
+                    &mut memory,
+                    &mut events,
+                );
+            }
+            if poisoned {
+                memory.lead_status = Some(pokebot_state::Status::Poisoned);
+            }
+            let mut low = wild(3, command, 1000);
+            let b = low.battle.as_mut().unwrap();
+            b.player_hp_numbers = Some((10, 54));
+            b.player_hp = Some(185);
+            let d = decide_on(&data, &party, &mut memory, &low);
+            (d, memory.catch.attempt.is_some())
+        };
+        let (healthy, attempt) = decision(false);
+        assert!(attempt, "{healthy}");
+        assert_ne!(healthy, "cursor to RUN: Down");
+        let (poisoned, attempt) = decision(true);
+        assert!(!attempt);
+        assert_eq!(poisoned, "cursor to RUN: Down");
     }
 
     /// Review: a non-shiny attempt kept throwing (`throws_left.max(1)`)
