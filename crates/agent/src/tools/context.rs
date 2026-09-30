@@ -402,6 +402,13 @@ impl<'a> ToolContext<'a> {
     /// Records an event: through the runtime, and into the running tool's
     /// outcome.
     pub fn emit(&mut self, event: GameEvent) -> Result<(), ToolError> {
+        // A pose a tool infers is tracked from, like the sensor's: the
+        // belief alone moved (the Switch flew to Lavender; perception
+        // still tracked Celadon and its neighbours, found the player
+        // nowhere, and the walk waited "locating the player").
+        if let GameEvent::PlayerInferred { pose, .. } = &event {
+            self.runtime.set_pose_hint_inferred(pose.clone());
+        }
         self.runtime.emit(event.clone())?;
         self.learn(event);
         Ok(())

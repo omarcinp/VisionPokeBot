@@ -883,3 +883,38 @@ fn a_recovery_needing_the_running_tool_replans() {
     let got = result.lock().unwrap().clone().unwrap_or_default();
     assert!(got.starts_with("replan:"), "{got}");
 }
+
+/// Switch: a flight landed on Lavender and the Fly tool placed the player
+/// there, but perception still tracked Celadon and its neighbours: the
+/// walk waited "locating the player". A pose a tool infers is tracked from.
+#[test]
+fn a_pose_a_tool_infers_is_tracked_from() {
+    let Some(d) = data() else { return };
+    let Some(overworld) = fixture("emu-tools-overworld.png") else {
+        return;
+    };
+    let frames = vec![overworld.clone(), overworld.clone(), overworld];
+    let (mut runtime, _) = runtime(&d, frames);
+    runtime.set_pose_hint(pose("PalletTown", 5, 5));
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    );
+    let o = ctx.observe().expect("observe");
+    assert!(o.player.is_none(), "tracked from Pallet: {:?}", o.player);
+    ctx.emit(pokebot_state::GameEvent::PlayerInferred {
+        pose: pose(FIXTURE_POSE.0, FIXTURE_POSE.1, FIXTURE_POSE.2),
+        candidates: Vec::new(),
+    })
+    .unwrap();
+    let o = ctx.observe().expect("observe");
+    assert_eq!(
+        o.player.map(|p| p.pose),
+        Some(pose(FIXTURE_POSE.0, FIXTURE_POSE.1, FIXTURE_POSE.2))
+    );
+}
