@@ -103,6 +103,11 @@ pub struct HuntStep {
     /// not a species: the carrier evolves on the way (fleet worker 6: its
     /// BULBASAUR became IVYSAUR at battle 38, and the hunt lost it).
     carrier: Option<u8>,
+    /// The hunted species was marked caught before the hunt began: the
+    /// plan wants one more (a party member), so the mark doesn't end it
+    /// (fleet worker 2: PIDGEY caught long before, each Catch was "done"
+    /// at once and the plan asked for it again, 20 times in 10 minutes).
+    dex_marked_before: bool,
     nav: NavParts,
 }
 
@@ -121,6 +126,7 @@ impl HuntStep {
             entries: MapEntries::default(),
             trainee: None,
             carrier: None,
+            dex_marked_before: false,
             nav: NavParts::of(ctx),
             saved_level: None,
         }
@@ -159,15 +165,7 @@ impl HuntStep {
     ) -> Option<String> {
         match &self.hunt {
             Hunt::Species(species) => {
-                if caught == Some(species.as_str()) {
-                    return Some(format!("caught {species}"));
-                }
-                let marked = state
-                    .pokedex
-                    .caught
-                    .get(species)
-                    .is_some_and(|k| k.value == Some(true));
-                marked.then(|| format!("{species} is marked caught in the Pokédex"))
+                species_caught(species, caught, state, self.dex_marked_before)
             }
             Hunt::Level(level) => self
                 .trainee
@@ -504,6 +502,26 @@ fn heal_after_flight(
         && lead_hp.is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * FLIGHT_HEAL_PCT)
 }
 
+/// Whether a hunt for `species` is over: one `caught` in the battle just
+/// ended, or the Pokédex marked it caught since the hunt began (not
+/// before: then the plan wants another, for the party).
+fn species_caught(
+    species: &str,
+    caught: Option<&str>,
+    state: &pokebot_state::GameState,
+    marked_before: bool,
+) -> Option<String> {
+    if caught == Some(species) {
+        return Some(format!("caught {species}"));
+    }
+    let marked = state
+        .pokedex
+        .caught
+        .get(species)
+        .is_some_and(|k| k.value == Some(true));
+    (marked && !marked_before).then(|| format!("{species} is marked caught in the Pokédex"))
+}
+
 /// Below this share of its HP, a lead that ran from a battle the hunt is
 /// for heals first.
 const FLIGHT_HEAL_PCT: u32 = 75;
@@ -527,8 +545,18 @@ fn hunt_for(
     let mut encounters = 0;
     let mut fled_in_a_row = 0;
     let mut restock = true;
+    let dex_marked_before = match &hunt {
+        Hunt::Species(species) => ctx
+            .state()
+            .pokedex
+            .caught
+            .get(species)
+            .is_some_and(|k| k.value == Some(true)),
+        Hunt::Level(_) => false,
+    };
     loop {
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
+        step.dex_marked_before = dex_marked_before;
         step.trainee = trainee.map(str::to_owned);
         step.carrier = carrier;
         step.restock = restock;
@@ -757,6 +785,22 @@ mod tests {
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
 
+    /// Fleet worker 2: PIDGEY marked caught long before, the plan's Catch
+    /// (for a second one in the party) ended at once and was planned again
+    /// and again. A mark made before the hunt doesn't end it; one made
+    /// during it, or a catch, does.
+    #[test]
+    fn a_species_caught_before_the_hunt_is_hunted_again() {
+        let mut state = pokebot_state::GameState::default();
+        state.pokedex.caught.insert(
+            "SPECIES_PIDGEY".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        assert!(species_caught("SPECIES_PIDGEY", None, &state, true).is_none());
+        assert!(species_caught("SPECIES_PIDGEY", None, &state, false).is_some());
+        assert!(species_caught("SPECIES_PIDGEY", Some("SPECIES_PIDGEY"), &state, true).is_some());
+    }
+
     /// Fleet worker 6: the carrier (slot 1) evolved from BULBASAUR into
     /// IVYSAUR at battle 38; it is still the carrier.
     #[test]
@@ -884,6 +928,7 @@ mod tests {
             saved_level: None,
             trainee: None,
             carrier: None,
+            dex_marked_before: false,
             nav: NavParts {
                 world: Arc::new(world),
                 gone: Gone::new(),
