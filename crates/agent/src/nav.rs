@@ -115,6 +115,18 @@ pub fn straight_run(from: (i32, i32), path: &[Step]) -> usize {
     run.max(1)
 }
 
+/// Tiles a tap `dir` from `from` covers to end on `to`: 1 for a plain
+/// step (or a ledge's hop), the slide's Manhattan length when a spin tile
+/// carries the player on (`pokebot_world::path::step_with`).
+pub fn slide_tiles(from: (i32, i32), dir: Direction, to: (i32, i32)) -> usize {
+    let (dx, dy) = dir.delta();
+    let hop = (from.0 + 2 * dx, from.1 + 2 * dy);
+    if (from.0 + dx, from.1 + dy) == to || hop == to {
+        return 1;
+    }
+    ((to.0 - from.0).unsigned_abs() + (to.1 - from.1).unsigned_abs()) as usize
+}
+
 /// How long to hold a direction to walk `tiles` tiles before the timing
 /// model has learned anything: release inside the last tile, which the
 /// game then finishes ([`Syncer::hold_for`] with the defaults).
@@ -644,6 +656,31 @@ impl Navigator {
                 .interruptible()
                 .timed(InputKind::WalkTile, tiles),
             ),
+            // A step onto a spin tile slides on to where the arrows end:
+            // the tap is done there, not when the player leaves the tile
+            // (Switch, Rocket Hideout B2F: the walk replanned from the
+            // tiles slid through, pressed on, and the press landing after
+            // the slide stepped onto an arrow back to the start).
+            WalkStep::Tap {
+                dir,
+                to,
+                timeout_frames,
+            } if slide_tiles((pose.x, pose.y), dir, to) > 1 => {
+                let tiles = slide_tiles((pose.x, pose.y), dir, to);
+                NavStatus::Act(
+                    Action::new(
+                        format!("walk {what}: {dir:?}, sliding to {to:?}"),
+                        vec![ControllerCommand::Press(direction_button(dir))],
+                        Expectation::PlayerAt(PlayerPose {
+                            map: pose.map.clone(),
+                            x: to.0,
+                            y: to.1,
+                        }),
+                        timeout_frames.max(sync.timeout_frames(InputKind::WalkTile, 2 * tiles)),
+                    )
+                    .timed(InputKind::WalkTile, 1),
+                )
+            }
             WalkStep::Tap {
                 dir,
                 timeout_frames,
@@ -1485,6 +1522,47 @@ mod tests {
             NavStatus::Act(a) => assert!(!a.label.contains("cross"), "{}", a.label),
             _ => panic!("expected a walk along the edge"),
         }
+    }
+
+    /// Switch, Rocket Hideout B2F: from (3, 9) the way to the elevator
+    /// steps Right onto a spin tile that slides the player to (8, 11). The
+    /// tap waits for the slide's end, not for the player leaving (3, 9):
+    /// replanned from the tiles slid through, the walk pressed on, and the
+    /// press after the slide stepped onto an arrow back to (1, 4).
+    #[test]
+    fn a_step_onto_a_spin_tile_waits_for_the_slide_to_end() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let dest = Destination::Tile {
+            map: "RocketHideout_B2F".into(),
+            x: 28,
+            y: 17,
+        };
+        let mut nav = Navigator::new(Arc::new(world), dest);
+        nav.facing = Some(Direction::Right);
+        match nav.next(&located("RocketHideout_B2F", 3, 9)) {
+            NavStatus::Act(a) => {
+                assert_eq!(
+                    a.expect,
+                    Expectation::PlayerAt(PlayerPose {
+                        map: "RocketHideout_B2F".into(),
+                        x: 8,
+                        y: 11,
+                    }),
+                    "{}",
+                    a.label
+                );
+                // A slide runs about 8 frames a tile (6 in 48 on the Switch).
+                assert!(a.timeout_frames >= 7 * 8, "{}", a.timeout_frames);
+            }
+            NavStatus::Wait(why) => panic!("expected the tap, waiting: {why}"),
+            _ => panic!("expected the tap"),
+        }
+        assert_eq!(slide_tiles((3, 9), Direction::Right, (4, 9)), 1);
+        assert_eq!(slide_tiles((3, 9), Direction::Right, (5, 9)), 1);
+        assert_eq!(slide_tiles((3, 9), Direction::Right, (8, 11)), 7);
     }
 
     /// Fleet workers: the route's crossing out of Pewter City was a tile
