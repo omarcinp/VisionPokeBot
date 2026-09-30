@@ -1183,6 +1183,22 @@ fn run_script(
     path: Option<usize>,
     answers: &[Answer],
 ) -> Result<(), ToolError> {
+    // A trash can of Vermilion Gym's locks: the switches are rolled by
+    // the game, so the cans are searched rather than one path run.
+    if super::trash_cans::can_of(script).is_some() {
+        let open = ctx
+            .state()
+            .world
+            .flags
+            .get(super::trash_cans::FLAG)
+            .and_then(|k| k.value)
+            == Some(true);
+        return if open {
+            Ok(())
+        } else {
+            super::trash_cans::solve(ctx)
+        };
+    }
     // A path that fights a trainer who must be beaten is prepared for
     // like a Beat: heal first when the lead isn't ready (Switch: IVYSAUR
     // met Cerulean's rival at 64/75 through RunScript, never healed, and

@@ -29,6 +29,7 @@ pub mod scene;
 pub mod sell;
 mod talk;
 pub mod teach;
+mod trash_cans;
 mod unstick;
 
 use pokebot_state::{Direction, GameEvent, PlayerPose, Pocket};
