@@ -90,6 +90,11 @@ pub struct HuntStep {
     /// Where the hunt entered maps: its walks are planned afresh on each
     /// map, so only the hunt sees them go round in circles.
     entries: MapEntries,
+    /// The training's level when the step began (or last saved): a level
+    /// gained is saved before the hunt goes on (the Switch lost an hour
+    /// of IVYSAUR's levels to each relaunch: a Train saves only when it
+    /// ends).
+    saved_level: Option<u8>,
     /// The species a training hunt is for (it leads the battles); `None`:
     /// the lead.
     trainee: Option<String>,
@@ -117,6 +122,7 @@ impl HuntStep {
             trainee: None,
             carrier: None,
             nav: NavParts::of(ctx),
+            saved_level: None,
         }
     }
 
@@ -179,6 +185,19 @@ impl HuntStep {
         }
     }
 
+    /// The level of the member being trained (the trainee, else the lead);
+    /// `None` when catching.
+    fn trained_level(&self, party: &Party) -> Option<u8> {
+        if !matches!(self.hunt, Hunt::Level(_)) {
+            return None;
+        }
+        self.trainee
+            .as_ref()
+            .and_then(|s| party.members.iter().find(|m| &m.species == s))
+            .or_else(|| party.lead())
+            .map(|m| m.level)
+    }
+
     /// The member whose HP decides heals: the carrier while switch-training
     /// (the trainee doesn't fight), else the lead.
     fn fighter<'p>(&self, party: &'p Party) -> Option<&'p crate::party::Member> {
@@ -201,6 +220,17 @@ impl ToolStep for HuntStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         let o = ctx.observation;
         let party = Party::from_state(ctx.state);
+        if self.battle.is_none() {
+            if let Some(level) = self.trained_level(&party) {
+                match self.saved_level {
+                    None => self.saved_level = Some(level),
+                    Some(saved) if level > saved => {
+                        return Decision::Done(format!("{SAVE_FIRST}: Lv{level} reached"));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
         if let Some(battle) = &mut self.battle {
             let decision = battle.next(ctx);
             if let Decision::Done(summary) = &decision {
@@ -513,7 +543,7 @@ fn hunt_for(
                     match ctx.invoke(&Intent::Save).result {
                         Ok(()) => {}
                         Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
-                        Err(e) => ctx.info(format!("save after a catch: {e}; hunting on")),
+                        Err(e) => ctx.info(format!("save on the way: {e}; hunting on")),
                     }
                 }
             }
@@ -824,6 +854,79 @@ mod tests {
             members: vec![paras],
         };
         assert!(fainted_trainee(&party, Some("SPECIES_PARAS")).is_none());
+    }
+
+    /// The Switch lost an hour of IVYSAUR's levels to each relaunch: a
+    /// Train saved only when it ended. Between battles, a level gained
+    /// since the step began is saved first ("save first", as a catch).
+    #[test]
+    fn a_level_gained_while_training_is_saved() {
+        use pokebot_state::{GameState, Knowledge, Observation, Observed, PartyMon, ScreenState};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let (Ok(world), Ok(data)) = (
+            World::load(&dir),
+            pokebot_gamedata::GameData::load(dir.join("gamedata.json")),
+        ) else {
+            return;
+        };
+        let mut step = HuntStep {
+            hunt: Hunt::Level(34),
+            restock: true,
+            map: Some("Route4".into()),
+            data: Arc::new(data),
+            battle: None,
+            go: None,
+            spin_at: None,
+            encounters: 0,
+            fled_in_a_row: 0,
+            entries: MapEntries::default(),
+            saved_level: None,
+            trainee: None,
+            carrier: None,
+            nav: NavParts {
+                world: Arc::new(world),
+                gone: Gone::new(),
+                syncer: None,
+                blocked: Default::default(),
+                gates: Default::default(),
+                data: None,
+            },
+        };
+        let state = |level: u8| GameState {
+            party: Knowledge::observed(
+                vec![PartyMon {
+                    species: Knowledge::observed("SPECIES_IVYSAUR".into(), 1),
+                    level: Knowledge::observed(level, 1),
+                    hp: Knowledge::observed((80, 80), 1),
+                    ..PartyMon::default()
+                }],
+                1,
+            ),
+            ..GameState::default()
+        };
+        let o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        let mut run = |state: &GameState| {
+            let mut events = Vec::new();
+            step.next(&mut StepContext {
+                observation: &o,
+                state,
+                events: &mut events,
+                quiet_frames: 0,
+                frame: None,
+                learned: &[],
+            })
+        };
+        let saves = |d: &Decision| matches!(d, Decision::Done(s) if s.starts_with(SAVE_FIRST));
+        assert!(!saves(&run(&state(28))));
+        assert!(!saves(&run(&state(28))));
+        assert!(saves(&run(&state(29))));
     }
 
     #[test]
