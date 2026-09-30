@@ -740,7 +740,17 @@ impl<'a> ToolContext<'a> {
             Ok(true)
         })();
         self.scheduler.recovering = false;
-        result
+        // The recovery needs a tool the suspended task is running (a Beat's
+        // Talk walking to Miguel, a wild battle on the way leaving the lead
+        // worn: the Heal's Talk to the nurse was "busy" and the Beat
+        // failed, in two fleet games): the task gives way, and the goal
+        // loop plans the heal first.
+        match result {
+            Err(ToolError::Busy(tool)) => Err(ToolError::Replan(format!(
+                "{need:?} needs {tool}, which the step is running: heal first"
+            ))),
+            other => other,
+        }
     }
 
     /// Runs `step` until it is done or fails, one frame per decision, with

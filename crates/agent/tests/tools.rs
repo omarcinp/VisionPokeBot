@@ -823,3 +823,63 @@ fn an_unlocated_player_walks_about_rather_than_idles() {
     // From frame 300 on, one every 40 frames.
     assert!(directions >= 8, "{directions}");
 }
+
+/// Runs the scheduler's queued need from inside itself: the recovery
+/// needs the tool that is running.
+struct Suspends {
+    result: Arc<Mutex<Option<String>>>,
+}
+
+impl Tool for Suspends {
+    fn name(&self) -> &str {
+        "Suspends"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::ConfirmLocation)
+    }
+
+    fn run(&mut self, _intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        ctx.scheduler.enabled = true;
+        ctx.scheduler
+            .queue
+            .push_back(pokebot_agent::scheduler::Need::ConfirmLocation);
+        let r = ctx.service_needs();
+        *self.result.lock().unwrap() = Some(match r {
+            Err(pokebot_agent::tools::ToolError::Replan(why)) => format!("replan: {why}"),
+            Err(e) => format!("error: {e}"),
+            Ok(b) => format!("ok: {b}"),
+        });
+        ToolOutcome::ok()
+    }
+}
+
+/// Two fleet games: a Beat's Talk walking to Miguel met a wild battle,
+/// the lead came out worn, and the scheduler's Heal needed Talk, already
+/// running: "Talk is busy" failed the Beat. A recovery that needs the
+/// running tool makes the step give way (a replan: the goal loop heals
+/// first), never a failure.
+#[test]
+fn a_recovery_needing_the_running_tool_replans() {
+    let Some(d) = data() else { return };
+    let Some(overworld) = fixture("emu-tools-overworld.png") else {
+        return;
+    };
+    let (mut runtime, _) = runtime(&d, vec![overworld]);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let result = Arc::new(Mutex::new(None));
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(Toolbox::new(vec![Box::new(Suspends {
+        result: Arc::clone(&result),
+    })]));
+    ctx.invoke(&Intent::ConfirmLocation).result.expect("ran");
+    let got = result.lock().unwrap().clone().unwrap_or_default();
+    assert!(got.starts_with("replan:"), "{got}");
+}
