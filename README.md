@@ -116,6 +116,19 @@ first. Details: [`docs/shiny-starter.md`](docs/shiny-starter.md).
 ./target/release/pokebot shiny-starter --prepare --starter charmander --save /tmp/sh/game.sav --hunt /tmp/sh/hunt.json
 ```
 
+### Farm money at Nugget Bridge
+
+The Route 24 grunt hands over a NUGGET before his battle and never takes it
+back when he wins. The farm beats the contest trainers, keeps only the member
+that can't beat him (the rest go to the PC), loses to him `--nuggets` times
+(default 200; each white-out is expected), sells the NUGGETs (never past
+¥999,999), and takes the party back. Progress is in `nugget-farm.json` beside
+the progress file, so `--restart` resumes it.
+
+```bash
+tools/live-run.sh --instance emu /tmp/farm.log nugget-farm --continue --save /tmp/emu/game.sav --progress /tmp/emu/progress.json --nuggets 200 --record /tmp/farm-1
+```
+
 ### In-process emulator (fast, deterministic)
 
 ```bash

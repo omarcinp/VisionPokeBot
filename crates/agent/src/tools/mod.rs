@@ -5,7 +5,7 @@
 //!
 //! Every tool is deterministic given the same observations; none sleeps.
 
-mod battle;
+pub(crate) mod battle;
 mod beat;
 mod buy;
 mod catch;
@@ -26,6 +26,7 @@ pub mod pc;
 pub mod probe;
 mod save;
 pub mod scene;
+pub mod sell;
 mod talk;
 pub mod teach;
 mod unstick;
@@ -110,6 +111,10 @@ pub enum BattlePlan {
     Fight,
     /// Run from a wild battle when possible.
     Flee,
+    /// Lose it (a trainer's prize handed over before the battle, kept
+    /// through the white-out: `crate::nugget_farm`): the least harmful
+    /// move every turn, no switching, and the white-out is no failure.
+    Lose,
 }
 
 /// A fact a `Probe` establishes by opening a screen.
@@ -197,6 +202,12 @@ pub enum Intent {
         item: String,
         count: u16,
     },
+    /// Sell up to `count` of `item` at the nearest mart (fewer when fewer
+    /// are held, or the money would pass ¥999,999).
+    Sell {
+        item: String,
+        count: u32,
+    },
     Probe {
         #[serde(flatten)]
         fact: ProbeFact,
@@ -270,6 +281,7 @@ impl Intent {
             Intent::Catch { .. } => "Catch",
             Intent::Train { .. } => "Train",
             Intent::Buy { .. } => "Buy",
+            Intent::Sell { .. } => "Sell",
             Intent::Probe { .. } => "Probe",
             Intent::Save => "Save",
             Intent::Unstick => "Unstick",
@@ -414,7 +426,7 @@ fn parse_answers(answers: &[String]) -> Vec<Answer> {
 }
 
 /// The object of `map` whose compiled script battles `trainer`.
-fn trainer_object(world: &World, map: &str, trainer: &str) -> Option<u32> {
+pub fn trainer_object(world: &World, map: &str, trainer: &str) -> Option<u32> {
     let events = world.events()?;
     let mut objects: Vec<&pokebot_world::events::ObjectRef> =
         events.objects.iter().filter(|o| o.map == map).collect();
@@ -479,6 +491,7 @@ impl std::fmt::Display for Intent {
                 level,
             } => write!(f, "Train {species} to Lv{level} on {map}"),
             Intent::Buy { item, count } => write!(f, "Buy {item} x{count}"),
+            Intent::Sell { item, count } => write!(f, "Sell {item} x{count}"),
             Intent::Probe { fact } => write!(f, "Probe {fact:?}"),
             Intent::Save => write!(f, "Save"),
             Intent::Unstick => write!(f, "Unstick"),
@@ -609,6 +622,7 @@ impl Default for Toolbox {
             Box::new(catch::CatchTool),
             Box::new(catch::TrainTool),
             Box::new(buy::BuyTool),
+            Box::new(sell::SellTool),
             Box::new(probe::ProbeTool),
             Box::new(teach::TeachTool),
             Box::new(pc::PcSwapTool),

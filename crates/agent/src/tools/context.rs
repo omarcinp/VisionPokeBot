@@ -43,6 +43,9 @@ pub struct Expects {
     pub dialogue: bool,
     pub battle: bool,
     pub menu: bool,
+    /// The white-out screens are part of the step (a battle lost on
+    /// purpose), not the end of the run.
+    pub whiteout: bool,
 }
 
 impl Expects {
@@ -51,24 +54,36 @@ impl Expects {
         dialogue: false,
         battle: false,
         menu: false,
+        whiteout: false,
     };
     /// A conversation, questions included.
     pub const DIALOGUE: Expects = Expects {
         dialogue: true,
         battle: false,
         menu: true,
+        whiteout: false,
     };
     /// A battle and everything it shows.
     pub const BATTLE: Expects = Expects {
         dialogue: true,
         battle: true,
         menu: true,
+        whiteout: false,
     };
     /// Menus without dialogue (the Start menu, the bag).
     pub const MENUS: Expects = Expects {
         dialogue: true,
         battle: false,
         menu: true,
+        whiteout: false,
+    };
+    /// A battle lost on purpose: the battle, the white-out screens and
+    /// the nurse's healing after them.
+    pub const LOSING: Expects = Expects {
+        dialogue: true,
+        battle: true,
+        menu: true,
+        whiteout: true,
     };
 }
 
@@ -605,6 +620,10 @@ impl<'a> ToolContext<'a> {
         // here; the goal loop ends the run and the session reloads the
         // save.
         if o.screen.value == ScreenState::Whiteout {
+            if self.expects.whiteout {
+                self.whiteout_frames = 0;
+                return Ok(false);
+            }
             self.whiteout_frames += 1;
             if self.whiteout_frames >= WHITEOUT_FRAMES {
                 return Err(ToolError::Failed("whited out".into()));

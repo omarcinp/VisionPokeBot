@@ -3,6 +3,7 @@ mod devices;
 mod fleet;
 mod goal;
 mod hub;
+mod nugget;
 mod plan;
 mod scenario;
 mod script;
@@ -201,6 +202,11 @@ enum Command {
     /// Ball, time the title press (RNG seed) and the last A (advance), read
     /// each result from the summary, aim at a shiny frame (docs/shiny-starter.md).
     ShinyStarter(shiny::ShinyArgs),
+    /// Farm money at Nugget Bridge: the grunt past the contest trainers
+    /// hands over a NUGGET before his battle and again after every loss;
+    /// lose to him with one weak Pokémon (the rest in the PC) --nuggets
+    /// times, sell the NUGGETs, take the party back.
+    NuggetFarm(nugget::NuggetArgs),
     /// The development scenario library (`goal --dev-snapshots`)
     Scenario(scenario::ScenarioArgs),
     /// Serve every instance's web UI under one address: /switch/, /emu/.
@@ -262,6 +268,7 @@ fn main() -> Result<()> {
         | Command::Story { output, .. } => output.instance_file.is_some(),
         Command::Goal(args) => args.output.instance_file.is_some(),
         Command::ShinyStarter(args) => args.output.instance_file.is_some(),
+        Command::NuggetFarm(args) => args.output.instance_file.is_some(),
         _ => false,
     };
     if managed {
@@ -375,6 +382,7 @@ fn main() -> Result<()> {
         Command::Plan(args) => plan::run(args),
         Command::Goal(args) => goal::run(args, Arc::clone(&stop)),
         Command::ShinyStarter(args) => shiny::run(args, Arc::clone(&stop)),
+        Command::NuggetFarm(args) => nugget::run(args, Arc::clone(&stop)),
         Command::Scenario(args) => scenario::run(args),
         Command::Hub(args) => hub::run(args, stop),
         Command::Emulator {

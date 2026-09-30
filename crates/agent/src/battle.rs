@@ -21,6 +21,8 @@ pub struct BattlePolicy {
     /// In wild battles, moves with at most this many PP left are saved for
     /// trainers (moves with 30+ PP are always usable).
     pub wild_pp_reserve: u8,
+    /// The battle is to be lost: [`losing_move`] every turn.
+    pub lose: bool,
 }
 
 impl Default for BattlePolicy {
@@ -29,6 +31,7 @@ impl Default for BattlePolicy {
             flee_below: 350,
             max_run_attempts: 3,
             wild_pp_reserve: 5,
+            lose: false,
         }
     }
 }
@@ -438,6 +441,52 @@ pub fn choose_move(
     Some((slot, chosen))
 }
 
+/// Move effects that hurt the foe without power: poison, a seed, confusion
+/// (it hits itself), a fixed-damage or OHKO move.
+const HARMFUL_EFFECTS: [&str; 9] = [
+    "EFFECT_POISON",
+    "EFFECT_TOXIC",
+    "EFFECT_LEECH_SEED",
+    "EFFECT_CONFUSE",
+    "EFFECT_SWAGGER",
+    "EFFECT_FLATTER",
+    "EFFECT_LEVEL_DAMAGE",
+    "EFFECT_DRAGON_RAGE",
+    "EFFECT_SONICBOOM",
+];
+
+/// A move that does nothing to the foe (GROWL, TAIL WHIP): no power and
+/// none of [`HARMFUL_EFFECTS`]. A move not known (unread) may hurt.
+pub fn harmless(data: &GameData, mv: &str) -> bool {
+    data.move_(mv).is_some_and(|m| {
+        m.power == 0
+            && m.effect
+                .as_deref()
+                .is_none_or(|e| !HARMFUL_EFFECTS.contains(&e))
+    })
+}
+
+/// The move least likely to win a battle that is to be lost: a
+/// [`harmless`] one first, then the weakest; slot order breaks ties. Only
+/// moves with PP the game accepts; `None` when none has PP (the game uses
+/// STRUGGLE by itself).
+pub fn losing_move(data: &GameData, party: &Party, memory: &BattleMemory) -> Option<(u8, String)> {
+    let lead = party.lead()?;
+    lead.moves
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| lead.pp_left(data, m) > 0 && memory.allows(data, m))
+        .min_by_key(|(slot, m)| {
+            // A harmful move without power (SUPERSONIC's confusion) is
+            // priced like a weak attack.
+            let power = data
+                .move_(m)
+                .map_or(u16::MAX, |mv| if mv.power > 0 { mv.power } else { 40 });
+            (!harmless(data, m), power, *slot)
+        })
+        .map(|(slot, m)| (slot as u8, m.clone()))
+}
+
 /// Any move the game will accept when no damaging move can be chosen (the
 /// only one is disabled or out of PP): the first non-disabled move with PP,
 /// status moves included, in slot order. `None` when no move has PP (the
@@ -627,14 +676,16 @@ pub fn decide(
         BattleMenu::Moves { column, row } => {
             let menu_party = with_menu_moves(data, party, battle);
             let party = menu_party.as_ref().unwrap_or(party);
-            let opener = sleep_opener(data, party, opponent.as_ref(), battle, memory);
-            if opener.is_some() {
-                memory.sleep_tries += 1;
-            }
-            let Some((slot, name)) = opener
-                .or_else(|| choose_move(data, party, opponent.as_ref(), memory, policy))
-                .or_else(|| fallback_move(data, party, memory))
-            else {
+            let chosen = if policy.lose {
+                losing_move(data, party, memory)
+            } else {
+                let opener = sleep_opener(data, party, opponent.as_ref(), battle, memory);
+                if opener.is_some() {
+                    memory.sleep_tries += 1;
+                }
+                opener.or_else(|| choose_move(data, party, opponent.as_ref(), memory, policy))
+            };
+            let Some((slot, name)) = chosen.or_else(|| fallback_move(data, party, memory)) else {
                 return Some(Decision::Fail("no move has PP left".into()));
             };
             memory.last_move = Some(name.clone());

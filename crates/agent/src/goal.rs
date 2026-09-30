@@ -1012,7 +1012,7 @@ fn short_of(step: &PlannedIntent, confidence: f64) -> Option<String> {
 /// Center healed at, else Mom's house), at a walkable tile near its
 /// middle (the exact spot isn't in the data; the localizer's search
 /// widens from there).
-fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
+pub fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
     let places = ctx.world.places()?;
     let known = ctx.state().world.respawn.value.as_ref();
     let spot = known

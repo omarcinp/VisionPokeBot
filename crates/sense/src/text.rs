@@ -38,6 +38,30 @@ pub fn page_events(page: &str, data: &GameData) -> Vec<GameEvent> {
             reason: "won a battle".into(),
         });
     }
+    if let Some(amount) = money_lost(page) {
+        events.push(GameEvent::MoneyChanged {
+            delta: -i64::from(amount),
+            reason: "lost a battle".into(),
+        });
+    }
+    if let Some((item, count, amount)) = sold(page, data) {
+        if let Some(pocket) = data.items[&item]
+            .pocket
+            .as_deref()
+            .and_then(Pocket::from_decomp)
+        {
+            events.push(GameEvent::ItemsChanged {
+                pocket,
+                item,
+                delta: -count,
+                reason: "sold".into(),
+            });
+        }
+        events.push(GameEvent::MoneyChanged {
+            delta: i64::from(amount),
+            reason: "sold".into(),
+        });
+    }
     if let Some((name, reason)) = item_gained(page) {
         // "received 30 SAFARI BALLS": a count, and the plural.
         let (count, name) = match name.split_once(' ') {
@@ -186,6 +210,42 @@ fn money_won(page: &str) -> Option<u32> {
     page.contains("for winning")
         .then(|| digits.parse().ok())
         .flatten()
+}
+
+/// The amount after `marker` (`,` separators skipped).
+fn amount_after(page: &str, marker: &str) -> Option<u32> {
+    let rest = &page[page.find(marker)? + marker.len()..];
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(|c| *c != ',')
+        .collect();
+    digits.parse().ok()
+}
+
+/// A lost battle's money: "RED paid ¥192 as the prize money…" (a
+/// trainer's) or "RED panicked and lost ¥96…" (a wild one's).
+fn money_lost(page: &str) -> Option<u32> {
+    if page.contains("as the prize") {
+        amount_after(page, " paid ¥")
+    } else {
+        amount_after(page, " panicked and lost ¥")
+    }
+}
+
+/// A sale at a mart: "Turned over the NUGGET(S) worth ¥5000." →
+/// (`ITEM_NUGGET`, 1, 5000): the count is the amount over the item's
+/// selling price (half its price).
+fn sold(page: &str, data: &GameData) -> Option<(String, i32, u32)> {
+    let rest = page.strip_prefix("Turned over the ")?;
+    let at = rest.find(" worth ¥")?;
+    let name = rest[..at].trim();
+    let name = name.strip_suffix("(S)").unwrap_or(name);
+    let item = data.item_named(name)?;
+    let amount = amount_after(rest, " worth ¥")?;
+    let each = data.items[item].price / 2;
+    (each > 0 && amount % each == 0 && amount > 0)
+        .then(|| (item.to_owned(), (amount / each) as i32, amount))
 }
 
 /// "RED used POKé BALL!" → `ITEM_POKE_BALL`; only items of the Poké Balls
@@ -363,6 +423,54 @@ mod tests {
             }]
         );
         assert!(page_events("The BOULDERBADGE raises ATTACK.", &d).is_empty());
+        assert_eq!(
+            page_events("RED received a NUGGET from the mystery TRAINER!", &d),
+            vec![GameEvent::ItemsChanged {
+                pocket: Pocket::Items,
+                item: "ITEM_NUGGET".into(),
+                delta: 1,
+                reason: "received".into()
+            }]
+        );
+        assert_eq!(
+            page_events("RED paid ¥192 as the prize money…", &d),
+            vec![GameEvent::MoneyChanged {
+                delta: -192,
+                reason: "lost a battle".into()
+            }]
+        );
+        assert_eq!(
+            page_events("RED panicked and lost ¥96…", &d),
+            vec![GameEvent::MoneyChanged {
+                delta: -96,
+                reason: "lost a battle".into()
+            }]
+        );
+        // The emulator's sale of two POKé BALLS (probe, Cerulean Mart).
+        assert_eq!(
+            page_events("Turned over the POKé BALL(S) worth ¥200.", &d),
+            vec![
+                GameEvent::ItemsChanged {
+                    pocket: Pocket::PokeBalls,
+                    item: "ITEM_POKE_BALL".into(),
+                    delta: -2,
+                    reason: "sold".into()
+                },
+                GameEvent::MoneyChanged {
+                    delta: 200,
+                    reason: "sold".into()
+                }
+            ]
+        );
+        assert_eq!(
+            page_events("Turned over the NUGGET(S) worth ¥495,000.", &d)[0],
+            GameEvent::ItemsChanged {
+                pocket: Pocket::Items,
+                item: "ITEM_NUGGET".into(),
+                delta: -99,
+                reason: "sold".into()
+            }
+        );
         assert_eq!(
             page_events("Gotcha! PIDGEY was caught!", &d),
             vec![GameEvent::SpeciesCaught {

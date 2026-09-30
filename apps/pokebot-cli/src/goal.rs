@@ -326,12 +326,12 @@ fn dry_run(args: &GoalArgs, goal: &GoalPredicate, pd: &PlannerData) -> Result<()
 /// `Save` that also records the save position in `progress.json`, so the
 /// checkpoint the built-in tool writes stays tied to it (`--continue`
 /// checks both).
-struct ProgressSave {
-    progress: Progress,
-    path: PathBuf,
+pub(crate) struct ProgressSave {
+    pub(crate) progress: Progress,
+    pub(crate) path: PathBuf,
     /// Development snapshots to record after each save, and the checkpoint
     /// beside it.
-    snapshots: Option<(Arc<scenario::Store>, PathBuf)>,
+    pub(crate) snapshots: Option<(Arc<scenario::Store>, PathBuf)>,
 }
 
 impl Tool for ProgressSave {

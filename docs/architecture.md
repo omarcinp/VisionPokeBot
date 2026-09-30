@@ -374,6 +374,25 @@ session/
 - (seed, advance) identification by brute force over the Gen III LCG, and a planner that learns each title's seed.
 - Theory, mGBA measurements (soft resets don't repeat; per-title seeds) and the Switch plan: [`shiny-starter.md`](shiny-starter.md).
 
+## Nugget Bridge farm (`agent::nugget_farm`, `agent::sell`, `tools::sell`)
+
+- `pokebot nugget-farm [--nuggets 200] [--save-every 10]`: the Route 24 grunt (`TRAINER_TEAM_ROCKET_GRUNT_6`) hands over a NUGGET *before* his battle, and only a win sets `VAR_MAP_SCENE_ROUTE24` (`Route24/scripts.inc`). Losing keeps the NUGGET and re-arms the trigger. The white-out costs `4 × top level × badge multiplier` (`ComputeWhiteOutMoneyLoss`), so one weak member keeps it small (Lv6 with 2 badges: ¥144 per ¥5000 NUGGET).
+- Phases, resumed from the farm file (`nugget-farm.json` beside `progress.json`, written right after each in-game save):
+  - **Prepare**: `Beat` the five contest trainers not known beaten, then `Heal` at the Cerulean Center (the respawn).
+    - The keeper (`nugget_farm::keeper`) is the member with the least chance against the grunt using only the move the `Lose` plan picks, then the lowest level. None under 1 %: refused, because a win ends the farm for good.
+    - `pc::deposit` stores the rest, last slot first. Then save in front of the grunt.
+  - **Farm**: from the tile south of the trigger, `LoseStep` steps onto it (a hold Up), reads "received a NUGGET", and plays the battle with `BattlePlan::Lose` (`battle::losing_move`: a harmless move first, then the weakest; no switching; `loss_ok`).
+    - It owns the white-out screens and the nurse (`Expects::LOSING`: the context doesn't fail the run on `ScreenState::Whiteout`).
+    - The respawn is pinned afterwards: every Center 1F looks alike. The scheduler is off in this phase.
+    - An in-game save every `--save-every` rounds.
+  - **Sell**: `Intent::Sell` at the nearest mart (`sell::Sale`, closed loop on every screen):
+    - SELL, then the bag pocket and row, then the quantity box (Up/Down ±1 wrapping, Right/Left ±10, at most `min(held, 99)` a sale).
+    - "I can pay ¥T" must equal count × half price before YES.
+    - The count is capped so money never passes ¥999,999 (`AddMoney` caps it).
+  - **Restore**: `pc::withdraw` the stored species.
+- The sensor turns "Turned over the X(S) worth ¥T." into `ItemsChanged(-n, "sold")` + `MoneyChanged(+T)`, and "paid ¥N as the prize money" / "panicked and lost ¥N" into `MoneyChanged(-N, "lost a battle")`.
+- `tests/nugget_farm_emulator.rs` (ignored) runs the whole farm for 2 NUGGETs from a scenario at the Cerulean Center (PARAS kept, 4 stored, 2 white-outs at ¥144, sold for ¥10000, party back).
+
 ## Next
 
 - **Switch acceptance of the Route 3 → Cascade Badge milestones.** All live runs so far are on the emulator; the physical Switch is the target. Acceptance needs `PrepareForRoute3` first (the Switch save is at `BeatBrock`), and it is pending because the console's video was black (the controller is mounted but there's no HDMI image).

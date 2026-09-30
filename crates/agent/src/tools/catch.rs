@@ -446,6 +446,7 @@ impl ToolStep for HuntStep {
                 dialogue: false,
                 battle: true,
                 menu: false,
+                whiteout: false,
             }
         }
     }

@@ -96,7 +96,10 @@ impl BattleStep {
             data,
             plan,
             party: Party::default(),
-            policy: BattlePolicy::default(),
+            policy: BattlePolicy {
+                lose: plan == BattlePlan::Lose,
+                ..BattlePolicy::default()
+            },
             memory: BattleMemory::default(),
             learning: MoveLearning::default(),
             tracker: TextTracker::default(),
@@ -117,7 +120,7 @@ impl BattleStep {
             battle_text_frame: None,
             unread_since: None,
             upcoming: Vec::new(),
-            loss_ok: false,
+            loss_ok: plan == BattlePlan::Lose,
             spare: None,
         }
     }
@@ -396,7 +399,7 @@ impl BattleStep {
 
     /// Losing doesn't end the story ([`loss_allowed`]).
     pub fn loss_ok(mut self, loss_ok: bool) -> Self {
-        self.loss_ok = loss_ok;
+        self.loss_ok = loss_ok || self.policy.lose;
         self
     }
 
@@ -429,6 +432,7 @@ impl BattleStep {
                 self.memory.catch.decided = true;
                 self.memory.catch.flee = true;
             }
+            BattlePlan::Lose => self.memory.catch.decided = true,
         }
         events.push(GameEvent::BattleStarted);
     }
@@ -613,6 +617,7 @@ impl ToolStep for BattleStep {
             // against the foe out makes way for a safer one (once a battle:
             // the battle's party menu is reordered after a switch).
             if self.memory.trainer
+                && !self.policy.lose
                 && self.shift_to.is_none()
                 && !self.shifted
                 && self.memory.limits.can_switch()
@@ -728,7 +733,9 @@ impl ToolStep for BattleStep {
                 // beats the announced one clearly better (the team plan),
                 // else NO (the one out fights on).
                 if battle::is_switch_question(&page) {
-                    if let Some((slot, p_best, p_out)) = self.member_for_next(b) {
+                    if let Some((slot, p_best, p_out)) =
+                        self.member_for_next(b).filter(|_| !self.policy.lose)
+                    {
                         ctx.events.push(super::progress(
                             "Battle",
                             format!(

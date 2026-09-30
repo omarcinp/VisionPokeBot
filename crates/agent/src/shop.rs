@@ -713,6 +713,20 @@ pub fn nearest_mart(
     item: &str,
     gone: &Gone,
 ) -> Option<(String, u32)> {
+    nearest_clerk(world, data, pose, gone, |items| {
+        items.iter().any(|i| i == item)
+    })
+}
+
+/// The nearest mart whose stock passes `stocks` (any mart buys what it
+/// is offered: selling needs no particular stock), as [`nearest_mart`].
+pub fn nearest_clerk(
+    world: &World,
+    data: &GameData,
+    pose: &PlayerPose,
+    gone: &Gone,
+    stocks: impl Fn(&[String]) -> bool,
+) -> Option<(String, u32)> {
     let clerk = |name: &str| {
         world
             .map(name)?
@@ -725,7 +739,7 @@ pub fn nearest_mart(
     let mut clerks = BTreeMap::new();
     let mut goals = BTreeMap::new();
     for (name, items) in &data.marts {
-        if !items.iter().any(|i| i == item) {
+        if !stocks(items) {
             continue;
         }
         let Some((id, x, y)) = clerk(name) else {

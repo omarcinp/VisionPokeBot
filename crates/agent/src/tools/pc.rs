@@ -81,9 +81,13 @@ fn is_species(data: &GameData, read: &str, species: &str) -> bool {
     data.species_named(read) == Some(species) || fits(&display_name(species), read)
 }
 
+/// One storage operation, in the order they are done.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Op {
-    Deposit(String),
+pub enum Op {
+    /// Store a party member of this species: the one in the given slot
+    /// (checked on PKMN DATA), else the first of the species.
+    Deposit(String, Option<u8>),
+    /// Take a Pokémon of this species from the boxes.
     Withdraw(String),
 }
 
@@ -157,6 +161,9 @@ pub struct PcSwapStep {
     /// as another Pokémon.
     deposit_slot: u8,
     wrong_slots: BTreeSet<u8>,
+    /// The next deposit's slot is taken afresh (a deposit before it moved
+    /// the members after it up).
+    retarget: bool,
     /// The party slot STORE was chosen for.
     storing: Option<u8>,
     /// The box cell WITHDRAW was chosen for.
@@ -191,21 +198,41 @@ impl PcSwapStep {
         state: &GameState,
     ) -> Self {
         let party = state.party.value.as_deref();
-        let deposit_slot = super::teach::member_slot(state, deposit).unwrap_or(0);
-        let mut ops = VecDeque::from([
-            Op::Deposit(deposit.to_owned()),
+        let mut ops = vec![
+            Op::Deposit(deposit.to_owned(), None),
             Op::Withdraw(withdraw.to_owned()),
-        ]);
+        ];
         // A lone member can't be stored: take the other one first.
         if party.is_some_and(|p| p.len() <= 1) {
             ops.rotate_left(1);
         }
+        Self::with_ops(data, go, ops, state)
+    }
+
+    /// Any operations, in order (the party must keep a member throughout).
+    pub fn with_ops(
+        data: Arc<GameData>,
+        go: Option<GoStep>,
+        ops: Vec<Op>,
+        state: &GameState,
+    ) -> Self {
+        let deposit_slot = ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Deposit(species, slot) => {
+                    Some(slot.or_else(|| super::teach::member_slot(state, species)))
+                }
+                Op::Withdraw(_) => None,
+            })
+            .flatten()
+            .unwrap_or(0);
         Self {
             data,
             go,
-            ops,
+            ops: ops.into(),
             deposit_slot,
             wrong_slots: BTreeSet::new(),
+            retarget: false,
             storing: None,
             taking: None,
             cells: BTreeMap::new(),
@@ -273,7 +300,7 @@ impl PcSwapStep {
         if row("SEE YA!").is_some() {
             self.retries.enter("storage menu");
             let (text, label) = match self.ops.front() {
-                Some(Op::Deposit(_)) => ("DEPOSIT POKéMON", "DEPOSIT POKéMON"),
+                Some(Op::Deposit(..)) => ("DEPOSIT POKéMON", "DEPOSIT POKéMON"),
                 Some(Op::Withdraw(_)) => ("WITHDRAW POKéMON", "WITHDRAW POKéMON"),
                 None => ("SEE YA!", "SEE YA!"),
             };
@@ -318,7 +345,7 @@ impl PcSwapStep {
             }
             self.retries.enter("storage window");
             let wanted = match (self.ops.front(), pc.mode, pc.cursor) {
-                (Some(Op::Deposit(s)), PcMode::Party, Some(PcCursor::Party(k)))
+                (Some(Op::Deposit(s, _)), PcMode::Party, Some(PcCursor::Party(k)))
                     if self.panel_is(pc, s) =>
                 {
                     self.storing = Some(k);
@@ -365,7 +392,15 @@ impl PcSwapStep {
             );
         }
         match (self.ops.front().cloned(), pc.mode) {
-            (Some(Op::Deposit(s)), PcMode::Party) => self.find_member(o, pc, &s),
+            (Some(Op::Deposit(s, slot)), PcMode::Party) => {
+                if std::mem::take(&mut self.retarget) {
+                    self.deposit_slot = slot
+                        .or_else(|| super::teach::member_slot(state, &s))
+                        .unwrap_or(0);
+                    self.wrong_slots.clear();
+                }
+                self.find_member(o, pc, &s)
+            }
             (Some(Op::Withdraw(s)), PcMode::Box) => self.find_in_box(o, pc, &s, state, events),
             _ => {
                 self.retries.enter("leave the box");
@@ -641,7 +676,7 @@ impl ToolStep for PcSwapStep {
                 .parse::<u8>()
                 .ok()
                 .and_then(|n| n.checked_sub(1));
-            if let (Some(slot), Some(b), Some(Op::Deposit(s))) =
+            if let (Some(slot), Some(b), Some(Op::Deposit(s, _))) =
                 (self.storing.take(), b, self.ops.front())
             {
                 self.done
@@ -654,6 +689,7 @@ impl ToolStep for PcSwapStep {
                 self.reported.remove(&b);
                 self.cells.retain(|(bx, _), _| *bx != b);
                 self.ops.pop_front();
+                self.retarget = true;
             }
         } else if action.label == "WITHDRAW" {
             if let (Some((b, c)), Some(Op::Withdraw(s))) = (self.taking.take(), self.ops.front()) {
@@ -757,11 +793,8 @@ fn party_count(state: &GameState, species: &str) -> usize {
     })
 }
 
-pub fn pc_swap(
-    ctx: &mut ToolContext<'_>,
-    deposit: &str,
-    withdraw: &str,
-) -> Result<String, ToolError> {
+/// The party read, when the belief has none.
+fn know_party(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
     if ctx
         .state()
         .party
@@ -774,16 +807,17 @@ pub fn pc_swap(
         })
         .result?;
     }
-    if party_count(ctx.state(), deposit) == 0 {
-        return Err(ToolError::Failed(format!(
-            "no {} in the party to store",
-            display_name(deposit)
-        )));
-    }
-    let (had_deposit, had_withdraw) = (
-        party_count(ctx.state(), deposit),
-        party_count(ctx.state(), withdraw),
-    );
+    Ok(())
+}
+
+/// Walks to face the nearest Center's PC and runs the step `make` builds
+/// there; the party is read afterwards (what the screens confirmed changed
+/// the belief; a withdrawn Pokémon's HP and moves were never seen).
+fn at_pc(
+    ctx: &mut ToolContext<'_>,
+    make: impl FnOnce(&mut ToolContext<'_>, GoStep) -> PcSwapStep,
+    describe: impl FnOnce(&PcSwapStep) -> String,
+) -> Result<String, ToolError> {
     let (map, (x, y)) = nearest_pc(ctx)?;
     super::go::reach_map(ctx, &map)?;
     let go = GoStep::new(
@@ -794,26 +828,52 @@ pub fn pc_swap(
             y,
         },
     );
-    let mut step = PcSwapStep::new(
-        Arc::clone(&ctx.data),
-        Some(go),
-        deposit,
-        withdraw,
-        ctx.state(),
-    );
-    ctx.info(format!(
-        "pc: {map} PC at ({x}, {y}): store {} (slot {}), take {}",
-        display_name(deposit),
-        step.deposit_slot,
-        display_name(withdraw)
-    ));
+    let mut step = make(ctx, go);
+    ctx.info(format!("pc: {map} PC at ({x}, {y}): {}", describe(&step)));
     let summary = ctx.drive(&mut step)?;
-    // What the screens confirmed changed the belief; the party is read to
-    // be sure (a withdrawn Pokémon's HP and moves were never seen).
     ctx.invoke(&Intent::Probe {
         fact: ProbeFact::Party,
     })
     .result?;
+    Ok(summary)
+}
+
+pub fn pc_swap(
+    ctx: &mut ToolContext<'_>,
+    deposit: &str,
+    withdraw: &str,
+) -> Result<String, ToolError> {
+    know_party(ctx)?;
+    if party_count(ctx.state(), deposit) == 0 {
+        return Err(ToolError::Failed(format!(
+            "no {} in the party to store",
+            display_name(deposit)
+        )));
+    }
+    let (had_deposit, had_withdraw) = (
+        party_count(ctx.state(), deposit),
+        party_count(ctx.state(), withdraw),
+    );
+    let summary = at_pc(
+        ctx,
+        |ctx, go| {
+            PcSwapStep::new(
+                Arc::clone(&ctx.data),
+                Some(go),
+                deposit,
+                withdraw,
+                ctx.state(),
+            )
+        },
+        |step| {
+            format!(
+                "store {} (slot {}), take {}",
+                display_name(deposit),
+                step.deposit_slot,
+                display_name(withdraw)
+            )
+        },
+    )?;
     let (has_deposit, has_withdraw) = (
         party_count(ctx.state(), deposit),
         party_count(ctx.state(), withdraw),
@@ -827,6 +887,103 @@ pub fn pc_swap(
              {has_withdraw} {} (had {had_withdraw})",
             display_name(deposit),
             display_name(withdraw)
+        )));
+    }
+    ctx.emit(progress("PcSwap", summary.clone()))?;
+    Ok(summary)
+}
+
+/// Stores the party members in `slots` (the party as the belief holds it),
+/// keeping the others: from the last slot up, so every slot still names
+/// its member when its turn comes.
+pub fn deposit(ctx: &mut ToolContext<'_>, slots: &[u8]) -> Result<String, ToolError> {
+    know_party(ctx)?;
+    let party: Vec<String> = ctx
+        .state()
+        .party
+        .value
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| m.species.value.clone().unwrap_or_default())
+        .collect();
+    let mut slots: Vec<u8> = slots.to_vec();
+    slots.sort_unstable_by(|a, b| b.cmp(a));
+    slots.dedup();
+    let mut ops = Vec::new();
+    for slot in &slots {
+        match party.get(usize::from(*slot)).filter(|s| !s.is_empty()) {
+            Some(species) => ops.push(Op::Deposit(species.clone(), Some(*slot))),
+            None => {
+                return Err(ToolError::Failed(format!(
+                    "pc: party slot {slot} is not known ({} members)",
+                    party.len()
+                )))
+            }
+        }
+    }
+    if ops.len() >= party.len() {
+        return Err(ToolError::Failed(
+            "pc: the party must keep one member".into(),
+        ));
+    }
+    if ops.is_empty() {
+        return Ok("nothing to store".into());
+    }
+    let had = party.len();
+    let names = ops
+        .iter()
+        .map(|op| match op {
+            Op::Deposit(s, _) | Op::Withdraw(s) => display_name(s),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let summary = at_pc(
+        ctx,
+        |ctx, go| PcSwapStep::with_ops(Arc::clone(&ctx.data), Some(go), ops, ctx.state()),
+        |_| format!("store {names}"),
+    )?;
+    let has = ctx.state().party.value.as_ref().map_or(0, Vec::len);
+    if has + slots.len() != had {
+        return Err(ToolError::Failed(format!(
+            "pc: the party read afterwards has {has} members (had {had}, stored {})",
+            slots.len()
+        )));
+    }
+    ctx.emit(progress("PcSwap", summary.clone()))?;
+    Ok(summary)
+}
+
+/// Takes a Pokémon of each species in `species` from the boxes into the
+/// party (six at most in all).
+pub fn withdraw(ctx: &mut ToolContext<'_>, species: &[String]) -> Result<String, ToolError> {
+    know_party(ctx)?;
+    let had = ctx.state().party.value.as_ref().map_or(0, Vec::len);
+    if species.is_empty() {
+        return Ok("nothing to take".into());
+    }
+    if had + species.len() > 6 {
+        return Err(ToolError::Failed(format!(
+            "pc: {had} members and {} to take: more than six",
+            species.len()
+        )));
+    }
+    let ops: Vec<Op> = species.iter().map(|s| Op::Withdraw(s.clone())).collect();
+    let names = species
+        .iter()
+        .map(|s| display_name(s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let summary = at_pc(
+        ctx,
+        |ctx, go| PcSwapStep::with_ops(Arc::clone(&ctx.data), Some(go), ops, ctx.state()),
+        |_| format!("take {names}"),
+    )?;
+    let has = ctx.state().party.value.as_ref().map_or(0, Vec::len);
+    if has != had + species.len() {
+        return Err(ToolError::Failed(format!(
+            "pc: the party read afterwards has {has} members (had {had}, took {})",
+            species.len()
         )));
     }
     ctx.emit(progress("PcSwap", summary.clone()))?;
