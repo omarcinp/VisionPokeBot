@@ -53,8 +53,55 @@ pub fn step(
     )
 }
 
-/// [`step`] with the walking rules in `walk`.
+/// [`step`] with the walking rules in `walk`. A step onto a spin tile
+/// (the Rocket Hideout's arrows) is the whole slide it starts
+/// (`TryUpdatePlayerSpinDirection`): on in the arrow's direction, turned
+/// by each arrow on the way, until a stop tile or a wall; the step ends
+/// where the slide does (the Switch, B3F (10, 14): walked as plain floor,
+/// the slides took the player elsewhere and the walk looped).
 pub fn step_with(map: &MapData, from: (i32, i32), dir: Direction, walk: &Walk) -> Option<Step> {
+    let first = plain_step(map, from, dir, walk)?;
+    let Some(mut spin) = map
+        .tile(first.to.0, first.to.1)
+        .and_then(|t| spin_dir(t.behavior))
+    else {
+        return Some(first);
+    };
+    let mut at = first.to;
+    for _ in 0..MAX_SLIDE {
+        let Some(next) = plain_step(map, at, spin, walk) else {
+            break;
+        };
+        at = next.to;
+        let behavior = map.tile(at.0, at.1).map_or(0, |t| t.behavior);
+        if behavior == STOP_SPINNING {
+            break;
+        }
+        if let Some(turn) = spin_dir(behavior) {
+            spin = turn;
+        }
+    }
+    Some(Step { dir, to: at })
+}
+
+/// Tiles a slide may cross before it is taken as endless (a loop of arrows).
+const MAX_SLIDE: usize = 128;
+/// `MB_STOP_SPINNING`: a slide ends on it.
+const STOP_SPINNING: u16 = 0x58;
+
+/// The direction a spin tile sends the player (`MB_SPIN_RIGHT` … `DOWN`).
+pub fn spin_dir(behavior: u16) -> Option<Direction> {
+    match behavior {
+        0x54 => Some(Direction::Right),
+        0x55 => Some(Direction::Left),
+        0x56 => Some(Direction::Up),
+        0x57 => Some(Direction::Down),
+        _ => None,
+    }
+}
+
+/// One press's move without forced movement.
+fn plain_step(map: &MapData, from: (i32, i32), dir: Direction, walk: &Walk) -> Option<Step> {
     let here = map.tile(from.0, from.1)?;
     let (dx, dy) = dir.delta();
     let to = (from.0 + dx, from.1 + dy);
