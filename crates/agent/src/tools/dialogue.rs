@@ -876,6 +876,69 @@ pub fn unrecorded_badge_paths(
     out
 }
 
+/// Key items the bag holds whose giving script path was never recorded:
+/// the path is recorded, so what it set follows the item (Switch: the
+/// LIFT KEY in the bag, FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT unset, and every
+/// plan sent the bot to pick up the key that was gone).
+pub fn reconcile_key_items(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    let world = Arc::clone(&ctx.world);
+    let Some(events) = world.events() else {
+        return Ok(());
+    };
+    for (item, script, path) in unrecorded_key_item_paths(events, ctx.state()) {
+        ctx.info(format!(
+            "{item} is held but its path never ran: recording {script}[{path}]"
+        ));
+        record_path(ctx, &script, path)?;
+    }
+    Ok(())
+}
+
+/// For each key item held whose giving path isn't recorded, when one
+/// script alone gives it: the item and that script's giving path with the
+/// fewest effects ([`reconcile_key_items`]).
+pub fn unrecorded_key_item_paths(
+    events: &pokebot_world::events::Events,
+    state: &GameState,
+) -> Vec<(String, String, usize)> {
+    let Some(held) = state
+        .bag
+        .pockets
+        .get(&pokebot_state::Pocket::KeyItems)
+        .and_then(|k| k.value.as_ref())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (item, _) in held.iter().filter(|(_, n)| *n > 0) {
+        let mut givers: Vec<(&str, usize, usize)> = events
+            .scripts
+            .iter()
+            .flat_map(|(name, s)| {
+                s.paths.iter().enumerate().filter_map(move |(i, p)| {
+                    p.does
+                        .iter()
+                        .any(|e| matches!(e, Effect::Give { give, count, .. } if give == item && *count > 0))
+                        .then_some((name.as_str(), i, p.does.len()))
+                })
+            })
+            .collect();
+        let run = &state.world.paths_run;
+        if givers.is_empty()
+            || givers.iter().any(|(s, _, _)| *s != givers[0].0)
+            || givers
+                .iter()
+                .any(|(s, p, _)| run.iter().any(|(rs, rp)| rs == s && rp == p))
+        {
+            continue;
+        }
+        givers.sort_by_key(|(s, p, len)| (*len, *s, *p));
+        let (script, path, _) = givers[0];
+        out.push((item.clone(), script.to_owned(), path));
+    }
+    out
+}
+
 pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Result<(), ToolError> {
     let world = Arc::clone(&ctx.world);
     let Some(events) = world.events() else {
@@ -1935,6 +1998,33 @@ mod tests {
         assert_eq!(script, "PewterCity_Gym_EventScript_Brock");
         belief.record_path(script, *path);
         assert!(unrecorded_badge_paths(events, &belief).is_empty());
+    }
+
+    /// The Switch: the LIFT KEY in the bag, its script unrecorded. The
+    /// key names the Rocket Hideout's Lift Key path; once recorded,
+    /// nothing is left to do.
+    #[test]
+    fn a_key_item_held_names_its_unrecorded_giving_path() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let mut state = GameState::default();
+        assert!(unrecorded_key_item_paths(events, &state).is_empty());
+        state.bag.pockets.insert(
+            pokebot_state::Pocket::KeyItems,
+            pokebot_state::Knowledge::observed(vec![("ITEM_LIFT_KEY".into(), 1)], 1),
+        );
+        let found = unrecorded_key_item_paths(events, &state);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (item, script, path) = &found[0];
+        assert_eq!(item, "ITEM_LIFT_KEY");
+        assert_eq!(script, "RocketHideout_B4F_EventScript_LiftKey");
+        let sets = &events.script(script).unwrap().paths[*path].does;
+        assert!(sets.iter().any(|e| matches!(e,
+            Effect::Set { set } if set == "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT")));
+        state.world.record_path(script, *path);
+        assert!(unrecorded_key_item_paths(events, &state).is_empty());
     }
 
     /// Bill's script belongs to him and to the Clefairy he turned into:
