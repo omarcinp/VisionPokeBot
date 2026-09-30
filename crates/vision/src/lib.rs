@@ -51,6 +51,12 @@ pub struct FireRedPerception {
     /// The map of an inferred hint: poses tracked on it are inferred too.
     inferred: Option<String>,
     frames_since_global_search: u32,
+    /// The last frame of a battle (its HUD or text): the player is on the
+    /// map they fought on, so no whole-world search replaces it for
+    /// [`POST_BATTLE_FRAMES`] (fleet worker 3 caught a MACHOP in dark Rock
+    /// Tunnel; a frame of the fade back matched Six Island's Sapphire Room
+    /// and the belief moved there).
+    last_battle_frame: Option<u64>,
     /// Previous frame's text cells and how long they have been unchanged.
     /// Text cells of the last dialogue and the frame they first appeared.
     previous_text: Option<(Vec<u8>, u64)>,
@@ -124,6 +130,8 @@ const STATIC_PIXELS: u32 = 240 * 160 / 100;
 /// Frames between whole-world searches while the player can't be located
 /// (each takes ~10 ms of all cores; see `Localizer::locate_anywhere`).
 const GLOBAL_SEARCH_INTERVAL: u32 = 30;
+/// Frames after a battle during which no whole-world search runs.
+const POST_BATTLE_FRAMES: u64 = 300;
 
 /// A frame counts as a transition when this share of pixels (per mille) is
 /// near-black or near-white.
@@ -265,6 +273,9 @@ impl PerceptionSystem for FireRedPerception {
         observation.menu = menu;
         let in_battle = battle.is_some();
         observation.battle = battle;
+        if in_battle || observation.screen.value == ScreenState::BattleText {
+            self.last_battle_frame = Some(frame.frame_id);
+        }
         if !in_battle {
             let popup = detect::map_popup::detect(image);
             if let (Some(popup), Some(font)) = (&popup, &self.font) {
@@ -679,6 +690,13 @@ impl FireRedPerception {
             }
             // Nor the world by it.
             None if !self.global_search || dark.is_some() => None,
+            // Just out of a battle: still on the map it was fought on.
+            None if self
+                .last_battle_frame
+                .is_some_and(|f| observation.frame_id < f + POST_BATTLE_FRAMES) =>
+            {
+                None
+            }
             None => {
                 self.frames_since_global_search += 1;
                 if self.frames_since_global_search < GLOBAL_SEARCH_INTERVAL {
@@ -1908,6 +1926,38 @@ mod tests {
         let mut p = FireRedPerception::with_world(world);
         p.set_pose_hint(stale);
         assert!((0..40).all(|i| p.observe(&frame(i, image.clone())).player.is_none()));
+    }
+
+    /// Fleet worker 3 caught a MACHOP in dark Rock Tunnel; a frame of the
+    /// fade back matched Six Island's Sapphire Room and the belief moved
+    /// there. Right after a battle the player is on the map it was fought
+    /// on: no whole-world search for [`POST_BATTLE_FRAMES`], then as usual.
+    #[test]
+    fn no_world_search_right_after_a_battle() {
+        let (Some(world), Some(image), Some(battle)) = (
+            world(),
+            fixture("switch-pewter-gym.png"),
+            fixture("emu-tools-battle-command.png"),
+        ) else {
+            return;
+        };
+        let stale = PlayerPose {
+            map: "Route3".into(),
+            x: 5,
+            y: 9,
+        };
+        let mut p = FireRedPerception::with_world(world).with_global_search(true);
+        assert!(p.observe(&frame(0, battle)).battle.is_some());
+        p.set_pose_hint(stale);
+        let located: Vec<bool> = (1..POST_BATTLE_FRAMES + u64::from(GLOBAL_SEARCH_INTERVAL) + 1)
+            .map(|i| p.observe(&frame(i, image.clone())).player.is_some())
+            .collect();
+        let window = usize::try_from(POST_BATTLE_FRAMES).unwrap() - 1;
+        assert!(
+            located[..window].iter().all(|l| !l),
+            "searched right after the battle"
+        );
+        assert!(located[window..].iter().any(|l| *l), "never searched after");
     }
 
     /// Entering Route 3 from Pewter (Switch): the popup is read, and its
