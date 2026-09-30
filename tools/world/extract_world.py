@@ -277,6 +277,9 @@ def main():
             # field in play, not drawn into the render: the localizer
             # matches those maps' frames by a fog model.
             "weather": m.get("weather"),
+            # Dig and the Escape Rope work here (`gMapHeader.allowEscaping`,
+            # CanUseEscapeRopeOnCurrMap).
+            "allow_escaping": bool(m.get("allow_escaping")),
             "tiles": tiles,
             "warps": [
                 # Dynamic warps (e.g. building exits back to "where you came

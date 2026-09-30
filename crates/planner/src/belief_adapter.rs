@@ -406,6 +406,10 @@ impl BeliefView for StateBelief<'_> {
         }
         self.eval_world(p)
     }
+
+    fn escape(&self) -> Option<pokebot_state::EscapeWarp> {
+        self.knowledge.world.escape.value.clone()
+    }
 }
 
 impl GoalBelief for StateBelief<'_> {

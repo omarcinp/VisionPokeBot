@@ -234,6 +234,10 @@ impl BeliefView for BoundBelief<'_, '_> {
             t => t,
         }
     }
+
+    fn escape(&self) -> Option<pokebot_state::EscapeWarp> {
+        self.base.escape()
+    }
 }
 
 impl GoalBelief for BoundBelief<'_, '_> {

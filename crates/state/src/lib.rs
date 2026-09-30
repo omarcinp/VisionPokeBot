@@ -27,7 +27,7 @@ mod training;
 mod view;
 pub use observation::{PartyMenuObservation, SummaryObservation, SummaryPage};
 
-pub use belief::{Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
+pub use belief::{EscapeWarp, Fact, HealSpot, NpcBelief, WorldBelief, PATHS_RUN_KEPT};
 pub use change::{diff, ChangeRecord, StateChange};
 pub use events::{EventExtractor, EventRecord, FrameArrival, FrameDropPolicy, GameEvent};
 pub use inference::{Condition, InferenceRule, InferenceRules};

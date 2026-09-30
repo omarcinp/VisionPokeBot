@@ -291,6 +291,12 @@ pub enum GameEvent {
         x: i32,
         y: i32,
     },
+    /// Where Dig and the Escape Rope now lead (an entrance taken from
+    /// outdoors, or a map's `setescapewarp`); `None` when it changed to
+    /// somewhere unknown.
+    EscapeWarpSet {
+        escape: Option<crate::EscapeWarp>,
+    },
     /// An NPC was seen at a tile of `map` (facing which way, when the
     /// sprite showed it).
     NpcSeen {

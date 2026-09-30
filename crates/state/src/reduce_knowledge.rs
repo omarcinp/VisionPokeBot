@@ -470,6 +470,12 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
                 frame,
             );
         }
+        GameEvent::EscapeWarpSet { escape } => {
+            state.world.escape = match escape {
+                Some(e) => Knowledge::observed(e.clone(), frame),
+                None => Knowledge::unknown(),
+            };
+        }
         GameEvent::NpcSeen {
             map,
             local_id,

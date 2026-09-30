@@ -47,6 +47,12 @@ pub struct RouteParams {
     pub talk_s: f64,
     /// Beating a trainer that stands in the way.
     pub battle_s: f64,
+    /// Dig out of a cave: the party menu, the move and the fade. Nothing
+    /// is spent.
+    pub dig_s: f64,
+    /// An Escape Rope: the bag, the fade, and the rope's ¥550 at 10 money
+    /// units a second (the scheduler's price of medicines).
+    pub escape_rope_s: f64,
 }
 
 impl Default for RouteParams {
@@ -60,6 +66,8 @@ impl Default for RouteParams {
             surf_s: 5.0,
             talk_s: 4.0,
             battle_s: 60.0,
+            dig_s: 8.0,
+            escape_rope_s: 10.0 + 550.0 / 10.0,
         }
     }
 }
@@ -137,6 +145,8 @@ pub enum PlaceKind {
     Script,
     /// A tile the caller asked for.
     Tile,
+    /// Where Dig and the Escape Rope lead ([`crate::escape`]).
+    Escape,
 }
 
 /// A node of the graph. Identity is the tile; `kind` says why it is one.
@@ -196,6 +206,10 @@ pub enum EdgeKind {
         script: String,
     },
     Fly,
+    /// Dig out to the escape warp (a cave's mouth, a building's door).
+    Dig,
+    /// An Escape Rope out to the escape warp.
+    EscapeRope,
 }
 
 impl fmt::Display for EdgeKind {
@@ -208,6 +222,8 @@ impl fmt::Display for EdgeKind {
             EdgeKind::Gate { kind } => write!(f, "gate:{kind}"),
             EdgeKind::ScriptWarp { script } => write!(f, "script:{script}"),
             EdgeKind::Fly => write!(f, "fly"),
+            EdgeKind::Dig => write!(f, "dig"),
+            EdgeKind::EscapeRope => write!(f, "escape rope"),
         }
     }
 }
@@ -279,6 +295,24 @@ pub const MAX_BLOCKED_SETS: usize = 8;
 pub const MOVE_SURF: &str = "MOVE_SURF";
 pub const MOVE_FLY: &str = "MOVE_FLY";
 pub const MOVE_CUT_NAME: &str = "MOVE_CUT";
+pub const MOVE_DIG: &str = "MOVE_DIG";
+pub const ITEM_ESCAPE_ROPE: &str = "ITEM_ESCAPE_ROPE";
+
+/// What Dig out of a cave takes: the move, no badge (`FIELD_MOVE_DIG`
+/// comes after the HMs the party menu checks badges for).
+pub fn dig_requirement() -> Requirement {
+    vec![Predicate::PartyHasMove {
+        mv: MOVE_DIG.to_string(),
+    }]
+}
+
+/// What an Escape Rope takes: one in the bag.
+pub fn escape_rope_requirement() -> Requirement {
+    vec![Predicate::HasItem {
+        item: ITEM_ESCAPE_ROPE.to_string(),
+        n: 1,
+    }]
+}
 
 /// What Surf takes: the move in the party and the Soul Badge.
 pub fn surf_requirement() -> Requirement {
@@ -335,6 +369,10 @@ struct MapInfo {
     walls_hash: u64,
     wander: BTreeSet<(i32, i32)>,
     outdoor: bool,
+    /// Dig and the Escape Rope work here.
+    allow_escaping: bool,
+    /// Arriving sets the escape warp by script ([`crate::escape`]).
+    sets_escape: bool,
 }
 
 /// A map's walkability for one search: the walls plus the blockers whose
@@ -372,6 +410,11 @@ pub struct PlaceGraph {
     /// `on_frame` script that fires on each load fights or warps: the
     /// Champion's room): nobody walks there.
     intercepted: BTreeSet<String>,
+    /// Per map, the maps one edge away that keep the escape warp and where
+    /// it may be used (not outdoors, or where escaping is allowed).
+    escape_links: BTreeMap<String, BTreeSet<String>>,
+    /// The maps an escape warp set on entering a map holds on, by map.
+    escape_regions: RefCell<HashMap<String, Rc<BTreeSet<String>>>>,
 }
 
 impl PlaceGraph {
@@ -390,6 +433,8 @@ impl PlaceGraph {
             relevant: BTreeSet::new(),
             relevant_vars: BTreeSet::new(),
             intercepted: BTreeSet::new(),
+            escape_links: BTreeMap::new(),
+            escape_regions: RefCell::new(HashMap::new()),
         };
         let mut maps: Vec<&MapData> = world.maps().collect();
         maps.sort_by(|a, b| a.name.cmp(&b.name));
@@ -496,6 +541,8 @@ impl PlaceGraph {
                     walls_hash,
                     wander: wander_tiles(map),
                     outdoor: map.is_outdoor(),
+                    allow_escaping: map.allow_escaping,
+                    sets_escape: crate::escape::sets_escape_on_arrival(world, &map.name),
                 },
             );
         }
@@ -550,8 +597,27 @@ impl PlaceGraph {
             edges.sort_by(|a, b| (&a.kind, &a.to, &a.requires).cmp(&(&b.kind, &b.to, &b.requires)));
             edges.dedup_by(|a, b| a.kind == b.kind && a.to == b.to && a.requires == b.requires);
         }
+        for (from, edges) in &g.edges {
+            for e in edges {
+                let to = &e.to.map;
+                if *to == from.0 || g.updates_escape(&from.0, to, &e.kind) {
+                    continue;
+                }
+                if g.maps
+                    .get(to)
+                    .is_some_and(|i| !i.outdoor || i.allow_escaping)
+                {
+                    g.escape_links
+                        .entry(from.0.clone())
+                        .or_default()
+                        .insert(to.clone());
+                }
+            }
+        }
         let mut relevant: BTreeSet<Predicate> = BTreeSet::new();
         relevant.extend(surf_requirement());
+        relevant.extend(dig_requirement());
+        relevant.extend(escape_rope_requirement());
         for spot in &g.fly_spots {
             relevant.extend(fly_requirement(&spot.map));
         }
@@ -576,6 +642,49 @@ impl PlaceGraph {
             .collect();
         g.relevant = relevant;
         g
+    }
+
+    /// Whether a leg from `from` to `to` moves the escape warp: a warp
+    /// from outdoors into a building or cave (but out of Viridian Forest),
+    /// or arriving where a script sets it. Script warps count too: whether
+    /// they set it isn't worked out, and a route assuming the old one
+    /// would escape to the wrong place.
+    fn updates_escape(&self, from: &str, to: &str, kind: &EdgeKind) -> bool {
+        if from == to {
+            return false;
+        }
+        let (Some(a), Some(b)) = (self.maps.get(from), self.maps.get(to)) else {
+            return true;
+        };
+        b.sets_escape
+            || matches!(kind, EdgeKind::Warp | EdgeKind::ScriptWarp { .. })
+                && a.outdoor
+                && !b.outdoor
+                && from != crate::escape::VIRIDIAN_FOREST
+    }
+
+    /// The maps an escape warp set on entering `entered` holds on: those
+    /// reached from it without a leg that moves it and without walking
+    /// outdoors (Viridian Forest, a route escaping is allowed on, is one:
+    /// entered from Route 2's south gate, it escapes back out that gate).
+    pub fn escape_region(&self, entered: &str) -> Rc<BTreeSet<String>> {
+        if let Some(r) = self.escape_regions.borrow().get(entered) {
+            return Rc::clone(r);
+        }
+        let mut region = BTreeSet::from([entered.to_string()]);
+        let mut queue = vec![entered.to_string()];
+        while let Some(m) = queue.pop() {
+            for next in self.escape_links.get(&m).into_iter().flatten() {
+                if region.insert(next.clone()) {
+                    queue.push(next.clone());
+                }
+            }
+        }
+        let r = Rc::new(region);
+        self.escape_regions
+            .borrow_mut()
+            .insert(entered.to_string(), Rc::clone(&r));
+        r
     }
 
     /// Whether the story opens or closes passages on `map` ([`crate::gates`]).
@@ -1667,6 +1776,11 @@ fn search(
     settled: Option<&mut BTreeSet<PlaceKey>>,
 ) -> Option<Found> {
     let surf_ok = pass.allows(&unmet_of(&check(belief, &surf_requirement()), policy));
+    let (escape_to, escape_edges) = escape_edges(world, graph, belief, start);
+    // Places reached without moving the escape warp, by whether the best
+    // way in kept it.
+    let escape_kept: RefCell<HashMap<PlaceKey, bool>> =
+        RefCell::new(HashMap::from([(start.key(), true)]));
     let mut dist: HashMap<PlaceKey, f64> = HashMap::new();
     let mut came: Came = HashMap::new();
     let mut done: std::collections::HashSet<PlaceKey> = std::collections::HashSet::new();
@@ -1713,6 +1827,11 @@ fn search(
             }
         };
         if better {
+            if !escape_edges.is_empty() {
+                let kept = escape_kept.borrow().get(&from.key()).copied() == Some(true)
+                    && !graph.updates_escape(&from.map, &edge.to.map, &edge.kind);
+                escape_kept.borrow_mut().insert(key.clone(), kept);
+            }
             dist.insert(key.clone(), ng);
             came.insert(
                 key.clone(),
@@ -1746,7 +1865,10 @@ fn search(
         let here = match graph.places.get(&key) {
             Some(p) => p.clone(),
             None if key == start.key() => start.clone(),
-            None => continue,
+            None => match &escape_to {
+                Some(p) if p.key() == key => p.clone(),
+                _ => continue,
+            },
         };
         let Some(map) = world.map(&here.map) else {
             continue;
@@ -1851,6 +1973,15 @@ fn search(
                 relax(&here, edge, g, &mut dist, &mut open);
             }
         }
+        let escapes = graph.maps[&here.map].allow_escaping
+            && escape_kept.borrow().get(&key).copied() == Some(true);
+        if escapes {
+            for edge in &escape_edges {
+                if edge.to.key() != key && !done.contains(&edge.to.key()) {
+                    relax(&here, edge, g, &mut dist, &mut open);
+                }
+            }
+        }
     }
     if let Some(out) = settled {
         out.extend(done.iter().cloned());
@@ -1879,6 +2010,50 @@ fn search(
         assumes,
         unmet,
     })
+}
+
+/// Where Dig and the Escape Rope lead from `start`, and the edges there
+/// the belief holds the means for: none when the escape warp is unknown or
+/// was set on entering somewhere `start` can't be reached from without it
+/// moving. They are never assumed, nor offered as blocked alternatives: a
+/// rope bought or Dig taught to leave a cave is no plan.
+fn escape_edges(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    start: &Place,
+) -> (Option<Place>, Vec<Edge>) {
+    let Some(e) = belief.escape() else {
+        return (None, Vec::new());
+    };
+    if world.map(&e.map).is_none() || !graph.escape_region(&e.entered).contains(&start.map) {
+        return (None, Vec::new());
+    }
+    let to = Place {
+        map: e.map,
+        x: e.x,
+        y: e.y,
+        kind: PlaceKind::Escape,
+    };
+    let p = &graph.params;
+    let edges = [
+        (EdgeKind::Dig, dig_requirement(), p.dig_s),
+        (
+            EdgeKind::EscapeRope,
+            escape_rope_requirement(),
+            p.escape_rope_s,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, requires, _)| check(belief, requires).truth() == Truth::True)
+    .map(|(kind, requires, cost_s)| Edge {
+        to: to.clone(),
+        kind,
+        cost_s,
+        requires,
+    })
+    .collect();
+    (Some(to), edges)
 }
 
 /// Walks through intermediate places of one map become a single leg (one

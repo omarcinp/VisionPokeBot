@@ -418,6 +418,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Where Dig and the Escape Rope lead is part of the save: kept by the
+    /// checkpoint, and unknown in one written before it was tracked.
+    #[test]
+    fn the_escape_warp_round_trips_through_state_json() {
+        let dir = temp_dir("escape");
+        let path = dir.join("state.json");
+        let mut k = SavedKnowledge::default();
+        k.world.escape = Knowledge::observed(
+            pokebot_state::EscapeWarp {
+                map: "Route4".into(),
+                x: 19,
+                y: 6,
+                entered: "MtMoon_1F".into(),
+            },
+            7,
+        );
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        let back = load(&path).unwrap().unwrap();
+        assert_eq!(back.knowledge.world.escape, k.world.escape);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        json["world"].as_object_mut().unwrap().remove("escape");
+        std::fs::write(&path, json.to_string()).unwrap();
+        let old = load(&path).unwrap().unwrap();
+        assert_eq!(old.knowledge.world.escape, Knowledge::unknown());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Switch: a wild battle was taken for Cerulean's rival battle and
     /// saved. His trigger firing (the sensor's retraction, the var armed)
     /// corrects the checkpoint; a path the save doesn't record, or facts of

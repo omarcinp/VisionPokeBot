@@ -260,6 +260,16 @@ pub fn recovery(
     let belief = StateBelief(state);
     let mut distance = BTreeMap::from([(from.map.clone(), 0usize)]);
     let mut queue = VecDeque::from([from.map.clone()]);
+    // Dig or a rope puts the way into the cave one step away: a Center
+    // past its floors is near (the route prices whether one is at hand).
+    if let Some(e) = state.world.escape.value.as_ref() {
+        let escapes = world.map(&from.map).is_some_and(|m| m.allow_escaping)
+            && graph.escape_region(&e.entered).contains(&from.map);
+        if escapes && !distance.contains_key(&e.map) {
+            distance.insert(e.map.clone(), 1);
+            queue.push_back(e.map.clone());
+        }
+    }
     while let Some(name) = queue.pop_front() {
         let d = distance[&name];
         if d >= HEALER_HOPS {
@@ -724,6 +734,47 @@ mod tests {
         );
         let choice = recovery(&world, &graph, &state, &d, &from, None, true).expect("a healer");
         assert_eq!(choice.map, "LavenderTown_PokemonCenter_1F", "{choice:?}");
+    }
+
+    /// Worn deep in Mt. Moon with DIG known: the way to a healer digs
+    /// out to Route 4, by its Center, instead of walking the floors back.
+    #[test]
+    fn a_healer_past_a_cave_is_reached_by_digging_out() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let d = data();
+        let graph = graph(&world);
+        let from = PlayerPose {
+            map: "MtMoon_B2F".into(),
+            x: 17,
+            y: 30,
+        };
+        let mut state = GameState::default();
+        state.world.escape = Knowledge::observed(
+            pokebot_state::EscapeWarp {
+                map: "Route4".into(),
+                x: 19,
+                y: 6,
+                entered: "MtMoon_1F".into(),
+            },
+            1,
+        );
+        let walked = recovery(&world, &graph, &state, &d, &from, None, true).expect("a healer");
+        let mut digger = mon(20);
+        digger.moves[1] = Some(MoveSlot {
+            mv: Knowledge::observed("MOVE_DIG".into(), 1),
+            pp: Knowledge::observed((10, 10), 1),
+        });
+        state.party = Knowledge::observed(vec![digger], 1);
+        let dug = recovery(&world, &graph, &state, &d, &from, None, true).expect("a healer");
+        assert_eq!(dug.map, "Route4_PokemonCenter_1F", "{dug:?}");
+        assert!(
+            dug.added_travel_s + dug.encounter_risk_s
+                < walked.added_travel_s + walked.encounter_risk_s,
+            "{dug:?} vs {walked:?}"
+        );
     }
 
     /// Fleet worker 3: BULBASAUR at 10/29 in Viridian Forest (5, 27) went

@@ -191,6 +191,11 @@ pub enum StateChange {
         from: Option<HealSpot>,
         to: Option<HealSpot>,
     },
+    /// Where Dig and the Escape Rope lead.
+    EscapeChanged {
+        from: Option<crate::EscapeWarp>,
+        to: Option<crate::EscapeWarp>,
+    },
     /// An NPC was seen at a tile for the first time.
     NpcAppeared {
         map: String,
@@ -553,6 +558,12 @@ fn world(out: &mut Vec<StateChange>, old: &GameState, new: &GameState) {
         out.push(StateChange::RespawnChanged {
             from: a.respawn.value.clone(),
             to: b.respawn.value.clone(),
+        });
+    }
+    if a.escape.value != b.escape.value {
+        out.push(StateChange::EscapeChanged {
+            from: a.escape.value.clone(),
+            to: b.escape.value.clone(),
         });
     }
     for (map, npcs) in &b.npcs {

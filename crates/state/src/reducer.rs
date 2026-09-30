@@ -144,6 +144,7 @@ impl StateReducer for DefaultReducer {
                 | GameEvent::VarTracked { .. }
                 | GameEvent::MapVisited { .. }
                 | GameEvent::RespawnSet { .. }
+                | GameEvent::EscapeWarpSet { .. }
                 | GameEvent::NpcSeen { .. }
                 | GameEvent::NpcAbsent { .. }
                 | GameEvent::ScriptPathRun { .. }

@@ -4,6 +4,7 @@
 
 pub mod behavior;
 pub mod dialogue;
+pub mod escape;
 pub mod events;
 pub mod gates;
 pub mod localize;
@@ -147,6 +148,8 @@ struct MapFile {
     requires_flash: bool,
     #[serde(default)]
     weather: Option<String>,
+    #[serde(default)]
+    allow_escaping: bool,
     tiles: Vec<Vec<[u16; 4]>>,
     warps: Vec<Warp>,
     connections: Vec<Connection>,
@@ -168,6 +171,9 @@ pub struct MapData {
     pub requires_flash: bool,
     /// The map header's weather (`WEATHER_FOG_HORIZONTAL`, ...).
     pub weather: Option<String>,
+    /// Dig and the Escape Rope work here (the header's `allow_escaping`,
+    /// `CanUseEscapeRopeOnCurrMap`): caves, Pokémon Tower, Silph Co.
+    pub allow_escaping: bool,
     tiles: Vec<Tile>,
     pub warps: Vec<Warp>,
     pub connections: Vec<Connection>,
@@ -273,6 +279,7 @@ impl World {
                     map_type: file.map_type,
                     requires_flash: file.requires_flash,
                     weather: file.weather,
+                    allow_escaping: file.allow_escaping,
                     tiles,
                     warps: file.warps,
                     connections: file.connections,

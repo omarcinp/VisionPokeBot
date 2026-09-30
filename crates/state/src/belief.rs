@@ -20,6 +20,21 @@ pub struct HealSpot {
     pub y: i32,
 }
 
+/// Where Dig and the Escape Rope take the player: the save's `escapeWarp`,
+/// set by `UpdateEscapeWarp` (src/overworld.c) when a warp leads from an
+/// outdoor map into a building or cave, to the outdoor tile outside the
+/// entrance taken (or by a map's `setescapewarp` on arrival). An escape
+/// never crosses a cave: it goes back out the way in.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EscapeWarp {
+    pub map: String,
+    pub x: i32,
+    pub y: i32,
+    /// The map the entrance led into: the escape holds on the maps joined
+    /// to it without passing outdoors.
+    pub entered: String,
+}
+
 /// An NPC (object event) of a map, by its `local_id` in the map data.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +93,9 @@ pub struct WorldBelief {
     /// `FLAG_WORLD_MAP_*` flags because Fly is decided on it.
     pub visited: BTreeMap<String, Knowledge<bool>>,
     pub respawn: Knowledge<HealSpot>,
+    /// Where Dig and the Escape Rope lead; unknown until an entrance is
+    /// seen taken.
+    pub escape: Knowledge<EscapeWarp>,
     /// map → local_id → NPC (nested rather than keyed by a pair so that the
     /// JSON stays a plain object).
     #[serde(deserialize_with = "npcs_from_json")]

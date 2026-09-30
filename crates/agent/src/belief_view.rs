@@ -80,6 +80,10 @@ impl BeliefView for StateBelief<'_> {
             Predicate::At { map } => known(s.player.pose.value.as_ref().map(|p| p.map == *map)),
         }
     }
+
+    fn escape(&self) -> Option<pokebot_state::EscapeWarp> {
+        self.0.world.escape.value.clone()
+    }
 }
 
 #[cfg(test)]

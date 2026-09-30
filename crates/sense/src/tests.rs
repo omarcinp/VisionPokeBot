@@ -1451,3 +1451,59 @@ fn an_object_seen_standing_is_not_hidden() {
         Some(false)
     );
 }
+
+/// The committed pose walks `poses`, one frame each (the extractor's
+/// moves, applied before the sensor reads the next frame).
+fn walk_poses(s: &mut Sensor, mut state: GameState, poses: &[(&str, i32, i32)]) -> GameState {
+    for (i, (map, x, y)) in poses.iter().enumerate() {
+        state.player.pose = Knowledge::observed(pose(map, *x, *y), i as u64);
+        state = run(s, state, [bare(i as u64, ScreenState::Overworld)]).0;
+    }
+    state
+}
+
+#[test]
+fn entering_a_cave_from_outdoors_records_the_escape_outside_its_mouth() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    let mut s = Sensor::new(d).with_world(w);
+    let state = walk_poses(
+        &mut s,
+        committed(None),
+        &[("Route4", 19, 7), ("Route4", 19, 6), ("MtMoon_1F", 18, 37)],
+    );
+    let escape = pokebot_state::EscapeWarp {
+        map: "Route4".into(),
+        x: 19,
+        y: 6,
+        entered: "MtMoon_1F".into(),
+    };
+    assert_eq!(state.world.escape.value.as_ref(), Some(&escape));
+    // Deeper in: the same.
+    let state = walk_poses(&mut s, state, &[("MtMoon_1F", 5, 6), ("MtMoon_B1F", 5, 5)]);
+    assert_eq!(state.world.escape.value.as_ref(), Some(&escape));
+    // Out and into Viridian Forest's south gate, through the forest and
+    // out of its north gate: the gate on Route 2's south side stays.
+    let state = walk_poses(
+        &mut s,
+        state,
+        &[
+            ("Route2", 5, 53),
+            ("Route2", 5, 52),
+            ("Route2_ViridianForest_SouthEntrance", 5, 1),
+            ("ViridianForest", 17, 47),
+            ("ViridianForest", 1, 1),
+            ("Route2_ViridianForest_NorthEntrance", 5, 8),
+        ],
+    );
+    assert_eq!(
+        state.world.escape.value,
+        Some(pokebot_state::EscapeWarp {
+            map: "Route2".into(),
+            x: 5,
+            y: 52,
+            entered: "Route2_ViridianForest_SouthEntrance".into(),
+        })
+    );
+}

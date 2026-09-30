@@ -24,9 +24,11 @@
 //! | Pokédex list | species seen and caught |
 //! | Fly map | fly spots visited |
 //! | field (player located) | NPCs seen on a tile, NPCs whose whole reach is empty |
+//! | (the committed pose) | where Dig and the Escape Rope lead: outside the entrance last taken from outdoors |
 //! | overworld matching several maps | the one the state points at (the committed pose's map, a map its warps lead to, the respawn point) as an inferred pose, else `LocationAmbiguous` |
 //! | anything | the view: text, menu, opponent, sprites on the field |
 
+mod escape;
 mod field;
 pub mod names;
 pub mod text;
@@ -134,6 +136,8 @@ pub struct Sensor {
     trigger_battle: triggers::TriggerBattle,
     /// A fade that begins on a warp that fires: its destination.
     warp_taken: warps::WarpTaken,
+    /// Where Dig and the Escape Rope lead, as the committed pose moves.
+    escape: escape::EscapeTracker,
     /// The lookalike maps last resolved or announced, so each ambiguous
     /// stretch is decided once.
     ambiguous: Option<Vec<String>>,
@@ -210,6 +214,7 @@ impl Sensor {
             world: None,
             trigger_battle: triggers::TriggerBattle::default(),
             warp_taken: warps::WarpTaken::default(),
+            escape: escape::EscapeTracker::default(),
             ambiguous: None,
             page: Confirm::default(),
             hud: Confirm::default(),
@@ -254,6 +259,7 @@ impl Sensor {
     /// The facts `o` confirms, given what the state already holds.
     pub fn observe(&mut self, o: &Observation, state: &GameState) -> Vec<GameEvent> {
         let mut events = self.warp_taken.observe(self.world.as_deref(), o, state);
+        events.extend(self.escape.observe(self.world.as_deref(), state));
         // Fades and cut-ins show nothing; readings in progress survive them
         // only if they read the same afterwards.
         if o.screen.value == ScreenState::Transition {

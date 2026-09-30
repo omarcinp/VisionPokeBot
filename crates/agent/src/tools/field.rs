@@ -68,10 +68,12 @@ pub enum FieldMove {
     Flash,
     RockSmash,
     Waterfall,
+    /// Out of a cave or building to the escape warp ([`super::escape`]).
+    Dig,
 }
 
 impl FieldMove {
-    pub const ALL: [FieldMove; 7] = [
+    pub const ALL: [FieldMove; 8] = [
         FieldMove::Cut,
         FieldMove::Fly,
         FieldMove::Surf,
@@ -79,6 +81,7 @@ impl FieldMove {
         FieldMove::Flash,
         FieldMove::RockSmash,
         FieldMove::Waterfall,
+        FieldMove::Dig,
     ];
 
     /// `MOVE_CUT` → `Cut`.
@@ -95,6 +98,7 @@ impl FieldMove {
             FieldMove::Flash => "MOVE_FLASH",
             FieldMove::RockSmash => "MOVE_ROCK_SMASH",
             FieldMove::Waterfall => "MOVE_WATERFALL",
+            FieldMove::Dig => "MOVE_DIG",
         }
     }
 
@@ -108,26 +112,29 @@ impl FieldMove {
             FieldMove::Flash => "FLASH",
             FieldMove::RockSmash => "ROCK SMASH",
             FieldMove::Waterfall => "WATERFALL",
+            FieldMove::Dig => "DIG",
         }
     }
 
     /// The badge that allows the move outside battle (FireRed:
-    /// `FLAG_BADGE0n_GET` checked by the field scripts and the party menu).
-    pub fn badge(self) -> u8 {
+    /// `FLAG_BADGE0n_GET` checked by the field scripts and the party menu);
+    /// none for Dig, which comes after the HMs the party menu checks.
+    pub fn badge(self) -> Option<u8> {
         match self {
-            FieldMove::Flash => 1,
-            FieldMove::Cut => 2,
-            FieldMove::Fly => 3,
-            FieldMove::Strength => 4,
-            FieldMove::Surf => 5,
-            FieldMove::RockSmash => 6,
-            FieldMove::Waterfall => 7,
+            FieldMove::Flash => Some(1),
+            FieldMove::Cut => Some(2),
+            FieldMove::Fly => Some(3),
+            FieldMove::Strength => Some(4),
+            FieldMove::Surf => Some(5),
+            FieldMove::RockSmash => Some(6),
+            FieldMove::Waterfall => Some(7),
+            FieldMove::Dig => None,
         }
     }
 
     /// Pressing A on the obstacle offers the move.
     pub fn has_overworld_prompt(self) -> bool {
-        !matches!(self, FieldMove::Fly | FieldMove::Flash)
+        !matches!(self, FieldMove::Fly | FieldMove::Flash | FieldMove::Dig)
     }
 }
 
@@ -468,6 +475,13 @@ impl PartyFieldMove {
     fn after_choice(&mut self, o: &Observation, quiet: u32) -> Decision {
         if self.mv == FieldMove::Fly && o.fly_map.is_some() {
             return Decision::Done("region map open".into());
+        }
+        // Dig asks first: "Want to escape from here and return to ROUTE
+        // 4?" (`DisplayFieldMoveExitAreaMessage`).
+        if self.mv == FieldMove::Dig {
+            if let (Some(menu), Some((yes, _))) = (&o.menu, yes_no_rows(o)) {
+                return crate::new_game::select(menu, yes, "YES: dig out");
+            }
         }
         if let Some(d) = &o.dialogue {
             let page = d.lines.join(" ");
@@ -1026,6 +1040,7 @@ impl Tool for FieldMoveTool {
             (FieldMove::Fly, Some(dest)) => fly(ctx, dest.map()),
             (FieldMove::Fly, None) => Err(ToolError::Failed("Fly needs a destination".into())),
             (FieldMove::Flash, _) => use_from_party(ctx, field),
+            (FieldMove::Dig, _) => super::escape::dig(ctx),
             (FieldMove::Strength, Some(Dest::Facing { map, x, y })) => {
                 strength(ctx, map, (*x, *y), push)
             }
@@ -1326,6 +1341,43 @@ mod tests {
             },
             score: 1000,
         });
+        assert!(matches!(
+            step.next(&mut step_ctx(&o, &state, &mut events, 60)),
+            Decision::Done(_)
+        ));
+    }
+
+    /// DIG asks "Want to escape from here and return to ROUTE 4?" over the
+    /// party menu: YES, then the menu closes and the fade takes over.
+    #[test]
+    fn dig_answers_yes_to_leaving() {
+        let mut step = PartyFieldMove::new(FieldMove::Dig, 0);
+        step.unlocated_ok = true;
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        o.party_menu = Some(party_menu(
+            0,
+            &["SUMMARY", "DIG", "SWITCH", "ITEM", "CANCEL"],
+            Some(1),
+        ));
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 0));
+        assert_eq!(pressed(&d), Some(Button::A));
+        let mut o = bare(40);
+        o.party_menu = Some(party_menu(0, &[], None));
+        o.menu = Some(yes_no(1));
+        o.menu_lines = vec!["YES".into(), "NO".into()];
+        let Decision::Act(a) = step.next(&mut step_ctx(&o, &state, &mut events, 0)) else {
+            panic!("the question is answered")
+        };
+        assert_eq!(a.commands, vec![ControllerCommand::Press(Button::Up)]);
+        o.menu = Some(yes_no(0));
+        let Decision::Act(a) = step.next(&mut step_ctx(&o, &state, &mut events, 0)) else {
+            panic!("YES is chosen")
+        };
+        assert_eq!(a.label, "YES: dig out");
+        // The fade: nobody located, and done once quiet.
+        let o = bare(200);
         assert!(matches!(
             step.next(&mut step_ctx(&o, &state, &mut events, 60)),
             Decision::Done(_)

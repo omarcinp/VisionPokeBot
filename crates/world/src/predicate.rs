@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use pokebot_state::EscapeWarp;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -126,6 +127,12 @@ pub enum Truth {
 /// What the belief says about single facts.
 pub trait BeliefView {
     fn eval(&self, p: &Predicate) -> Truth;
+
+    /// Where Dig and the Escape Rope lead from here ([`EscapeWarp`]);
+    /// `None` when unknown: no escape is planned.
+    fn escape(&self) -> Option<EscapeWarp> {
+        None
+    }
 }
 
 /// A requirement checked against a belief: which predicates fail and which
@@ -173,6 +180,7 @@ pub struct MapBelief {
     pub moves: BTreeMap<String, bool>,
     pub badges: BTreeMap<u8, bool>,
     pub at: Option<String>,
+    pub escape: Option<EscapeWarp>,
 }
 
 impl MapBelief {
@@ -210,6 +218,18 @@ impl MapBelief {
         self.at = Some(map.to_string());
         self
     }
+
+    /// Dig and the Escape Rope lead to `map (x, y)`, set on entering
+    /// `entered`.
+    pub fn escape(mut self, map: &str, (x, y): (i32, i32), entered: &str) -> Self {
+        self.escape = Some(EscapeWarp {
+            map: map.to_string(),
+            x,
+            y,
+            entered: entered.to_string(),
+        });
+        self
+    }
 }
 
 fn known(v: Option<bool>) -> Truth {
@@ -233,6 +253,10 @@ impl BeliefView for MapBelief {
             Predicate::Badge { n } => known(self.badges.get(n).copied()),
             Predicate::At { map } => known(self.at.as_ref().map(|m| m == map)),
         }
+    }
+
+    fn escape(&self) -> Option<EscapeWarp> {
+        self.escape.clone()
     }
 }
 

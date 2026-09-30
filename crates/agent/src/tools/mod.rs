@@ -12,6 +12,7 @@ mod catch;
 mod context;
 pub mod dialogue;
 pub mod effects;
+mod escape;
 pub mod explore;
 pub mod field;
 mod go;

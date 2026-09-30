@@ -352,11 +352,15 @@ impl Tool for GoTool {
     }
 }
 
-/// Whether `leg` needs a field move (or enters a dark map), or is a ride
-/// in an elevator.
+/// Whether `leg` needs a field move or an item (or enters a dark map), or
+/// is a ride in an elevator.
 fn special(world: &World, leg: &Leg) -> bool {
     match &leg.kind {
-        EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        EdgeKind::Gate { .. }
+        | EdgeKind::Fly
+        | EdgeKind::Walk { surf: true, .. }
+        | EdgeKind::Dig
+        | EdgeKind::EscapeRope => true,
         EdgeKind::ScriptWarp { .. } => ride(world, leg),
         _ => field::is_dark(world, &leg.to.map) && !field::is_dark(world, &leg.from.map),
     }
@@ -428,7 +432,8 @@ pub fn ride_path(
 }
 
 /// The route to `dest` from where the player stands, when it needs field
-/// moves (a Cut or Rock Smash gate, Surf, Fly), enters a dark map with a
+/// moves (a Cut or Rock Smash gate, Surf, Fly, Dig or an Escape Rope out
+/// of a cave), enters a dark map with a
 /// Flash user in the party, or rides an elevator the navigator can't get
 /// there without; `None` when the navigator alone walks it. Requirements
 /// the belief doesn't know count as unmet (the planner establishes them
@@ -503,7 +508,11 @@ pub fn plan_field_route(
     }
     let flash = field::carrier(state, FieldMove::Flash.move_id()).is_some();
     let needed = result.legs.iter().any(|l| match &l.kind {
-        EdgeKind::Gate { .. } | EdgeKind::Fly | EdgeKind::Walk { surf: true, .. } => true,
+        EdgeKind::Gate { .. }
+        | EdgeKind::Fly
+        | EdgeKind::Walk { surf: true, .. }
+        | EdgeKind::Dig
+        | EdgeKind::EscapeRope => true,
         EdgeKind::ScriptWarp { .. } => false,
         // Entering a dark map matters only with someone to use Flash.
         _ => special(world, l) && flash,
@@ -802,6 +811,19 @@ pub fn walk_legs(
                     }),
                 )?
             }
+            EdgeKind::Dig | EdgeKind::EscapeRope => {
+                // From anywhere on the cave's maps: the route prices it
+                // from where the player stands, often right there.
+                if ctx.pose().is_none_or(|p| p.map != leg.from.map) {
+                    walk_to(ctx, &leg.from)?;
+                }
+                let to = PlayerPose {
+                    map: leg.to.map.clone(),
+                    x: leg.to.x,
+                    y: leg.to.y,
+                };
+                super::escape::escape(ctx, &leg.kind, &to)?;
+            }
             _ => {
                 // Into a dark map: light it up on arrival when someone
                 // knows Flash.
@@ -1063,6 +1085,64 @@ mod tests {
                 .insert("FLAG_BADGE02_GET".into(), Knowledge::observed(true, 1));
         }
         state
+    }
+
+    /// A party whose lead knows `mv`, having come into Mt. Moon from
+    /// Route 4's west mouth.
+    fn in_mt_moon_knowing(mv: &str) -> pokebot_state::GameState {
+        use pokebot_state::{EscapeWarp, Knowledge, MoveSlot, PartyMon};
+        let mut state = pokebot_state::GameState::default();
+        let mut mon = PartyMon::default();
+        mon.moves[0] = Some(MoveSlot {
+            mv: Knowledge::observed(mv.into(), 1),
+            pp: Knowledge::observed((10, 10), 1),
+        });
+        state.party = Knowledge::observed(vec![mon], 1);
+        state.world.escape = Knowledge::observed(
+            EscapeWarp {
+                map: "Route4".into(),
+                x: 19,
+                y: 6,
+                entered: "MtMoon_1F".into(),
+            },
+            1,
+        );
+        state
+    }
+
+    /// Deep in Mt. Moon with DIG known, the way back out to Route 4 digs
+    /// out where the player stands, to the tile below the mouth it was
+    /// entered by; without it, the navigator walks.
+    #[test]
+    fn the_way_out_of_a_cave_digs_when_dig_is_known() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let pose = PlayerPose {
+            map: "MtMoon_B2F".into(),
+            x: 17,
+            y: 30,
+        };
+        let dest = Dest::Map {
+            map: "Route4".into(),
+        };
+        let legs = plan_field_route(
+            &world,
+            &graph,
+            &in_mt_moon_knowing("MOVE_DIG"),
+            &pose,
+            &dest,
+            || true,
+        )
+        .expect("a route that digs");
+        assert_eq!(legs[0].kind, EdgeKind::Dig, "{legs:?}");
+        assert_eq!(legs[0].from.map, "MtMoon_B2F");
+        assert_eq!(
+            (legs[0].to.map.as_str(), legs[0].to.x, legs[0].to.y),
+            ("Route4", 19, 6)
+        );
+        assert!(special(&world, &legs[0]));
+        let walker = in_mt_moon_knowing("MOVE_TACKLE");
+        assert!(plan_field_route(&world, &graph, &walker, &pose, &dest, || true).is_none());
     }
 
     /// Cerulean's cut tree (26, 32): with CUT known and the Cascade Badge,

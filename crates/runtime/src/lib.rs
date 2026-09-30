@@ -853,6 +853,10 @@ fn summarize(event: &GameEvent) -> String {
         GameEvent::VarTracked { var, value } => format!("Var {var} = {value} (tracked)"),
         GameEvent::MapVisited { map } => format!("Visited {map}"),
         GameEvent::RespawnSet { map, x, y } => format!("Respawn at {map} ({x}, {y})"),
+        GameEvent::EscapeWarpSet { escape: Some(e) } => {
+            format!("Escape leads to {} ({}, {})", e.map, e.x, e.y)
+        }
+        GameEvent::EscapeWarpSet { escape: None } => "Escape destination unknown".into(),
         GameEvent::NpcSeen {
             map,
             local_id,
