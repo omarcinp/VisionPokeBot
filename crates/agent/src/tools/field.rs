@@ -185,6 +185,12 @@ fn says_refused(page: &str) -> bool {
     .any(|t| page.contains(t))
 }
 
+/// The game's answer when the obstacle is already gone (`gText_NothingToCut`,
+/// "There's nothing to CUT."): the way is clear, nothing is refused.
+fn says_nothing_there(page: &str) -> bool {
+    page.replace('’', "'").contains("There's nothing to")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptPhase {
     Approach,
@@ -436,6 +442,9 @@ pub struct PartyFieldMove {
     /// cave before Flash).
     pub unlocated_ok: bool,
     failed: Option<String>,
+    /// The game said there is nothing to use the move on (the obstacle is
+    /// already gone).
+    pub nothing_there: bool,
     /// Action windows closed because another member's opened.
     wrong_member: u32,
 }
@@ -451,6 +460,7 @@ impl PartyFieldMove {
             pages: Vec::new(),
             unlocated_ok: false,
             failed: None,
+            nothing_there: false,
             wrong_member: 0,
         }
     }
@@ -462,7 +472,9 @@ impl PartyFieldMove {
         if let Some(d) = &o.dialogue {
             let page = d.lines.join(" ");
             if !page.is_empty() && self.pages.last() != Some(&page) {
-                if says_refused(&page) || page.contains("not able") {
+                if says_nothing_there(&page) {
+                    self.nothing_there = true;
+                } else if says_refused(&page) || page.contains("not able") {
                     self.failed = Some(page.clone());
                 }
                 self.pages.push(page);
@@ -477,11 +489,25 @@ impl PartyFieldMove {
             return Decision::Fail(format!("{}: {why}", self.mv.label()));
         }
         if let Some(party) = &o.party_menu {
-            // Refusals print in the party menu's prompt box.
-            if says_refused(&party.prompt) {
+            // Refusals print in the party menu's prompt box; so does
+            // "There's nothing to CUT." (Switch, Vermilion: the tree was
+            // already cut, the list stayed open and the walk to the Gym
+            // failed "no progress in after").
+            if says_nothing_there(&party.prompt) {
+                self.nothing_there = true;
+            } else if says_refused(&party.prompt) {
                 self.failed = Some(party.prompt.clone());
                 return Decision::Wait("refused".into());
             }
+        }
+        if self.nothing_there {
+            if o.party_menu.is_some() || o.menu.is_some() {
+                return self.closer.next(o, "closed");
+            }
+            return Decision::Done(format!(
+                "nothing to {} here: the way is clear",
+                self.mv.label()
+            ));
         }
         if o.party_menu.is_some() || o.summary.is_some() || o.bag.is_some() {
             return self.retries.wait(o, "waiting for the party menu to close");
@@ -818,6 +844,18 @@ pub fn use_on_obstacle(
             ));
             let mut step = PartyFieldMove::new(mv, slot);
             ctx.drive(&mut step)?;
+            if step.nothing_there {
+                // Gone already: the walk goes through where it stood.
+                if let Dest::Facing { map, x, y } = at {
+                    if let Some(gate) = ctx.world.places().and_then(|p| {
+                        p.gates
+                            .iter()
+                            .find(|g| g.map == *map && (g.x, g.y) == (*x, *y) && regrows(&g.kind))
+                    }) {
+                        ctx.gone.insert((gate.map.clone(), gate.local_id));
+                    }
+                }
+            }
             Ok(())
         }
         Err(e) => Err(e),
@@ -1260,6 +1298,37 @@ mod tests {
             step.next(&mut step_ctx(&o, &state, &mut events, 60)),
             Decision::Fail(_)
         ));
+    }
+
+    /// Switch, Vermilion: the Cut tree was already cut; CUT from the list
+    /// printed "There's nothing to CUT." in the prompt, the list stayed
+    /// open, and the walk to the Gym failed "no progress in after". The
+    /// way is clear: the menu is closed and the step is done.
+    #[test]
+    fn nothing_to_cut_means_the_way_is_clear() {
+        let mut step = PartyFieldMove::new(FieldMove::Cut, 4);
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        o.party_menu = Some(party_menu(
+            4,
+            &["SUMMARY", "CUT", "SWITCH", "ITEM", "CANCEL"],
+            Some(1),
+        ));
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 0));
+        assert_eq!(pressed(&d), Some(Button::A));
+        let mut o = bare(40);
+        let mut list = party_menu(4, &[], None);
+        list.prompt = "There’s nothing to CUT.".into();
+        o.party_menu = Some(list);
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 0));
+        assert_eq!(pressed(&d), Some(Button::B));
+        assert!(step.nothing_there);
+        let o = bare(80);
+        match step.next(&mut step_ctx(&o, &state, &mut events, 0)) {
+            Decision::Done(why) => assert!(why.contains("the way is clear"), "{why}"),
+            _ => panic!("expected done"),
+        }
     }
 
     #[test]

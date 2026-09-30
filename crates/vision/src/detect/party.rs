@@ -791,6 +791,13 @@ mod tests {
             assert!(m.double);
             assert_eq!(m.prompt, "Choose a POKéMON.");
         }
+        // Switch, Vermilion: CUT with the tree already gone answers in the
+        // prompt box.
+        if let Ok(image) = load("switch-party-nothing-to-cut.png") {
+            let m = menu(&image, &font).expect("party menu");
+            assert_eq!(m.prompt, "There’s nothing to CUT.");
+            assert_eq!(m.count, 5);
+        }
         // 60/ 60: the zeros read as the letter O in the small font.
         if let Some(r) = rows("switch-party-choose-ivysaur-60.png") {
             assert_eq!(r, vec![row("IVYSAUR", 22, Some((60, 60)))]);
