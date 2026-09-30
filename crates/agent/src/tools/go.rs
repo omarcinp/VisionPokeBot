@@ -478,17 +478,22 @@ pub fn plan_field_route(
     walks: impl FnOnce() -> bool,
 ) -> Option<Vec<Leg>> {
     let belief = StateBelief(state);
+    // Unknown facts count as unmet, but for a trainer: one not known beaten
+    // is a battle on the way, not a wall (Switch, Rocket Hideout: out of
+    // Giovanni's side, the elevator to B1F passes GRUNT_12, never met on
+    // the stairs down; "no known route" out).
+    let policy = UnknownPolicy::Optimistic {
+        penalty_of: battle_on_the_way,
+    };
     let result = match dest {
-        Dest::Map { map } => {
-            route::route_to_map(world, graph, &belief, pose, map, UnknownPolicy::Pessimistic)
-        }
+        Dest::Map { map } => route::route_to_map(world, graph, &belief, pose, map, policy),
         Dest::Tile { map, x, y } => route::route(
             world,
             graph,
             &belief,
             pose,
             &Place::tile(map, *x, *y),
-            UnknownPolicy::Pessimistic,
+            policy,
         ),
         // Talking and warp legs end next to their target: the navigator's.
         Dest::Facing { .. } | Dest::Warp { .. } => return None,
@@ -506,6 +511,22 @@ pub fn plan_field_route(
     let rides = result.legs.iter().any(|l| ride(world, l));
     (needed || rides && !walks()).then_some(result.legs)
 }
+
+/// The price of assuming `p` for a route the tools walk: a trainer not
+/// known beaten is fought on the way; anything else unknown is unmet.
+fn battle_on_the_way(p: &pokebot_world::predicate::Predicate) -> f64 {
+    match p {
+        pokebot_world::predicate::Predicate::Flag { name, is: true }
+            if name.starts_with("TRAINER_") =>
+        {
+            BATTLE_ON_THE_WAY_S
+        }
+        _ => f64::INFINITY,
+    }
+}
+
+/// Seconds a battle on the way adds to a route.
+const BATTLE_ON_THE_WAY_S: f64 = 90.0;
 
 /// Walks to a place of the route (the navigator routes across maps).
 fn walk_to(ctx: &mut ToolContext<'_>, place: &Place) -> Result<(), ToolError> {
@@ -1157,6 +1178,33 @@ mod tests {
     /// flag the way beside him rides the elevator (whose floor paths test
     /// VAR_ELEVATOR_FLOOR, which nothing tracks); without it there is
     /// none. The navigator doesn't walk it, so it is a field route.
+    /// Switch, Rocket Hideout: Giovanni beaten, the way out of his side of
+    /// B4F rides the elevator to B1F past GRUNT_12, never met on the
+    /// stairs down. Not known beaten, he is a battle on the way, not a
+    /// wall ("no known route from RocketHideout_B4F").
+    #[test]
+    fn a_trainer_not_known_beaten_is_no_wall_on_the_way_out() {
+        use pokebot_state::Knowledge;
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let mut state = pokebot_state::GameState::default();
+        state.world.flags.insert(
+            "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
+            Knowledge::observed(true, 1),
+        );
+        let pose = PlayerPose {
+            map: "RocketHideout_B4F".into(),
+            x: 20,
+            y: 6,
+        };
+        let dest = Dest::Map {
+            map: "CeladonCity_GameCorner".into(),
+        };
+        let legs =
+            plan_field_route(&world, &graph, &state, &pose, &dest, || false).expect("a ride out");
+        assert!(legs.iter().any(|l| ride(&world, l)), "{legs:?}");
+    }
+
     #[test]
     fn the_way_to_the_lift_side_of_b4f_rides_the_elevator() {
         use pokebot_state::Knowledge;
