@@ -308,7 +308,19 @@ impl Sensor {
             self.paths_run = marker;
             self.field.forget_absence();
         }
+        // Text or a menu on screen: a script is running (it adds its
+        // objects when it ends) or a window hides sprites, so the evidence
+        // of absence starts over after it (Switch, Rocket Hideout: the
+        // Silph Scope, added once Giovanni's speech closed, was taken for
+        // gone through the speech and the save that followed; the path
+        // retracted, and no plan could get the Scope).
+        if o.dialogue.is_some() || o.menu.is_some() {
+            self.field.forget_absence();
+        }
         events.extend(self.field.observe(o, state));
+        if let Some(world) = &self.world {
+            events.extend(shown_objects(world, state, &self.field.visible()));
+        }
         if let (Some(world), Some((map, absent))) =
             (&self.world, self.field.absent_for(RETRACT_ABSENT_FRAMES))
         {
@@ -1076,6 +1088,38 @@ fn contradicted_paths(
             });
         out.extend(culprit);
         out.push(GameEvent::FlagObserved { flag, value: true });
+    }
+    out
+}
+
+/// Objects seen standing whose hide flag the belief holds set: the flag
+/// is clear (Switch, Rocket Hideout: the Silph Scope, taken for gone and
+/// saved so, stood on its tile, and no plan could get it).
+fn shown_objects(
+    world: &pokebot_world::World,
+    state: &GameState,
+    seen: &[pokebot_state::VisibleNpc],
+) -> Vec<GameEvent> {
+    let mut out = Vec::new();
+    for npc in seen {
+        let Some(local_id) = npc.local_id else {
+            continue;
+        };
+        let Some(flag) = world
+            .map(&npc.map)
+            .and_then(|m| m.objects.iter().find(|o| o.local_id == local_id))
+            .and_then(|o| o.flag.clone())
+            .filter(|f| !pokebot_world::gates::is_local_flag(f))
+        else {
+            continue;
+        };
+        let hidden = state.world.flags.get(&flag).and_then(|k| k.value) == Some(true);
+        let told = out
+            .iter()
+            .any(|e| matches!(e, GameEvent::FlagObserved { flag: f, .. } if *f == flag));
+        if hidden && !told {
+            out.push(GameEvent::FlagObserved { flag, value: false });
+        }
     }
     out
 }

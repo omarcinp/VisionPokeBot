@@ -1345,3 +1345,109 @@ fn a_battle_party_menu_is_in_battle_order() {
     assert_eq!(party[0].nickname.value.as_deref(), Some("BIRDY"));
     assert_eq!(party[0].hp.value, Some((5, 19)));
 }
+
+/// Switch, Rocket Hideout B4F: Giovanni's path recorded (the Silph Scope
+/// shown), the Scope's ball is added only when his speech closes. Seen
+/// empty through the speech and the save after it, its path was retracted
+/// and the Scope taken for gone. Text or a menu starts the evidence over;
+/// 20 s of plain field still retract.
+#[test]
+fn absence_behind_text_does_not_retract_a_path() {
+    let Some(d) = data() else { return };
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+    let Ok(world) = pokebot_world::World::load(&dir) else {
+        return;
+    };
+    let mut state = GameState::default();
+    state
+        .world
+        .record_path("RocketHideout_B4F_EventScript_Giovanni", 0);
+    state.world.flags.insert(
+        "FLAG_HIDE_SILPH_SCOPE".into(),
+        Knowledge::tracked(false, None),
+    );
+    let located = |f: u64| {
+        let mut o = bare(f, ScreenState::Unknown);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "RocketHideout_B4F".into(),
+                x: 18,
+                y: 4,
+            },
+            score: 990,
+        });
+        o.objects_absent = vec![2];
+        o
+    };
+    let talking = |f: u64| {
+        let mut o = located(f);
+        o.dialogue = page(f, "RED saved the game.").dialogue;
+        o
+    };
+    let retracted = |state: &GameState| {
+        state
+            .world
+            .flags
+            .get("FLAG_HIDE_SILPH_SCOPE")
+            .and_then(|k| k.value)
+            == Some(true)
+    };
+    let world = Arc::new(world);
+    let mut s = Sensor::new(Arc::clone(&d)).with_world(Arc::clone(&world));
+    let frames = (0..1600).map(|f| {
+        if f % 400 < 300 {
+            talking(f)
+        } else {
+            located(f)
+        }
+    });
+    let (after, _) = run(&mut s, state.clone(), frames);
+    assert!(!retracted(&after), "retracted behind text");
+    let mut s = Sensor::new(d).with_world(world);
+    let (after, _) = run(&mut s, state, (0..1600).map(located));
+    assert!(retracted(&after), "plain field absence retracts");
+}
+
+/// The Switch's checkpoint held the Silph Scope's hide flag set (a wrong
+/// retraction, saved). Its ball seen standing on its tile clears it.
+#[test]
+fn an_object_seen_standing_is_not_hidden() {
+    let Some(d) = data() else { return };
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+    let Ok(world) = pokebot_world::World::load(&dir) else {
+        return;
+    };
+    let mut state = GameState::default();
+    state
+        .world
+        .flags
+        .insert("FLAG_HIDE_SILPH_SCOPE".into(), Knowledge::observed(true, 1));
+    let mut s = Sensor::new(d).with_world(Arc::new(world));
+    let frames = (0..60).map(|f| {
+        let mut o = bare(f, ScreenState::Unknown);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "RocketHideout_B4F".into(),
+                x: 18,
+                y: 4,
+            },
+            score: 990,
+        });
+        o.sprites = vec![pokebot_state::SpriteObservation {
+            x: 20,
+            y: 5,
+            local_id: Some(2),
+            facing: None,
+        }];
+        o
+    });
+    let (after, _) = run(&mut s, state, frames);
+    assert_eq!(
+        after
+            .world
+            .flags
+            .get("FLAG_HIDE_SILPH_SCOPE")
+            .and_then(|k| k.value),
+        Some(false)
+    );
+}
