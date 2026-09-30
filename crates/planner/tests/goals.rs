@@ -1374,3 +1374,51 @@ fn readiness_short_of_ball_money_earns_it_first() {
     assert_eq!(*money, 2000);
     assert!(trainers.iter().all(|(t, _)| t.contains("BUG_CATCHER")));
 }
+
+/// The Switch in Rocket Hideout B4F (its checkpoint), Giovanni's room
+/// behind the barrier that stays shut until TEAM_ROCKET_GRUNT_16 and _17
+/// are beaten (`RocketHideout_B4F_OnLoad`). The plan beat Giovanni first:
+/// "no path next to (19, 4)", 13 times, then no plan at all. The grunts
+/// are on the lift's side of B4F, so the Lift Key comes first.
+#[test]
+fn giovanni_in_the_hideout_waits_for_the_barrier_grunts() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 60.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, _) = checkpoint("rocket_hideout_state.json");
+    let pose = Some(PlayerPose {
+        map: "RocketHideout_B4F".into(),
+        x: 11,
+        y: 15,
+    });
+    let goal = parse_goal("flag TRAINER_BOSS_GIOVANNI").unwrap();
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 30);
+    let beats = |who: &str| {
+        let who = who.to_string();
+        move |i: &Intent| match i {
+            Intent::Beat { trainer, .. } => *trainer == who,
+            Intent::RunScript { script, .. } => script.contains(&who),
+            _ => false,
+        }
+    };
+    let giovanni = position(&plan, beats("TRAINER_BOSS_GIOVANNI"));
+    assert!(giovanni < plan.intents.len(), "Giovanni missing");
+    // B4F's stairs land west of a wall: the grunts' side is the lift's.
+    let key = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "RocketHideout_B4F_EventScript_LiftKey"),
+    );
+    for grunt in [
+        "TRAINER_TEAM_ROCKET_GRUNT_16",
+        "TRAINER_TEAM_ROCKET_GRUNT_17",
+    ] {
+        let at = position(&plan, beats(grunt));
+        assert!(
+            key < at && at < giovanni,
+            "Lift Key at {key}, {grunt} at {at}, Giovanni at {giovanni}"
+        );
+    }
+}

@@ -3878,7 +3878,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 if self.planner.trainer_maps.contains_key(name) =>
             {
                 let mut v = self.script_candidates(p, belief, &ctx);
-                v.extend(self.beat_candidates(name, &ctx));
+                v.extend(self.beat_candidates(name, p, belief, &ctx));
                 v
             }
             GoalPredicate::World(_) => self.script_candidates(p, belief, &ctx),
@@ -4293,7 +4293,13 @@ impl<'p, 'a> Session<'p, 'a> {
     }
 
     /// `Beat` for every map with an object whose script fights `trainer`.
-    fn beat_candidates(&self, trainer: &str, ctx: &PlanContext<'_>) -> Vec<Candidate> {
+    fn beat_candidates(
+        &self,
+        trainer: &str,
+        p: &GoalPredicate,
+        belief: &StateBelief<'a>,
+        ctx: &PlanContext<'_>,
+    ) -> Vec<Candidate> {
         self.planner
             .trainer_maps
             .get(trainer)
@@ -4306,8 +4312,61 @@ impl<'p, 'a> Session<'p, 'a> {
                     map: map.clone(),
                 };
                 let cost = intent.cost_s(ctx);
-                Candidate::single(intent, ctx, cost)
+                let mut c = Candidate::single(intent, ctx, cost);
+                // As for a script: on a map whose passages the story
+                // opens, what the walk to the trainer needs comes first
+                // (Giovanni's room in the Rocket Hideout: the Lift Key, then
+                // the two grunts whose defeat opens the barrier). The first
+                // listed runs last, so the walk's order is listed reversed.
+                let at = c
+                    .preconditions
+                    .iter()
+                    .position(|q| q.at_map().is_some())
+                    .map_or(0, |i| i + 1);
+                for need in self.trainer_spot_needs(trainer, map, belief) {
+                    if need != *p && !c.preconditions.contains(&need) {
+                        c.preconditions.insert(at, need);
+                    }
+                }
+                c
             })
+            .collect()
+    }
+
+    /// What the walk to `trainer`'s object on `map` needs beyond what
+    /// holds, when the map has gates ([`Self::spot_needs`]).
+    fn trainer_spot_needs(
+        &self,
+        trainer: &str,
+        map: &str,
+        belief: &StateBelief<'a>,
+    ) -> Vec<GoalPredicate> {
+        if !self.planner.graph.has_gates(map) {
+            return Vec::new();
+        }
+        let Some(events) = self.planner.world.events() else {
+            return Vec::new();
+        };
+        let mut spots = Vec::new();
+        let mut below = u32::MAX;
+        for (label, script) in &events.scripts {
+            if script.kind != "object" || script.map.as_deref() != Some(map) {
+                continue;
+            }
+            for (idx, path) in script.paths.iter().enumerate() {
+                if crate::intents::first_battle(path) == Some(trainer) {
+                    spots.extend(self.planner.script_spots(script, label, map));
+                    below = below.min(self.levels.fired(label, idx).unwrap_or(u32::MAX));
+                }
+            }
+        }
+        spots.sort_unstable();
+        spots.dedup();
+        let after = belief.with_established([GoalPredicate::flag(trainer, true)].into());
+        self.spot_needs(map, &spots, below, belief)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|need| after.eval_goal(need) != Truth::True)
             .collect()
     }
 
