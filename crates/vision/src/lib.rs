@@ -38,6 +38,14 @@ pub trait PerceptionSystem {
     }
 }
 
+/// A warp that fires as the player steps onto it (a ladder, a hole); an
+/// arrow warp (a cave's exit mat) fires only on the next step along its
+/// arrow, a stair warp on a push sideways.
+fn fires_on_step(behavior: u16) -> bool {
+    use pokebot_world::behavior::{arrow_warp, stair_warp, warp_fires};
+    warp_fires(behavior) && arrow_warp(behavior).is_none() && stair_warp(behavior).is_none()
+}
+
 /// FireRed/LeafGreen perception.
 #[derive(Default)]
 pub struct FireRedPerception {
@@ -796,7 +804,40 @@ impl FireRedPerception {
         };
         if at.name == r.map {
             r.velocity = (f.px - r.px, f.py - r.py);
+            let before = r.tile;
             r.tile = f.tile(r.tile);
+            // A step onto a warp that fires is that warp, whatever the
+            // disc shows: the fade from dark to dark reads as no fade, and
+            // a ladder's disc looks alike on both floors (Switch, Rock
+            // Tunnel B1F (33, 3): the belief stayed below, the walk
+            // stepped off and on the ladder, "looping").
+            if r.tile != before {
+                if let Some((dest, x, y)) = at
+                    .tile(r.tile.0, r.tile.1)
+                    .filter(|t| fires_on_step(t.behavior))
+                    .and_then(|_| at.warps.iter().find(|w| (w.x, w.y) == r.tile))
+                    .and_then(|w| world.warp_destination(w))
+                {
+                    r.map = dest.name.clone();
+                    r.tile = (x, y);
+                    r.velocity = (0, 0);
+                    (r.px, r.py, r.misses) = (x * BLOCK, y * BLOCK, 0);
+                    let pose = PlayerPose {
+                        map: dest.name.clone(),
+                        x,
+                        y,
+                    };
+                    if !dest.requires_flash {
+                        // Lit: located as usual from there.
+                        self.reckoned = None;
+                    }
+                    self.hint = Some(pose.clone());
+                    return Some(pokebot_state::PoseObservation {
+                        pose,
+                        score: f.score as u16,
+                    });
+                }
+            }
         } else {
             r.map = at.name.clone();
             r.velocity = (0, 0);
@@ -2193,7 +2234,19 @@ mod tests {
                 }
                 at = step.to;
                 let seen = see(&mut p, dark_frame(map, at.0 * BLOCK, at.1 * BLOCK));
-                assert_eq!(seen, Some(pose("RockTunnel_1F", at.0, at.1)));
+                // A step onto the ladder is its warp (the Switch on B1F
+                // (33, 3): the fade from dark to dark reads as none).
+                let fires = map
+                    .tile(at.0, at.1)
+                    .is_some_and(|t| fires_on_step(t.behavior));
+                let expected = match map.warps.iter().find(|w| fires && (w.x, w.y) == at) {
+                    Some(w) => {
+                        let (to, x, y) = world.warp_destination(w).unwrap();
+                        pose(&to.name, x, y)
+                    }
+                    None => pose("RockTunnel_1F", at.0, at.1),
+                };
+                assert_eq!(seen, Some(expected));
             }
         }
         // Down the ladder: a fade, then B1F's ladder the warp leads to.
