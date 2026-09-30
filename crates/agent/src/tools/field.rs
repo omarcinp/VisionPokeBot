@@ -677,6 +677,8 @@ pub struct FlyTo {
     lit_seen: bool,
     /// The first frame the region map was seen.
     map_since: Option<u64>,
+    /// Where the flight lands (`places.json` fly spots).
+    landing: Option<pokebot_state::PlayerPose>,
 }
 
 impl FlyTo {
@@ -688,7 +690,30 @@ impl FlyTo {
             pressed: None,
             lit_seen: false,
             map_since: None,
+            landing: None,
         })
+    }
+
+    /// Where the flight lands: the player is placed there once the
+    /// destination's name shows (the tracker, still on the old map, found
+    /// the player nowhere: the Switch flew to Lavender and waited "flying"
+    /// until the step failed).
+    pub fn landing_at(mut self, pose: pokebot_state::PlayerPose) -> Self {
+        self.landing = Some(pose);
+        self
+    }
+
+    /// Whether the map-name popup names this destination ("LAVENDER TOWN"
+    /// for LavenderTown, "INDIGO PLATEAU" for IndigoPlateau_Exterior).
+    fn names_destination(&self, popup: &str) -> bool {
+        let key = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_uppercase()
+        };
+        let popup = key(popup);
+        !popup.is_empty() && key(&self.map).starts_with(&popup)
     }
 
     /// The next cursor cell one press brings toward the target: columns
@@ -724,6 +749,17 @@ impl ToolStep for FlyTo {
         if let Some(p) = &o.player {
             if self.pressed.is_some() && p.pose.map == self.map {
                 return Decision::Done(format!("flew to {}", self.map));
+            }
+        }
+        if let (Some(_), Some(landing), Some(popup)) =
+            (self.pressed, self.landing.as_ref(), o.map_popup.as_deref())
+        {
+            if o.fly_map.is_none() && self.names_destination(popup) {
+                ctx.events.push(GameEvent::PlayerInferred {
+                    pose: landing.clone(),
+                    candidates: Vec::new(),
+                });
+                return Decision::Done(format!("flew to {} ({popup})", self.map));
             }
         }
         let Some(map) = &o.fly_map else {
@@ -893,6 +929,17 @@ pub fn use_from_party(ctx: &mut ToolContext<'_>, mv: FieldMove) -> Result<(), To
 pub fn fly(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
     let mut to = FlyTo::new(map)
         .ok_or_else(|| ToolError::Failed(format!("{map} is not a fly spot on the region map")))?;
+    if let Some(spot) = ctx
+        .world
+        .places()
+        .and_then(|p| p.fly_spots.iter().find(|f| f.map == map))
+    {
+        to = to.landing_at(pokebot_state::PlayerPose {
+            map: spot.map.clone(),
+            x: spot.x,
+            y: spot.y,
+        });
+    }
     use_from_party(ctx, FieldMove::Fly)?;
     ctx.drive(&mut to)?;
     ctx.emit(GameEvent::MapVisited {
@@ -1345,6 +1392,51 @@ mod tests {
             Decision::Done(why) => assert!(why.contains("the way is clear"), "{why}"),
             _ => panic!("expected done"),
         }
+    }
+
+    /// Switch: the flight to Lavender landed, but the tracker, still on
+    /// Celadon, found the player nowhere and the step failed "flying".
+    /// The destination's name showing places the player at its landing.
+    #[test]
+    fn a_flight_lands_where_the_destination_is_named() {
+        let landing = pokebot_state::PlayerPose {
+            map: "CeruleanCity".into(),
+            x: 22,
+            y: 20,
+        };
+        let mut step = FlyTo::new("CeruleanCity")
+            .unwrap()
+            .landing_at(landing.clone());
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        o.fly_map = Some(FlyMapObservation {
+            lit: vec!["CeruleanCity".into()],
+            dark: vec![],
+            cursor: Some((14, 3)),
+        });
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 0));
+        assert_eq!(pressed(&d), Some(Button::A));
+        // Another town's name is not the landing.
+        let mut elsewhere = bare(300);
+        elsewhere.map_popup = Some("ROUTE 4".into());
+        assert!(!matches!(
+            step.next(&mut step_ctx(&elsewhere, &state, &mut events, 0)),
+            Decision::Done(_)
+        ));
+        let mut landed = bare(310);
+        landed.map_popup = Some("CERULEAN CITY".into());
+        assert!(matches!(
+            step.next(&mut step_ctx(&landed, &state, &mut events, 0)),
+            Decision::Done(_)
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerInferred { pose, .. } if *pose == landing
+        )));
+        assert!(!step.names_destination("INDIGO PLATEAU"));
+        let indigo = FlyTo::new("IndigoPlateau_Exterior").unwrap();
+        assert!(indigo.names_destination("INDIGO PLATEAU"));
     }
 
     #[test]
