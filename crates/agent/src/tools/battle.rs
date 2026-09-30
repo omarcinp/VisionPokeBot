@@ -226,6 +226,17 @@ impl BattleStep {
     /// Our battler `name` fainted: the next is sent out, or, the last
     /// one, it is the white-out (the restart is for a white-out only).
     fn faint_seen(&mut self, name: &str, events: &mut Vec<GameEvent>) -> Option<Decision> {
+        self.faint_seen_at(name, None, events)
+    }
+
+    /// [`Self::faint_seen`] with the slot the party screen showed it in,
+    /// for when its name wasn't read.
+    fn faint_seen_at(
+        &mut self,
+        name: &str,
+        row: Option<u8>,
+        events: &mut Vec<GameEvent>,
+    ) -> Option<Decision> {
         if self.fainted.is_some() {
             return None;
         }
@@ -235,6 +246,7 @@ impl BattleStep {
             .iter()
             .find(|m| !name.is_empty() && m.display_name() == name)
             .map(|m| m.slot)
+            .or(row)
             .or(self.active)
             .unwrap_or(0);
         self.fainted = Some(slot);
@@ -830,13 +842,21 @@ impl ToolStep for BattleStep {
             // workers 2, 4 and 5 pressed B on this screen, which can't be
             // left, for hours): the FNT on the first panel (the one out)
             // tells.
+            // In a double battle either of the two out (left) may be the one
+            // (Switch, Route 16: PIDGEY fainted beside VENUSAUR, the first
+            // panel read healthy, and B was pressed 40 times).
             if let Some(party) = &o.party_menu {
-                let first = party.members.first();
-                if self.fainted.is_none()
-                    && first.is_some_and(|r| r.status == Some(Status::Fainted))
-                {
-                    let name = first.and_then(|r| r.nickname.clone()).unwrap_or_default();
-                    if let Some(white_out) = self.faint_seen(&name, ctx.events) {
+                let out = if party.double { 2 } else { 1 };
+                let fainted = party
+                    .members
+                    .iter()
+                    .enumerate()
+                    .take(out)
+                    .find(|(_, r)| r.status == Some(Status::Fainted));
+                if let (None, Some((row, r))) = (self.fainted, fainted) {
+                    let name = r.nickname.clone().unwrap_or_default();
+                    if let Some(white_out) = self.faint_seen_at(&name, Some(row as u8), ctx.events)
+                    {
                         return white_out;
                     }
                 }
@@ -1494,6 +1514,30 @@ mod tests {
             m.count = 3;
             m.double = true;
             m.members = vec![row("VENUSAUR", 100), row("CATERPIE", 0), row("PIDGEY", 30)];
+        }
+        let label = step_label(&step_next(&mut step, &double, &three, &mut events));
+        assert!(label.contains("toward slot 2"), "{label}");
+
+        // A double battle's second one out fainted, and only its panel
+        // tells (Switch, Route 16: PIDGEY beside VENUSAUR; the first panel
+        // read healthy and B was pressed 40 times): the next one is sent.
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        step.started = true;
+        step.in_battle = true;
+        let mut double = party_menu(200, false);
+        if let Some(m) = double.party_menu.as_mut() {
+            m.count = 3;
+            m.double = true;
+            m.members = vec![
+                row("VENUSAUR", 100),
+                PartyRowObservation {
+                    nickname: None,
+                    level: None,
+                    hp: Some((0, 20)),
+                    status: Some(Status::Fainted),
+                },
+                row("PIDGEY", 30),
+            ];
         }
         let label = step_label(&step_next(&mut step, &double, &three, &mut events));
         assert!(label.contains("toward slot 2"), "{label}");
