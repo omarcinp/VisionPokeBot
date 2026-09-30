@@ -1133,6 +1133,7 @@ pub fn changes_save(event: &GameEvent) -> bool {
             | GameEvent::VarTracked { .. }
             | GameEvent::ItemsChanged { .. }
             | GameEvent::PocketObserved { .. }
+            | GameEvent::PocketRowsObserved { .. }
             | GameEvent::PartyAudited { .. }
             | GameEvent::PartyObserved { .. }
             | GameEvent::PartyMonDerived { .. }

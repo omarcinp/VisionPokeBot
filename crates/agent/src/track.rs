@@ -127,14 +127,19 @@ mod tests {
                 reason: "obtained".into()
             }]
         );
-        // Its follow-up page adds nothing.
-        assert!(read(
-            &mut t,
-            "RED put the HELIX FOSSIL\nin the KEY ITEMS POCKET.",
-            &d,
-            None
-        )
-        .is_empty());
+        // Its follow-up page counts nothing again: it observes the one held.
+        assert_eq!(
+            read(
+                &mut t,
+                "RED put the HELIX FOSSIL\nin the KEY ITEMS POCKET.",
+                &d,
+                None
+            ),
+            vec![GameEvent::PocketRowsObserved {
+                pocket: Pocket::KeyItems,
+                items: vec![("ITEM_HELIX_FOSSIL".into(), 1)],
+            }]
+        );
         assert_eq!(
             read(
                 &mut t,

@@ -91,6 +91,17 @@ pub fn page_events(page: &str, data: &GameData) -> Vec<GameEvent> {
             }
         }
     }
+    // "RED put the SILPH SCOPE in the KEY ITEMS POCKET.": the item is in
+    // the bag. A key item is only ever one, so the page observes it held
+    // without counting it again (Switch, Rocket Hideout: the page before,
+    // "found", was lost to dropped frames; the Scope unknown, no route to
+    // Pokémon Tower 7F).
+    if let Some(item) = key_item_pocketed(page, data) {
+        events.push(GameEvent::PocketRowsObserved {
+            pocket: Pocket::KeyItems,
+            items: vec![(item, 1)],
+        });
+    }
     // A ball thrown in battle: "RED used POKé BALL!".
     if let Some(item) = ball_thrown(page, data) {
         events.push(GameEvent::ItemsChanged {
@@ -328,6 +339,13 @@ pub fn box_from_text(page: &str) -> Option<u8> {
 /// "RED found a POTION!" / "received the TOWN MAP." / "received TM03 from
 /// MISTY." / "obtained a X!", and
 /// the Mt. Moon fossil's "Obtained the HELIX FOSSIL!" (no name before it).
+/// "… put the X in the KEY ITEMS POCKET." → X's constant.
+fn key_item_pocketed(page: &str, data: &GameData) -> Option<String> {
+    let rest = &page[page.find(" put the ")? + " put the ".len()..];
+    let name = rest[..rest.find(" in the KEY ITEMS POCKET")?].trim();
+    data.item_named(name).map(str::to_owned)
+}
+
 fn item_gained(page: &str) -> Option<(String, String)> {
     for (verb, reason) in [
         (" found ", "found"),
@@ -363,6 +381,19 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
         )
         .ok()
+    }
+
+    #[test]
+    fn a_key_item_put_in_its_pocket_is_held() {
+        let Some(d) = data() else { return };
+        assert_eq!(
+            page_events("RED put the SILPH SCOPE in the KEY ITEMS POCKET.", &d),
+            vec![GameEvent::PocketRowsObserved {
+                pocket: Pocket::KeyItems,
+                items: vec![("ITEM_SILPH_SCOPE".into(), 1)],
+            }]
+        );
+        assert!(page_events("RED put the POTION in the ITEMS POCKET.", &d).is_empty());
     }
 
     #[test]
