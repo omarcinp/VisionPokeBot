@@ -68,7 +68,9 @@ pub fn cursor_region(image: &RgbImage, menu: &MenuObservation) -> Region {
 /// Top-left of the ▶ cursor: a gray triangle whose rows are 1,2,3,4,5,4,3,2,1
 /// pixels wide, with no gray immediately left or right of each row.
 pub fn find_cursor(image: &RgbImage) -> Option<(u32, u32)> {
-    let gray = |x: u32, y: u32| near(px(image, x, y), TEXT_GRAY, TOLERANCE);
+    // The shared tolerance: the Switch capture's compression puts some of
+    // the ▶'s pixels 21 off the gray (switch-bag-key-items-fame-checker).
+    let gray = |x: u32, y: u32| near(px(image, x, y), TEXT_GRAY, crate::color::TOLERANCE);
     for y in 0..image.height().saturating_sub(CURSOR_ROWS) {
         for x in 1..image.width().saturating_sub(6) {
             let matches = (0..CURSOR_ROWS).all(|row| {

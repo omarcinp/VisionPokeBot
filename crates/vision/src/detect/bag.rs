@@ -353,6 +353,21 @@ mod tests {
         cursor_row("switch/");
     }
 
+    /// The Switch's KEY ITEMS pocket, the ▶ on its fourth row (FAME
+    /// CHECKER): the TM Case audit read no cursor here and pressed A on
+    /// the BAG 40 times.
+    #[test]
+    fn switch_key_items_cursor_is_read() {
+        let Some((image, font, small_font)) = fixture("switch-bag-key-items-fame-checker.png")
+        else {
+            return;
+        };
+        let bag = detect(&image, &font, &small_font).expect("bag");
+        assert_eq!(bag.pocket, "KEY ITEMS");
+        assert_eq!(bag.rows[1].0, "TM CASE");
+        assert_eq!(bag.cursor, Some(3));
+    }
+
     fn use_prompt(dir: &str) {
         let Some((image, font, small_font)) = fixture(&format!("{dir}bag-use-prompt.png")) else {
             return;
