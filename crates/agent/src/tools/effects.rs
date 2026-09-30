@@ -95,7 +95,7 @@ pub struct Skipped(pub String);
 /// | `var` `eq` | `VarTracked` |
 /// | `var` `add` / `sub` | `VarTracked` from the tracked value, if known |
 /// | `give` / `take` item | `ItemsChanged` (pocket from the game data) |
-/// | `warp` to a map | `MapVisited` (map id resolved to its name) |
+/// | `warp` to a map | `MapVisited` (map id resolved to its name), and `PlayerInferred` at the tile it names |
 /// | `heal` | `Healed` |
 /// | `respawn` heal location | `RespawnSet` (from `places.json`) |
 /// | `money` | `MoneyChanged` |
@@ -147,8 +147,25 @@ pub fn translate(
         // a script gives, and the runtime's sensor counts it from the text.
         Effect::Give { give, .. } => skip(&format!("give {give} (the sensor reads it)")),
         Effect::Take { take, count } => item_event(data, take, -*count, "script took it"),
-        Effect::Warp { warp, .. } => match map_name(warp) {
-            Some(map) => Ok(vec![GameEvent::MapVisited { map }]),
+        // Where it puts the player, when the script names the tile:
+        // perception tracks from there (Switch: Mr. Fuji, rescued, warps
+        // the player to his house; the tracker kept looking at Pokémon
+        // Tower 7F and every walk waited on "locating the player").
+        Effect::Warp { warp, x, y, .. } => match map_name(warp) {
+            Some(map) => {
+                let mut out = vec![GameEvent::MapVisited { map: map.clone() }];
+                if let (Some(x), Some(y)) = (x.as_ref().and_then(int), y.as_ref().and_then(int)) {
+                    out.push(GameEvent::PlayerInferred {
+                        pose: pokebot_state::PlayerPose {
+                            map,
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                        candidates: Vec::new(),
+                    });
+                }
+                Ok(out)
+            }
             None => skip(&format!("warp to unknown map {warp}")),
         },
         Effect::Heal { heal: true } => Ok(vec![GameEvent::Healed]),
@@ -418,6 +435,35 @@ mod tests {
         world.events()?;
         let data = GameData::load(dir.join("gamedata.json")).ok()?;
         Some((world, data))
+    }
+
+    /// Switch: Mr. Fuji, rescued on Pokémon Tower 7F, warps the player to
+    /// his house; the path puts the player on the tile it names.
+    #[test]
+    fn a_script_warp_puts_the_player_on_its_tile() {
+        let Some((world, data)) = world() else { return };
+        let events = world.events().unwrap();
+        let name = |id: &str| world.name_of(id).map(str::to_owned);
+        let (out, _) = path_events(
+            events,
+            "PokemonTower_7F_EventScript_MrFuji",
+            0,
+            &GameState::default(),
+            &data,
+            world.places(),
+            &name,
+        );
+        assert!(
+            out.contains(&GameEvent::PlayerInferred {
+                pose: pokebot_state::PlayerPose {
+                    map: "LavenderTown_VolunteerPokemonHouse".into(),
+                    x: 4,
+                    y: 7,
+                },
+                candidates: Vec::new(),
+            }),
+            "{out:?}"
+        );
     }
 
     /// Talking to the Cerulean grunt once beaten proves the defeat.

@@ -855,7 +855,7 @@ pub fn reconcile_badges(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         ctx.info(format!(
             "{flag} is held but its path never ran: recording {script}[{path}]"
         ));
-        record_path(ctx, &script, path)?;
+        record_path_after(ctx, &script, path)?;
     }
     Ok(())
 }
@@ -940,7 +940,7 @@ pub fn reconcile_key_items(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         ctx.info(format!(
             "{item} is held but its path never ran: recording {script}[{path}]"
         ));
-        record_path(ctx, &script, path)?;
+        record_path_after(ctx, &script, path)?;
     }
     Ok(())
 }
@@ -990,7 +990,27 @@ pub fn unrecorded_key_item_paths(
     out
 }
 
+/// [`record_path`] for a path that ran some time ago (a badge or key item
+/// held, its path never recorded): where it warped the player then says
+/// nothing of where the player is now.
+pub fn record_path_after(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: usize,
+) -> Result<(), ToolError> {
+    record_path_with(ctx, script, path, false)
+}
+
 pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Result<(), ToolError> {
+    record_path_with(ctx, script, path, true)
+}
+
+fn record_path_with(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: usize,
+    now: bool,
+) -> Result<(), ToolError> {
     let world = Arc::clone(&ctx.world);
     let Some(events) = world.events() else {
         return Ok(());
@@ -1021,6 +1041,9 @@ pub fn record_path(ctx: &mut ToolContext<'_>, script: &str, path: usize) -> Resu
             ),
         ))?;
         for event in learned {
+            if !now && matches!(event, GameEvent::PlayerInferred { .. }) {
+                continue;
+            }
             ctx.emit(event)?;
         }
     }
