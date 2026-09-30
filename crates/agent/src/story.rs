@@ -2201,9 +2201,10 @@ mod tests {
         let Some((world, data)) = story_fixture() else {
             return;
         };
-        // IVYSAUR Lv18 with its default moves stays below 0.9 vs Miguel even
-        // healed; four Lv50 PIDGEOT behind it win for sure.
-        let lead = party::Member::new(&data, "SPECIES_IVYSAUR", 18);
+        // IVYSAUR Lv14 with its default moves stays below 0.9 vs Miguel even
+        // healed (Lv18 reached it once GRASS against pure POISON counted
+        // 0.5, not 0.25); four Lv50 PIDGEOT behind it win for sure.
+        let lead = party::Member::new(&data, "SPECIES_IVYSAUR", 14);
         let mut members = vec![lead.clone()];
         for slot in 1..5 {
             members.push(party::Member {
@@ -2227,7 +2228,7 @@ mod tests {
                 assert!(!steps.is_empty(), "already ready with {p_win:?}");
                 assert!(steps
                     .iter()
-                    .all(|s| matches!(s, StoryStep::Train { level, .. } if *level > 18)));
+                    .all(|s| matches!(s, StoryStep::Train { level, .. } if *level > 14)));
             }
             Err(e) => assert!(!e.is_empty()),
         }
@@ -3249,6 +3250,9 @@ mod tests {
             return;
         };
         if let Some(party) = state.party.value.as_mut() {
+            // Lv14: healing can't make it ready (Lv18 can, since GRASS
+            // against pure POISON counts 0.5, not 0.25).
+            party[0].level = pokebot_state::Knowledge::observed(14, 1);
             party[0].hp = pokebot_state::Knowledge::observed((20, 54), 1);
         }
         let mut warnings = 0;

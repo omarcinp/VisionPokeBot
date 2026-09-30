@@ -265,7 +265,19 @@ impl GameData {
     /// Damage multiplier ×10 for `attack` against a defender of `defender`
     /// types (10 = neutral, 0 = immune, 40 = double super effective).
     pub fn effectiveness(&self, attack: &str, defender: &[String]) -> u32 {
-        defender.iter().fold(10, |acc, d| {
+        // A single-type species lists its type twice (type1 == type2); the
+        // game applies the second only when it differs
+        // (`battle_script_commands.c`: `type1 != type2`). Counted twice,
+        // every matchup against CHARMELEON was squared: RAZOR LEAF scored
+        // a quarter, and the Switch's Lv35 VENUSAUR used TACKLE into
+        // SMOKESCREEN and lost to the S.S. Anne rival.
+        let mut types: Vec<&String> = Vec::with_capacity(defender.len());
+        for t in defender {
+            if !types.contains(&t) {
+                types.push(t);
+            }
+        }
+        types.into_iter().fold(10, |acc, d| {
             let m = self
                 .type_chart
                 .iter()

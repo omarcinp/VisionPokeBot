@@ -1316,10 +1316,12 @@ fn money_short_is_earned_from_trainers_not_yet_beaten() {
 }
 
 /// Fleet workers 2 and 5 looped between a mart with no money for balls and
-/// the MANKEY that needed them. Readiness weighs earning first: a
-/// CHARMANDER facing Brock with ₽1800 (after the Potions kept and the
-/// shiny reserve, one ball) beats Viridian Forest's Bug Catchers for the
-/// second ball, since the MANKEY gets further than training alone (87%).
+/// the MANKEY that needed them. Readiness weighs earning first: a SPEAROW
+/// (PECK, GROWL: walled by Brock's ROCK) facing Brock with ₽1800 (after
+/// the Potions kept and the shiny reserve, one ball) beats Viridian
+/// Forest's Bug Catchers for the second ball, since a recruit gets further
+/// than training alone. (CHARMANDER once, while ROCK counted ×4 against
+/// pure FIRE; it trains through METAL CLAW now.)
 #[test]
 fn readiness_short_of_ball_money_earns_it_first() {
     use pokebot_state::{Knowledge, MoveSlot};
@@ -1330,7 +1332,7 @@ fn readiness_short_of_ball_money_earns_it_first() {
     let planner = f.planner(PlanOptions::default());
     let (mut knowledge, pose) = pewter();
     let mut lead = knowledge.party.value.as_ref().unwrap()[0].clone();
-    lead.species = Knowledge::observed("SPECIES_CHARMANDER".to_owned(), 1);
+    lead.species = Knowledge::observed("SPECIES_SPEAROW".to_owned(), 1);
     lead.level = Knowledge::observed(8, 1);
     lead.hp = Knowledge::observed((26, 26), 1);
     let slot = |mv: &str| {
@@ -1339,7 +1341,7 @@ fn readiness_short_of_ball_money_earns_it_first() {
             pp: Knowledge::observed((35, 35), 1),
         })
     };
-    lead.moves = [slot("MOVE_SCRATCH"), slot("MOVE_GROWL"), None, None];
+    lead.moves = [slot("MOVE_PECK"), slot("MOVE_GROWL"), None, None];
     knowledge.party = Knowledge::observed(vec![lead], 1);
     for flag in ["FLAG_BADGE01_GET", "TRAINER_LEADER_BROCK"] {
         knowledge

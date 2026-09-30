@@ -89,11 +89,32 @@ fn bulbasaur_trains_for_vine_whip() {
     );
 }
 
+/// CHARMANDER learns METAL CLAW at 13 (super effective on Brock's ROCK):
+/// training alone gets there. (Recruiting MANKEY looked needed only while
+/// ROCK moves counted ×4 against pure FIRE.)
 #[test]
-fn charmander_recruits_a_fighting_type() {
+fn charmander_trains_through_metal_claw() {
     let Some(data) = data() else { return };
     let plans = plan_preparation(
         &request(&data, "SPECIES_CHARMANDER", &["MOVE_SCRATCH", "MOVE_GROWL"]),
+        3,
+    );
+    let best = &plans[0];
+    assert!(best.min_confidence() >= 0.9);
+    assert!(
+        matches!(&best.steps[..], [PlanStep::Train { to, .. }] if *to >= 13),
+        "{:?}",
+        best.steps
+    );
+}
+
+/// A lead Brock's ROCK walls (SPEAROW, PECK and GROWL) recruits a
+/// FIGHTING type.
+#[test]
+fn a_walled_lead_recruits_a_fighting_type() {
+    let Some(data) = data() else { return };
+    let plans = plan_preparation(
+        &request(&data, "SPECIES_SPEAROW", &["MOVE_PECK", "MOVE_GROWL"]),
         3,
     );
     let best = &plans[0];
@@ -288,12 +309,13 @@ fn a_trainers_healing_item_lowers_the_chance_to_win() {
 /// caught a MANKEY, but keeping the Potion money and the shiny reserve the
 /// mart sold no ball, and the same catch came back fourteen cycles. With
 /// the tools' ball budget no catch is planned; the preparation trains
-/// instead. With money for balls, recruiting stays an option.
+/// instead. With money for balls, recruiting stays an option. (SPEAROW
+/// here: with ROCK against FIRE counted right, CHARMANDER just trains.)
 #[test]
 fn a_catch_the_money_cant_buy_balls_for_is_not_planned() {
     use pokebot_planner::stock::ball_budget;
     let Some(data) = data() else { return };
-    let mut poor = request(&data, "SPECIES_CHARMANDER", &["MOVE_SCRATCH", "MOVE_GROWL"]);
+    let mut poor = request(&data, "SPECIES_SPEAROW", &["MOVE_PECK", "MOVE_GROWL"]);
     poor.money = ball_budget(&data, 680, 0);
     assert_eq!(poor.money, 0);
     let plans = plan_preparation(&poor, 1);
@@ -306,7 +328,7 @@ fn a_catch_the_money_cant_buy_balls_for_is_not_planned() {
         "{:?}",
         plan.steps
     );
-    let mut rich = request(&data, "SPECIES_CHARMANDER", &["MOVE_SCRATCH", "MOVE_GROWL"]);
+    let mut rich = request(&data, "SPECIES_SPEAROW", &["MOVE_PECK", "MOVE_GROWL"]);
     rich.money = ball_budget(&data, 5000, 0);
     let any_catch = plan_preparation(&rich, 3)
         .iter()
