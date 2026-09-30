@@ -455,7 +455,10 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
 
 /// Whether a battle the hunt ran from calls for a heal: one it is for (any
 /// while training; the hunted species while catching; running from others
-/// is how a catch hunt goes on), with the lead hurt.
+/// is how a catch hunt goes on), with the lead hurt below
+/// [`FLIGHT_HEAL_PCT`] %. Nearly full, the flight is the matchup's, and a
+/// heal changes nothing (fleet worker 4: a Lv7 CATERPIE at 47/50 ran from
+/// Route 3's Pokémon, healed three times and gave the training up).
 fn heal_after_flight(
     hunt: &Hunt,
     fled: bool,
@@ -466,8 +469,13 @@ fn heal_after_flight(
         Hunt::Level(_) => true,
         Hunt::Species(s) => foe == Some(s.as_str()),
     };
-    fled && for_the_hunt && lead_hp.is_some_and(|(hp, max)| hp < max)
+    fled && for_the_hunt
+        && lead_hp.is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * FLIGHT_HEAL_PCT)
 }
+
+/// Below this share of its HP, a lead that ran from a battle the hunt is
+/// for heals first.
+const FLIGHT_HEAL_PCT: u32 = 75;
 
 /// Runs the hunt, healing at the nearest Center (and coming back) when the
 /// lead is too weak to go on, and saving after a catch on the way when
@@ -756,6 +764,14 @@ mod tests {
             true,
             Some("SPECIES_RATTATA"),
             Some((23, 23))
+        ));
+        // Fleet worker 4: a Lv7 CATERPIE at 47/50 runs from Route 3's
+        // Pokémon for the matchup; a heal changes nothing.
+        assert!(!heal_after_flight(
+            &train,
+            true,
+            Some("SPECIES_SPEAROW"),
+            Some((47, 50))
         ));
         assert!(!heal_after_flight(
             &train,
