@@ -392,6 +392,43 @@ fn a_bag_pocket_is_whole_only_when_it_ends_before_the_list_fills() {
     }));
 }
 
+/// Switch: the TM Case scrolled to its end showed TM19–TM39 and CANCEL,
+/// five rows, its whole window; read as the whole case, HM01, HM02 and
+/// TM03 were dropped. A full TM Case window is only the rows seen.
+#[test]
+fn a_full_tm_case_window_is_only_the_rows_seen() {
+    let Some(d) = data() else { return };
+    let mut s = Sensor::new(d);
+    let case = |f: u64| {
+        let mut o = bag(
+            f,
+            &[
+                ("TM19", None),
+                ("TM28", None),
+                ("TM34", None),
+                ("TM39", None),
+                ("CANCEL", None),
+            ],
+        );
+        if let Some(b) = o.bag.as_mut() {
+            b.pocket = "TM CASE".into();
+        }
+        o
+    };
+    let mut state = GameState::default();
+    state.bag.pockets.insert(
+        Pocket::TmCase,
+        pokebot_state::Knowledge::observed(
+            vec![("ITEM_HM01".into(), 1), ("ITEM_HM02".into(), 1)],
+            1,
+        ),
+    );
+    let (state, _) = run(&mut s, state, (0..10).map(case));
+    let held = state.bag.pockets[&Pocket::TmCase].value.clone().unwrap();
+    assert!(held.iter().any(|(i, _)| i == "ITEM_HM02"), "{held:?}");
+    assert!(held.iter().any(|(i, _)| i == "ITEM_TM19"), "{held:?}");
+}
+
 #[test]
 fn transitions_are_ignored() {
     let Some(d) = data() else { return };

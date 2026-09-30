@@ -105,7 +105,7 @@ pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expecta
     // pocket: the item isn't in it (fleet worker 3 pressed Up 400 000
     // times for a POTION the belief still counted).
     let cancel = bag.rows.iter().any(|(name, _)| is_cancel(name));
-    if cancel && bag.rows.len() < WHOLE_POCKET_ROWS {
+    if cancel && bag.rows.len() < window_rows(pocket_from_title(&bag.pocket)) {
         return Decision::Fail(format!("{item} is not in the pocket"));
     }
     press(
@@ -114,8 +114,16 @@ pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expecta
     )
 }
 
-/// Rows the bag list shows at once.
-const WHOLE_POCKET_ROWS: usize = 6;
+/// Rows a pocket's list shows at once: six in the bag, five in the TM
+/// Case (Switch: the TM Case scrolled to its end showed TM19–TM39 and
+/// CANCEL, five rows, read as the whole case; HM02, listed first, was
+/// "not in the pocket" and Fly was never taught).
+pub fn window_rows(pocket: Option<Pocket>) -> usize {
+    match pocket {
+        Some(Pocket::TmCase) => 5,
+        _ => 6,
+    }
+}
 
 /// Bag rows: (name or item key, count).
 pub(crate) type Rows = Vec<(String, Option<u16>)>;
@@ -753,6 +761,32 @@ mod tests {
             .commands,
             vec![ControllerCommand::Press(Button::Up)]
         );
+    }
+
+    /// Switch: the TM Case scrolled to its end showed TM19–TM39 and
+    /// CANCEL, five rows, the case's whole window: HM02, listed first, is
+    /// looked for further up, not "not in the pocket".
+    #[test]
+    fn a_full_tm_case_window_may_be_scrolled() {
+        let Some(data) = data() else { return };
+        let end: Vec<(&str, Option<u16>)> = vec![
+            ("TM19", None),
+            ("TM28", None),
+            ("TM34", None),
+            ("TM39", None),
+            ("CANCEL", None),
+        ];
+        let o = bag(1, "TM CASE", &end, 4);
+        assert_eq!(
+            act(select_item(&o, &data, "ITEM_HM02", Expectation::InputsDone)).commands,
+            vec![ControllerCommand::Press(Button::Up)]
+        );
+        // Four rows and CANCEL in the bag's six-row window: the whole pocket.
+        let o = bag(2, "ITEMS", &end, 4);
+        assert!(matches!(
+            select_item(&o, &data, "ITEM_HM02", Expectation::InputsDone),
+            Decision::Fail(_)
+        ));
     }
 
     /// A list reading counts only when a later frame reads the same: the

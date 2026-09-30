@@ -894,7 +894,15 @@ impl Sensor {
             })
             .collect();
         let Some(items) = items else { return };
-        let whole = cancel.is_some() && bag.rows.len() < BAG_ROWS;
+        // The TM Case's list shows five rows, the bag's six: a full view
+        // ending in CANCEL may be scrolled (Switch: TM19–TM39 and CANCEL
+        // read as the whole case, HM01, HM02 and TM03 lost).
+        let window = if pocket == Pocket::TmCase {
+            BAG_ROWS - 1
+        } else {
+            BAG_ROWS
+        };
+        let whole = cancel.is_some() && bag.rows.len() < window;
         events.push(if whole {
             GameEvent::PocketObserved { pocket, items }
         } else {

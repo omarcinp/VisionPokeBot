@@ -569,7 +569,15 @@ impl TeachStep {
                     self.outcome = Some(Err(format!("{} is not in the TM CASE", self.item)));
                     return Decision::Wait("closing".into());
                 }
-                crate::bag::select_item(o, &self.data, &self.item, Expectation::PartyList)
+                match crate::bag::select_item(o, &self.data, &self.item, Expectation::PartyList) {
+                    // Failed with the case open: closed before failing (the
+                    // Switch's next walk waited behind an open TM Case).
+                    Decision::Fail(why) => {
+                        self.outcome = Some(Err(why));
+                        Decision::Wait("closing".into())
+                    }
+                    d => d,
+                }
             }
             Some(Pocket::KeyItems) => {
                 self.retries.enter("key items");
