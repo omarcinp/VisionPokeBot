@@ -659,6 +659,7 @@ impl CliRunner<'_> {
 
     fn play(&mut self, start: Start) -> Result<GoalReport> {
         let previous = self.bring_up(start)?;
+        let starter = previous.as_ref().map(|p| p.starter.species().to_owned());
         // The fossil not chosen is never taken: its path is out of every
         // plan (session knowledge, so again after each checkpoint).
         if let Some(fossil) = self.args.fossil {
@@ -707,6 +708,8 @@ impl CliRunner<'_> {
         } else {
             pokebot_agent::tools::probe::audit_core(&mut ctx)?;
         }
+        // The starter picked, even once it is in the PC (a nugget farm's).
+        pokebot_agent::tools::dialogue::reconcile_choices(&mut ctx, starter.as_slice())?;
         let telemetry = self.telemetry.clone();
         let step = self.snapshots.as_ref().map(|s| Arc::clone(&s.step));
         let on_status = (telemetry.is_some() || step.is_some()).then(|| {

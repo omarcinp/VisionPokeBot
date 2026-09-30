@@ -900,6 +900,33 @@ pub fn unrecorded_badge_paths(
     out
 }
 
+/// The choices the story recorded (`VAR_STARTER_MON`) that the party's
+/// species and `also` (the starter the new game picked) imply, tracked
+/// when the belief doesn't hold them, so they outlive the Pokémon leaving
+/// the party (fleet worker 2: the nugget farm stored CHARIZARD, the
+/// starter var went unknown, the Cerulean rival's trigger was taken for
+/// another starter's and no plan left Cerulean).
+pub fn reconcile_choices(ctx: &mut ToolContext<'_>, also: &[String]) -> Result<(), ToolError> {
+    let mut species: Vec<String> = ctx
+        .state()
+        .party
+        .value
+        .iter()
+        .flatten()
+        .filter_map(|m| m.species.value.clone())
+        .collect();
+    species.extend(also.iter().cloned());
+    let world = Arc::clone(&ctx.world);
+    let data = Arc::clone(&ctx.data);
+    for (var, value) in pokebot_planner::goals::choices_of(&world, &data, &species) {
+        if ctx.state().world.var(&var).value.is_none() {
+            ctx.info(format!("{var} = {value}: the Pokémon the story gave"));
+            ctx.emit(GameEvent::VarTracked { var, value })?;
+        }
+    }
+    Ok(())
+}
+
 /// Key items the bag holds whose giving script path was never recorded:
 /// the path is recorded, so what it set follows the item (Switch: the
 /// LIFT KEY in the bag, FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT unset, and every

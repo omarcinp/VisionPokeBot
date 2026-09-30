@@ -1174,12 +1174,10 @@ impl<'a> Planner<'a> {
         out
     }
 
-    /// Choices the event graph records (spec §3.2 inference): a var that
-    /// only scripts giving a Pokémon set (`VAR_STARTER_MON`) holds the
-    /// value every path giving a party member's species sets it to. `None`
-    /// when nothing new is learnt.
+    /// Choices the event graph records ([`choices_of`]) that the knowledge
+    /// doesn't hold yet, from the party's species. `None` when nothing new
+    /// is learnt.
     fn infer_choices(&self, knowledge: &SavedKnowledge) -> Option<SavedKnowledge> {
-        let events = self.world.events()?;
         let party: Vec<String> = knowledge
             .party
             .value
@@ -1187,71 +1185,14 @@ impl<'a> Planner<'a> {
             .flatten()
             .filter_map(|m| m.species.value.clone())
             .collect();
-        if party.is_empty() {
-            return None;
-        }
-        let gives = |p: &pokebot_world::events::ScriptPath| {
-            p.does
-                .iter()
-                .any(|e| matches!(e, ScriptEffect::GiveMon { .. }))
-        };
-        // Vars only written by paths that give a Pokémon.
-        let mut choice_vars: BTreeMap<&str, bool> = BTreeMap::new();
-        for script in events.scripts.values() {
-            for path in &script.paths {
-                for e in &path.does {
-                    if let ScriptEffect::Var { var, .. } = e {
-                        if !is_local_var(var) {
-                            let ok = choice_vars.entry(var).or_insert(true);
-                            *ok &= gives(path);
-                        }
-                    }
-                }
-            }
-        }
         let mut out = knowledge.clone();
         let mut learnt = false;
-        for species in &party {
-            // Given as itself or as what it evolved from (a starter that
-            // has evolved).
-            let family = pre_evolutions(self.data, species);
-            let mut common: Option<BTreeSet<(String, i64)>> = None;
-            for script in events.scripts.values() {
-                for path in &script.paths {
-                    let gives_it = path.does.iter().any(|e| {
-                        matches!(e, ScriptEffect::GiveMon { givemon: pokebot_world::events::Val::Sym(s), .. } if family.contains(s))
-                    });
-                    if !gives_it {
-                        continue;
-                    }
-                    let set: BTreeSet<(String, i64)> = path
-                        .does
-                        .iter()
-                        .filter_map(|e| match e {
-                            ScriptEffect::Var { var, change }
-                                if choice_vars.get(var.as_str()) == Some(&true) =>
-                            {
-                                Some((var.clone(), change.eq.as_ref()?.as_int()?))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    common = Some(match common {
-                        None => set,
-                        Some(c) => c.intersection(&set).cloned().collect(),
-                    });
-                }
-            }
-            for (var, value) in common.unwrap_or_default() {
-                let Ok(value) = u16::try_from(value) else {
-                    continue;
-                };
-                if out.world.var(&var).value.is_none() {
-                    out.world
-                        .vars
-                        .insert(var, pokebot_state::Knowledge::derived(value, 0));
-                    learnt = true;
-                }
+        for (var, value) in choices_of(self.world, self.data, &party) {
+            if out.world.var(&var).value.is_none() {
+                out.world
+                    .vars
+                    .insert(var, pokebot_state::Knowledge::derived(value, 0));
+                learnt = true;
             }
         }
         learnt.then_some(out)
@@ -1732,6 +1673,73 @@ impl<'a> Planner<'a> {
 }
 
 /// `species` and what it evolves from, nearest first (IVYSAUR, BULBASAUR).
+/// Choices the event graph records (spec §3.2 inference): a var that
+/// only scripts giving a Pokémon set (`VAR_STARTER_MON`) holds the value
+/// every path giving one of `species` (or what it evolved from) sets it to.
+pub fn choices_of(world: &World, data: &GameData, species: &[String]) -> BTreeMap<String, u16> {
+    let mut out = BTreeMap::new();
+    let Some(events) = world.events() else {
+        return out;
+    };
+    let gives = |p: &pokebot_world::events::ScriptPath| {
+        p.does
+            .iter()
+            .any(|e| matches!(e, ScriptEffect::GiveMon { .. }))
+    };
+    // Vars only written by paths that give a Pokémon.
+    let mut choice_vars: BTreeMap<&str, bool> = BTreeMap::new();
+    for script in events.scripts.values() {
+        for path in &script.paths {
+            for e in &path.does {
+                if let ScriptEffect::Var { var, .. } = e {
+                    if !is_local_var(var) {
+                        let ok = choice_vars.entry(var).or_insert(true);
+                        *ok &= gives(path);
+                    }
+                }
+            }
+        }
+    }
+    for one in species {
+        // Given as itself or as what it evolved from (a starter that has
+        // evolved).
+        let family = pre_evolutions(data, one);
+        let mut common: Option<BTreeSet<(String, i64)>> = None;
+        for script in events.scripts.values() {
+            for path in &script.paths {
+                let gives_it = path.does.iter().any(|e| {
+                    matches!(e, ScriptEffect::GiveMon { givemon: pokebot_world::events::Val::Sym(s), .. } if family.contains(s))
+                });
+                if !gives_it {
+                    continue;
+                }
+                let set: BTreeSet<(String, i64)> = path
+                    .does
+                    .iter()
+                    .filter_map(|e| match e {
+                        ScriptEffect::Var { var, change }
+                            if choice_vars.get(var.as_str()) == Some(&true) =>
+                        {
+                            Some((var.clone(), change.eq.as_ref()?.as_int()?))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                common = Some(match common {
+                    None => set,
+                    Some(c) => c.intersection(&set).cloned().collect(),
+                });
+            }
+        }
+        for (var, value) in common.unwrap_or_default() {
+            if let Ok(value) = u16::try_from(value) {
+                out.entry(var).or_insert(value);
+            }
+        }
+    }
+    out
+}
+
 fn pre_evolutions(data: &GameData, species: &str) -> Vec<String> {
     let mut out = vec![species.to_string()];
     while out.len() < 4 {

@@ -1438,3 +1438,20 @@ fn barrier_grunts_first(plan: &Plan) {
         );
     }
 }
+
+/// Fleet worker 2's nugget farm stored CHARIZARD in the PC: the starter
+/// var, inferred from the party only, went unknown, the Cerulean rival's
+/// trigger was taken for another starter's, and no plan left Cerulean.
+/// The starter's evolution implies what its base form does.
+#[test]
+fn an_evolved_starter_implies_the_starter_choice() {
+    let Some(f) = fixture() else { return };
+    let of = |species: &str| {
+        pokebot_planner::goals::choices_of(&f.world, &f.data, &[species.to_string()])
+    };
+    let chose = of("SPECIES_CHARMANDER");
+    assert!(chose.contains_key("VAR_STARTER_MON"), "{chose:?}");
+    assert_eq!(of("SPECIES_CHARIZARD"), chose);
+    assert_ne!(of("SPECIES_SQUIRTLE"), chose);
+    assert!(of("SPECIES_PIDGEY").is_empty());
+}
