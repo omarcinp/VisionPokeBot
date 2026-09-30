@@ -114,12 +114,15 @@ const NORTH_SEA: Region = Region {
     width: 48,
     height: 24,
 };
-/// Tiles (3..=18, 2..=4): the mountains north of Pewter and Mt. Moon.
+/// Tiles (3..=18, 4): the mountains north of Pewter and Mt. Moon, below
+/// the box naming the cursor's place (rows 2..=3, drawn over the map on
+/// the Switch's Fly map: "ROUTE 16" covered the land read higher up, and
+/// the map wasn't seen).
 const NORTH_LAND: Region = Region {
     x: 24,
-    y: 16,
+    y: 32,
     width: 128,
-    height: 24,
+    height: 8,
 };
 /// Tiles (0..=2, 2..=19): the map's left edge.
 const WEST_EDGE: Region = Region {
@@ -224,7 +227,8 @@ pub fn cursor_cell(image: &RgbImage) -> Option<(u32, u32)> {
                         total += 1;
                         if x < image.width()
                             && y < image.height()
-                            && near(px(image, x, y), CURSOR_WHITE, 8)
+                            // The Switch's capture draws it a little off white.
+                            && near(px(image, x, y), CURSOR_WHITE, 24)
                         {
                             hit += 1;
                         }
@@ -347,6 +351,28 @@ mod tests {
             fill(image, x0 + bx, y0 + ly, 5, 2, white);
             fill(image, x0 + lx, y0 + by, 2, 5, white);
         }
+    }
+
+    /// The Switch's Fly map from Route 16: the box naming the cursor's
+    /// place covers the north-west land, the cursor is drawn a little off
+    /// white, and the fly icons blink (drawn on the first frame, off on
+    /// the second). Both are the map, with the cursor on Route 16's cell.
+    #[test]
+    fn the_switch_fly_map_is_read_with_its_name_box_and_blinking_icons() {
+        let (Some(wings), Some(named)) = (
+            fixture("switch-fly-map-wings.png"),
+            fixture("switch-fly-map-route16.png"),
+        ) else {
+            return;
+        };
+        let wings = detect(&wings).expect("the map, icons drawn");
+        assert!(
+            wings.lit.iter().any(|m| m == "CeladonCity"),
+            "{:?}",
+            wings.lit
+        );
+        let named = detect(&named).expect("the map under the name box");
+        assert_eq!(named.cursor, Some((7, 6)));
     }
 
     #[test]

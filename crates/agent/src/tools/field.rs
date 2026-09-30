@@ -661,6 +661,10 @@ impl ToolStep for PartyFieldMove {
     }
 }
 
+/// Frames the fly icons are watched for before a destination counts as
+/// not visited (they blink: two thirds of the Switch's frames drew none).
+const FLY_ICON_WAIT_FRAMES: u64 = 120;
+
 /// On the region map: walk the cursor to `cell`, press A, and wait until
 /// the player is located on `map`.
 pub struct FlyTo {
@@ -668,6 +672,11 @@ pub struct FlyTo {
     cell: (u32, u32),
     retries: Retries,
     pressed: Option<u64>,
+    /// The destination's fly icon was seen: the icons blink (on the Switch
+    /// drawn one frame in three), so one frame without it proves nothing.
+    lit_seen: bool,
+    /// The first frame the region map was seen.
+    map_since: Option<u64>,
 }
 
 impl FlyTo {
@@ -677,6 +686,8 @@ impl FlyTo {
             cell: fly_map::spot_cell(map)?,
             retries: Retries::default(),
             pressed: None,
+            lit_seen: false,
+            map_since: None,
         })
     }
 
@@ -721,7 +732,12 @@ impl ToolStep for FlyTo {
             }
             return self.retries.wait(o, "waiting for the region map");
         };
-        if !map.lit.iter().any(|m| m == &self.map) {
+        let since = *self.map_since.get_or_insert(o.frame_id);
+        self.lit_seen |= map.lit.iter().any(|m| m == &self.map);
+        if !self.lit_seen {
+            if o.frame_id.saturating_sub(since) < FLY_ICON_WAIT_FRAMES {
+                return Decision::Wait("waiting for the fly icons (they blink)".into());
+            }
             return Decision::Fail(format!(
                 "{} is not lit on the fly map (not visited)",
                 self.map
@@ -1370,13 +1386,39 @@ mod tests {
             step.next(&mut step_ctx(&o, &state, &mut events, 0)),
             Decision::Done(_)
         ));
-        // A dark destination is refused.
+        // A dark destination is refused, once the blinking icons had time
+        // to show (the Switch drew them one frame in three).
         let mut step = FlyTo::new("FuchsiaCity").unwrap();
         let mut o = bare(1);
         o.fly_map = Some(map(Some((4, 11))));
         assert!(matches!(
             step.next(&mut step_ctx(&o, &state, &mut events, 0)),
+            Decision::Wait(_)
+        ));
+        let mut o = bare(1 + FLY_ICON_WAIT_FRAMES);
+        o.fly_map = Some(map(Some((4, 11))));
+        assert!(matches!(
+            step.next(&mut step_ctx(&o, &state, &mut events, 0)),
             Decision::Fail(_)
+        ));
+        // A lit one seen dark on a frame (its icon blinked off) waits, then
+        // flies once the icon shows.
+        let mut step = FlyTo::new("CeruleanCity").unwrap();
+        let mut o = bare(1);
+        o.fly_map = Some(FlyMapObservation {
+            lit: vec![],
+            dark: vec!["CeruleanCity".into()],
+            cursor: Some((4, 11)),
+        });
+        assert!(matches!(
+            step.next(&mut step_ctx(&o, &state, &mut events, 0)),
+            Decision::Wait(_)
+        ));
+        o.frame_id = 10;
+        o.fly_map = Some(map(Some((4, 11))));
+        assert!(matches!(
+            step.next(&mut step_ctx(&o, &state, &mut events, 0)),
+            Decision::Act(_)
         ));
     }
 
