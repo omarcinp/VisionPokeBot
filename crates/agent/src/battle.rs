@@ -395,6 +395,23 @@ pub fn identify_opponent(data: &GameData, observation: &Observation) -> Option<C
     )
 }
 
+/// Damaging moves not chosen for their power: they fail unless the foe or
+/// the user is asleep (DREAM EATER, SNORE), faint the user (EXPLOSION),
+/// need a setup first (SPIT UP), only return damage taken (BIDE, COUNTER,
+/// MIRROR COAT), land two turns later (FUTURE SIGHT), or fail against a
+/// higher level (the OHKO moves, whose power is nominal).
+const UNRELIABLE_EFFECTS: [&str; 9] = [
+    "EFFECT_DREAM_EATER",
+    "EFFECT_SNORE",
+    "EFFECT_EXPLOSION",
+    "EFFECT_SPIT_UP",
+    "EFFECT_BIDE",
+    "EFFECT_COUNTER",
+    "EFFECT_MIRROR_COAT",
+    "EFFECT_FUTURE_SIGHT",
+    "EFFECT_OHKO",
+];
+
 /// The move slot to use: the evaluator's best damaging move among those
 /// with PP to spare; in wild battles, the trainer reserve is spent only when
 /// nothing else is left. A disabled move is never chosen (the game refuses
@@ -407,8 +424,15 @@ pub fn choose_move(
     policy: &BattlePolicy,
 ) -> Option<(u8, String)> {
     let lead = party.lead()?;
-    let damaging =
-        |m: &String| data.move_(m).is_some_and(|mv| mv.power > 0) && memory.allows(data, m);
+    let damaging = |m: &String| {
+        data.move_(m).is_some_and(|mv| {
+            mv.power > 0
+                && !mv
+                    .effect
+                    .as_deref()
+                    .is_some_and(|e| UNRELIABLE_EFFECTS.contains(&e))
+        }) && memory.allows(data, m)
+    };
     let spare = |m: &String| {
         let left = lead.pp_left(data, m);
         let max = data.move_(m).map_or(0, |mv| mv.pp);
@@ -1117,6 +1141,63 @@ mod tests {
             &mut events,
         ));
         assert!(d.contains("FIGHT"), "{d}");
+    }
+
+    /// A move that takes two turns lands half as often per turn: SLASH
+    /// before DIG against a foe both hit; SELFDESTRUCT, despite its power,
+    /// is never chosen.
+    #[test]
+    fn two_turn_and_self_fainting_moves_are_weighed_by_their_rules() {
+        let Some(data) = data() else { return };
+        let foe = Combatant::new(&data, "SPECIES_RATTATA", 20, vec![], 15).unwrap();
+        let policy = BattlePolicy::default();
+        let memory = BattleMemory::default();
+        let lead = |moves: &[&str]| {
+            let mut member = Member::new(&data, "SPECIES_DUGTRIO", 40);
+            member.moves = moves.iter().map(|m| (*m).to_owned()).collect();
+            Party {
+                members: vec![member],
+            }
+        };
+        let party = lead(&["MOVE_DIG", "MOVE_SLASH"]);
+        assert_eq!(
+            choose_move(&data, &party, Some(&foe), &memory, &policy).map(|(_, m)| m),
+            Some("MOVE_SLASH".into())
+        );
+        let party = lead(&["MOVE_SELF_DESTRUCT", "MOVE_SCRATCH"]);
+        assert_eq!(
+            choose_move(&data, &party, Some(&foe), &memory, &policy).map(|(_, m)| m),
+            Some("MOVE_SCRATCH".into())
+        );
+    }
+
+    /// Switch, Pokémon Tower: DUGTRIO used DIG on a GASTLY. Ground on
+    /// Poison reads super effective, but GASTLY's LEVITATE takes nothing
+    /// from it: the other move is chosen. Against a foe without the
+    /// ability, DIG is still the best.
+    #[test]
+    fn a_move_the_foes_ability_stops_is_not_chosen() {
+        let Some(data) = data() else { return };
+        let mut member = Member::new(&data, "SPECIES_DUGTRIO", 40);
+        member.moves = vec!["MOVE_DIG".into(), "MOVE_SLASH".into()];
+        let party = Party {
+            members: vec![member],
+        };
+        let foe = |species: &str| {
+            Combatant::new(&data, species, 30, data.default_moves(species, 30), 15).unwrap()
+        };
+        let policy = BattlePolicy::default();
+        let memory = BattleMemory::default();
+        let gastly = foe("SPECIES_GASTLY");
+        assert_eq!(
+            choose_move(&data, &party, Some(&gastly), &memory, &policy).map(|(_, m)| m),
+            Some("MOVE_SLASH".into())
+        );
+        let grimer = foe("SPECIES_GRIMER");
+        assert_eq!(
+            choose_move(&data, &party, Some(&grimer), &memory, &policy).map(|(_, m)| m),
+            Some("MOVE_DIG".into())
+        );
     }
 
     #[test]

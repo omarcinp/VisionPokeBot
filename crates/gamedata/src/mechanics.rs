@@ -97,7 +97,68 @@ pub struct DamageRolls {
     pub hit_chance: f64,
 }
 
-/// Damage of `mv` from an attacker (types, level, stats) to a defender.
+/// Effects whose move takes two turns for one hit: charged first (DIG,
+/// FLY, SOLAR BEAM, …) or followed by a turn of recharge (HYPER BEAM).
+const TWO_TURN_EFFECTS: [&str; 6] = [
+    "EFFECT_SEMI_INVULNERABLE",
+    "EFFECT_SOLAR_BEAM",
+    "EFFECT_RAZOR_WIND",
+    "EFFECT_SKY_ATTACK",
+    "EFFECT_SKULL_BASH",
+    "EFFECT_RECHARGE",
+];
+
+/// Hits a move lands per turn used: a two-turn move half as often.
+fn per_turn(mv: &Move) -> f64 {
+    if mv
+        .effect
+        .as_deref()
+        .is_some_and(|e| TWO_TURN_EFFECTS.contains(&e))
+    {
+        0.5
+    } else {
+        1.0
+    }
+}
+
+/// Whether the defender's `ability` stops a `kind` move of `effectiveness`
+/// (×10) from doing damage (`battle_util.c`, `AbilityBattleEffects`
+/// ABILITYEFFECT_ABSORBING and `CalculateBaseDamage`): LEVITATE and
+/// Ground, VOLT ABSORB and Electric, WATER ABSORB and Water, FLASH FIRE
+/// and Fire; WONDER GUARD lets through only a super-effective hit.
+pub fn ability_blocks(ability: &str, kind: &str, effectiveness: u32) -> bool {
+    match ability {
+        "ABILITY_LEVITATE" => kind == "TYPE_GROUND",
+        "ABILITY_VOLT_ABSORB" => kind == "TYPE_ELECTRIC",
+        "ABILITY_WATER_ABSORB" => kind == "TYPE_WATER",
+        "ABILITY_FLASH_FIRE" => kind == "TYPE_FIRE",
+        "ABILITY_WONDER_GUARD" => effectiveness <= 10,
+        _ => false,
+    }
+}
+
+/// The share of the defender's possible abilities that let a `kind` move
+/// through: a species with two may have either (Switch: DIG chosen against
+/// GASTLY, Ground on Poison "super effective", but LEVITATE takes none).
+fn ability_passes(abilities: &[String], kind: &str, effectiveness: u32) -> f64 {
+    let known: Vec<&String> = abilities
+        .iter()
+        .filter(|a| a.as_str() != "ABILITY_NONE")
+        .collect();
+    if known.is_empty() {
+        return 1.0;
+    }
+    let passes = known
+        .iter()
+        .filter(|a| !ability_blocks(a, kind, effectiveness))
+        .count();
+    passes as f64 / known.len() as f64
+}
+
+/// Damage of `mv` from an attacker (types, level, stats) to a defender
+/// (types, stats, the abilities it may have). An ability that may stop
+/// the move lowers its hit chance by the share that would.
+#[allow(clippy::too_many_arguments)]
 pub fn damage(
     data: &GameData,
     mv: &Move,
@@ -105,6 +166,7 @@ pub fn damage(
     level: u8,
     atk: &Stats,
     defender_types: &[String],
+    defender_abilities: &[String],
     def: &Stats,
 ) -> Option<DamageRolls> {
     let kind = mv.kind.as_deref()?;
@@ -113,6 +175,10 @@ pub fn damage(
     }
     let effectiveness = data.effectiveness(kind, defender_types);
     if effectiveness == 0 {
+        return None;
+    }
+    let passes = ability_passes(defender_abilities, kind, effectiveness);
+    if passes == 0.0 {
         return None;
     }
     let (a, d) = if is_physical(kind) {
@@ -139,11 +205,13 @@ pub fn damage(
         normal[i] = roll(b1, 85 + i as u32);
         critical[i] = roll(b2, 85 + i as u32);
     }
-    let hit_chance = if mv.accuracy == 0 {
-        1.0
-    } else {
-        f64::from(mv.accuracy.min(100)) / 100.0
-    };
+    let hit_chance = passes
+        * per_turn(mv)
+        * if mv.accuracy == 0 {
+            1.0
+        } else {
+            f64::from(mv.accuracy.min(100)) / 100.0
+        };
     Some(DamageRolls {
         normal,
         critical,
@@ -234,5 +302,31 @@ mod tests {
         assert_eq!(plain, catch_probability(45, 30, 7, 10));
         assert!(catch_probability_status(45, 30, 7, 10, 20) > plain);
         assert!(catch_probability_status(45, 30, 7, 15, 10) > plain);
+    }
+}
+
+#[cfg(test)]
+mod ability_tests {
+    use super::*;
+
+    fn abilities(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn abilities_that_stop_a_type_of_move() {
+        assert!(ability_blocks("ABILITY_LEVITATE", "TYPE_GROUND", 20));
+        assert!(!ability_blocks("ABILITY_LEVITATE", "TYPE_ROCK", 10));
+        assert!(ability_blocks("ABILITY_VOLT_ABSORB", "TYPE_ELECTRIC", 10));
+        assert!(ability_blocks("ABILITY_WATER_ABSORB", "TYPE_WATER", 10));
+        assert!(ability_blocks("ABILITY_FLASH_FIRE", "TYPE_FIRE", 10));
+        assert!(ability_blocks("ABILITY_WONDER_GUARD", "TYPE_NORMAL", 10));
+        assert!(!ability_blocks("ABILITY_WONDER_GUARD", "TYPE_FIRE", 20));
+        // One of two possible abilities stops it: half the hits land.
+        let either = abilities(&["ABILITY_VOLT_ABSORB", "ABILITY_STATIC"]);
+        assert_eq!(ability_passes(&either, "TYPE_ELECTRIC", 10), 0.5);
+        let only = abilities(&["ABILITY_LEVITATE", "ABILITY_NONE"]);
+        assert_eq!(ability_passes(&only, "TYPE_GROUND", 20), 0.0);
+        assert_eq!(ability_passes(&[], "TYPE_GROUND", 20), 1.0);
     }
 }

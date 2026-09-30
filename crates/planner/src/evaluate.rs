@@ -23,6 +23,8 @@ pub struct Combatant {
     #[serde(skip)]
     pub stats: Stats,
     pub types: Vec<String>,
+    /// The abilities it may have (a species with two: either).
+    pub abilities: Vec<String>,
     pub hp: u32,
     /// Accuracy and evasion stages (−6..=6) in the battle; 0 when fresh.
     pub acc_stage: i8,
@@ -46,6 +48,7 @@ impl Combatant {
             moves,
             stats,
             types: s.types.clone(),
+            abilities: s.abilities.clone(),
             hp: stats.hp(),
             acc_stage: 0,
             evasion_stage: 0,
@@ -78,6 +81,7 @@ pub fn best_move(
             attacker.level,
             &attacker.stats,
             &defender.types,
+            &defender.abilities,
             &defender.stats,
         ) else {
             continue;

@@ -597,6 +597,7 @@ fn rolls(data: &GameData, mv: &str, from: &Combatant, to: &Combatant) -> Option<
         from.level,
         &from.stats,
         &to.types,
+        &to.abilities,
         &to.stats,
     )
 }
