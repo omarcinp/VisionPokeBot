@@ -138,7 +138,25 @@ impl Font {
     pub fn read(&self, image: &RgbImage, region: Region, exclude: &[Region]) -> Vec<String> {
         let mut best: Option<(i64, Vec<String>)> = None;
         let palette = colour_clusters(image, region, exclude);
-        for &ink in palette.iter().skip(1).take(MAX_INKS) {
+        let inks: Vec<Rgb> = palette.iter().skip(1).take(MAX_INKS).copied().collect();
+        // One ink, or two shades of one (a capture splits saturated text
+        // into two clusters: Switch, a Channeler's red "Be gone!" read
+        // nothing as either half).
+        let mut tries: Vec<Vec<Rgb>> = inks.iter().map(|&i| vec![i]).collect();
+        for &a in &inks {
+            // The other shade may be a small cluster, past the inks tried.
+            for &b in palette.iter().skip(1) {
+                if b != a
+                    && near(a, b, 2 * CLUSTER_SPREAD)
+                    && !tries
+                        .iter()
+                        .any(|t| t.len() == 2 && t.contains(&a) && t.contains(&b))
+                {
+                    tries.push(vec![a, b]);
+                }
+            }
+        }
+        for ink in &tries {
             let mask = Mask::new(image, region, exclude, ink, &palette);
             let (score, lines) = self.read_mask(&mask);
             if best.as_ref().is_none_or(|(s, _)| score > *s) {
@@ -423,7 +441,7 @@ impl Mask {
         image: &RgbImage,
         region: Region,
         exclude: &[Region],
-        ink: Rgb,
+        ink: &[Rgb],
         palette: &[Rgb],
     ) -> Mask {
         let (width, height) = (region.width as usize, region.height as usize);
@@ -432,7 +450,7 @@ impl Mask {
             for dx in 0..region.width {
                 let (x, y) = (region.x + dx, region.y + dy);
                 bits[dy as usize * width + dx as usize] = !exclude.iter().any(|r| r.contains(x, y))
-                    && is_ink(image.pixel(x, y), ink, palette);
+                    && ink.iter().any(|&i| is_ink(image.pixel(x, y), i, palette));
             }
         }
         Mask {
@@ -478,6 +496,30 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Switch, Pokémon Tower 3F: a Channeler's red text came out of the
+    /// capture as two clusters of red, each half of every glyph; the page
+    /// read nothing, and the walk took the battle's intro for something
+    /// turning it back.
+    #[test]
+    fn saturated_text_split_in_two_shades_is_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(font), Ok(image)) = (
+            Font::load(root.join("data/world/font_normal.json")),
+            pokebot_video::png::load(
+                root.join("captures/fixtures/switch-tower-channeler-red-text.png"),
+            ),
+        ) else {
+            return;
+        };
+        let d = crate::detect::dialogue::detect(&image).expect("a message box");
+        let lines = font.read(&image, d.region, &[]);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("Be gone!"),
+            "{lines:?}"
+        );
+    }
 
     /// A tiny font: `I` (3 wide), `o` (4 wide), `!` (2 wide).
     fn font() -> Font {
