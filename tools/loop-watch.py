@@ -16,10 +16,15 @@ pos = {}       # path -> offset
 grew = {}      # path -> last growth time
 def logs():
     out = {'switch': '/tmp/pokebot-switch.log'}
-    # The live fleet: worker logs written in the last two hours.
-    for p in glob.glob(ROOT + '/saves/emulators/emu-*/worker.log'):
+    # The live fleet: worker logs written in the last two hours. New-game
+    # workers are emu-<generation>-<n> (emuN), continuing ones continue-<k>
+    # (contK).
+    paths = glob.glob(ROOT + '/saves/emulators/emu-*/worker.log') \
+        + glob.glob(ROOT + '/saves/emulators/continue-*/worker.log')
+    for p in paths:
         try:
-            key = 'emu' + p.split('-')[-1].split('/')[0]
+            kind = 'cont' if '/continue-' in p else 'emu'
+            key = kind + p.split('-')[-1].split('/')[0]
             t = os.path.getmtime(p)
             if time.time() - t < 7200 and (key not in out or t > os.path.getmtime(out[key])):
                 out[key] = p

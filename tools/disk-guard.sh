@@ -20,7 +20,9 @@
 #      (default 14).
 # Copy anything worth keeping (fixtures: captures/fixtures/) before pruning.
 #
-# Recordings are looked for in RECORD_DIRS (default: /tmp).
+# Recordings are looked for in RECORD_DIRS (default: /tmp). Nothing under
+# saves/ is ever a recording or deleted: the fleet's continuing workers keep
+# their games in saves/emulators/continue-<k> across every redeploy.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KEEP_HOURS="${KEEP_HOURS:-12}"
@@ -54,6 +56,7 @@ recordings() {
     find "${base}" -mindepth 1 -maxdepth 2 -type f -name metadata.json 2>/dev/null \
       | while read -r meta; do
           d="$(dirname "${meta}")"
+          [[ "$(realpath -m "${d}")" == "${ROOT}/saves/"* ]] && continue
           [[ -d "${d}/frames" ]] && echo "$(stat -c %Y "${d}") $(realpath -m "${d}")"
         done
   done | sort -n
@@ -77,11 +80,17 @@ while read -r mtime dir; do
   echo "  ${size}  ${age_h} h  ${state}  ${dir}"
 done < <(recordings)
 bundles="${ROOT}/captures/stuck"
+for d in "${ROOT}"/saves/emulators/continue-*/; do
+  [[ -d "${d}" ]] && echo "  kept: $(du -sh "${d}" 2>/dev/null | cut -f1)  ${d%/}"
+done
 [[ -d "${bundles}" ]] && echo "debug bundles: $(ls "${bundles}" | wc -l) ($(du -sh "${bundles}" | cut -f1)) in ${bundles}"
 
 (( PRUNE )) || exit 0
 
-delete() { echo "deleting $2: $1"; rm -rf -- "$1"; }
+delete() {
+  [[ "$(realpath -m "$1")" == "${ROOT}/saves/"* ]] && { echo "refusing to delete $1 (saves/)"; return 0; }
+  echo "deleting $2: $1"; rm -rf -- "$1"
+}
 
 # 1. Old inactive recordings.
 while read -r mtime dir; do

@@ -170,7 +170,7 @@ fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
         ]
     };
     match a.task {
-        "autonomy" => {
+        "autonomy" | CONTINUE => {
             let (starter, fossil) = new_game_choice(a.n);
             // The stepped emulator is deterministic: the same inputs
             // play the same game. A name typed differently shifts
@@ -228,6 +228,11 @@ fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
             goal.push(os("--continue"));
             goal.extend(progress());
             goal.extend(output(true));
+            // A continuing worker plays on from its own save: the new game
+            // and the hunt were played the first time.
+            if a.task == CONTINUE && a.dir.join("game.sav").is_file() {
+                return vec![goal];
+            }
             vec![story, hunt, goal]
         }
         task => {
@@ -240,6 +245,19 @@ fn worker_stages(a: &StageArgs<'_>) -> Vec<Vec<OsString>> {
             vec![args]
         }
     }
+}
+
+/// The task of the workers that continue their own save on every launch
+/// (`saves/emulators/continue-<k>`), to reach later parts of the story,
+/// where `autonomy` workers start a new game each time to catch early
+/// regressions. Continuing worker `k` plays the same game as the `k`th
+/// autonomy worker (starter, fossil, gender), so the two compare.
+const CONTINUE: &str = "autonomy-continue";
+
+/// Continuing worker `k`'s name (the hub routes only `emu-` names) and
+/// its stable directory's.
+fn continue_name(k: u64) -> (String, String) {
+    (format!("emu-continue-{k}"), format!("continue-{k}"))
 }
 
 /// One stage runs as the executable itself; several in turn under `sh`,
@@ -467,8 +485,8 @@ impl State {
             .context("count must be a positive integer")?;
         let task = body["task"]
             .as_str()
-            .context("task must be autonomy, new-game, story or observe")?;
-        if !["autonomy", "new-game", "story", "observe"].contains(&task) {
+            .context("task must be autonomy, autonomy-continue, new-game, story or observe")?;
+        if !["autonomy", CONTINUE, "new-game", "story", "observe"].contains(&task) {
             bail!("unknown task");
         }
         let running = self
@@ -497,22 +515,54 @@ impl State {
             .emulator_data
             .canonicalize()
             .context("emulator data directory")?;
-        if matches!(task, "story" | "autonomy") && !data.join("world/index.json").is_file() {
+        if matches!(task, "story" | "autonomy" | CONTINUE)
+            && !data.join("world/index.json").is_file()
+        {
             bail!("build the world model with tools/world/build.sh first");
         }
         let mut created = Vec::new();
         for _ in 0..count {
-            self.next += 1;
-            let name = format!("emu-{:x}-{}", self.generation, self.next);
-            let label = format!("Emulator {}", self.next);
-            let dir = self.args.emulator_dir.join(&name);
+            let (n, name, folder, label) = if task == CONTINUE {
+                // The first number no running worker continues.
+                let k = (1..)
+                    .find(|&k| {
+                        self.workers
+                            .get(&continue_name(k).0)
+                            .is_none_or(|w| w.outcome.is_some())
+                    })
+                    .expect("a free number");
+                let (name, folder) = continue_name(k);
+                (k, name, folder, format!("Continue {k}"))
+            } else {
+                self.next += 1;
+                let name = format!("emu-{:x}-{}", self.generation, self.next);
+                (
+                    self.next,
+                    name.clone(),
+                    name,
+                    format!("Emulator {}", self.next),
+                )
+            };
+            let dir = self.args.emulator_dir.join(&folder);
             let launch = (|| -> Result<Worker> {
-                std::fs::create_dir(&dir)?;
-                std::os::unix::fs::symlink(&data, dir.join("data"))?;
+                if task == CONTINUE {
+                    // Kept across launches: its save, progress and belief.
+                    std::fs::create_dir_all(&dir)?;
+                    if std::fs::symlink_metadata(dir.join("data")).is_err() {
+                        std::os::unix::fs::symlink(&data, dir.join("data"))?;
+                    }
+                    let log = dir.join("worker.log");
+                    if log.is_file() {
+                        std::fs::rename(&log, dir.join("worker.log.1"))?;
+                    }
+                } else {
+                    std::fs::create_dir(&dir)?;
+                    std::os::unix::fs::symlink(&data, dir.join("data"))?;
+                }
                 let log = File::create(dir.join("worker.log"))?;
                 let stages = worker_stages(&StageArgs {
                     task,
-                    n: self.next,
+                    n,
                     dir: &dir,
                     core: &core,
                     rom: &rom,
@@ -943,6 +993,103 @@ mod tests {
             crate::Cli::try_parse_from(std::iter::once("pokebot").chain(line.lines()))
                 .unwrap_or_else(|e| panic!("stage {i}: {e}"));
         }
+    }
+
+    /// A continuing worker plays the game of the autonomy worker with its
+    /// number (same starter, fossil, name and gender): the new game the
+    /// first time, then only the goal loop on its own save, every launch.
+    #[test]
+    fn continuing_workers_play_on_from_their_own_save() {
+        let dir = std::env::temp_dir().join(format!("vpb-continue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stages = |task| {
+            worker_stages(&StageArgs {
+                task,
+                n: 5,
+                dir: &dir,
+                core: Path::new("/core.so"),
+                rom: Path::new("/game.gba"),
+                data: Path::new("/data"),
+                instance_file: Path::new("/registry/emu-continue-5.json"),
+                label: "Continue 5",
+                scenarios: Path::new("/scenarios"),
+            })
+        };
+        // No save yet: the new game, as autonomy worker 5 plays it.
+        assert_eq!(stages(CONTINUE), stages("autonomy"));
+        std::fs::write(dir.join("game.sav"), "save").unwrap();
+        let resumed = stages(CONTINUE);
+        let goal = stages("autonomy").pop().unwrap();
+        assert_eq!(resumed, vec![goal.clone()]);
+        let line = goal
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(line.contains("--restart\n--starter\ncharmander\n--fossil\nhelix\n"));
+        assert!(line.contains("--player\nJADE\n--gender\ngirl\n"), "{line}");
+        assert!(line.contains("--continue\n"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Continuing workers live in stable directories (`continue-<k>`) that
+    /// every launch reuses, its save kept and its last log set aside, and
+    /// take the first number no running worker has.
+    #[test]
+    fn continuing_workers_keep_their_directory_across_launches() {
+        if available_memory() < WORKER_MEMORY * 2 {
+            return;
+        }
+        let (fleet, root) = fixture();
+        std::fs::create_dir(root.join("data/world")).unwrap();
+        std::fs::write(root.join("data/world/index.json"), "{}").unwrap();
+        let launch = |count: u64| {
+            let (code, started) = fleet.request(
+                "POST",
+                "/api/emulators",
+                json!({"count":count,"task":CONTINUE}),
+            );
+            assert_eq!(code, 201, "{started}");
+            started["started"].clone()
+        };
+        let args = |k: u64| {
+            let file = root.join(format!("runs/continue-{k}/args.txt"));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !file.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            text
+        };
+        assert_eq!(launch(2), json!(["emu-continue-1", "emu-continue-2"]));
+        assert!(args(1).starts_with("story\n--new-game\n"));
+        args(2);
+        // Worker 1 saved and was stopped: it comes back on its save.
+        let dir = root.join("runs/continue-1");
+        std::fs::write(dir.join("game.sav"), "save").unwrap();
+        let (code, _) = fleet.request("POST", "/api/emulators/emu-continue-1/stop", json!({}));
+        assert_eq!(code, 200);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fleet.request("GET", "/api/emulators", json!({})).1["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["name"] == "emu-continue-1" && w["alive"] == true)
+        {
+            assert!(Instant::now() < deadline, "worker 1 stopped");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(launch(1), json!(["emu-continue-1"]));
+        assert!(args(1).starts_with("goal\nflag FLAG_SYS_GAME_CLEAR\n"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("game.sav")).unwrap(),
+            "save"
+        );
+        assert!(dir.join("worker.log.1").is_file());
+        assert!(dir.join("data").exists());
+        drop(fleet);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The chain runs its stages in turn and a SIGTERM to it stops the one
