@@ -603,6 +603,22 @@ impl<'a> ToolContext<'a> {
         pose: Option<pokebot_state::PlayerPose>,
         learned_before: usize,
     ) -> Option<String> {
+        // A trigger that turned the step back fired, so its var held the
+        // value it fires on (a battle is no trigger's doing: a wild one
+        // meets the player anywhere).
+        let battled = self.learned.get(learned_before..).is_some_and(|l| {
+            l.iter()
+                .any(|e| matches!(e, GameEvent::BattleStarted | GameEvent::BattleEnded))
+        });
+        let shown = match pose.as_ref() {
+            Some(p) if !battled => trigger_vars_shown(&self.world, p, &self.runtime.state().world),
+            _ => Vec::new(),
+        };
+        for event in shown {
+            if self.emit(event).is_err() {
+                break;
+            }
+        }
         let counts = self.interrupt_counts.last_mut()?;
         let learned = self.learned.get(learned_before..).unwrap_or_default();
         count_interrupt(counts, pose, learned)
@@ -1031,6 +1047,50 @@ fn count_interrupt(
         .then(|| format!("interrupted at {pose} {n} times: something there turns the step back"))
 }
 
+/// What a step turned back at `pose` shows of the coord triggers there: a
+/// trigger fires only while its var holds its value, so the one var of
+/// the triggers on the tile (or, the player pushed back, next to it) is
+/// observed at that value when the belief holds otherwise (fleet
+/// continue-2, Route 8's gate to Saffron: the thirsty guard's trigger, on
+/// VAR_MAP_SCENE_ROUTE5_ROUTE6_ROUTE7_ROUTE8_GATES 0, unknown to the
+/// belief; the walk to Celadon for the TEA he wants went through him, and
+/// was turned back 3 times a plan, every plan). Nothing when the
+/// triggers there test different vars or values.
+fn trigger_vars_shown(
+    world: &pokebot_world::World,
+    pose: &pokebot_state::PlayerPose,
+    belief: &pokebot_state::WorldBelief,
+) -> Vec<GameEvent> {
+    let Some(map) = world.map(&pose.map) else {
+        return Vec::new();
+    };
+    let at = |d: i32| {
+        map.triggers
+            .iter()
+            .filter(move |t| (t.x - pose.x).abs() + (t.y - pose.y).abs() <= d)
+            .filter_map(|t| {
+                let var = t.var.as_deref()?;
+                let value: u16 = t.value.as_deref()?.parse().ok()?;
+                Some((var.to_owned(), value))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut shown = at(0);
+    if shown.is_empty() {
+        shown = at(1);
+    }
+    let mut it = shown.into_iter();
+    let (Some((var, value)), None) = (it.next(), it.next()) else {
+        return Vec::new();
+    };
+    if pokebot_world::gates::is_local_var(&var)
+        || belief.vars.get(&var).and_then(|k| k.value) == Some(value)
+    {
+        return Vec::new();
+    }
+    vec![GameEvent::VarObserved { var, value }]
+}
+
 /// Interruptions (a scene, a conversation) at the same tile within one
 /// step before it fails.
 pub const MAX_SAME_INTERRUPTS: u32 = 3;
@@ -1208,6 +1268,35 @@ mod tests {
             wrong_gate_flags(&gates, &b1f, &crate::belief_view::StateBelief(&unknown)),
             [("TRAINER_TEAM_ROCKET_GRUNT_12".to_owned(), true)]
         );
+    }
+
+    /// Fleet continue-2: turned back by Route 8's thirsty guard (his
+    /// trigger fires on the gates' scene var at 0, unknown), the var is
+    /// seen at 0; known already, nothing.
+    #[test]
+    fn a_trigger_that_turned_the_step_back_shows_its_var() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let pose = pokebot_state::PlayerPose {
+            map: "Route8_WestEntrance".into(),
+            x: 6,
+            y: 5,
+        };
+        let mut belief = pokebot_state::WorldBelief::default();
+        let var = "VAR_MAP_SCENE_ROUTE5_ROUTE6_ROUTE7_ROUTE8_GATES";
+        assert_eq!(
+            trigger_vars_shown(&world, &pose, &belief),
+            [GameEvent::VarObserved {
+                var: var.into(),
+                value: 0
+            }]
+        );
+        belief
+            .vars
+            .insert(var.into(), pokebot_state::Knowledge::observed(0, 1));
+        assert!(trigger_vars_shown(&world, &pose, &belief).is_empty());
     }
 
     /// The museum's ticket gate turns the walk back at one tile: the third
