@@ -1129,6 +1129,22 @@ impl<'a> Planner<'a> {
         out
     }
 
+    /// The open tiles next to `tiles` on `map` that aren't among them.
+    pub(crate) fn beside_tiles(&self, map: &str, tiles: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        let Some(m) = self.world.map(map) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(i32, i32)> = tiles
+            .iter()
+            .flat_map(|&(x, y)| [(x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)])
+            .filter(|t| !tiles.contains(t))
+            .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| t.collision == 0))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// The tiles a map's entry scripts may move object `id` to.
     fn placed(&self, map: &str, id: u32) -> Vec<(i32, i32)> {
         let Some(events) = self.world.events() else {
@@ -4579,7 +4595,15 @@ impl<'p, 'a> Session<'p, 'a> {
             // Co. door a Card Key opens) comes first too.
             let mut start = start;
             if self.planner.graph.has_gates(map) {
-                let spots = self.planner.script_spots(script, &label, map);
+                let mut spots = self.planner.script_spots(script, &label, map);
+                // A trigger is walked onto from a tile next to it: while it
+                // is armed, the route counts its own tile shut (Switch,
+                // Silph Co. 11F: the way to Giovanni's trigger read as
+                // needing him beaten, no route was found, no need was
+                // planned and the Card Key's doors were walked into).
+                if script.kind == "trigger" {
+                    spots = self.planner.beside_tiles(map, &spots);
+                }
                 // What the script itself establishes can't be a need of
                 // the walk to it (the old man's own road), nor can what
                 // only comes after it in the story.

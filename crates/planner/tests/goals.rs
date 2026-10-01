@@ -1612,3 +1612,42 @@ fn readiness_counts_the_trainers_fought_on_the_way() {
     let (_, on_cost) = readiness(misty, vec![to_mt_moon]);
     assert!(on_cost < here_cost);
 }
+
+/// Switch, Silph Co. 11F by the elevator, no Card Key: Giovanni's
+/// trigger was planned as the next step, and "no path to (5, 15)". The
+/// trigger's tile counts shut while armed, so the walk's needs come from
+/// the tiles beside it: the Card Key and the doors it opens come first.
+#[test]
+fn silph_cos_giovanni_waits_for_the_card_key() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 120.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, _) = checkpoint("switch_silph_state.json");
+    let pose = Some(PlayerPose {
+        map: "SilphCo_11F".into(),
+        x: 13,
+        y: 3,
+    });
+    let plan = planner
+        .plan(
+            &parse_goal("flag TRAINER_BOSS_GIOVANNI_2").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .unwrap();
+    print(&plan, 12);
+    let at = |name: &str| {
+        let name = name.to_string();
+        position(
+            &plan,
+            move |i| matches!(i, Intent::RunScript { script, .. } if *script == name),
+        )
+    };
+    let giovanni = at("SilphCo_11F_EventScript_GiovanniTriggerLeft")
+        .min(at("SilphCo_11F_EventScript_GiovanniTriggerRight"));
+    assert!(giovanni < plan.intents.len(), "Giovanni missing");
+    let key = at("SilphCo_5F_EventScript_ItemCardKey");
+    assert!(key < giovanni, "Card Key at {key}, Giovanni at {giovanni}");
+}
