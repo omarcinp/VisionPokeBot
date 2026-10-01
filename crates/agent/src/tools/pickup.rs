@@ -229,8 +229,33 @@ pub fn choose(around: &Around<'_>, pose: &PlayerPose) -> Option<Pickup> {
     let sight = crate::nav::sight_tiles(map, trainers, |t| {
         state.world.flags.get(t).and_then(|k| k.value) == Some(true)
     });
+    // Nor a trigger that may still fire (fleet workers 4 and 6, Nugget
+    // Bridge: the way to TM45 crossed the grunt's trigger; his battle came
+    // as a plain one, the farm's expected white-out read as a failure).
+    let armed: std::collections::HashSet<(i32, i32)> = world
+        .events()
+        .map(|e| {
+            e.triggers
+                .iter()
+                .filter(|t| t.map == pose.map && t.script.is_some())
+                .filter(|t| {
+                    route::requirement_of(&t.when).is_none_or(|req| {
+                        req.iter().all(|q| {
+                            pokebot_world::predicate::BeliefView::eval(&belief, q)
+                                != pokebot_world::predicate::Truth::False
+                        })
+                    })
+                })
+                .map(|t| (t.x, t.y))
+                .collect()
+        })
+        .unwrap_or_default();
     let seen = |steps: Option<Vec<path::Step>>| {
-        steps.is_some_and(|steps| steps.iter().any(|s| sight.contains(&s.to)))
+        steps.is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|s| sight.contains(&s.to) || armed.contains(&s.to))
+        })
     };
     let mut best: Option<Pickup> = None;
     for ball in near {
@@ -553,6 +578,30 @@ mod tests {
         );
         let p = pick(&world, &d, &state, &tried, &from).expect("a ball");
         assert_eq!(p.ball.item, "ITEM_PARALYZE_HEAL", "{p:?}");
+    }
+
+    /// Fleet workers 4 and 6, Nugget Bridge: from the farm's tile (11, 16)
+    /// the way to TM45 (11, 4) crosses the grunt's trigger, armed while
+    /// VAR_MAP_SCENE_ROUTE24 is 0; left then, taken once he is beaten.
+    #[test]
+    fn a_ball_past_an_armed_trigger_is_left() {
+        let Some((world, d)) = loaded() else { return };
+        let from = at("Route24", 11, 16);
+        let mut state = GameState::default();
+        state
+            .world
+            .vars
+            .insert("VAR_MAP_SCENE_ROUTE24".into(), Knowledge::observed(0, 1));
+        let tm45 = |state: &GameState| {
+            pick(&world, &d, state, &BTreeSet::new(), &from)
+                .is_some_and(|p| p.ball.item == "ITEM_TM45")
+        };
+        assert!(!tm45(&state));
+        state
+            .world
+            .vars
+            .insert("VAR_MAP_SCENE_ROUTE24".into(), Knowledge::observed(1, 1));
+        assert!(tm45(&state));
     }
 
     /// A cheap item is not worth a long way: the Antidote from twelve
