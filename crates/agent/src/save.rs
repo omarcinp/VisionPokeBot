@@ -239,6 +239,15 @@ impl Task for ContinueTask {
                 _ => Decision::Wait("waiting for the main menu".into()),
             },
             ContinuePhase::Resume => {
+                // The main menu again: CONTINUE only paged a message the
+                // menu detector took for it (fleet continue-1, a save cut
+                // short by a restart: "The save file is corrupted." / "The
+                // previous save file will be loaded.", then the menu), and
+                // B there goes back to the title, 120 times.
+                if o.menu.is_some() && o.screen.value == ScreenState::MainMenu {
+                    self.phase = ContinuePhase::MainMenu;
+                    return self.next(ctx);
+                }
                 if o.player.is_some() && o.dialogue.is_none() && o.menu.is_none() {
                     self.located += 1;
                     if self.located >= 60 {
@@ -328,6 +337,35 @@ mod tests {
             phase: ContinuePhase::AwaitTitle,
             ..ContinueTask::default()
         }
+    }
+
+    /// Fleet continue-1: CONTINUE on a corrupted save pages "The save file
+    /// is corrupted." and "The previous save file will be loaded.", then
+    /// shows the main menu again: CONTINUE is chosen again, never B (back
+    /// to the title).
+    #[test]
+    fn the_main_menu_after_continue_is_answered_with_continue_again() {
+        let mut task = ContinueTask {
+            phase: ContinuePhase::Resume,
+            ..ContinueTask::default()
+        };
+        let mut o = observe(ScreenState::MainMenu);
+        o.menu = Some(pokebot_state::MenuObservation {
+            window: pokebot_state::Region::new(8, 8, 100, 48),
+            rows: 3,
+            cursor_row: 0,
+            cursor_y: 16,
+        });
+        let decision = task.next(&mut TaskContext {
+            observation: &o,
+            state: &GameState::default(),
+            events: &mut Vec::new(),
+        });
+        let Decision::Act(action) = decision else {
+            panic!("expected an action");
+        };
+        assert_eq!(action.label, "choose CONTINUE");
+        assert_eq!(task.phase, ContinuePhase::MainMenu);
     }
 
     #[test]
