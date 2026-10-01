@@ -1410,6 +1410,47 @@ fn scripted_battle(world: &World, script: &str, path: usize) -> Option<String> {
 }
 
 /// [`DialogueTool`]'s work.
+/// The vars a trigger on `tile` of `map` (running `script`) is armed by
+/// (`var == v`), each with the other value the script sets it to: what
+/// it holds when the trigger, stood on, doesn't fire.
+fn disarmed(world: &World, script: &str, map: &str, tile: (i32, i32)) -> Vec<(String, u16)> {
+    let Some(events) = world.events() else {
+        return Vec::new();
+    };
+    let Some(s) = events.script(script) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for t in events
+        .triggers
+        .iter()
+        .filter(|t| t.map == map && (t.x, t.y) == tile && t.script.as_deref() == Some(script))
+    {
+        for c in &t.when {
+            let Condition::Var { var, cmp } = c else {
+                continue;
+            };
+            let Some(armed) = cmp.eq.as_ref().and_then(Val::as_int) else {
+                continue;
+            };
+            let set = s.paths.iter().flat_map(|p| &p.does).find_map(|e| match e {
+                Effect::Var { var: v, change } if v == var => change
+                    .eq
+                    .as_ref()
+                    .and_then(Val::as_int)
+                    .filter(|n| *n != armed),
+                _ => None,
+            });
+            if let Some(n) = set.and_then(|n| u16::try_from(n).ok()) {
+                if !out.iter().any(|(v, _)| v == var) {
+                    out.push((var.clone(), n));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn run_script(
     ctx: &mut ToolContext<'_>,
     script: &str,
@@ -1501,7 +1542,22 @@ fn run_script(
                 },
             );
             let mut step = ScriptStep::new(Some(go), SceneStep::new(conversation));
-            ctx.drive(&mut step)?;
+            if let Err(e) = ctx.drive(&mut step) {
+                // Stood on, it didn't fire: the var arming it no longer
+                // holds; it holds what the trigger's own script sets
+                // (fleet worker 6: the Cerulean rival beaten before a
+                // reload the belief kept him unbeaten; every plan walked
+                // onto his disarmed trigger, "no scene started").
+                let on = ctx
+                    .pose()
+                    .is_some_and(|p| p.map == map && (p.x, p.y) == (x, y));
+                if on && matches!(&e, ToolError::Failed(m) if m.starts_with("no scene started")) {
+                    for (var, value) in disarmed(&ctx.world, script, &map, (x, y)) {
+                        ctx.emit(GameEvent::VarObserved { var, value })?;
+                    }
+                }
+                return Err(e);
+            }
             let mut conversation = step.scene.conversation;
             // The tile it fired on tells the trigger's paths apart.
             conversation.near = Some(PlayerPose { map, x, y });
@@ -2219,6 +2275,29 @@ mod tests {
         assert_eq!(script, "PewterCity_Gym_EventScript_Brock");
         belief.record_path(script, *path);
         assert!(unrecorded_badge_paths(events, &belief).is_empty());
+    }
+
+    /// Fleet worker 6: the Cerulean rival beaten, the belief reloaded
+    /// with him unbeaten; his trigger, stood on, didn't fire. Its arming
+    /// var holds what his script sets, 1.
+    #[test]
+    fn a_trigger_that_does_not_fire_is_disarmed() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let script = "CeruleanCity_EventScript_RivalTriggerLeft";
+        let t = events
+            .triggers
+            .iter()
+            .find(|t| t.script.as_deref() == Some(script))
+            .unwrap();
+        let found = disarmed(&world, script, "CeruleanCity", (t.x, t.y));
+        assert_eq!(
+            found,
+            vec![("VAR_MAP_SCENE_CERULEAN_CITY_RIVAL".to_string(), 1)]
+        );
+        assert!(disarmed(&world, script, "CeruleanCity", (0, 0)).is_empty());
     }
 
     /// The Switch: the LIFT KEY in the bag, its script unrecorded. The
