@@ -852,12 +852,12 @@ fn planner_intents_convert_to_tool_intents() {
             map: "M".into(),
         })
         .unwrap(),
-        // A multichoice's row is answered; a YES/NO box's own row is not
-        // (its NO branches give none).
+        // A multichoice's row is answered (an elevator's, as a list row); a
+        // YES/NO box's own row is not (its NO branches give none).
         Intent::RunScript {
             script: "S".into(),
             path: Some(2),
-            answers: vec![Answer::Yes, Answer::Menu(1), Answer::No],
+            answers: vec![Answer::Yes, Answer::ListRow(1), Answer::No],
         }
     );
     assert_eq!(conv(&Planned::Save).unwrap(), Intent::Save);
