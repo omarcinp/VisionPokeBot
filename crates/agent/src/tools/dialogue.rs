@@ -799,6 +799,32 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         }
         return Ok(());
     };
+    if conversation.path == Some(path) {
+        let twin = {
+            let belief = StateBelief(ctx.state());
+            twin_path(
+                events,
+                &script,
+                path,
+                &conversation.recognised,
+                &conversation.answered,
+                &belief,
+            )
+        };
+        if let Some(twin) = twin {
+            // What it fought is the battle tool's to record.
+            ctx.emit(progress(
+                "Dialogue",
+                format!(
+                    "{script}[{path}] reads the same as [{twin}], and the belief can't \
+                     tell which ran: neither is recorded"
+                ),
+            ))?;
+            return Err(ToolError::Replan(format!(
+                "{script}: can't tell path {path} from {twin}"
+            )));
+        }
+    }
     let diverged = conversation
         .path
         .filter(|&planned| planned != path && !same_effects(events, &script, planned, path));
@@ -918,6 +944,44 @@ pub fn conditions_shown(
 
 /// Whether two paths of `script` change the same things (they differ only
 /// in what they print: the player's gender, the way they faced).
+/// Another path of `script` the screen and the belief can't tell from
+/// `planned`: it prints every label read, takes the answers given, the
+/// belief doesn't rule it out, and it does something else, while the
+/// belief doesn't know `planned`'s own conditions hold. Recording
+/// `planned` then would take its conditions as facts on the plan's word
+/// (fleet, Rocket Hideout B4F: GRUNT_17's script opens the barrier when
+/// GRUNT_16 is beaten too, the same text either way; its run recorded
+/// GRUNT_16 beaten, never fought, and every walk to GIOVANNI met the
+/// barrier, 418 times).
+pub fn twin_path(
+    events: &pokebot_world::events::Events,
+    script: &str,
+    planned: usize,
+    recognised: &[String],
+    answered: &[bool],
+    belief: &dyn BeliefView,
+) -> Option<usize> {
+    let s = events.script(script)?;
+    let known = requirement_of(&s.paths.get(planned)?.when)
+        .is_some_and(|req| req.iter().all(|q| belief.eval(q) == Truth::True));
+    if known {
+        return None;
+    }
+    s.paths.iter().enumerate().find_map(|(i, p)| {
+        let branches = question_branches(&p.when);
+        let prints = path_labels(&p.does);
+        let possible = requirement_of(&p.when)
+            .is_none_or(|req| !req.iter().any(|q| belief.eval(q) == Truth::False));
+        (i != planned
+            && branches.len() >= answered.len()
+            && branches[..answered.len()] == *answered
+            && possible
+            && recognised.iter().all(|l| prints.contains(&l.as_str()))
+            && !same_effects(events, script, planned, i))
+        .then_some(i)
+    })
+}
+
 fn same_effects(events: &pokebot_world::events::Events, script: &str, a: usize, b: usize) -> bool {
     let Some(s) = events.script(script) else {
         return false;
@@ -1629,6 +1693,40 @@ mod tests {
         world.events()?;
         let data = GameData::load(dir.join("gamedata.json")).ok()?;
         Some((Arc::new(world), Arc::new(data)))
+    }
+
+    /// Fleet (continue-2), Rocket Hideout B4F: GRUNT_17's script prints
+    /// the same pages whether GRUNT_16 is beaten (path 0, the barrier
+    /// opens) or not (path 1). With GRUNT_16 unknown the two can't be
+    /// told apart, and path 0 isn't taken on the plan's word; known
+    /// beaten, it is.
+    #[test]
+    fn a_planned_path_reading_the_same_as_another_is_not_taken_on_trust() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let script = "RocketHideout_B4F_EventScript_Grunt3";
+        let read = [
+            "RocketHideout_B4F_Text_Grunt3Intro".to_owned(),
+            "RocketHideout_B4F_Text_Grunt3Defeat".to_owned(),
+        ];
+        let mut state = GameState::default();
+        let twin = |state: &GameState, planned| {
+            twin_path(events, script, planned, &read, &[], &StateBelief(state))
+        };
+        assert_eq!(twin(&state, 0), Some(1));
+        state.world.flags.insert(
+            "TRAINER_TEAM_ROCKET_GRUNT_16".into(),
+            pokebot_state::Knowledge::tracked(true, None),
+        );
+        assert_eq!(twin(&state, 0), None);
+        // Unbeaten, the planned path 1 is the only one left.
+        state.world.flags.insert(
+            "TRAINER_TEAM_ROCKET_GRUNT_16".into(),
+            pokebot_state::Knowledge::tracked(false, None),
+        );
+        assert_eq!(twin(&state, 1), None);
     }
 
     #[test]

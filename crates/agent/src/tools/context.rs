@@ -310,39 +310,15 @@ impl<'a> ToolContext<'a> {
 
     /// A tile a script draws (a beam, a barrier) that the belief holds
     /// open but a walk found it can't step onto: the belief is wrong, and
-    /// each flag it was open by alone is observed the other way (Switch,
-    /// Vermilion Gym: a trash can's "second lock opened" path recorded on
-    /// the plan's word; the beams stayed on and Lt. Surge was walked to
-    /// eight plans in a row). The flags corrected.
+    /// the flags it was open by are observed the other way
+    /// ([`wrong_gate_flags`]). The flags corrected.
     pub fn retract_open_gates(&mut self) -> Result<Vec<String>, ToolError> {
-        use pokebot_world::gates::{gate_truth, GateKind};
-        use pokebot_world::predicate::{check, Predicate, Truth};
         let gates = self.story_gates();
         let blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner()).all();
-        let mut wrong: Vec<(String, bool)> = Vec::new();
-        {
+        let wrong = {
             let belief = crate::belief_view::StateBelief(self.runtime.state());
-            for (map, tiles) in &blocked {
-                let Some(on) = gates.get(map) else { continue };
-                for gate in tiles.iter().filter_map(|t| on.get(t)) {
-                    if gate.kind != GateKind::Metatile
-                        || !matches!(gate_truth(gate, &belief), Truth::True)
-                    {
-                        continue;
-                    }
-                    for way in &gate.ways {
-                        let c = check(&belief, way);
-                        if let ([Predicate::Flag { name, is }], true) =
-                            (way.as_slice(), c.failed.is_empty() && c.unknown.is_empty())
-                        {
-                            if !wrong.contains(&(name.clone(), *is)) {
-                                wrong.push((name.clone(), *is));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            wrong_gate_flags(&gates, &blocked, &belief)
+        };
         for (flag, is) in &wrong {
             self.emit(GameEvent::FlagObserved {
                 flag: flag.clone(),
@@ -1113,12 +1089,98 @@ fn screen_fingerprint(o: &Observation) -> String {
     )
 }
 
+/// The flags (and the value believed) that hold open a drawn gate a walk
+/// found blocked on one of its `blocked` tiles: every flag of each way the
+/// belief holds satisfied, when the way is made of flags alone. One flag
+/// is the one that's wrong (Switch, Vermilion Gym: a trash can's "second
+/// lock opened" path recorded on the plan's word; the beams stayed on and
+/// Lt. Surge was walked to eight plans in a row). Of several, which is
+/// wrong can't be told, so all are retracted, and a talk re-establishes
+/// those that hold (fleet, Rocket Hideout B4F: the barrier needs both
+/// door grunts beaten, GRUNT_16 was held beaten unfought, and GIOVANNI
+/// was walked to 418 times).
+pub fn wrong_gate_flags(
+    gates: &pokebot_world::gates::Gates,
+    blocked: &std::collections::BTreeMap<String, Vec<(i32, i32)>>,
+    belief: &dyn pokebot_world::predicate::BeliefView,
+) -> Vec<(String, bool)> {
+    use pokebot_world::gates::{gate_truth, GateKind};
+    use pokebot_world::predicate::{check, Predicate, Truth};
+    let mut wrong: Vec<(String, bool)> = Vec::new();
+    for (map, tiles) in blocked {
+        let Some(on) = gates.get(map) else { continue };
+        for gate in tiles.iter().filter_map(|t| on.get(t)) {
+            if gate.kind != GateKind::Metatile || !matches!(gate_truth(gate, belief), Truth::True) {
+                continue;
+            }
+            for way in &gate.ways {
+                let c = check(belief, way);
+                if way.is_empty() || !c.failed.is_empty() || !c.unknown.is_empty() {
+                    continue;
+                }
+                let flags: Option<Vec<(String, bool)>> = way
+                    .iter()
+                    .map(|p| match p {
+                        Predicate::Flag { name, is } => Some((name.clone(), *is)),
+                        _ => None,
+                    })
+                    .collect();
+                for flag in flags.into_iter().flatten() {
+                    if !wrong.contains(&flag) {
+                        wrong.push(flag);
+                    }
+                }
+            }
+        }
+    }
+    wrong
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Expectation;
     use pokebot_core::{Button, ControllerCommand};
     use pokebot_state::{Observed, ScreenState};
+
+    /// Fleet (continue-2), Rocket Hideout B4F: the barrier needs both
+    /// door grunts beaten; the belief held both, the walk met the barrier.
+    /// Which flag is wrong can't be told: both are retracted. A barrier
+    /// the belief already holds shut retracts nothing.
+    #[test]
+    fn a_blocked_barrier_held_open_by_several_flags_retracts_them_all() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let gates = pokebot_world::gates::derive(&world);
+        let blocked =
+            std::collections::BTreeMap::from([("RocketHideout_B4F".to_owned(), vec![(18, 13)])]);
+        let mut state = GameState::default();
+        let grunts = [
+            "TRAINER_TEAM_ROCKET_GRUNT_16",
+            "TRAINER_TEAM_ROCKET_GRUNT_17",
+        ];
+        for g in grunts {
+            state
+                .world
+                .flags
+                .insert(g.into(), pokebot_state::Knowledge::tracked(true, None));
+        }
+        let wrong = wrong_gate_flags(&gates, &blocked, &crate::belief_view::StateBelief(&state));
+        assert_eq!(
+            wrong,
+            grunts.map(|g| (g.to_owned(), true)).to_vec(),
+            "{wrong:?}"
+        );
+        state.world.flags.insert(
+            grunts[0].into(),
+            pokebot_state::Knowledge::observed(false, 1),
+        );
+        assert!(
+            wrong_gate_flags(&gates, &blocked, &crate::belief_view::StateBelief(&state)).is_empty()
+        );
+    }
 
     /// The museum's ticket gate turns the walk back at one tile: the third
     /// time fails. Nugget Bridge's trainers interrupt at one tile too, but
