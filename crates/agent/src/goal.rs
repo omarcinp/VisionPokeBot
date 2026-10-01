@@ -564,13 +564,15 @@ impl Run<'_, '_> {
         plan: &Plan,
         i: usize,
     ) -> Result<Option<String>, ToolError> {
+        // Only on the failed step's map: a later step elsewhere is a trip,
+        // not what opens the way (Switch: from Saffron, the Safari Zone's
+        // entry ran "first"; walked toward Fuchsia, the Route 11 gatehouse,
+        // alike, was taken for the entry and its path recorded unplayed).
+        let here = plan.intents.get(i).and_then(|s| planned_map(&s.intent));
         for later in plan.intents.iter().skip(i + 1).take(LOOK_AHEAD) {
             let key = later.intent.to_string();
-            let runs = matches!(
-                later.intent,
-                pokebot_planner::Intent::RunScript { .. } | pokebot_planner::Intent::Beat { .. }
-            );
-            if !runs || self.looked_ahead.contains(&key) {
+            let same_map = here.is_some() && planned_map(&later.intent) == here;
+            if !same_map || self.looked_ahead.contains(&key) {
                 continue;
             }
             self.looked_ahead.insert(key.clone());
@@ -1140,6 +1142,15 @@ pub fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
 }
 
 /// The map an intent walks to or acts on.
+/// The map a planned battle or script happens on.
+fn planned_map(intent: &pokebot_planner::Intent) -> Option<&str> {
+    match intent {
+        pokebot_planner::Intent::RunScript { map, .. }
+        | pokebot_planner::Intent::Beat { map, .. } => Some(map),
+        _ => None,
+    }
+}
+
 fn intent_map(intent: &Intent) -> Option<&str> {
     match intent {
         Intent::Go { dest } => Some(dest.map()),

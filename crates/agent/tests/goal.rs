@@ -1276,7 +1276,7 @@ fn a_step_out_of_reach_runs_the_next_one_first() {
         ),
         ("Catch", vec![Ok(vec![caught()])]),
     ]);
-    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    let (report, _) = h.run(&d, frame.clone(), &planner, GoalOptions::default(), vec![]);
     assert!(report.satisfied, "{report:?}");
     assert_eq!(h.seen_names(), vec!["RunScript", "RunScript", "Catch"]);
     assert!(
@@ -1286,4 +1286,30 @@ fn a_step_out_of_reach_runs_the_next_one_first() {
         "{:?}",
         report.plans
     );
+    // The next script on another map: not run ahead (the Switch, from
+    // Saffron, ran the Safari Zone's entry "first").
+    let elsewhere = Planned::RunScript {
+        script: "FuchsiaCity_SafariZone_Entrance_EventScript_EntryTriggerLeft".into(),
+        path: 1,
+        answers: Vec::new(),
+        map: "FuchsiaCity_SafariZone_Entrance".into(),
+    };
+    let planner = FakePlanner::new(vec![
+        plan(vec![
+            step(run_script("PalletTown_EventScript_Door")),
+            step(elsewhere),
+            step(catch()),
+        ]),
+        plan(vec![step(catch())]),
+    ]);
+    let h = Harness::new(vec![
+        (
+            "RunScript",
+            vec![Err("no path next to (5, 16) on PalletTown".into())],
+        ),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["RunScript", "Catch"]);
 }
