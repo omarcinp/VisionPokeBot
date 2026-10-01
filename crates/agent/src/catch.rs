@@ -227,6 +227,47 @@ fn means<'a>(ball: &str, balls: u16, status_allowed: bool, disabled: Option<&'a 
     }
 }
 
+/// What the plan's later steps want caught (their `Catch`es, a `Caught`
+/// goal's species; any species not caught yet for a Pokédex goal): a hunt
+/// that meets one catches it on the way, and the later step is skipped
+/// (the user's "while training, new Pokémon can be hunted").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SideCatch {
+    pub species: std::collections::BTreeSet<String>,
+    /// Any species the Pokédex doesn't mark caught (a `PokedexCaught` goal).
+    pub any_new: bool,
+}
+
+impl SideCatch {
+    pub fn is_empty(&self) -> bool {
+        self.species.is_empty() && !self.any_new
+    }
+
+    /// Whether `foe` is wanted: one of the species, or new to the Pokédex
+    /// when any new one is.
+    pub fn wants(&self, foe: &Foe) -> bool {
+        self.species.contains(&foe.species) || (self.any_new && foe.caught == Some(false))
+    }
+}
+
+/// The catch decision of a hunt's battle: the hunted species and those
+/// the plan wants later are caught as the goal they are
+/// ([`plan_catch_wanted`]); in a training battle (`only_wanted`) nothing
+/// else is but a shiny, elsewhere the usual policy decides.
+pub fn plan_for_hunt(
+    data: &GameData,
+    state: &GameState,
+    lead: &Lead,
+    foe: &Foe,
+    memory: &CatchMemory,
+) -> Result<CatchPlan, String> {
+    let wanted = memory.wanted.as_deref() == Some(foe.species.as_str()) || memory.side.wants(foe);
+    if memory.only_wanted && !wanted && !foe.shiny {
+        return Err("training: no later step of the plan wants it".into());
+    }
+    plan_catch_wanted(data, state, lead, foe, false, wanted)
+}
+
 /// Decide whether to catch `foe`, and how. `Err` carries the reason not to.
 pub fn plan_catch(
     data: &GameData,
@@ -438,6 +479,12 @@ pub struct CatchMemory {
     pub flee: bool,
     /// The species the hunt is after: caught unless our lead is at risk.
     pub wanted: Option<String>,
+    /// What later steps of the plan want caught, taken on the side as the
+    /// hunt's own species is ([`plan_for_hunt`]).
+    pub side: SideCatch,
+    /// A training battle: nothing but `wanted`, `side` and a shiny is
+    /// caught; the others are fought.
+    pub only_wanted: bool,
     /// "The TRAINER blocked the BALL!": this is a trainer battle.
     pub blocked: bool,
     /// The current throw through the battle bag.
@@ -720,8 +767,7 @@ pub fn identify(
         shiny: shiny == Some(ShinyReading::Shiny),
         caught: Some(caught),
     };
-    let wanted = c.wanted.as_deref() == Some(species.as_str());
-    match plan_catch_wanted(data, state, &lead, &foe, false, wanted) {
+    match plan_for_hunt(data, state, &lead, &foe, c) {
         Ok(plan) => {
             events.push(log(format!(
                 "catching {species} Lv{level} with {}: {}{}{}",
@@ -2012,6 +2058,38 @@ mod tests {
         );
         assert_eq!(label, "choose BAG");
         assert!(memory.catch.thrower.is_some());
+    }
+
+    /// The user's "while training, new Pokémon can be hunted": a training
+    /// battle with species later steps want identifies the foe and tries
+    /// for a wanted one as the hunt's own (here caught already: a party
+    /// member), and fights any other.
+    #[test]
+    fn a_training_battle_catches_only_what_later_steps_want() {
+        let Some(data) = data() else { return };
+        let party = Party {
+            members: vec![ivysaur(&data)],
+        };
+        let state = with_balls(&[("ITEM_POKE_BALL", 10)]);
+        let command = BattleMenu::Command { column: 0, row: 0 };
+        let meet = |name: &str| {
+            let mut memory = BattleMemory::default();
+            memory.catch.only_wanted = true;
+            memory.catch.side.species.insert("SPECIES_PIDGEY".into());
+            let mut events = Vec::new();
+            for frame in 1..=2 {
+                let mut o = wild_as(frame, command, 1000, name, 6);
+                if let Some(b) = o.battle.as_mut() {
+                    b.opponent_caught = Some(true);
+                }
+                identify(&o, &data, &state, &party, &mut memory, &mut events);
+            }
+            assert!(memory.catch.decided, "{events:?}");
+            memory.catch.attempt.map(|a| a.plan)
+        };
+        let pidgey = meet("PIDGEY").expect("the wanted species is tried for");
+        assert!(pidgey.wanted);
+        assert!(meet("RATTATA").is_none(), "another species is fought");
     }
 
     /// The moves menu goes to the odds' move; the status move counts as

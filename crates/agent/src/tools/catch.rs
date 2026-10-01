@@ -108,6 +108,11 @@ pub struct HuntStep {
     /// (fleet worker 2: PIDGEY caught long before, each Catch was "done"
     /// at once and the plan asked for it again, 20 times in 10 minutes).
     dex_marked_before: bool,
+    /// What later steps of the plan want caught: caught when met, the
+    /// hunt going on ([`crate::catch::SideCatch`]).
+    side: crate::catch::SideCatch,
+    /// The species caught on the side in this step.
+    side_caught: Vec<String>,
     nav: NavParts,
 }
 
@@ -127,6 +132,8 @@ impl HuntStep {
             trainee: None,
             carrier: None,
             dex_marked_before: false,
+            side: crate::catch::SideCatch::default(),
+            side_caught: Vec::new(),
             nav: NavParts::of(ctx),
             saved_level: None,
         }
@@ -276,6 +283,7 @@ impl ToolStep for HuntStep {
                     ));
                 }
                 if let Some(species) = caught {
+                    self.side_caught.push(species.clone());
                     return Decision::Done(format!("{SAVE_FIRST}: caught {species}"));
                 }
                 return Decision::Wait("battle over".into());
@@ -288,11 +296,21 @@ impl ToolStep for HuntStep {
         if o.battle.is_some() {
             let battle = BattleStep::new(Arc::clone(&self.data), self.plan(), false);
             let carrier_slot = carrier_in(&party, self.carrier).map(|m| m.slot);
-            self.battle = Some(match (&self.hunt, carrier_slot) {
-                (Hunt::Species(species), _) => battle.sparing(species),
-                (Hunt::Level(_), Some(slot)) => battle.shifting_to(slot),
-                (Hunt::Level(_), None) => battle,
-            });
+            // Switch-training catches nothing on the side: the carrier
+            // comes out at the first command menu, the catch would plan
+            // for the trainee.
+            let side = match carrier_slot {
+                Some(_) => crate::catch::SideCatch::default(),
+                None => self.side.clone(),
+            };
+            self.battle = Some(
+                match (&self.hunt, carrier_slot) {
+                    (Hunt::Species(species), _) => battle.sparing(species),
+                    (Hunt::Level(_), Some(slot)) => battle.shifting_to(slot),
+                    (Hunt::Level(_), None) => battle,
+                }
+                .catching_on_the_side(side),
+            );
             return Decision::Wait("a battle starts".into());
         }
         // The carrier gone from the party knowledge: the trainee would
@@ -554,6 +572,12 @@ fn hunt_for(
             .is_some_and(|k| k.value == Some(true)),
         Hunt::Level(_) => false,
     };
+    // What later steps want caught, but the hunt's own species; each
+    // caught once (a second one is the later step's to want).
+    let mut side = ctx.scheduler.side_catch.clone();
+    if let Hunt::Species(species) = &hunt {
+        side.species.remove(species);
+    }
     loop {
         // Off the hunt's map (a heal, a Center far away): the way back
         // flies or uses a field move where that beats walking (Switch: from
@@ -564,6 +588,7 @@ fn hunt_for(
         }
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.dex_marked_before = dex_marked_before;
+        step.side = side.clone();
         step.trainee = trainee.map(str::to_owned);
         step.carrier = carrier;
         step.restock = restock;
@@ -572,6 +597,9 @@ fn hunt_for(
         let result = ctx.drive(&mut step);
         encounters = step.encounters;
         fled_in_a_row = step.fled_in_a_row;
+        for species in &step.side_caught {
+            side.species.remove(species);
+        }
         match result {
             Ok(summary) if summary.starts_with(SAVE_FIRST) => {
                 if ctx.checkpoint.is_some() {
@@ -936,6 +964,8 @@ mod tests {
             trainee: None,
             carrier: None,
             dex_marked_before: false,
+            side: crate::catch::SideCatch::default(),
+            side_caught: Vec::new(),
             nav: NavParts {
                 world: Arc::new(world),
                 gone: Gone::new(),

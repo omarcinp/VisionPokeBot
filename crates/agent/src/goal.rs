@@ -28,6 +28,7 @@ use pokebot_state::{GameEvent, KnowledgeSource, PlayerPose, SavedKnowledge, Scre
 use pokebot_world::predicate::{Predicate, Truth};
 use serde::Serialize;
 
+use crate::catch::SideCatch;
 use crate::ledger::fingerprint;
 use crate::nugget_farm::{self, FarmConfig};
 use crate::recourse::{self, Recourse, Stall};
@@ -369,10 +370,21 @@ impl Run<'_, '_> {
     /// Runs the plan's steps in order.
     fn execute(&mut self, ctx: &mut ToolContext<'_>, plan: &Plan) -> Result<Executed, ToolError> {
         let n = plan.intents.len();
+        let start = Owned::of(&self.snapshot(ctx)?.0);
         for (i, step) in plan.intents.iter().enumerate() {
             let k = i + 1;
             let (knowledge, pose) = self.snapshot(ctx)?;
             let belief = StateBelief::new(&knowledge, &ctx.data, pose.clone());
+            let now = Owned::of(&knowledge);
+            if let Some(why) = caught_on_the_side(&step.intent, &start, &now)
+                .or_else(|| grass_unneeded(step, &plan.intents[k..], &start, &now))
+            {
+                self.report.steps_skipped += 1;
+                let why = format!("{}: skipped, {why}", step.intent);
+                ctx.emit(progress(GOAL, why.clone()))?;
+                self.set_status("skipped", why, k, Some(step), ctx);
+                continue;
+            }
             // "Buy balls if needed": settled by a probe earlier in the plan.
             if !step.unless.is_empty()
                 && step
@@ -451,8 +463,19 @@ impl Run<'_, '_> {
                 }
             }
             ctx.scheduler.assumptions = step.assumes.clone();
+            ctx.scheduler.side_catch = wanted_later(self.goal, &plan.intents[k..], &start, &now);
+            if !ctx.scheduler.side_catch.is_empty() && matches!(intent, Intent::Train { .. }) {
+                ctx.emit(progress(
+                    GOAL,
+                    format!(
+                        "training catches on the side: {}",
+                        side_list(&ctx.scheduler.side_catch)
+                    ),
+                ))?;
+            }
             let outcome = ctx.invoke(&intent);
             ctx.scheduler.assumptions.clear();
+            ctx.scheduler.side_catch = SideCatch::default();
             if outcome.result.is_ok() {
                 // The step establishing what it assumed absent (a trainer
                 // beaten, a flag set) is its effect, not a contradiction;
@@ -1081,6 +1104,124 @@ fn frame_id(ctx: &ToolContext<'_>) -> u64 {
     ctx.observation().map_or(0, |o| o.frame_id)
 }
 
+/// What the Pokédex marks caught and how many of each species the party
+/// holds: taken when a plan starts running and before each step.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Owned {
+    marked: BTreeSet<String>,
+    party: std::collections::BTreeMap<String, usize>,
+}
+
+impl Owned {
+    fn of(knowledge: &SavedKnowledge) -> Owned {
+        let marked = knowledge
+            .pokedex
+            .caught
+            .iter()
+            .filter(|(_, k)| k.value == Some(true))
+            .map(|(s, _)| s.clone())
+            .collect();
+        let mut party = std::collections::BTreeMap::new();
+        for m in knowledge.party.value.iter().flatten() {
+            if let Some(s) = &m.species.value {
+                *party.entry(s.clone()).or_insert(0) += 1;
+            }
+        }
+        Owned { marked, party }
+    }
+}
+
+/// Why a plan's `Catch` needn't run: an earlier step of the plan caught
+/// its species on the side (a training hunt, a walk's catch). A catch for
+/// the Pokédex (the species not marked when the plan began) is done once
+/// it is marked; one for the party (marked already: readiness wants it as
+/// a member, fleet worker 2's second PIDGEY) once the party holds more of
+/// it than when the plan began.
+fn caught_on_the_side(
+    intent: &pokebot_planner::Intent,
+    start: &Owned,
+    now: &Owned,
+) -> Option<String> {
+    let pokebot_planner::Intent::Catch { species, .. } = intent else {
+        return None;
+    };
+    if !start.marked.contains(species) {
+        return now
+            .marked
+            .contains(species)
+            .then(|| format!("{species} caught on the side since the plan began"));
+    }
+    let held = |o: &Owned| o.party.get(species).copied().unwrap_or(0);
+    (held(now) > held(start))
+        .then(|| format!("{species} caught into the party on the side since the plan began"))
+}
+
+/// Why a catch's walk to the grass needn't run: the `Catch`es it leads
+/// to (those right after it, on its map) were all caught on the side.
+fn grass_unneeded(
+    step: &PlannedIntent,
+    rest: &[PlannedIntent],
+    start: &Owned,
+    now: &Owned,
+) -> Option<String> {
+    let pokebot_planner::Intent::Go { dest } = &step.intent else {
+        return None;
+    };
+    if !step
+        .note
+        .as_deref()
+        .is_some_and(|n| n.starts_with("to the grass"))
+    {
+        return None;
+    }
+    let catches: Vec<&PlannedIntent> = rest
+        .iter()
+        .take_while(
+            |s| matches!(&s.intent, pokebot_planner::Intent::Catch { map, .. } if map == dest),
+        )
+        .collect();
+    (!catches.is_empty()
+        && catches
+            .iter()
+            .all(|s| caught_on_the_side(&s.intent, start, now).is_some()))
+    .then(|| "the catches it leads to were made on the side".to_string())
+}
+
+/// What the steps after the running one (`rest`) and the goal want caught,
+/// but for what was caught on the side already: a hunt catches it when
+/// met ([`SideCatch`]).
+fn wanted_later(
+    goal: &GoalPredicate,
+    rest: &[PlannedIntent],
+    start: &Owned,
+    now: &Owned,
+) -> SideCatch {
+    let mut side = SideCatch::default();
+    for step in rest {
+        if let pokebot_planner::Intent::Catch { species, .. } = &step.intent {
+            if caught_on_the_side(&step.intent, start, now).is_none() {
+                side.species.insert(species.clone());
+            }
+        }
+    }
+    match goal {
+        GoalPredicate::Caught { caught } if !now.marked.contains(caught) => {
+            side.species.insert(caught.clone());
+        }
+        GoalPredicate::PokedexCaught { .. } => side.any_new = true,
+        _ => {}
+    }
+    side
+}
+
+fn side_list(side: &SideCatch) -> String {
+    let mut out: Vec<String> = side.species.iter().cloned().collect();
+    if side.any_new {
+        out.push("any species not caught yet".into());
+    }
+    out.join(", ")
+}
+
 fn list(ps: &[GoalPredicate]) -> String {
     ps.iter()
         .map(ToString::to_string)
@@ -1239,6 +1380,89 @@ mod health_tests {
             ),
             None
         );
+    }
+
+    fn catch(species: &str, map: &str) -> PlannedIntent {
+        PlannedIntent {
+            intent: pokebot_planner::Intent::Catch {
+                species: species.into(),
+                map: map.into(),
+                slot: "land".into(),
+                balls: 7,
+            },
+            cost_s: 80.0,
+            assumes: Vec::new(),
+            unless: Vec::new(),
+            note: None,
+            route: Vec::new(),
+            expected: Vec::new(),
+        }
+    }
+
+    fn owned(marked: &[&str], party: &[&str]) -> Owned {
+        let mut o = Owned {
+            marked: marked.iter().map(|s| s.to_string()).collect(),
+            ..Owned::default()
+        };
+        for s in party {
+            *o.party.entry(s.to_string()).or_insert(0) += 1;
+        }
+        o
+    }
+
+    /// A `Train` before a `Catch(ODDISH)` on the same grass catches the
+    /// ODDISH it meets, and the `Catch` (and its walk to the grass) is
+    /// skipped: for the Pokédex once ODDISH is marked caught, for the
+    /// party (PIDGEY marked long before, fleet worker 2) once the party
+    /// holds one more. What is still wanted goes to the hunt.
+    #[test]
+    fn a_catch_made_on_the_side_skips_the_later_catch() {
+        let oddish = catch("SPECIES_ODDISH", "Route24");
+        let pidgey = catch("SPECIES_PIDGEY", "Route24");
+        let start = owned(&["SPECIES_PIDGEY"], &["SPECIES_IVYSAUR", "SPECIES_PIDGEY"]);
+        // Nothing caught yet: both run, and both are wanted on the side.
+        assert_eq!(caught_on_the_side(&oddish.intent, &start, &start), None);
+        assert_eq!(caught_on_the_side(&pidgey.intent, &start, &start), None);
+        let goal = GoalPredicate::badge(3);
+        let side = wanted_later(&goal, &[oddish.clone(), pidgey.clone()], &start, &start);
+        assert_eq!(
+            side.species.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["SPECIES_ODDISH", "SPECIES_PIDGEY"]
+        );
+        assert!(!side.any_new);
+        // ODDISH caught while training: marked in the Pokédex.
+        let now = owned(
+            &["SPECIES_PIDGEY", "SPECIES_ODDISH"],
+            &["SPECIES_IVYSAUR", "SPECIES_PIDGEY", "SPECIES_ODDISH"],
+        );
+        assert!(caught_on_the_side(&oddish.intent, &start, &now).is_some());
+        // The PIDGEY mark was there before: only one more in the party counts.
+        assert_eq!(caught_on_the_side(&pidgey.intent, &start, &now), None);
+        let side = wanted_later(&goal, &[oddish.clone(), pidgey.clone()], &start, &now);
+        assert_eq!(
+            side.species.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["SPECIES_PIDGEY"]
+        );
+        let more = owned(
+            &["SPECIES_PIDGEY", "SPECIES_ODDISH"],
+            &["SPECIES_IVYSAUR", "SPECIES_PIDGEY", "SPECIES_PIDGEY"],
+        );
+        assert!(caught_on_the_side(&pidgey.intent, &start, &more).is_some());
+        // The walk to the grass goes only while one of its catches is left.
+        let mut go = PlannedIntent {
+            intent: pokebot_planner::Intent::Go {
+                dest: "Route24".into(),
+            },
+            ..oddish.clone()
+        };
+        go.note = Some("to the grass at (10, 5)".into());
+        let rest = [oddish.clone(), pidgey.clone()];
+        assert_eq!(grass_unneeded(&go, &rest, &start, &now), None);
+        assert!(grass_unneeded(&go, &rest[..1], &start, &now).is_some());
+        // A Pokédex goal wants any new species; a `Caught` goal its own.
+        assert!(wanted_later(&GoalPredicate::pokedex_caught(30), &[], &start, &now).any_new);
+        let side = wanted_later(&GoalPredicate::caught("SPECIES_ABRA"), &[], &start, &now);
+        assert!(side.species.contains("SPECIES_ABRA"));
     }
 
     #[test]

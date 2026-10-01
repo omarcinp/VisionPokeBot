@@ -184,6 +184,9 @@ pub struct Scheduler {
     /// The tile the last pickup check was made from: the same tile gives
     /// the same answer.
     pub pickup_checked: Option<PlayerPose>,
+    /// What later steps of the plan in force want caught, set by the goal
+    /// loop for the step running: a hunt catches it on the way.
+    pub side_catch: crate::catch::SideCatch,
 }
 impl Scheduler {
     pub fn event(&mut self, event: &GameEvent, state: &GameState, data: &GameData) -> bool {

@@ -87,6 +87,9 @@ pub struct BattleStep {
     /// (the catch declined or given up for its risk), RUN rather than
     /// faint it.
     spare: Option<String>,
+    /// What later steps of the plan want caught: caught on the side, in a
+    /// training battle too ([`crate::catch::plan_for_hunt`]).
+    side: crate::catch::SideCatch,
 }
 
 impl BattleStep {
@@ -122,7 +125,15 @@ impl BattleStep {
             upcoming: Vec::new(),
             loss_ok: plan == BattlePlan::Lose,
             spare: None,
+            side: crate::catch::SideCatch::default(),
         }
+    }
+
+    /// Catch what later steps of the plan want when met: a training
+    /// battle identifies the foe for it, and fights all others.
+    pub fn catching_on_the_side(mut self, side: crate::catch::SideCatch) -> Self {
+        self.side = side;
+        self
     }
 
     /// RUN from `species` whenever it isn't being caught ([`Self::spare`]).
@@ -436,8 +447,12 @@ impl BattleStep {
             ..BattleMemory::default()
         };
         self.memory.catch.wanted = self.spare.clone();
+        self.memory.catch.side = self.side.clone();
         match self.plan {
             BattlePlan::Auto => {}
+            // Training with species wanted later: identified, and only
+            // those caught.
+            BattlePlan::Fight if !self.side.is_empty() => self.memory.catch.only_wanted = true,
             // No identification, no catch: fight (or flee) on the HUD.
             BattlePlan::Fight => self.memory.catch.decided = true,
             BattlePlan::Flee => {
@@ -581,7 +596,7 @@ impl ToolStep for BattleStep {
             self.begin(ctx.events);
             ctx.events
                 .extend(party::battle_events(&data, &self.party, b));
-            if self.plan == BattlePlan::Auto {
+            if self.plan == BattlePlan::Auto || self.memory.catch.only_wanted {
                 catch::identify(
                     o,
                     &data,
@@ -1160,6 +1175,29 @@ mod tests {
             label(fresh.shift_in_party_menu(&menu, 2, None)),
             "shift: Down toward slot 2"
         );
+    }
+
+    /// A training battle identifies its foe only when later steps of the
+    /// plan want a species caught (it then catches nothing else).
+    #[test]
+    fn a_training_battle_identifies_only_for_a_side_catch() {
+        let Ok(data) = GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let mut events = Vec::new();
+        let mut plain = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        plain.begin(&mut events);
+        assert!(plain.memory.catch.decided && !plain.memory.catch.only_wanted);
+        let mut side = crate::catch::SideCatch::default();
+        side.species.insert("SPECIES_PIDGEY".into());
+        let mut step =
+            BattleStep::new(data, BattlePlan::Fight, false).catching_on_the_side(side.clone());
+        step.begin(&mut events);
+        assert!(!step.memory.catch.decided && step.memory.catch.only_wanted);
+        assert_eq!(step.memory.catch.side, side);
     }
 
     /// Switch goal run, Route 22: `Train(BULBASAUR to Lv10)` fights with
