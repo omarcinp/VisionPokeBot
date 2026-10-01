@@ -2219,6 +2219,34 @@ mod tests {
         }
     }
 
+    /// Fleet continue-1, Rock Tunnel B1F without Flash: the reckoning had
+    /// drifted (it held (15, 35), the player stood at (17, 34)), lost the
+    /// player, and the search near the hint "located" them on 1F (6, 2),
+    /// by the ladder from B1F (33, 3): the disc of rock floor matched there
+    /// too. Every route from there failed "stuck waiting: locating the
+    /// player". Off a dark map only a warp next to the player leads; a
+    /// hint too far off for the search near it finds nothing instead.
+    #[test]
+    fn a_dark_cave_is_not_left_but_by_a_warp_next_to_the_player() {
+        let Some(image) = fixture("emu-rock-tunnel-b1f-lost.png") else {
+            return;
+        };
+        let Some(world) = world() else { return };
+        let mut p = FireRedPerception::with_world(world);
+        p.set_pose_hint(PlayerPose {
+            map: "RockTunnel_B1F".into(),
+            x: 21,
+            y: 35,
+        });
+        for id in 0..u64::from(DARK_MISSES) * 2 {
+            let seen = p.observe(&frame(id, image.clone())).player;
+            assert!(
+                seen.as_ref().is_none_or(|o| o.pose.map == "RockTunnel_B1F"),
+                "frame {id}: {seen:?}"
+            );
+        }
+    }
+
     /// A dark cave's view at sprite map pixel `(px, py)`: the map's render
     /// inside the lit disc (as fleet worker 1 saw it in Rock Tunnel: its
     /// box 96–143 × 56–104), black around it, the player's sprite on top.

@@ -733,10 +733,13 @@ impl<'w> Localizer<'w> {
     }
 
     /// [`Localizer::locate_from`] without the whole-map searches: near the
-    /// hint, and near where the warps from its map arrive. A dark cave's
-    /// lit disc matches too many places of a whole cave (fleet worker 1:
-    /// Rock Tunnel's floor, "located" eight tiles off, then in Diglett's
-    /// Cave).
+    /// hint, and near where the warps next to it arrive (only a warp takes
+    /// the player off a dark map, and the fade from dark to dark reads as
+    /// none). A dark cave's lit disc matches too many places of a whole
+    /// cave (fleet worker 1: Rock Tunnel's floor, "located" eight tiles
+    /// off, then in Diglett's Cave; fleet continue-1: lost on B1F (15, 35),
+    /// no ladder near, "located" on 1F (6, 2) by the ladder from B1F
+    /// (33, 3), and every route from there failed).
     pub fn locate_near(
         &self,
         frame: &RgbImage,
@@ -771,7 +774,7 @@ impl<'w> Localizer<'w> {
                 // fade ends: those frames are mid-step, which only a
                 // tracked search finds.
                 let found = self
-                    .arrivals(map, &other.name)
+                    .arrivals(map, &other.name, (!whole).then_some(hint))
                     .filter_map(|at| self.locate_in(frame, other, Some(at), 2, exclude))
                     .max_by_key(|o| o.score)
                     .or_else(|| {
@@ -785,15 +788,18 @@ impl<'w> Localizer<'w> {
             .map(|(o, _)| o)
     }
 
-    /// Tiles on `other` where the warps from `map` put the player.
+    /// Tiles on `other` where the warps from `map` put the player; only
+    /// the warps on or next to `near`'s tile, when given.
     fn arrivals<'a>(
         &'a self,
         map: &'a MapData,
         other: &'a str,
+        near: Option<&'a PlayerPose>,
     ) -> impl Iterator<Item = (i32, i32)> + 'a {
         map.warps
             .iter()
             .filter(move |w| self.world.name_of(&w.dest_map) == Some(other))
+            .filter(move |w| near.is_none_or(|p| (w.x - p.x).abs() + (w.y - p.y).abs() <= 1))
             .filter_map(|w| self.world.warp_destination(w))
             .map(|(_, x, y)| (x, y))
     }
