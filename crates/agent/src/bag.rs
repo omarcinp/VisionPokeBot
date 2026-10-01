@@ -227,6 +227,12 @@ pub struct PocketAudit {
     candidate: Option<(u64, u8, Rows)>,
     /// What the last input was meant to show.
     pending: Option<Expectation>,
+    /// Looking for the TM CASE or BERRY POUCH in a KEY ITEMS list longer
+    /// than its window: past the top (an Up that changed nothing on the
+    /// first row), the search goes down.
+    search_down: bool,
+    /// The view an Up was sent from, while searching.
+    searched_from: Option<(u8, Rows)>,
     waiting_since: Option<u64>,
     /// The last bag title seen (fades between screens show none), the
     /// frame a container opened or closed, and whether the bag is on
@@ -257,6 +263,8 @@ impl PocketAudit {
             total_retries: 0,
             candidate: None,
             pending: None,
+            search_down: false,
+            searched_from: None,
             waiting_since: None,
             title: None,
             came_up: None,
@@ -376,7 +384,14 @@ impl PocketAudit {
                     if self.settling() {
                         return Decision::Wait("letting the bag settle".into());
                     }
-                    return select_item(o, data, item, Expectation::BagPocket(title.into()));
+                    let visible = bag
+                        .rows
+                        .iter()
+                        .any(|(n, _)| data.item_named(n) == Some(item));
+                    if visible || bag.prompt.is_some() {
+                        return select_item(o, data, item, Expectation::BagPocket(title.into()));
+                    }
+                    return self.search(bag, item);
                 }
                 let Some(at) = pocket_from_title(&bag.pocket).and_then(pocket_index) else {
                     return self.wait(o, "reading the pocket title");
@@ -397,6 +412,36 @@ impl PocketAudit {
             Phase::Read => self.read(o, data, events),
             Phase::Close => self.close(o),
         }
+    }
+
+    /// A container not on screen in KEY ITEMS: up first (CANCEL is last),
+    /// down once the top is passed (Switch: ten key items, the search
+    /// pressed Up while CANCEL showed and Down once it didn't, scrolling
+    /// between them for half an hour, the TM CASE never reached).
+    fn search(&mut self, bag: &pokebot_state::BagObservation, item: &str) -> Decision {
+        let Some(cursor) = bag.cursor else {
+            return Decision::Wait("reading item cursor".into());
+        };
+        let view = (cursor, bag.rows.clone());
+        if !self.search_down && cursor == 0 && self.searched_from.as_ref() == Some(&view) {
+            self.search_down = true;
+        }
+        let cancel = bag.rows.iter().any(|(name, _)| is_cancel(name));
+        if self.search_down && cancel {
+            return Decision::Fail(format!("{item} is not in the pocket"));
+        }
+        let button = if self.search_down {
+            Button::Down
+        } else {
+            self.searched_from = Some(view);
+            Button::Up
+        };
+        Decision::Act(Action::new(
+            format!("bag: {button:?}, looking for {item}"),
+            vec![ControllerCommand::Press(button)],
+            Expectation::InputsDone,
+            120,
+        ))
     }
 
     /// Closes as far as `leave` says, then Done.
@@ -729,6 +774,46 @@ mod tests {
             Decision::Done(r) => panic!("done: {r}"),
             Decision::Fail(r) => panic!("failed: {r}"),
         }
+    }
+
+    /// Switch: ten key items, the TM CASE second. The search went up while
+    /// CANCEL showed and down once it didn't, for half an hour. It goes up
+    /// to the top, then down; CANCEL reached going down: not there.
+    #[test]
+    fn the_tm_case_is_looked_for_up_to_the_top() {
+        let mut audit = PocketAudit::leaving(Pocket::TmCase, Leave::StartMenu);
+        let end = [
+            ("S.S. TICKET", None),
+            ("LIFT KEY", None),
+            ("SILPH SCOPE", None),
+            ("POKé FLUTE", None),
+            ("TEA", None),
+            ("CANCEL", None),
+        ];
+        let mid = [
+            ("DOME FOSSIL", None),
+            ("FAME CHECKER", None),
+            ("S.S. TICKET", None),
+            ("LIFT KEY", None),
+            ("SILPH SCOPE", None),
+            ("POKé FLUTE", None),
+        ];
+        let view =
+            |list: &[(&str, Option<u16>)], cursor| bag(1, "KEY ITEMS", list, cursor).bag.unwrap();
+        let mut press = |list: &[(&str, Option<u16>)], cursor| {
+            pressed(&act(audit.search(&view(list, cursor), "ITEM_TM_CASE")))
+        };
+        assert_eq!(press(&end, 4), Button::Up);
+        // CANCEL gone off the bottom: still up (it went down here).
+        assert_eq!(press(&mid, 2), Button::Up);
+        assert_eq!(press(&mid, 0), Button::Up);
+        // An Up that changed nothing on the top row: the top. Down now.
+        assert_eq!(press(&mid, 0), Button::Down);
+        assert_eq!(press(&mid, 3), Button::Down);
+        assert!(matches!(
+            audit.search(&view(&end, 5), "ITEM_TM_CASE"),
+            Decision::Fail(_)
+        ));
     }
 
     /// Fleet worker 3: the belief counted a POTION the ITEMS pocket no
