@@ -441,46 +441,20 @@ pub fn ride_path(
 pub fn field_route(ctx: &mut ToolContext<'_>, dest: &Dest) -> Option<Vec<Leg>> {
     let pose = ctx.pose()?;
     let world = Arc::clone(&ctx.world);
-    let gone = ctx.gone.clone();
-    let gates = ctx.gate_tiles();
-    let walks = || navigable(&world, &pose, dest, &gone, &gates);
     let graph = ctx
         .scheduler
         .graph
         .get_or_insert_with(|| crate::scheduler::graph(&world));
-    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest, walks)
+    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest)
 }
 
-/// Whether the navigator finds a way from `pose` to `dest` on its own
-/// (warps, edges and walks; no script's warp).
-fn navigable(
-    world: &World,
-    pose: &PlayerPose,
-    dest: &Dest,
-    gone: &Gone,
-    gates: &GateTiles,
-) -> bool {
-    let search = |map: &str, goal: &dyn Fn((i32, i32)) -> bool| {
-        crate::nav::route_search_via(world, pose, map, goal, gone, gates).is_some()
-    };
-    match dest {
-        Dest::Map { map } => search(map, &|_| true),
-        Dest::Tile { map, x, y } => search(map, &|p| p == (*x, *y)),
-        Dest::Facing { .. } | Dest::Warp { .. } => true,
-    }
-}
-
-/// [`field_route`] without a context; `walks` tells whether the navigator
-/// gets there alone (asked only when the route rides an elevator: a ride
-/// is taken only when there is no walking there, stairs are the
-/// navigator's).
+/// [`field_route`] without a context.
 pub fn plan_field_route(
     world: &World,
     graph: &route::PlaceGraph,
     state: &pokebot_state::GameState,
     pose: &PlayerPose,
     dest: &Dest,
-    walks: impl FnOnce() -> bool,
 ) -> Option<Vec<Leg>> {
     let belief = StateBelief(state);
     // Unknown facts count as unmet, but for a trainer: one not known beaten
@@ -517,8 +491,13 @@ pub fn plan_field_route(
         // Entering a dark map matters only with someone to use Flash.
         _ => special(world, l) && flash,
     });
+    // A ride the route chose is cheaper than any walk it priced: taken.
+    // The navigator's own "walks there" was too coarse to veto it (Switch,
+    // Silph Co. 3F: it found a way to 11F past the locked doors, walked
+    // into them, "no path to warp (13, 14)", while the elevator was a
+    // few steps away).
     let rides = result.legs.iter().any(|l| ride(world, l));
-    (needed || rides && !walks()).then_some(result.legs)
+    (needed || rides).then_some(result.legs)
 }
 
 /// The price of assuming `p` for a route the tools walk: a trainer not
@@ -1131,7 +1110,6 @@ mod tests {
             &in_mt_moon_knowing("MOVE_DIG"),
             &pose,
             &dest,
-            || true,
         )
         .expect("a route that digs");
         assert_eq!(legs[0].kind, EdgeKind::Dig, "{legs:?}");
@@ -1142,7 +1120,7 @@ mod tests {
         );
         assert!(special(&world, &legs[0]));
         let walker = in_mt_moon_knowing("MOVE_TACKLE");
-        assert!(plan_field_route(&world, &graph, &walker, &pose, &dest, || true).is_none());
+        assert!(plan_field_route(&world, &graph, &walker, &pose, &dest).is_none());
     }
 
     /// Cerulean's cut tree (26, 32): with CUT known and the Cascade Badge,
@@ -1163,7 +1141,7 @@ mod tests {
             x: 26,
             y: 33,
         };
-        let legs = plan_field_route(&world, &graph, &cutter(true), &pose, &dest, || true)
+        let legs = plan_field_route(&world, &graph, &cutter(true), &pose, &dest)
             .expect("a route through the tree");
         let gate = legs
             .iter()
@@ -1171,7 +1149,7 @@ mod tests {
             .expect("a gate leg");
         assert_eq!((gate.from.x, gate.from.y), (26, 31));
         assert_eq!((gate.to.x, gate.to.y), (26, 33));
-        assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest, || true).is_none());
+        assert!(plan_field_route(&world, &graph, &cutter(false), &pose, &dest).is_none());
     }
 
     /// Switch, Celadon Gym: a Cut tree stands between the door and ERIKA
@@ -1204,7 +1182,6 @@ mod tests {
                         x,
                         y,
                     },
-                    || true,
                 )
             })
         };
@@ -1236,7 +1213,7 @@ mod tests {
         let dest = Dest::Map {
             map: "VermilionCity_PokemonCenter_1F".into(),
         };
-        let legs = plan_field_route(&world, &graph, &state, &pose, &dest, || true)
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest)
             .expect("the Center is past the tree");
         assert!(legs
             .iter()
@@ -1280,8 +1257,50 @@ mod tests {
         let dest = Dest::Map {
             map: "CeladonCity_GameCorner".into(),
         };
-        let legs =
-            plan_field_route(&world, &graph, &state, &pose, &dest, || false).expect("a ride out");
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest).expect("a ride out");
+        assert!(legs.iter().any(|l| ride(&world, l)), "{legs:?}");
+    }
+
+    /// Switch, Silph Co. 3F (29, 2), the Card Key not held, every door
+    /// shut: the navigator thought it could walk to 11F past them and
+    /// walked into a door ("no path to warp (13, 14)"). The route's
+    /// elevator ride, a few steps away, is taken.
+    #[test]
+    fn silph_co_rides_the_elevator_past_its_shut_doors() {
+        use pokebot_state::Knowledge;
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let mut state = pokebot_state::GameState::default();
+        let doors: Vec<String> = graph
+            .gates()
+            .values()
+            .flat_map(|on| on.values())
+            .flat_map(|g| g.ways.iter().flatten())
+            .filter_map(|p| match p {
+                pokebot_world::predicate::Predicate::Flag { name, .. }
+                    if name.starts_with("FLAG_SILPH_") =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!doors.is_empty());
+        for door in doors {
+            state
+                .world
+                .flags
+                .insert(door, Knowledge::observed(false, 1));
+        }
+        let pose = PlayerPose {
+            map: "SilphCo_3F".into(),
+            x: 29,
+            y: 2,
+        };
+        let dest = Dest::Map {
+            map: "SilphCo_11F".into(),
+        };
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest).expect("a ride");
         assert!(legs.iter().any(|l| ride(&world, l)), "{legs:?}");
     }
 
@@ -1306,15 +1325,12 @@ mod tests {
             x: 19,
             y: 15,
         };
-        let gone = Gone::new();
-        let gates = GateTiles::believed(&world, graph.gates(), &StateBelief(&state));
-        assert!(!navigable(&world, &pose, &dest, &gone, &gates));
-        assert!(plan_field_route(&world, &graph, &state, &pose, &dest, || false).is_none());
+        assert!(plan_field_route(&world, &graph, &state, &pose, &dest).is_none());
         state.world.flags.insert(
             "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
             Knowledge::observed(true, 1),
         );
-        let legs = plan_field_route(&world, &graph, &state, &pose, &dest, || false)
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest)
             .expect("a ride to Giovanni's side");
         let lift = legs
             .iter()
@@ -1327,8 +1343,6 @@ mod tests {
         );
         assert!(special(&world, lift));
         assert_eq!(dynamic_door(&world, "RocketHideout_Elevator"), Some(0));
-        // Where the navigator walks there alone, the stairs are its.
-        assert!(plan_field_route(&world, &graph, &state, &pose, &dest, || true).is_none());
 
         // (b) The panel's path to B4F: its set_warp lands there, and the
         // answer is B4F's row of the menu.
