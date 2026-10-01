@@ -2247,6 +2247,32 @@ mod tests {
         }
     }
 
+    /// Fleet continue-1/2/3, the Underground Path's east-west tunnel: a
+    /// uniform corridor whose only marks are ceiling lights a few pixels
+    /// wide. Walking east, the sparse search near the last tile put the
+    /// player three tiles back (983 against the true tile's 1000 when
+    /// compared densely), and every walk through failed "looping". Mid-step
+    /// east of (9, 3) and of (15, 3), the pose stays on its tile.
+    #[test]
+    fn a_uniform_corridor_is_tracked_tile_by_tile() {
+        let Some(world) = world() else { return };
+        for (name, x) in [
+            ("emu-underground-tunnel-east-9.png", 9),
+            ("emu-underground-tunnel-east-15.png", 15),
+        ] {
+            let Some(image) = fixture(name) else { return };
+            let mut p = FireRedPerception::with_world(world.clone());
+            let pose = |x| PlayerPose {
+                map: "UndergroundPath_EastWestTunnel".into(),
+                x,
+                y: 3,
+            };
+            p.set_pose_hint(pose(x));
+            let seen = p.observe(&frame(1, image)).player.map(|o| o.pose);
+            assert_eq!(seen, Some(pose(x)), "{name}");
+        }
+    }
+
     /// A dark cave's view at sprite map pixel `(px, py)`: the map's render
     /// inside the lit disc (as fleet worker 1 saw it in Rock Tunnel: its
     /// box 96–143 × 56–104), black around it, the player's sprite on top.

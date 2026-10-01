@@ -758,7 +758,7 @@ impl<'w> Localizer<'w> {
     ) -> Option<PoseObservation> {
         let map = self.world.map(&hint.map)?;
         if let Some(found) = self.locate_in(frame, map, Some((hint.x, hint.y)), 3, exclude) {
-            return Some(found);
+            return Some(self.sharpen(frame, map, hint, found, exclude));
         }
         if whole {
             if let Some(found) = self.locate_in(frame, map, None, 0, exclude) {
@@ -786,6 +786,42 @@ impl<'w> Localizer<'w> {
             })
             .max_by_key(|(o, distance)| (o.score, std::cmp::Reverse(*distance)))
             .map(|(o, _)| o)
+    }
+
+    /// `found` near `hint`, or the tile a dense comparison along the
+    /// hint's row and column matches better: the sparse grid can miss what
+    /// tells two tiles of a uniform corridor apart (fleet continue-1/2/3,
+    /// the Underground Path's tunnel: its only marks are ceiling lights a
+    /// few pixels wide, ten tiles apart; walking east the pose snapped back
+    /// three tiles at 983 while the true one scored 1000 densely, and every
+    /// walk failed "looping"). A perfect sparse match stands.
+    fn sharpen(
+        &self,
+        frame: &RgbImage,
+        map: &MapData,
+        hint: &PlayerPose,
+        found: PoseObservation,
+        exclude: &[Region],
+    ) -> PoseObservation {
+        if found.score >= 1000 || found.pose.map != map.name {
+            return found;
+        }
+        let from = (hint.x * BLOCK, hint.y * BLOCK);
+        let Some(f) = self.follow(frame, map, from, from, 3 * BLOCK, exclude) else {
+            return found;
+        };
+        if f.score < CLEAR || f.score <= u32::from(found.score) {
+            return found;
+        }
+        let (x, y) = f.tile((hint.x, hint.y));
+        PoseObservation {
+            pose: PlayerPose {
+                map: map.name.clone(),
+                x,
+                y,
+            },
+            score: f.score as u16,
+        }
     }
 
     /// Tiles on `other` where the warps from `map` put the player; only
