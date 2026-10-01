@@ -2371,6 +2371,34 @@ mod tests {
         }
     }
 
+    /// Switch: the Safari Zone's "time's up" put the player in the
+    /// entrance gate while the belief stayed in SafariZone_North, whose
+    /// neighbours the tracker searched for twenty minutes. Once the hint is
+    /// dropped (a long "locating the player"), every map is searched and
+    /// the gate is found.
+    #[test]
+    fn a_player_taken_off_the_hints_maps_is_found_once_the_hint_is_dropped() {
+        let (Some(world), Some(image)) =
+            (world(), fixture("switch-safari-entrance-after-time-up.png"))
+        else {
+            return;
+        };
+        let mut p = FireRedPerception::with_world(world);
+        p.set_pose_hint(PlayerPose {
+            map: "SafariZone_North".into(),
+            x: 30,
+            y: 24,
+        });
+        for id in 0..5 {
+            assert!(p.observe(&frame(id, image.clone())).player.is_none());
+        }
+        p.clear_pose_hint();
+        let found = (5..5 + u64::from(GLOBAL_SEARCH_INTERVAL) + 3)
+            .find_map(|id| p.observe(&frame(id, image.clone())).player)
+            .map(|o| o.pose.map);
+        assert_eq!(found.as_deref(), Some("FuchsiaCity_SafariZone_Entrance"));
+    }
+
     /// Switch, Route 16's north gatehouse: standing on the west mat, the
     /// map's black edge fills the left of the view and read as a battle
     /// wipe; the walk waited for it to end. A wipe changes every frame;

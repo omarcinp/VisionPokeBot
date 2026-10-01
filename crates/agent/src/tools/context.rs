@@ -879,6 +879,16 @@ impl<'a> ToolContext<'a> {
                     if !*nudged && waited > limit / 2 {
                         *nudged = true;
                         self.executor.nudge(self.runtime, "tool", &reason)?;
+                        // Unlocated this long, the player is likely where
+                        // the belief never looks: a script took them off
+                        // the map (Switch, the Safari Zone's "time's up"
+                        // put the player in the entrance gate; the belief
+                        // stayed in SafariZone_North and every step waited
+                        // "locating the player" for twenty minutes). Every
+                        // map is searched from here.
+                        if reason.contains("locating the player") {
+                            self.runtime.clear_pose_hint();
+                        }
                         continue;
                     }
                     if waited > limit {
