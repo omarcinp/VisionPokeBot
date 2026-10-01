@@ -763,6 +763,14 @@ impl<'a> ToolContext<'a> {
                 ));
             }
             self.info("scheduler: recovery verified, resume suspended task");
+            // Back to the task's map the way the route prices it (FLY),
+            // not the suspended walker's warps and edges (Switch: Route 7's
+            // training walked back from a Center six maps away each time).
+            if let Some(dest) = self.scheduler.destination.clone() {
+                if self.pose().is_some_and(|p| p.map != dest) {
+                    super::go::reach_map(self, &dest)?;
+                }
+            }
             Ok(true)
         })();
         self.scheduler.recovering = false;

@@ -328,8 +328,19 @@ pub fn recovery(
                     .cost_s
                 })
                 .unwrap_or(0.0);
-            let travel = if urgent || !baseline.is_finite() {
+            // Urgent, the way back counts too (Switch, Route 7: Cerulean's
+            // Center, a flight away with no grass, beat Celadon's next
+            // door; the training walked back from Cerulean six maps each
+            // time).
+            let travel = if !baseline.is_finite() {
                 out.cost_s
+            } else if urgent {
+                out.cost_s
+                    + if return_cost.is_finite() {
+                        return_cost
+                    } else {
+                        0.0
+                    }
             } else {
                 (out.cost_s + return_cost - baseline).max(0.0)
             };
@@ -705,6 +716,43 @@ mod tests {
         assert_eq!(choice.map, from.map);
         assert!(choice.medicine.is_none());
         assert!(choice.score_s.is_finite());
+    }
+
+    /// Switch, training on Route 7 with FLY: every urgent heal flew to
+    /// Cerulean's Center (no grass on the way) and the training walked back
+    /// six maps. Counting the way back, Celadon's, next door, is chosen.
+    /// The Switch's checkpoint then (a planner fixture).
+    #[test]
+    fn an_urgent_heal_counts_the_way_back() {
+        use pokebot_state::{DefaultReducer, EventRecord, StateReducer};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let Ok(Some(c)) = crate::checkpoint::load(
+            &root.join("crates/planner/tests/fixtures/switch_route7_state.json"),
+        ) else {
+            return;
+        };
+        let d = data();
+        let graph = graph(&world);
+        let state = DefaultReducer.reduce(
+            &GameState::default(),
+            &[EventRecord {
+                frame_id: 0,
+                event: GameEvent::CheckpointRestored {
+                    knowledge: Box::new(c.knowledge),
+                },
+            }],
+        );
+        let from = PlayerPose {
+            map: "Route7".into(),
+            x: 5,
+            y: 10,
+        };
+        let choice =
+            recovery(&world, &graph, &state, &d, &from, Some("Route7"), true).expect("a healer");
+        assert_eq!(choice.map, "CeladonCity_PokemonCenter_1F", "{choice:?}");
     }
 
     /// Switch, Pokémon Tower 6F, the lead worn: Lavender's Center is seven

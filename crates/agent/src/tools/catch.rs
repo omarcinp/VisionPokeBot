@@ -555,6 +555,13 @@ fn hunt_for(
         Hunt::Level(_) => false,
     };
     loop {
+        // Off the hunt's map (a heal, a Center far away): the way back
+        // flies or uses a field move where that beats walking (Switch: from
+        // Cerulean's Center back to Route 7, the walker's six maps on foot
+        // every time, FLY known).
+        if let Some(map) = map {
+            super::go::reach_map(ctx, map)?;
+        }
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.dex_marked_before = dex_marked_before;
         step.trainee = trainee.map(str::to_owned);
