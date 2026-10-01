@@ -527,10 +527,13 @@ pub fn plan_field_route(
                 .any(|g| g.kind == pokebot_world::gates::GateKind::Metatile)
         })
     };
+    // A warp onto its own map (Saffron Gym's pads) is one the navigator's
+    // search between maps never takes: next to SABRINA, reached only by
+    // the pads, every RunScript failed "no path next to (14, 11)".
     let gated = result
         .legs
         .iter()
-        .any(|l| l.kind == EdgeKind::Warp && doors(&l.from.map));
+        .any(|l| l.kind == EdgeKind::Warp && (doors(&l.from.map) || l.from.map == l.to.map));
     (needed || rides || gated).then_some(result.legs)
 }
 
@@ -1359,6 +1362,32 @@ mod tests {
             .insert("FLAG_SILPH_11F_DOOR".into(), Knowledge::observed(false, 1));
         let shut = GateTiles::believed(&world, graph.gates(), &StateBelief(&state));
         assert!(!walks_to(m, (13, 3), &spots, &Gone::new(), &shut));
+    }
+
+    /// Switch, Saffron Gym's door (14, 22): SABRINA's room is reached only
+    /// by the gym's pads, warps onto the gym itself; every RunScript failed
+    /// "no path next to (14, 11)". The route's pads are followed.
+    #[test]
+    fn saffron_gyms_pads_lead_next_to_sabrina() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let state = pokebot_state::GameState::default();
+        let pose = PlayerPose {
+            map: "SaffronCity_Gym".into(),
+            x: 14,
+            y: 22,
+        };
+        let dest = Dest::Tile {
+            map: "SaffronCity_Gym".into(),
+            x: 14,
+            y: 12,
+        };
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest).expect("followed");
+        assert!(
+            legs.iter()
+                .any(|l| l.kind == EdgeKind::Warp && l.to.map == "SaffronCity_Gym"),
+            "{legs:?}"
+        );
     }
 
     /// Switch, Silph Co. 5F (21, 21) by the Card Key: the navigator's own
