@@ -1390,6 +1390,99 @@ mod tests {
         );
     }
 
+    /// Switch, Saffron Gym: the pads are warps onto the gym itself, and a
+    /// warp read as done on reaching the map it leads to, i.e. at once.
+    /// The legs walked from the door never moved the player, and every
+    /// RunScript to SABRINA failed "no path to (14, 12)". Walked leg by
+    /// leg: each pad is stepped toward, done only on its landing tile,
+    /// and the last walk reaches the tile below SABRINA.
+    #[test]
+    fn saffron_gyms_pads_are_walked_from_the_door_to_sabrina() {
+        use crate::nav::{Destination, NavStatus, Navigator};
+        use pokebot_state::{Observation, Observed, PoseObservation, ScreenState};
+        let Some(world) = world() else { return };
+        let at = |x: i32, y: i32| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation {
+                pose: PlayerPose {
+                    map: "SaffronCity_Gym".into(),
+                    x,
+                    y,
+                },
+                score: 1000,
+            });
+            o
+        };
+        let graph = crate::scheduler::graph(&world);
+        let state = pokebot_state::GameState::default();
+        let door = PlayerPose {
+            map: "SaffronCity_Gym".into(),
+            x: 14,
+            y: 22,
+        };
+        let dest = Dest::Tile {
+            map: "SaffronCity_Gym".into(),
+            x: 14,
+            y: 12,
+        };
+        let legs = plan_field_route(&world, &graph, &state, &door, &dest).expect("the pads' route");
+        let mut stand = (door.x, door.y);
+        let mut pads = 0;
+        for leg in legs.iter().filter(|l| l.kind == EdgeKind::Warp) {
+            let warp = world
+                .map("SaffronCity_Gym")
+                .and_then(|m| {
+                    m.warps
+                        .iter()
+                        .position(|w| (w.x, w.y) == (leg.from.x, leg.from.y))
+                })
+                .expect("a pad");
+            let to_pad = || {
+                Navigator::new(
+                    Arc::clone(&world),
+                    Destination::Warp {
+                        map: "SaffronCity_Gym".into(),
+                        warp,
+                    },
+                )
+            };
+            match to_pad().next(&at(stand.0, stand.1)) {
+                NavStatus::Act(_) => {}
+                NavStatus::Arrived => panic!("pad {warp} done from {stand:?} before a step"),
+                NavStatus::Wait(r) | NavStatus::Fail(r) => panic!("pad {warp}: {r}"),
+            }
+            assert!(
+                matches!(to_pad().next(&at(leg.to.x, leg.to.y)), NavStatus::Arrived),
+                "pad {warp} lands on ({}, {})",
+                leg.to.x,
+                leg.to.y
+            );
+            stand = (leg.to.x, leg.to.y);
+            pads += 1;
+        }
+        assert!(pads >= 2, "{legs:?}");
+        let mut last = Navigator::new(
+            Arc::clone(&world),
+            Destination::Tile {
+                map: "SaffronCity_Gym".into(),
+                x: 14,
+                y: 12,
+            },
+        );
+        match last.next(&at(stand.0, stand.1)) {
+            NavStatus::Act(_) => {}
+            NavStatus::Arrived => panic!("already below SABRINA at {stand:?}"),
+            NavStatus::Wait(r) | NavStatus::Fail(r) => panic!("from {stand:?}: {r}"),
+        }
+    }
+
     /// Switch, Silph Co. 5F (21, 21) by the Card Key: the navigator's own
     /// way to 3F went by the pad at (2, 20), behind a grunt standing in the
     /// corridor, and failed every replan. Through Silph's gated floors the

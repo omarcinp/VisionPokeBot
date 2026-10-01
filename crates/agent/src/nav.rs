@@ -413,12 +413,22 @@ impl Navigator {
         };
         // A warp is done once we stand on the map it leads to; an
         // elevator's door (to `MAP_DYNAMIC`, set by its panel) once we
-        // stand off the car.
+        // stand off the car. A warp onto its own map (Saffron Gym's pads)
+        // is done on the tile it lands on: the map alone read as arrived
+        // before the first step, and every RunScript to SABRINA failed
+        // "no path to (14, 12)" from the door.
         if let Destination::Warp { map: from, warp } = &self.destination {
             let target = world.map(from).and_then(|m| m.warps.get(*warp));
             let dest = target.and_then(|w| world.name_of(&w.dest_map));
             let dynamic = target.is_some_and(|w| w.dest_map == "MAP_DYNAMIC");
-            if dest == Some(pose.map.as_str()) || (dynamic && pose.map != *from) {
+            let landed = if dest == Some(from.as_str()) {
+                target
+                    .and_then(|w| world.warp_destination(w))
+                    .is_some_and(|(m, x, y)| m.name == pose.map && (x, y) == (pose.x, pose.y))
+            } else {
+                dest == Some(pose.map.as_str())
+            };
+            if landed || (dynamic && pose.map != *from) {
                 return NavStatus::Arrived;
             }
         }
