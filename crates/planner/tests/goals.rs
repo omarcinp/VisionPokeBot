@@ -1264,6 +1264,27 @@ fn a_full_party_that_cannot_learn_an_hm_swaps_one_in_at_the_pc() {
     assert!(caught < swap);
 }
 
+/// The catch tool doesn't throw Safari Balls: a SURF learner for the
+/// Switch's party (HM03 in hand) is never planned as a catch in the Safari
+/// Zone (it planned KANGASKHAN on SafariZone_East).
+#[test]
+fn a_safari_zone_species_is_not_planned_as_a_catch() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = checkpoint("switch_silph_state.json");
+    knowledge.bag.pockets.insert(
+        Pocket::TmCase,
+        pokebot_state::Knowledge::observed(vec![("ITEM_HM03".to_owned(), 1)], 1),
+    );
+    let goal = GoalPredicate::party_has_move("MOVE_SURF");
+    let plan = planner.plan(&goal, &knowledge, pose).expect("a plan");
+    print(&plan, 20);
+    assert!(!plan
+        .intents
+        .iter()
+        .any(|s| matches!(&s.intent, Intent::Catch { map, .. } if map.starts_with("SafariZone"))));
+}
+
 /// With a member that can learn Cut, it is taught to that one directly.
 #[test]
 fn cut_goes_to_the_member_that_can_learn_it() {

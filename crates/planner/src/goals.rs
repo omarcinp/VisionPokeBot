@@ -5198,6 +5198,13 @@ impl<'p, 'a> Session<'p, 'a> {
                     if self.planner.world.map(map).is_none() {
                         continue;
                     }
+                    // Its encounters take Safari Balls, bait and rocks, which
+                    // the catch tool doesn't throw (Switch: a full party
+                    // planned KANGASKHAN from SafariZone_East to learn SURF).
+                    if map.starts_with(SAFARI_ZONE) {
+                        unsupported.push(format!("{species} on {map}: Safari Zone catches"));
+                        continue;
+                    }
                     let level = m.max_level.or(m.level).unwrap_or(5);
                     let Some(throws) = expected_throws(self.planner.data, species, level, mult)
                     else {
