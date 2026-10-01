@@ -52,6 +52,9 @@ pub enum Answer {
     Yes,
     No,
     Menu(u8),
+    /// A row of an elevator's floor list (a scrolling list menu that
+    /// doesn't wrap, the cursor starting on the car's floor).
+    ListRow(u8),
 }
 
 /// Where a `Go` ends. Mirrors [`Destination`] (which has no `Deserialize`).
@@ -429,9 +432,12 @@ pub(crate) fn parse_answers(answers: &[String]) -> Vec<Answer> {
             "NO" => Some(Answer::No),
             a => {
                 let (choice, row) = a.split_once('=')?;
-                (choice != "MULTICHOICE_YES_NO")
-                    .then(|| row.trim().parse().ok().map(Answer::Menu))
-                    .flatten()
+                let row: u8 = row.trim().parse().ok()?;
+                match choice {
+                    "MULTICHOICE_YES_NO" => None,
+                    c if c.contains("ELEVATOR") => Some(Answer::ListRow(row)),
+                    _ => Some(Answer::Menu(row)),
+                }
             }
         })
         .collect()

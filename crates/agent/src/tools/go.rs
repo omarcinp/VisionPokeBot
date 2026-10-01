@@ -1355,7 +1355,7 @@ mod tests {
         let p = &world.events().unwrap().script(script).unwrap().paths[path];
         assert!(p.does.iter().any(|e| matches!(e,
             pokebot_world::events::Effect::SetWarp { set_warp, .. } if set_warp == "MAP_ROCKET_HIDEOUT_B4F")));
-        assert_eq!(answers, vec![super::super::Answer::Menu(2)]);
+        assert_eq!(answers, vec![super::super::Answer::ListRow(2)]);
         // The car's floor unknown, the path that rides (and records it).
         assert!(p.does.iter().any(|e| matches!(e,
             pokebot_world::events::Effect::Set { set } if set == "FLAG_TEMP_2")));

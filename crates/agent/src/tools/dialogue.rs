@@ -281,7 +281,13 @@ pub fn resolve_path_with(
 }
 
 /// A conversation on screen, followed page by page.
+/// Up presses that reach the top of any elevator's floor list (Silph Co.:
+/// eleven floors and EXIT).
+const LIST_TOP_PRESSES: u8 = 14;
+
 pub struct Conversation {
+    /// Presses left to reach a planned list row: up to the top, then down.
+    list_moves: Option<(u8, u8)>,
     world: Arc<World>,
     data: Arc<GameData>,
     /// The compiled script known to be running, and its path when the plan
@@ -341,6 +347,7 @@ impl Conversation {
             path,
             answers,
             answers_used: 0,
+            list_moves: None,
             answered: Vec::new(),
             recognised: Vec::new(),
             pending_lines: Vec::new(),
@@ -409,6 +416,35 @@ impl Conversation {
     /// The answer to the question on screen: the plan's next answer, else
     /// the branch policy.
     fn answer(&mut self, menu: &MenuObservation) -> Decision {
+        // An elevator's floors: a list longer than its window (Switch,
+        // Silph Co.: 11F to 1F, six showing, the cursor on the car's floor;
+        // the row counted on screen chose 1F, where the car was). The list
+        // doesn't wrap: up past its top, then down to the row.
+        if let Some(&Answer::ListRow(row)) = self.answers.get(self.answers_used) {
+            let (ups, downs) = self.list_moves.get_or_insert((LIST_TOP_PRESSES, row));
+            let (button, what) = if *ups > 0 {
+                *ups -= 1;
+                (
+                    Button::Up,
+                    format!("choose list row {row} (planned): cursor Up"),
+                )
+            } else if *downs > 0 {
+                *downs -= 1;
+                (
+                    Button::Down,
+                    format!("choose list row {row} (planned): cursor Down"),
+                )
+            } else {
+                self.list_moves = None;
+                (Button::A, format!("choose row {row} (planned)"))
+            };
+            return Decision::Act(Action::new(
+                what,
+                vec![ControllerCommand::Press(button)],
+                Expectation::InputsDone,
+                30,
+            ));
+        }
         if let Some(&Answer::Menu(row)) = self.answers.get(self.answers_used) {
             // A multichoice (an elevator's floors): the plan's row, from
             // wherever the game put the cursor (the car's own floor). A
@@ -611,11 +647,9 @@ impl ToolStep for Conversation {
             if let Some(menu) = &o.menu {
                 // A menu without text (a multichoice after the text closed,
                 // or one we don't know): B, unless the plan is answering.
-                if self
-                    .answers
-                    .get(self.answers_used)
-                    .is_some_and(|a| matches!(a, Answer::Menu(_)) || menu.rows <= 2)
-                {
+                if self.answers.get(self.answers_used).is_some_and(|a| {
+                    matches!(a, Answer::Menu(_) | Answer::ListRow(_)) || menu.rows <= 2
+                }) {
                     return self.answer(menu);
                 }
                 return Decision::Act(Action::new(
@@ -2254,13 +2288,14 @@ mod tests {
             "MULTICHOICE_YES_NO=0".into(),
             "yes".into(),
         ]);
-        assert_eq!(answers, vec![Answer::Menu(2), Answer::Yes]);
+        // An elevator's floors are a list menu: answered by row in the list.
+        assert_eq!(answers, vec![Answer::ListRow(2), Answer::Yes]);
         let mut c = Conversation::new(
             world,
             data,
             Some("RocketHideout_Elevator_EventScript_FloorSelect".into()),
             None,
-            answers,
+            vec![Answer::Menu(2), Answer::Yes],
         );
         let menu = |cursor_row: u8| MenuObservation {
             window: Region::new(8, 8, 64, 68),
@@ -2328,6 +2363,80 @@ mod tests {
         );
         let close = act(c3.answer(&menu(0)));
         assert_eq!(close.commands, vec![ControllerCommand::Press(Button::B)]);
+    }
+
+    /// Switch, Silph Co.'s lift: eleven floors and EXIT, six rows showing,
+    /// the cursor on the car's floor. The row counted on screen chose 1F
+    /// (the car's own). A list row goes up past the top, then down to the
+    /// row, then A; only the A answers.
+    #[test]
+    fn an_elevator_list_row_is_counted_from_the_top() {
+        use pokebot_state::{Observed, Region};
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let mut c = Conversation::new(world, data, None, None, vec![Answer::ListRow(0)]);
+        let menu = MenuObservation {
+            window: Region::new(0, 0, 48, 112),
+            rows: 6,
+            cursor_row: 4,
+            cursor_y: 80,
+        };
+        let o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Dialogue,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut ctx = StepContext {
+            observation: &o,
+            state: &state,
+            events: &mut events,
+            quiet_frames: 0,
+            frame: None,
+            learned: &[],
+        };
+        let act = |d: Decision| match d {
+            Decision::Act(a) => a,
+            _ => panic!("expected an action"),
+        };
+        let pressed = |a: &Action| match a.commands.as_slice() {
+            [ControllerCommand::Press(b)] => *b,
+            other => panic!("{other:?}"),
+        };
+        let mut presses = Vec::new();
+        loop {
+            let a = act(c.answer(&menu));
+            let b = pressed(&a);
+            c.on_outcome(&a, Outcome::Confirmed, &mut ctx);
+            presses.push(b);
+            if b == Button::A {
+                break;
+            }
+            assert_eq!(c.answers_used, 0, "a cursor move is no answer");
+        }
+        assert_eq!(presses.len(), usize::from(LIST_TOP_PRESSES) + 1);
+        assert!(presses[..presses.len() - 1]
+            .iter()
+            .all(|b| *b == Button::Up));
+        assert_eq!(c.answers_used, 1);
+        // Row 2: up to the top, two down, A.
+        let mut c = Conversation::new(
+            Arc::clone(&c.world),
+            Arc::clone(&c.data),
+            None,
+            None,
+            vec![Answer::ListRow(2)],
+        );
+        let presses: Vec<Button> = (0..usize::from(LIST_TOP_PRESSES) + 3)
+            .map(|_| pressed(&act(c.answer(&menu))))
+            .collect();
+        let n = presses.len();
+        assert_eq!(&presses[n - 3..], &[Button::Down, Button::Down, Button::A]);
     }
 
     /// A planned NO starts with the cursor on YES: the move down to NO is
