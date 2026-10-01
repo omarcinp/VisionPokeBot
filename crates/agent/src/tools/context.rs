@@ -1099,9 +1099,10 @@ fn screen_fingerprint(o: &Observation) -> String {
     )
 }
 
-/// The flags (and the value believed) that hold open a drawn gate a walk
-/// found blocked on one of its `blocked` tiles: every flag of each way the
-/// belief holds satisfied, when the way is made of flags alone. One flag
+/// The flags (and the value the way needs) that a drawn gate a walk found
+/// blocked on one of its `blocked` tiles shows don't hold, for each way
+/// made of flags alone: the one not known when the rest hold, or all of
+/// them when the belief holds every one. One flag
 /// is the one that's wrong (Switch, Vermilion Gym: a trash can's "second
 /// lock opened" path recorded on the plan's word; the beams stayed on and
 /// Lt. Surge was walked to eight plans in a row). Of several, which is
@@ -1120,24 +1121,32 @@ pub fn wrong_gate_flags(
     for (map, tiles) in blocked {
         let Some(on) = gates.get(map) else { continue };
         for gate in tiles.iter().filter_map(|t| on.get(t)) {
-            if gate.kind != GateKind::Metatile || !matches!(gate_truth(gate, belief), Truth::True) {
+            if gate.kind != GateKind::Metatile || gate_truth(gate, belief) == Truth::False {
                 continue;
             }
             for way in &gate.ways {
                 let c = check(belief, way);
-                if way.is_empty() || !c.failed.is_empty() || !c.unknown.is_empty() {
+                if way.is_empty() || !c.failed.is_empty() {
                     continue;
                 }
-                let flags: Option<Vec<(String, bool)>> = way
-                    .iter()
-                    .map(|p| match p {
-                        Predicate::Flag { name, is } => Some((name.clone(), *is)),
-                        _ => None,
-                    })
-                    .collect();
-                for flag in flags.into_iter().flatten() {
-                    if !wrong.contains(&flag) {
-                        wrong.push(flag);
+                let flag = |p: &Predicate| match p {
+                    Predicate::Flag { name, is } => Some((name.clone(), *is)),
+                    _ => None,
+                };
+                let flags: Option<Vec<(String, bool)>> = match c.unknown.as_slice() {
+                    // Believed to hold: one of them is wrong.
+                    [] => way.iter().map(flag).collect(),
+                    // The rest hold: the one not known is the one that
+                    // doesn't (fleet continue-5, Rocket Hideout B1F: the
+                    // barrier stays until GRUNT_12 is beaten, unknown;
+                    // routes take an unknown trainer as fought on the way,
+                    // and the walk met the barrier 24 times).
+                    [one] => flag(one).map(|f| vec![f]),
+                    _ => None,
+                };
+                for f in flags.into_iter().flatten() {
+                    if !wrong.contains(&f) {
+                        wrong.push(f);
                     }
                 }
             }
@@ -1189,6 +1198,15 @@ mod tests {
         );
         assert!(
             wrong_gate_flags(&gates, &blocked, &crate::belief_view::StateBelief(&state)).is_empty()
+        );
+        // Fleet continue-5, B1F: the barrier stays until GRUNT_12 is beaten,
+        // not known; met, it shows he isn't.
+        let b1f =
+            std::collections::BTreeMap::from([("RocketHideout_B1F".to_owned(), vec![(20, 19)])]);
+        let unknown = GameState::default();
+        assert_eq!(
+            wrong_gate_flags(&gates, &b1f, &crate::belief_view::StateBelief(&unknown)),
+            [("TRAINER_TEAM_ROCKET_GRUNT_12".to_owned(), true)]
         );
     }
 
