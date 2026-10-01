@@ -1507,3 +1507,51 @@ fn entering_a_cave_from_outdoors_records_the_escape_outside_its_mouth() {
         })
     );
 }
+
+/// Fleet worker 6, Viridian City: the old man's catching demonstration.
+/// "The old man used POKé BALL!", "Gotcha! WEEDLE was caught!": neither
+/// the ball nor the WEEDLE is the player's. The same pages after the
+/// player's own throw still count.
+#[test]
+fn the_old_mans_catch_is_not_the_players() {
+    let Some(d) = data() else { return };
+    let party = |n: usize| {
+        let mut s = GameState::default();
+        s.party = Knowledge::observed(
+            (0..n)
+                .map(|_| PartyMon {
+                    species: Knowledge::observed("SPECIES_SQUIRTLE".into(), 1),
+                    level: Knowledge::observed(6, 1),
+                    ..Default::default()
+                })
+                .collect(),
+            1,
+        );
+        s
+    };
+    let pages = |user: &str| {
+        let mut f: Vec<Observation> = Vec::new();
+        let mut n = 0;
+        for text in [
+            format!("{user} used POKé BALL!"),
+            "Gotcha! WEEDLE was caught!".to_string(),
+        ] {
+            for _ in 0..30 {
+                f.push(page(n, &text));
+                n += 1;
+            }
+        }
+        f.extend((n..n + 30).map(|i| field(i, (20, 20), &[], &[])));
+        f
+    };
+    let caught = |state: &GameState| {
+        state.pokedex.caught.contains_key("SPECIES_WEEDLE")
+            || state.party.value.as_ref().map_or(0, Vec::len) > 1
+    };
+    let mut s = Sensor::new(Arc::clone(&d));
+    let (after, _) = run(&mut s, party(1), pages("The old man"));
+    assert!(!caught(&after), "the old man's WEEDLE taken for ours");
+    let mut s = Sensor::new(d);
+    let (after, _) = run(&mut s, party(1), pages("RED"));
+    assert!(caught(&after), "the player's own catch");
+}

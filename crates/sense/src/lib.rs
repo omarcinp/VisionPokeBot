@@ -192,6 +192,12 @@ pub struct Sensor {
     level_up: Confirm<[u16; 6]>,
     /// A catch whose destination is settled when the battle is over.
     catch: Option<Catch>,
+    /// The battle on screen is the old man's catching demonstration in
+    /// Viridian City ("The old man used POKé BALL!"): its ball and its
+    /// catch are his, not the player's (fleet worker 6: his WEEDLE went
+    /// into the belief's party, the nugget farm chose it to lose with and
+    /// "Can't deposit the last POKéMON!" failed the farm).
+    demo: bool,
 }
 
 /// A Pokémon caught in the battle on screen.
@@ -247,6 +253,7 @@ impl Sensor {
             grew: None,
             level_up: Confirm::default(),
             catch: None,
+            demo: false,
         }
     }
 
@@ -275,6 +282,7 @@ impl Sensor {
         events.extend(self.trigger_battle.observe(self.world.as_deref(), o, state));
         // Back on the field: a catch goes to the party or the PC.
         if o.player.is_some() {
+            self.demo = false;
             if let Some(catch) = self.catch.take() {
                 events.extend(caught_events(&self.data, state, &catch));
             }
@@ -435,7 +443,20 @@ impl Sensor {
         let Some(page) = self.page.update(o.frame_id, reading, TEXT_FRAMES) else {
             return;
         };
-        events.extend(text::page_events(&page, &self.data));
+        if page.contains("old man used") {
+            self.demo = true;
+        }
+        let page_events = text::page_events(&page, &self.data);
+        if self.demo {
+            events.extend(page_events.into_iter().filter(|e| {
+                !matches!(
+                    e,
+                    GameEvent::SpeciesCaught { .. } | GameEvent::ItemsChanged { .. }
+                )
+            }));
+            return;
+        }
+        events.extend(page_events);
         if let Some(species) = text::caught_name(&page).and_then(|n| self.data.species_named(&n)) {
             if self.catch.as_ref().is_none_or(|c| c.species != species) {
                 self.catch = Some(Catch {
