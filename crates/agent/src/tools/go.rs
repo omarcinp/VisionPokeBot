@@ -427,7 +427,26 @@ pub fn ride_path(
         })
         .map(|(i, _, _)| {
             let answers = pokebot_planner::intents::path_answers(&s.paths[i]);
-            (i, super::parse_answers(&answers))
+            let mut answers = super::parse_answers(&answers);
+            // The floor chosen from a list menu reads as the result of the
+            // special that drew it (Switch, Silph Co.: `special
+            // InitElevatorFloorSelectMenuPos == 0` for 11F, no menu choice;
+            // the ride had no answer, the menu was closed, the car stayed).
+            let listed = s.paths[i].when.iter().rev().find_map(|c| match c {
+                pokebot_world::events::Condition::Special { special, cmp }
+                    if special.contains("ElevatorFloor") =>
+                {
+                    cmp.eq.as_ref()?.as_int()
+                }
+                _ => None,
+            });
+            let chosen = answers
+                .iter()
+                .any(|a| matches!(a, super::Answer::ListRow(_) | super::Answer::Menu(_)));
+            if let (false, Some(row)) = (chosen, listed.and_then(|r| u8::try_from(r).ok())) {
+                answers.insert(0, super::Answer::ListRow(row));
+            }
+            (i, answers)
         })
 }
 
@@ -1259,6 +1278,25 @@ mod tests {
         };
         let legs = plan_field_route(&world, &graph, &state, &pose, &dest).expect("a ride out");
         assert!(legs.iter().any(|l| ride(&world, l)), "{legs:?}");
+    }
+
+    /// Switch, Silph Co.'s lift: the floor reads as the special drawing
+    /// the list (`InitElevatorFloorSelectMenuPos == n`), no menu choice.
+    /// The ride to 11F answers its row, 0; to 10F, 1.
+    #[test]
+    fn silph_cos_floor_is_the_lists_row() {
+        let Some(world) = world() else { return };
+        let state = pokebot_state::GameState::default();
+        let script = "SilphCo_Elevator_EventScript_FloorSelect";
+        for (floor, row) in [("SilphCo_11F", 0), ("SilphCo_10F", 1)] {
+            let (_, answers) =
+                ride_path(&world, script, floor, &StateBelief(&state)).expect("a path");
+            assert_eq!(
+                answers.first(),
+                Some(&super::super::Answer::ListRow(row)),
+                "{floor}"
+            );
+        }
     }
 
     /// Switch, Silph Co. 3F (29, 2), the Card Key not held, every door
