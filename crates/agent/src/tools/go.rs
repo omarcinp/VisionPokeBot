@@ -516,7 +516,22 @@ pub fn plan_field_route(
     // into them, "no path to warp (13, 14)", while the elevator was a
     // few steps away).
     let rides = result.legs.iter().any(|l| ride(world, l));
-    (needed || rides).then_some(result.legs)
+    // Through maps whose passages the story opens (Silph Co.'s doors), the
+    // route's warps are followed: the navigator's own search across maps
+    // is coarser there (Switch, Silph Co. 5F: it chose the pad at (2, 20)
+    // behind a grunt standing in the corridor, "no path to warp", every
+    // replan, while the route went by the pad at (15, 7)).
+    let doors = |map: &str| {
+        graph.gates().get(map).is_some_and(|on| {
+            on.values()
+                .any(|g| g.kind == pokebot_world::gates::GateKind::Metatile)
+        })
+    };
+    let gated = result
+        .legs
+        .iter()
+        .any(|l| l.kind == EdgeKind::Warp && doors(&l.from.map));
+    (needed || rides || gated).then_some(result.legs)
 }
 
 /// The price of assuming `p` for a route the tools walk: a trainer not
@@ -699,6 +714,22 @@ pub fn walk_legs(
     let world = Arc::clone(&ctx.world);
     for leg in legs {
         if !special(&world, leg) {
+            // A warp of the route: taken where the route takes it.
+            if leg.kind == EdgeKind::Warp {
+                if let Some(warp) = world.map(&leg.from.map).and_then(|m| {
+                    m.warps
+                        .iter()
+                        .position(|w| (w.x, w.y) == (leg.from.x, leg.from.y))
+                }) {
+                    go(
+                        ctx,
+                        Destination::Warp {
+                            map: leg.from.map.clone(),
+                            warp,
+                        },
+                    )?;
+                }
+            }
             continue;
         }
         match &leg.kind {
@@ -1297,6 +1328,46 @@ mod tests {
                 "{floor}"
             );
         }
+    }
+
+    /// Switch, Silph Co. 5F (21, 21) by the Card Key: the navigator's own
+    /// way to 3F went by the pad at (2, 20), behind a grunt standing in the
+    /// corridor, and failed every replan. Through Silph's gated floors the
+    /// route is followed, and its warp is the pad at (15, 7).
+    #[test]
+    fn silph_cos_floors_follow_the_routes_warps() {
+        use pokebot_state::Knowledge;
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let mut state = pokebot_state::GameState::default();
+        for on in graph.gates().values() {
+            for gate in on.values() {
+                for p in gate.ways.iter().flatten() {
+                    if let pokebot_world::predicate::Predicate::Flag { name, .. } = p {
+                        if name.starts_with("FLAG_SILPH_") {
+                            state
+                                .world
+                                .flags
+                                .insert(name.clone(), Knowledge::observed(false, 1));
+                        }
+                    }
+                }
+            }
+        }
+        let pose = PlayerPose {
+            map: "SilphCo_5F".into(),
+            x: 21,
+            y: 21,
+        };
+        let dest = Dest::Map {
+            map: "SilphCo_3F".into(),
+        };
+        let legs = plan_field_route(&world, &graph, &state, &pose, &dest).expect("followed");
+        let warp = legs
+            .iter()
+            .find(|l| l.kind == EdgeKind::Warp && l.from.map == "SilphCo_5F")
+            .expect("a warp off 5F");
+        assert_eq!((warp.from.x, warp.from.y), (15, 7), "{legs:?}");
     }
 
     /// Switch, Silph Co. 3F (29, 2), the Card Key not held, every door
