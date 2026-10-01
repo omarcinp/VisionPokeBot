@@ -659,7 +659,12 @@ impl FleetControl for Fleet {
                         "alive":true,"managed":false,"status":"connected","task":"no bot"}),
                     );
                 }
-                workers.sort_by_key(|w| w["name"] != "switch");
+                // The Switch, then the workers that continue their own
+                // save like it, then the new games.
+                workers.sort_by_key(|w| {
+                    let name = w["name"].as_str().unwrap_or_default();
+                    (name != "switch", !name.starts_with("emu-continue-"))
+                });
                 (
                     200,
                     json!({"workers": workers, "max_workers": state.limit,
@@ -1093,6 +1098,33 @@ mod tests {
         );
         assert!(dir.join("worker.log.1").is_file());
         assert!(dir.join("data").exists());
+        drop(fleet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The user didn't find the continuing workers on the page: they are
+    /// listed right after the Switch, before the new games.
+    #[test]
+    fn continuing_workers_are_listed_before_the_new_games() {
+        if available_memory() < WORKER_MEMORY * 2 {
+            return;
+        }
+        let (fleet, root) = fixture();
+        std::fs::create_dir(root.join("data/world")).unwrap();
+        std::fs::write(root.join("data/world/index.json"), "{}").unwrap();
+        for task in ["autonomy", CONTINUE] {
+            let (code, body) =
+                fleet.request("POST", "/api/emulators", json!({"count":1,"task":task}));
+            assert_eq!(code, 201, "{body}");
+        }
+        let (_, list) = fleet.request("GET", "/api/emulators", json!({}));
+        let names: Vec<&str> = list["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w["name"].as_str())
+            .collect();
+        assert!(names[0] == "emu-continue-1", "{names:?}");
         drop(fleet);
         std::fs::remove_dir_all(root).unwrap();
     }
