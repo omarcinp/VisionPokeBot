@@ -662,22 +662,8 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
         .into_iter()
         .map(|(t, _)| t)
         .collect();
-    let mut obstacles = crate::nav::object_obstacles(m, &ctx.gone);
-    obstacles.remove(&(pose.x, pose.y));
-    let walk = Walk {
-        obstacles: &obstacles,
-        surf: false,
-        opened: None,
-    };
-    let plain = find_path_with(
-        m,
-        (pose.x, pose.y),
-        &walk,
-        |_| 0,
-        |t| spots.contains(&t),
-        |_| 0,
-    );
-    if plain.is_some() {
+    let gates = ctx.gate_tiles();
+    if walks_to(m, (pose.x, pose.y), &spots, &ctx.gone, &gates) {
         return Ok(());
     }
     for (x, y) in spots {
@@ -701,6 +687,29 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
         }
     }
     Ok(())
+}
+
+/// Whether the navigator walks from `from` to one of `spots` on `m` around
+/// its own obstacles: objects and closed gates (Switch, Silph Co. 11F: its
+/// shut door was left out here, the way next to the door read plain, and
+/// the walk then found none: "no path next to (6, 16)").
+fn walks_to(
+    m: &pokebot_world::MapData,
+    from: (i32, i32),
+    spots: &[(i32, i32)],
+    gone: &Gone,
+    gates: &GateTiles,
+) -> bool {
+    let mut obstacles = crate::nav::object_obstacles(m, gone);
+    obstacles.extend(gates.closed_on(&m.name));
+    obstacles.remove(&from);
+    let opened = gates.opened_on(&m.name);
+    let walk = Walk {
+        obstacles: &obstacles,
+        surf: false,
+        opened: Some(&opened),
+    };
+    find_path_with(m, from, &walk, |_| 0, |t| spots.contains(&t), |_| 0).is_some()
 }
 
 /// Carries out the legs of a route that needs field moves: plain legs are
@@ -1328,6 +1337,28 @@ mod tests {
                 "{floor}"
             );
         }
+    }
+
+    /// Switch, Silph Co. 11F (13, 3), its door shut: the way next to the
+    /// door isn't walked on the floor (it read so, gates left out, and
+    /// the walk found none).
+    #[test]
+    fn a_shut_door_keeps_the_way_next_to_it_off_the_floor() {
+        use pokebot_state::Knowledge;
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let m = world.map("SilphCo_11F").unwrap();
+        let spots: Vec<(i32, i32)> = crate::nav::facing_spots(m, 6, 16)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        let mut state = pokebot_state::GameState::default();
+        state
+            .world
+            .flags
+            .insert("FLAG_SILPH_11F_DOOR".into(), Knowledge::observed(false, 1));
+        let shut = GateTiles::believed(&world, graph.gates(), &StateBelief(&state));
+        assert!(!walks_to(m, (13, 3), &spots, &Gone::new(), &shut));
     }
 
     /// Switch, Silph Co. 5F (21, 21) by the Card Key: the navigator's own
