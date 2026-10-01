@@ -937,13 +937,19 @@ pub fn conditions_shown(
                 flag: flag.clone(),
                 value: *is,
             }),
+            // A trainer's defeat is a flag too: its after-battle words are
+            // printed only once beaten (fleet, Rocket Hideout B4F: GRUNT_17
+            // retracted with the barrier, "BOSS! I'm sorry I failed you!"
+            // read, and the defeat stayed unknown to every plan after).
+            Condition::Trainer { trainer, defeated } => Some(GameEvent::FlagObserved {
+                flag: trainer.clone(),
+                value: *defeated,
+            }),
             _ => None,
         })
         .collect()
 }
 
-/// Whether two paths of `script` change the same things (they differ only
-/// in what they print: the player's gender, the way they faced).
 /// Another path of `script` the screen and the belief can't tell from
 /// `planned`: it prints every label read, takes the answers given, the
 /// belief doesn't rule it out, and it does something else, while the
@@ -982,6 +988,8 @@ pub fn twin_path(
     })
 }
 
+/// Whether two paths of `script` change the same things (they differ only
+/// in what they print: the player's gender, the way they faced).
 fn same_effects(events: &pokebot_world::events::Events, script: &str, a: usize, b: usize) -> bool {
     let Some(s) = events.script(script) else {
         return false;
@@ -1693,6 +1701,26 @@ mod tests {
         world.events()?;
         let data = GameData::load(dir.join("gamedata.json")).ok()?;
         Some((Arc::new(world), Arc::new(data)))
+    }
+
+    /// Fleet (continue-2): a beaten trainer's after-battle words show its
+    /// defeat, whatever the belief held.
+    #[test]
+    fn a_trainers_after_battle_words_show_its_defeat() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let read = ["RocketHideout_B4F_Text_Grunt3PostBattle".to_owned()];
+        let index = LabelIndex::build_for(events, &read);
+        let shown = conditions_shown(events, &index, &read);
+        assert!(
+            shown.contains(&GameEvent::FlagObserved {
+                flag: "TRAINER_TEAM_ROCKET_GRUNT_17".into(),
+                value: true,
+            }),
+            "{shown:?}"
+        );
     }
 
     /// Fleet (continue-2), Rocket Hideout B4F: GRUNT_17's script prints
