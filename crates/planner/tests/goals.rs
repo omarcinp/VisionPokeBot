@@ -1532,3 +1532,83 @@ fn training_goes_where_it_pays_and_heals_at_the_areas_own_center() {
     println!("{map}: {trained:.0} s, Route 7: {:.0} s", on_route7 * 60.0);
     assert!(trained < on_route7 * 60.0);
 }
+
+/// The user's "do some parts of the story to train at the same time":
+/// readiness counts the experience of the battles fought before the
+/// target, the trainers whose sight the walk there can't go round too.
+/// From Pewter with a Lv10 IVYSAUR, Mt. Moon's grunt asks for training to
+/// Lv14 when planned from here, and none once the walk to Mt. Moon has
+/// fought Route 3's trainers; Misty asks for less of it.
+#[test]
+fn readiness_counts_the_trainers_fought_on_the_way() {
+    use pokebot_state::{Knowledge, MoveSlot};
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = pewter();
+    if let Some(party) = knowledge.party.value.as_mut() {
+        let lead = &mut party[0];
+        assert_eq!(lead.species.value.as_deref(), Some("SPECIES_IVYSAUR"));
+        lead.level = Knowledge::observed(10, 1);
+        lead.hp = Knowledge::observed((33, 33), 1);
+        let moves = f.data.default_moves("SPECIES_IVYSAUR", 10);
+        for (i, slot) in lead.moves.iter_mut().enumerate() {
+            *slot = moves.get(i).map(|mv| MoveSlot {
+                mv: Knowledge::observed(mv.clone(), 1),
+                pp: Knowledge::observed((20, 20), 1),
+            });
+        }
+    }
+    for t in &f.data.map_trainers["Route3"] {
+        knowledge
+            .world
+            .flags
+            .insert(t.trainer.clone(), Knowledge::observed(false, 1));
+    }
+    let to_mt_moon = pokebot_planner::PlannedIntent {
+        intent: Intent::Go {
+            dest: "MtMoon_1F".into(),
+        },
+        cost_s: 0.0,
+        assumes: Vec::new(),
+        unless: Vec::new(),
+        note: None,
+        route: Vec::new(),
+        expected: Vec::new(),
+    };
+    let readiness = |trainer: &str, ahead: Vec<pokebot_planner::PlannedIntent>| {
+        let n = ahead.len();
+        let (steps, cost) = planner
+            .readiness_after(&knowledge, pose.clone(), trainer, ahead)
+            .expect("readiness");
+        let trained: Option<u8> = steps
+            .iter()
+            .filter_map(|s| match &s.intent {
+                Intent::Train { species, level, .. } if species == "SPECIES_IVYSAUR" => {
+                    Some(*level)
+                }
+                _ => None,
+            })
+            .max();
+        println!(
+            "{trainer} after {n} steps: {cost:.0} s, {}",
+            steps
+                .iter()
+                .map(|s| s.intent.to_string())
+                .collect::<Vec<_>>()
+                .join(" ; ")
+        );
+        (trained, cost)
+    };
+    let grunt = "TRAINER_TEAM_ROCKET_GRUNT";
+    let (here, here_cost) = readiness(grunt, Vec::new());
+    assert!(here.is_some(), "trains for the grunt from here");
+    let (on, on_cost) = readiness(grunt, vec![to_mt_moon.clone()]);
+    assert!(
+        on.is_none() && on_cost < here_cost,
+        "Route 3 trains it on the way"
+    );
+    let misty = "TRAINER_LEADER_MISTY";
+    let (_, here_cost) = readiness(misty, Vec::new());
+    let (_, on_cost) = readiness(misty, vec![to_mt_moon]);
+    assert!(on_cost < here_cost);
+}

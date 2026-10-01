@@ -974,6 +974,37 @@ impl<'a> Planner<'a> {
         areas
     }
 
+    /// The readiness steps to beat `trainer` once `ahead` has run, with
+    /// their cost: the lead as those steps leave it (trained, and with the
+    /// experience of the trainers they fight, those whose sight a walk
+    /// can't go round included). `None` when readiness can't be planned.
+    pub fn readiness_after(
+        &self,
+        knowledge: &SavedKnowledge,
+        pose: Option<PlayerPose>,
+        trainer: &str,
+        ahead: Vec<PlannedIntent>,
+    ) -> Option<(Vec<PlannedIntent>, f64)> {
+        let inferred = self.infer_choices(knowledge);
+        let knowledge = inferred.as_ref().unwrap_or(knowledge);
+        let session = self.session(knowledge, pose.as_ref());
+        let mut steps: Vec<Step> = ahead
+            .into_iter()
+            .map(|p| Step::new(p, Vec::new()))
+            .collect();
+        let passive = session.passive_walk(&mut steps);
+        let ctx = session.context(&session.base);
+        let c = session.readiness_candidate(
+            trainer,
+            &GoalPredicate::can_beat(trainer),
+            &session.base,
+            &ctx,
+            &passive,
+        );
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = None);
+        c.map(|c| (c.steps.into_iter().map(|s| s.planned).collect(), c.cost))
+    }
+
     /// What must hold for the player to start `script` once on `map`:
     /// an object present (its hide flag clear), a trigger's var at the
     /// value it fires on (a switch only a pushed boulder can press takes
@@ -2235,6 +2266,8 @@ struct Passive {
     seen: BTreeMap<String, f64>,
     explicit: BTreeSet<String>,
     exp: f64,
+    /// The trainers `exp` was earned from, each once, with their share.
+    fought: BTreeMap<String, f64>,
     /// Balls left at the end.
     balls: f64,
     /// The level the lead was trained to on the way, when a `Train` did.
@@ -2260,6 +2293,21 @@ impl Passive {
 
     fn probability(&self, which: DexCount, species: &str) -> f64 {
         self.map(which).get(species).copied().unwrap_or(0.0)
+    }
+
+    /// Credits the lead with beating `trainer` (once).
+    fn fight(&mut self, data: &GameData, trainer: &str) {
+        if !self.fought.contains_key(trainer) {
+            let exp = trainer_exp(data, trainer);
+            self.fought.insert(trainer.to_string(), exp);
+            self.exp += exp;
+        }
+    }
+
+    /// The experience earned before `trainer` is fought: not its own (a
+    /// walk to it through its sight line is that battle).
+    fn exp_before(&self, trainer: &str) -> f64 {
+        (self.exp - self.fought.get(trainer).copied().unwrap_or(0.0)).max(0.0)
     }
 }
 
@@ -2582,7 +2630,7 @@ impl<'p, 'a> Session<'p, 'a> {
                     let throws = b.saturating_sub(self.planner.params.ball_reserve);
                     balls = (balls - f64::from(throws)).max(0.0);
                 }
-                Intent::Beat { trainer, .. } => out.exp += trainer_exp(data, trainer),
+                Intent::Beat { trainer, .. } => out.fight(data, trainer),
                 Intent::Train { species, level, .. } => {
                     let lead = self
                         .base
@@ -2601,7 +2649,7 @@ impl<'p, 'a> Session<'p, 'a> {
                         .and_then(|s| s.paths.get(*path))
                         .and_then(first_battle);
                     if let Some(trainer) = trainer {
-                        out.exp += trainer_exp(data, trainer);
+                        out.fight(data, trainer);
                     }
                 }
                 Intent::Go { dest } => {
@@ -2617,6 +2665,21 @@ impl<'p, 'a> Session<'p, 'a> {
                         if !matches!(leg.kind, EdgeKind::Walk { .. }) || leg.from.map != leg.to.map
                         {
                             continue;
+                        }
+                        // The story trains on the way: a trainer whose
+                        // sight the walk can't go round is fought (its
+                        // `CanBeat` is the walk's need), and its experience
+                        // is the lead's before the battles after it.
+                        if self.planner.sights.contains_key(&leg.from.map) {
+                            if let Some(map) = self.planner.world.map(&leg.from.map) {
+                                for trainer in self.sighted_between(
+                                    map,
+                                    (leg.from.x, leg.from.y),
+                                    (leg.to.x, leg.to.y),
+                                ) {
+                                    out.fight(data, &trainer);
+                                }
+                            }
                         }
                         let Some(table) = data.wild.get(&leg.from.map).and_then(|t| t.get("land"))
                         else {
@@ -5518,7 +5581,7 @@ impl<'p, 'a> Session<'p, 'a> {
     ) -> Option<Candidate> {
         let key = (
             trainer.to_string(),
-            passive.exp as u64,
+            passive.exp_before(trainer) as u64,
             passive.lead_level.unwrap_or(0),
         );
         if let Some(c) = self.readiness.borrow().get(&key) {
