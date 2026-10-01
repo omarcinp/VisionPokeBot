@@ -361,6 +361,7 @@ mod tests {
                 "emu-pc-withdraw",
                 "emu-pc-continue",
                 "emu-pc-box",
+                "switch-pc-box",
             ]
             .iter()
             .any(|p| name.starts_with(p));

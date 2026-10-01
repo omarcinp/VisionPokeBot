@@ -538,6 +538,19 @@ impl PcSwapStep {
                     Expectation::PcCursorMoved(cur),
                 );
             }
+            // The hand over the top row covers the title (Switch, an
+            // empty BOX2: the hand came down from the title to cell 2,
+            // "BOX2" stayed unread and the swap waited until it failed
+            // "no progress in box"): a row down uncovers it.
+            if let PcCursor::Cell(c) = cur {
+                if c < COLUMNS {
+                    return self.act(
+                        "box: down to uncover the title",
+                        Button::Down,
+                        Expectation::PcCursorAt(PcCursor::Cell(c + COLUMNS)),
+                    );
+                }
+            }
             return self.retries.wait(o, "reading the box title");
         };
         if let PcCursor::Cell(c) = cur {
@@ -595,8 +608,20 @@ impl PcSwapStep {
             }
         }
         if complete {
-            // Not in this box: the next one, from the title.
+            // Not in this box: the next one, from the title. Boxes fill in
+            // order (a full one sends deposits to the next): past an empty
+            // one there is nothing (Switch: KANGASKHAN, in the Pokédex but
+            // not in BOX1, would have been looked for in all fourteen).
             self.searched.insert(b);
+            let empty = (0..CELLS).all(|c| matches!(self.cells.get(&(b, c)), Some(None)));
+            if empty {
+                self.fail(format!(
+                    "no {} in the boxes: BOX{} is empty",
+                    display_name(species),
+                    b + 1
+                ));
+                return Decision::Wait("giving up".into());
+            }
             if self.searched.len() >= usize::from(BOXES) {
                 self.fail(format!("no {} in any box", display_name(species)));
                 return Decision::Wait("giving up".into());
@@ -1353,6 +1378,40 @@ mod tests {
             })
         );
         assert!(step.ops.is_empty());
+    }
+
+    /// Switch, Celadon: BOX1 searched, the next box (BOX2, empty) scrolled
+    /// in and the hand came down from the title to cell 2, where it covers
+    /// the title: nothing read, and the swap waited until it failed. A row
+    /// down uncovers it.
+    #[test]
+    fn a_title_under_the_hand_is_uncovered_a_row_down() {
+        let Some(data) = data() else { return };
+        let mut run = Run {
+            state: state(&["SPECIES_IVYSAUR", "SPECIES_PIDGEY"], None),
+            events: Vec::new(),
+        };
+        let mut step = PcSwapStep::new(
+            Arc::clone(&data),
+            None,
+            "SPECIES_PIDGEY",
+            "SPECIES_PARAS",
+            &run.state,
+        );
+        step.ops.pop_front();
+        let mut o = storage(1, PcMode::Box, PcCursor::Cell(2), None);
+        if let Some(pc) = o.pc_storage.as_mut() {
+            pc.box_title = None;
+        }
+        let d = run.settled(&mut step, &o);
+        let Decision::Act(a) = &d else {
+            panic!("{}", show(&d))
+        };
+        assert_eq!(a.label, "box: down to uncover the title");
+        assert!(matches!(
+            a.expect,
+            Expectation::PcCursorAt(PcCursor::Cell(8))
+        ));
     }
 
     /// A box the belief holds is not read in full: the hand goes to the
