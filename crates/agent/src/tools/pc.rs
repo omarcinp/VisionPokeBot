@@ -77,8 +77,23 @@ pub fn box_number(title: &str) -> Option<u8> {
 }
 
 /// Whether a printed species name (`?` for unsure glyphs) is `species`.
+/// Whether `read` names `species` or what it has evolved into: an
+/// evolution the belief missed leaves its old name there (fleet workers 2
+/// and 5: the farm stored the party's WEEDLE, a KAKUNA by then, and "no
+/// party member reads WEEDLE" failed it every replan).
 fn is_species(data: &GameData, read: &str, species: &str) -> bool {
-    data.species_named(read) == Some(species) || fits(&display_name(species), read)
+    let mut line = vec![species.to_owned()];
+    let mut at = 0;
+    while at < line.len() {
+        for next in data.evolutions_of(&line[at]) {
+            if !line.contains(&next) {
+                line.push(next);
+            }
+        }
+        at += 1;
+    }
+    line.iter()
+        .any(|s| data.species_named(read) == Some(s.as_str()) || fits(&display_name(s), read))
 }
 
 /// One storage operation, in the order they are done.
@@ -1014,6 +1029,18 @@ mod tests {
     use super::*;
     use pokebot_core::ControllerCommand;
     use pokebot_state::{Observed, PartyMon, Region, ScreenState};
+
+    /// Fleet workers 2 and 5: the belief's WEEDLE was a KAKUNA on the PC's
+    /// panel. A later form reads as the species; an earlier one doesn't.
+    #[test]
+    fn an_evolved_member_reads_as_its_species() {
+        let Some(data) = data() else { return };
+        assert!(is_species(&data, "WEEDLE", "SPECIES_WEEDLE"));
+        assert!(is_species(&data, "KAKUNA", "SPECIES_WEEDLE"));
+        assert!(is_species(&data, "BEEDRILL", "SPECIES_WEEDLE"));
+        assert!(!is_species(&data, "WEEDLE", "SPECIES_KAKUNA"));
+        assert!(!is_species(&data, "PIDGEY", "SPECIES_WEEDLE"));
+    }
 
     fn data() -> Option<Arc<GameData>> {
         GameData::load(
