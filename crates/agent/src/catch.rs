@@ -253,9 +253,11 @@ pub fn plan_catch_wanted(
     if trainer {
         return Err("a trainer's Pokémon can't be caught".into());
     }
-    // The hunt ends once its species is marked caught: an unread icon on
-    // the wanted one is not a reason to let it go.
-    let caught_ok = foe.caught == Some(false) || (wanted && foe.caught != Some(true));
+    // The hunt's species is caught however the flag reads: a hunt that is
+    // on wants one more (a party member) or hasn't read it caught yet
+    // (fleet worker 2: PIDGEY caught long before, the hunt for a second
+    // ran from eight in a row, "caught flag Some(true)").
+    let caught_ok = foe.caught == Some(false) || wanted;
     if !foe.shiny && !caught_ok {
         return Err(format!("{}: caught flag {:?}", foe.species, foe.caught));
     }
@@ -1661,12 +1663,13 @@ mod tests {
         let one = with_balls(&[("ITEM_POKE_BALL", 1)]);
         let abra = foe("SPECIES_ABRA", 12);
         assert!(wanted(&one, 60, &abra).is_ok());
-        // Declined: caught already, no ball, or the lead at risk.
+        // Caught already: the hunt wants another (fleet worker 2, a second
+        // PIDGEY for the party). Declined: no ball, or the lead at risk.
         let caught = Foe {
             caught: Some(true),
             ..pidgey.clone()
         };
-        assert!(wanted(&reserve, 60, &caught).is_err());
+        assert!(wanted(&reserve, 60, &caught).is_ok());
         let none = with_balls(&[("ITEM_POKE_BALL", 0)]);
         assert!(wanted(&none, 60, &pidgey).is_err());
         let geodude = foe("SPECIES_GEODUDE", 9);
