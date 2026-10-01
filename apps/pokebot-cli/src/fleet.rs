@@ -1052,15 +1052,20 @@ mod tests {
             assert_eq!(code, 201, "{started}");
             started["started"].clone()
         };
+        // The shell creates the file before the worker writes it: waited
+        // for until it has been written (under a loaded test run it was
+        // read empty).
         let args = |k: u64| {
             let file = root.join(format!("runs/continue-{k}/args.txt"));
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !file.exists() && Instant::now() < deadline {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                if text.ends_with('\n') || Instant::now() >= deadline {
+                    std::fs::remove_file(&file).unwrap();
+                    return text;
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let text = std::fs::read_to_string(&file).unwrap();
-            std::fs::remove_file(&file).unwrap();
-            text
         };
         assert_eq!(launch(2), json!(["emu-continue-1", "emu-continue-2"]));
         assert!(args(1).starts_with("story\n--new-game\n"));
