@@ -109,6 +109,10 @@ pub struct Assumption {
     pub source: String,
 }
 
+/// Steps after one whose target is out of reach looked at for one to run
+/// first ([`Run::look_ahead`]).
+const LOOK_AHEAD: usize = 3;
+
 /// Told about every status change (telemetry).
 pub type StatusSink = Box<dyn FnMut(&GoalStatus)>;
 
@@ -185,6 +189,9 @@ struct Run<'g, 'p> {
     last_failure: Option<(String, String)>,
     /// Intent names that failed at each pose since the last success.
     failed_at: Vec<(PlayerPose, String)>,
+    /// Later steps already run ahead of one whose target was out of reach
+    /// ([`LOOK_AHEAD`]), so each is tried once.
+    looked_ahead: BTreeSet<String>,
     /// The last failure's reason, whatever the intent (a plan retrying
     /// one script by its paths fails the same way under other names).
     last_reason: Option<String>,
@@ -230,6 +237,7 @@ pub fn run(
         },
         last_failure: None,
         failed_at: Vec::new(),
+        looked_ahead: BTreeSet::new(),
         last_reason: None,
         recourses_run: 0,
         probed: BTreeSet::new(),
@@ -528,6 +536,16 @@ impl Run<'_, '_> {
                         self.set_status("fainted", why.clone(), k, Some(step), ctx);
                         return Ok(Executed::Fainted(why));
                     }
+                    // Its target out of reach: a later step of the plan may
+                    // be what opens the way (Switch, Silph Co.: 11F's door
+                    // is opened from the far side of the floor, reached past
+                    // the 7F rival planned right after it; "no path next to
+                    // (5, 16)", in a loop). The next few are tried once.
+                    if reason.starts_with("no path") {
+                        if let Some(why) = self.look_ahead(ctx, plan, i)? {
+                            return Ok(Executed::Replan(why));
+                        }
+                    }
                     let why = self.failed(ctx, plan, step, &reason)?;
                     self.set_status("failed", why.clone(), k, Some(step), ctx);
                     return Ok(Executed::Replan(why));
@@ -535,6 +553,40 @@ impl Run<'_, '_> {
             }
         }
         Ok(Executed::Completed)
+    }
+
+    /// Runs the first of the [`LOOK_AHEAD`] steps after step `i` that is a
+    /// battle or a script and wasn't run ahead already; why to replan,
+    /// when one ran.
+    fn look_ahead(
+        &mut self,
+        ctx: &mut ToolContext<'_>,
+        plan: &Plan,
+        i: usize,
+    ) -> Result<Option<String>, ToolError> {
+        for later in plan.intents.iter().skip(i + 1).take(LOOK_AHEAD) {
+            let key = later.intent.to_string();
+            let runs = matches!(
+                later.intent,
+                pokebot_planner::Intent::RunScript { .. } | pokebot_planner::Intent::Beat { .. }
+            );
+            if !runs || self.looked_ahead.contains(&key) {
+                continue;
+            }
+            self.looked_ahead.insert(key.clone());
+            let Ok(intent) = Intent::from_planned(&later.intent, Some(&ctx.world)) else {
+                continue;
+            };
+            ctx.emit(progress(GOAL, format!("out of reach: {key} first")))?;
+            let outcome = ctx.invoke(&intent);
+            self.report.learned.extend(outcome.learned.iter().cloned());
+            return match outcome.result {
+                Ok(()) => Ok(Some(format!("ran {key} ahead of a step out of reach"))),
+                Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
+                Err(_) => Ok(None),
+            };
+        }
+        Ok(None)
     }
 
     /// A white-out (the screen, the tool's reason, or every member at 0 HP)

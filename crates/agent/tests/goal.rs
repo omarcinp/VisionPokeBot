@@ -1239,3 +1239,51 @@ fn the_nugget_bridge_grunt_is_farmed_before_he_is_fought() {
     assert_eq!(h.seen_names(), vec!["Beat", "Catch"]);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn run_script(script: &str) -> Planned {
+    Planned::RunScript {
+        script: script.into(),
+        path: 0,
+        answers: Vec::new(),
+        map: "PalletTown".into(),
+    }
+}
+
+/// Switch, Silph Co.: 11F's door is opened from the far side of the
+/// floor, reached past the 7F rival planned right after it; "no path next
+/// to (5, 16)" looped. A step out of reach runs the next script first,
+/// once, and replans.
+#[test]
+fn a_step_out_of_reach_runs_the_next_one_first() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let planner = FakePlanner::new(vec![
+        plan(vec![
+            step(run_script("PalletTown_EventScript_Door")),
+            step(run_script("PalletTown_EventScript_Rival")),
+            step(catch()),
+        ]),
+        plan(vec![step(catch())]),
+    ]);
+    let h = Harness::new(vec![
+        (
+            "RunScript",
+            vec![
+                Err("no path next to (5, 16) on PalletTown".into()),
+                Ok(vec![]),
+            ],
+        ),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(h.seen_names(), vec!["RunScript", "RunScript", "Catch"]);
+    assert!(
+        report.plans[1]
+            .reason
+            .contains("ahead of a step out of reach"),
+        "{:?}",
+        report.plans
+    );
+}
