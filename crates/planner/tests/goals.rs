@@ -1189,6 +1189,81 @@ fn cut_for_a_party_that_cannot_learn_it_is_caught_first() {
         .any(|s| matches!(&s.intent, Intent::Teach { mon, .. } if mon == "SPECIES_BLASTOISE")));
 }
 
+/// Switch, HM03 from the Safari Zone: a full party where no member can
+/// learn the HM. One that can is taken in at the PC for the weakest
+/// member but the lead (one caught already; else caught first, which goes
+/// to the box), then taught; never "the party is full".
+#[test]
+fn a_full_party_that_cannot_learn_an_hm_swaps_one_in_at_the_pc() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let party = [
+        ("SPECIES_BLASTOISE", 40),
+        ("SPECIES_MAGIKARP", 7),
+        ("SPECIES_ZUBAT", 12),
+        ("SPECIES_PIDGEY", 9),
+        ("SPECIES_GEODUDE", 10),
+        ("SPECIES_SPEAROW", 11),
+    ];
+    for (species, _) in party {
+        assert!(!f.data.can_learn(species, "ITEM_HM01"), "{species}");
+    }
+    let goal = GoalPredicate::party_has_move("MOVE_CUT");
+    let swaps = |plan: &Plan| -> Vec<(String, String)> {
+        plan.intents
+            .iter()
+            .filter_map(|s| match &s.intent {
+                Intent::Swap {
+                    deposit, withdraw, ..
+                } => Some((deposit.clone(), withdraw.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    // Caught already: swapped in for MAGIKARP (Lv7), then taught.
+    let (mut knowledge, pose) = with_hm01(&party);
+    knowledge.pokedex.caught.insert(
+        "SPECIES_RATTATA".to_owned(),
+        pokebot_state::Knowledge::observed(true, 1),
+    );
+    let plan = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
+    print(&plan, 20);
+    assert_eq!(
+        swaps(&plan),
+        [("SPECIES_MAGIKARP".to_owned(), "SPECIES_RATTATA".to_owned())]
+    );
+    let swap = position(&plan, |i| matches!(i, Intent::Swap { .. }));
+    let teach = position(
+        &plan,
+        |i| matches!(i, Intent::Teach { mon, .. } if mon == "SPECIES_RATTATA"),
+    );
+    assert!(swap < teach);
+    // None caught (known): one is caught for it first.
+    let (mut knowledge, pose) = with_hm01(&party);
+    for species in f.data.species.keys() {
+        if f.data.can_learn(species, "ITEM_HM01") {
+            knowledge.pokedex.caught.insert(
+                species.clone(),
+                pokebot_state::Knowledge::observed(false, 1),
+            );
+        }
+    }
+    let plan = planner.plan(&goal, &knowledge, pose).unwrap();
+    print(&plan, 20);
+    let all = swaps(&plan);
+    let [(deposit, withdraw)] = &all[..] else {
+        panic!("one swap: {all:?}");
+    };
+    assert_eq!(deposit, "SPECIES_MAGIKARP");
+    assert!(f.data.can_learn(withdraw, "ITEM_HM01"), "{withdraw}");
+    let caught = position(
+        &plan,
+        |i| matches!(i, Intent::Catch { species, .. } if species == withdraw),
+    );
+    let swap = position(&plan, |i| matches!(i, Intent::Swap { .. }));
+    assert!(caught < swap);
+}
+
 /// With a member that can learn Cut, it is taught to that one directly.
 #[test]
 fn cut_goes_to_the_member_that_can_learn_it() {

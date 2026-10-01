@@ -144,6 +144,21 @@ const NEAREST_AREAS: usize = 12;
 const TEACH_LEVEL_S: f64 = 0.2;
 /// Species offered to catch when no party member can learn an HM.
 const TEACH_CATCH_OPTIONS: usize = 3;
+
+/// Whether `mv` is a move used in the field (an HM's, or one of its kind).
+fn is_field_move(mv: &str) -> bool {
+    matches!(
+        mv,
+        "MOVE_CUT"
+            | "MOVE_FLY"
+            | "MOVE_SURF"
+            | "MOVE_STRENGTH"
+            | "MOVE_FLASH"
+            | "MOVE_ROCK_SMASH"
+            | "MOVE_WATERFALL"
+            | "MOVE_DIG"
+    )
+}
 /// Party members at most (a catch past it goes to the PC).
 const PARTY_SIZE: usize = 6;
 /// A species the walk is expected to catch with at least this probability
@@ -5039,12 +5054,48 @@ impl<'p, 'a> Session<'p, 'a> {
             .value
             .as_ref()
             .is_some_and(|p| p.len() >= PARTY_SIZE);
+        // A full party takes one that can learn it in at the PC, for its
+        // weakest member but the lead: one caught already, else one caught
+        // for it (the catch goes to the box; `Swap` needs it caught, which
+        // the plan establishes first). Switch, HM03 from the Safari Zone's
+        // secret house: no member could learn SURF, and every plan stopped
+        // at "the party is full".
+        let swap_in = |species: &str| -> Option<Candidate> {
+            // One carrying a field move stays when another can go: the
+            // weakest are often the HM users the routes need.
+            let carries = |m: &PartyMember| m.moves.iter().any(|mv| is_field_move(mv));
+            let deposit = party
+                .iter()
+                .enumerate()
+                .skip(1)
+                .min_by_key(|(i, m)| (carries(m), m.level, std::cmp::Reverse(*i)))
+                .map(|(_, m)| m.species.clone())?;
+            let center = self.nearest_center(belief)?;
+            let swap = Intent::Swap {
+                deposit,
+                withdraw: species.to_string(),
+                center,
+            };
+            let cost = swap.cost_s(ctx);
+            let mut c = Candidate::single(swap, ctx, cost);
+            let then = teach(species);
+            c.steps.extend(then.steps);
+            c.cost += then.cost;
+            Some(c)
+        };
         if full {
-            return vec![self.unsupported(
-                format!("no party member can learn {hm} and the party is full"),
-                p,
-                ctx,
-            )];
+            let caught: Vec<&String> = belief
+                .knowledge
+                .pokedex
+                .caught
+                .iter()
+                .filter(|(s, k)| k.value == Some(true) && data.can_learn(s, hm))
+                .map(|(s, _)| s)
+                .collect();
+            let out: Vec<Candidate> = caught.iter().filter_map(|s| swap_in(s)).collect();
+            if !out.is_empty() {
+                return out;
+            }
         }
         // (cost, species, catch then teach)
         let mut options: Vec<(OrdF64, String, Candidate)> = Vec::new();
@@ -5072,6 +5123,13 @@ impl<'p, 'a> Session<'p, 'a> {
             let Some(mut c) = best else {
                 continue;
             };
+            if full {
+                // Ranked by its catch; the swap's own need plans it.
+                if let Some(swap) = swap_in(species) {
+                    options.push((OrdF64(c.cost + swap.cost), species.clone(), swap));
+                }
+                continue;
+            }
             let then = teach(species);
             c.steps.extend(then.steps);
             for pre in then.preconditions {
@@ -5084,6 +5142,13 @@ impl<'p, 'a> Session<'p, 'a> {
         }
         options.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
         options.truncate(TEACH_CATCH_OPTIONS);
+        if options.is_empty() && full {
+            return vec![self.unsupported(
+                format!("no party member can learn {hm}, the party is full and none in reach can"),
+                p,
+                ctx,
+            )];
+        }
         if options.is_empty() {
             // Far ahead (Surf from Pallet): the party will have changed by
             // then, and the replan there finds the catch once its grass is
