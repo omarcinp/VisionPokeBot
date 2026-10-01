@@ -1515,9 +1515,8 @@ fn entering_a_cave_from_outdoors_records_the_escape_outside_its_mouth() {
 #[test]
 fn the_old_mans_catch_is_not_the_players() {
     let Some(d) = data() else { return };
-    let party = |n: usize| {
-        let mut s = GameState::default();
-        s.party = Knowledge::observed(
+    let party = |n: usize| GameState {
+        party: Knowledge::observed(
             (0..n)
                 .map(|_| PartyMon {
                     species: Knowledge::observed("SPECIES_SQUIRTLE".into(), 1),
@@ -1526,8 +1525,8 @@ fn the_old_mans_catch_is_not_the_players() {
                 })
                 .collect(),
             1,
-        );
-        s
+        ),
+        ..GameState::default()
     };
     let pages = |user: &str| {
         let mut f: Vec<Observation> = Vec::new();
