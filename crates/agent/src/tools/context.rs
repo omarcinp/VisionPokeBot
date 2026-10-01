@@ -168,6 +168,10 @@ pub struct ToolContext<'a> {
     /// ([`crate::ledger`]); in memory only unless given a file.
     pub ledger: crate::ledger::Ledger,
     next_need_check: u64,
+    /// The frame from which an item ball on the way is looked for again.
+    next_pickup_check: u64,
+    /// The tools running, outermost first (their intents' names).
+    running: Vec<&'static str>,
     toolbox: Toolbox,
     expects: Expects,
     depth: usize,
@@ -246,6 +250,8 @@ impl<'a> ToolContext<'a> {
             running_script: None,
             ledger: crate::ledger::Ledger::default(),
             next_need_check: 0,
+            next_pickup_check: 0,
+            running: Vec::new(),
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,
@@ -363,6 +369,16 @@ impl<'a> ToolContext<'a> {
 
     pub fn toolbox(&self) -> &Toolbox {
         &self.toolbox
+    }
+
+    /// The tools running, outermost first (their intents' names).
+    pub fn running(&self) -> &[&'static str] {
+        &self.running
+    }
+
+    /// What the running tool has learned so far.
+    pub fn learned(&self) -> &[GameEvent] {
+        &self.learned
     }
 
     /// The last frame's observation.
@@ -664,19 +680,25 @@ impl<'a> ToolContext<'a> {
         // With the location unconfirmed no frame is located, and that need
         // is served from right there.
         let unconfirmed = !self.runtime.state().player.candidates.is_empty();
-        if (o.player.is_some() || unconfirmed)
-            && !expects.dialogue
+        let boundary = !expects.dialogue
             && o.dialogue.is_none()
             && o.menu.is_none()
             && o.battle.is_none()
             && o.party_menu.is_none()
             && o.summary.is_none()
             && o.pc_storage.is_none()
-            && self.quiet_frames >= SETTLE_FRAMES
-            && o.frame_id >= self.next_need_check
-        {
+            && self.quiet_frames >= SETTLE_FRAMES;
+        if boundary && (o.player.is_some() || unconfirmed) && o.frame_id >= self.next_need_check {
             self.next_need_check = o.frame_id + 180;
             if self.service_needs()? {
+                return Ok(true);
+            }
+        }
+        // An item ball on the way, looked for about every tile walked (a
+        // ball three tiles off the path is passed in a second).
+        if boundary && o.player.is_some() && o.frame_id >= self.next_pickup_check {
+            self.next_pickup_check = o.frame_id + 15;
+            if super::pickup::pick_up_on_the_way(self)? {
                 return Ok(true);
             }
         }
@@ -947,7 +969,9 @@ impl<'a> ToolContext<'a> {
         let expects = self.expects;
         let learned = std::mem::take(&mut self.learned);
         self.depth += 1;
+        self.running.push(intent.name());
         let mut outcome = tool.run(intent, self);
+        self.running.pop();
         self.depth -= 1;
         self.scheduler.recovering = recovering;
         self.scheduler.destination = destination;

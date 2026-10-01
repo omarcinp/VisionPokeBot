@@ -718,10 +718,12 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         return Ok(());
     };
     let index = LabelIndex::build_for(events, &conversation.recognised);
+    let ball = found_ball(events, &ctx.data, conversation);
     let resolved = {
         let belief = StateBelief(ctx.state());
         conversation.resolved_in(&index, Some(&belief))
-    };
+    }
+    .or_else(|| ball.as_ref().map(|(s, p, _)| (s.clone(), *p)));
     // What the text read proves, whatever path ran: a condition every
     // path printing it shares (Switch, Vermilion: "The ship set sail." is
     // only printed with the city's scene var at 3, the belief held 1 and
@@ -766,6 +768,26 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
     let diverged = conversation
         .path
         .filter(|&planned| planned != path && !same_effects(events, &script, planned, path));
+    // The ball's item, read only on its "put" page: counted here, once.
+    if let Some((_, _, Some(item))) = ball.filter(|(s, p, _)| *s == script && *p == path) {
+        let counted = ctx.learned().iter().any(|e| {
+            matches!(e, GameEvent::ItemsChanged { item: i, delta, .. } if *i == item && *delta > 0)
+        });
+        let pocket = ctx
+            .data
+            .items
+            .get(&item)
+            .and_then(|i| i.pocket.as_deref())
+            .and_then(pokebot_state::Pocket::from_decomp);
+        if let (false, Some(pocket)) = (counted, pocket) {
+            ctx.emit(GameEvent::ItemsChanged {
+                pocket,
+                item,
+                delta: 1,
+                reason: "found".into(),
+            })?;
+        }
+    }
     record_path(ctx, &script, path)?;
     match diverged {
         Some(planned) => Err(ToolError::Replan(format!(
@@ -773,6 +795,46 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         ))),
         _ => Ok(()),
     }
+}
+
+/// The planned path of an item ball (`finditem`) when the conversation
+/// shows its item taken, and the item when only its "put" page showed it
+/// (not counted yet; a key item's page is the sensor's). The ball prints
+/// "RED found X!" and "RED put the X in the Y POCKET.", texts of no
+/// script's own, so the item is the path's evidence; unrecorded, the
+/// ball's hide flag stayed clear and the taken ball was still believed
+/// there. The "found" page plays through with the fanfare and is easily
+/// missed (emulator, Mt. Moon 1F: "found a TM09!" never read, "put the
+/// TM09 in the TM CASE." read).
+fn found_ball(
+    events: &pokebot_world::events::Events,
+    data: &GameData,
+    conversation: &Conversation,
+) -> Option<(String, usize, Option<String>)> {
+    let script = conversation.script.as_ref()?;
+    let path = conversation.path?;
+    let item = events
+        .script(script)?
+        .paths
+        .get(path)?
+        .does
+        .iter()
+        .find_map(|e| match e {
+            Effect::Give {
+                give, find: true, ..
+            } => Some(give.clone()),
+            _ => None,
+        })?;
+    let info = data.items.get(&item);
+    let put = info.is_some_and(|i| {
+        let put = format!(" put the {} in the ", i.name);
+        conversation.pages.iter().any(|p| p.contains(&put))
+    });
+    if conversation.gained_item {
+        return Some((script.clone(), path, None));
+    }
+    let key = info.and_then(|i| i.pocket.as_deref()) == Some("POCKET_KEY_ITEMS");
+    put.then(|| (script.clone(), path, (!key).then_some(item)))
 }
 
 /// The story state `recognised` proves: the conditions every script path
@@ -1993,6 +2055,57 @@ mod tests {
         step(&mut c, &won);
         assert!(c.battled);
         assert_eq!(c.resolved(&index), Some((brock.into(), fights)));
+    }
+
+    /// An item ball prints only "RED found X!" and "RED put the X in the
+    /// Y POCKET.": either is its path's evidence, so the ball's hide flag
+    /// is recorded. Neither (a full bag), nothing recorded; a gift's text
+    /// is its own.
+    #[test]
+    fn a_ball_whose_item_was_found_ran_its_path() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let ball = "ViridianForest_EventScript_ItemAntidote";
+        let mut c = Conversation::new(
+            Arc::clone(&world),
+            Arc::clone(&data),
+            Some(ball.into()),
+            Some(0),
+            vec![],
+        );
+        assert_eq!(found_ball(events, &data, &c), None);
+        // Only the "put" page read: the item is still to count.
+        c.pages = vec!["GOLD put the ANTIDOTE in the ITEMS POCKET.".into()];
+        assert_eq!(
+            found_ball(events, &data, &c),
+            Some((ball.into(), 0, Some("ITEM_ANTIDOTE".into())))
+        );
+        c.gained_item = true;
+        assert_eq!(found_ball(events, &data, &c), Some((ball.into(), 0, None)));
+        let (learned, _) = super::super::effects::path_events(
+            events,
+            ball,
+            0,
+            &GameState::default(),
+            &data,
+            None,
+            &|_| None,
+        );
+        assert!(learned.contains(&GameEvent::FlagTracked {
+            flag: "FLAG_HIDE_VIRIDIAN_FOREST_ANTIDOTE".into(),
+            value: true
+        }));
+        let mut gift = Conversation::new(
+            Arc::clone(&world),
+            Arc::clone(&data),
+            Some("Route1_EventScript_MartClerk".into()),
+            Some(2),
+            vec![],
+        );
+        gift.gained_item = true;
+        assert_eq!(found_ball(events, &data, &gift), None);
     }
 
     /// A RunScript that fights a trainer who must be beaten heals first

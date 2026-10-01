@@ -24,6 +24,7 @@ pub mod menu;
 mod party_audit;
 pub mod party_order;
 pub mod pc;
+pub mod pickup;
 pub mod probe;
 mod save;
 pub mod scene;

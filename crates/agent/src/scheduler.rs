@@ -174,6 +174,16 @@ pub struct Scheduler {
     pub graph: Option<PlaceGraph>,
     pub assumptions: Vec<pokebot_planner::GoalPredicate>,
     pub invalidated: Option<String>,
+    /// An item ball is being picked up on the way
+    /// ([`crate::tools::pickup`]): no other detour starts inside it.
+    pub picking: bool,
+    /// Item balls (map, local id) a pickup went for this session, taken
+    /// or not: one that wasn't taken (a full pocket, no way next to it)
+    /// is not gone for again.
+    pub pickups_tried: std::collections::BTreeSet<(String, u32)>,
+    /// The tile the last pickup check was made from: the same tile gives
+    /// the same answer.
+    pub pickup_checked: Option<PlayerPose>,
 }
 impl Scheduler {
     pub fn event(&mut self, event: &GameEvent, state: &GameState, data: &GameData) -> bool {
