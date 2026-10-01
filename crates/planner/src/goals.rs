@@ -61,7 +61,10 @@ use pokebot_world::gates::{is_local_flag, is_local_var};
 use pokebot_world::obstacles::{blockers, sight_line, static_obstacles, Passage};
 use pokebot_world::path::{find_path_with, reach, Obstacles, Reach, Walk};
 use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
-use pokebot_world::route::{EdgeKind, PlaceGraph, RouteParams, RouteResult, UnknownPolicy};
+use pokebot_world::route::{
+    open_costs_to_maps, open_route_to_any_map, open_route_to_tiles, EdgeKind, PlaceGraph,
+    RouteParams, RouteResult, UnknownPolicy,
+};
 use pokebot_world::{MapData, World};
 use serde::{Deserialize, Serialize};
 
@@ -73,10 +76,21 @@ use crate::intents::{
 };
 use crate::levels::{Achiever, Levels, Start};
 use crate::methods::Methods;
-use crate::prepare::{plan_preparation, Area, PlanStep, Request};
+use crate::prepare::{
+    plan_preparation, rough_training, Area, PartyMember, PlanStep, Request, ROUGH_BATTLES_PER_HEAL,
+};
 
 /// Training/catching areas offered to the readiness planner.
 const TRAINING_AREAS: usize = 4;
+/// Areas whose training is priced exactly (their grass and their Center
+/// routed to): the best by the rough estimate.
+const PRICED_AREAS: usize = 8;
+/// Levels each member is trained by in the rough ranking of the areas.
+const ROUGH_LEVELS: u8 = 3;
+/// Minutes a heal is taken to cost where it isn't routed.
+const ROUGH_HEAL_MINUTES: f64 = 3.0;
+/// The Safari Zone's maps: their encounters are thrown at, never fought.
+const SAFARI_ZONE: &str = "SafariZone";
 /// Charged when a probed fact has to be assumed because nothing establishes
 /// it: beyond any real plan, so the work is always preferred.
 const FALLBACK_S: f64 = 1.0e7;
@@ -793,87 +807,7 @@ impl<'a> Planner<'a> {
         let original = knowledge;
         let inferred = self.infer_choices(knowledge);
         let knowledge = inferred.as_ref().unwrap_or(knowledge);
-        let mut base = StateBelief::new(knowledge, self.data, pose.clone());
-        base.floors = self.var_floors(knowledge);
-        base.confidence = self.options.confidence;
-        let mut session = Session {
-            planner: self,
-            base,
-            expanded: Cell::new(0),
-            started: Instant::now(),
-            nesting: Cell::new(0),
-            active: RefCell::new(Vec::new()),
-            partial: RefCell::new(None),
-            prefix: RefCell::new(Vec::new()),
-            routes: RefCell::new(HashMap::new()),
-            open_routes: RefCell::new(HashMap::new()),
-            reaches: RefCell::new(HashMap::new()),
-            sighted: RefCell::new(HashMap::new()),
-            hops: pose
-                .as_ref()
-                .map(|p| hops(self.world, &p.map))
-                .unwrap_or_default(),
-            grass_routes: RefCell::new(HashMap::new()),
-            min_costs: RefCell::new(BTreeMap::new()),
-            readiness: RefCell::new(BTreeMap::new()),
-            methods: RefCell::new(BTreeMap::new()),
-            seq: Cell::new(0),
-            trace: std::env::var_os("POKEBOT_PLAN_TRACE").is_some(),
-            spent: RefCell::new([0.0; 4]),
-            levels: Rc::new(Levels::unknown()),
-            bound_routes: RefCell::new(HashMap::new()),
-            story: StoryPrior {
-                implied: {
-                    let mut implied = self.implied_flags(knowledge);
-                    for (flag, v) in self.history(knowledge).flags {
-                        if knowledge.world.flag(&flag).value.is_none() {
-                            implied.entry(flag).or_insert(v);
-                        }
-                    }
-                    implied
-                },
-                ..self.story.clone()
-            },
-            spot_needs_cache: RefCell::new(HashMap::new()),
-            candidate_memo: RefCell::new(HashMap::new()),
-        };
-        if session.trace {
-            eprintln!(
-                "[plan] the knowledge implies var floors {:?}",
-                session.base.floors
-            );
-        }
-        if let Some(pose) = &pose {
-            let (flags, floors) = self.position_implied(&session.base, &session.story, pose);
-            if session.trace {
-                eprintln!("[plan] where the player is implies {flags:?} and {floors:?}");
-            }
-            for (f, v) in flags {
-                session.story.implied.entry(f).or_insert(v);
-            }
-            for (var, floor) in floors {
-                let entry = session.base.floors.entry(var).or_insert(floor);
-                *entry = (*entry).max(floor);
-            }
-            let t = Instant::now();
-            let levels = crate::levels::compute(
-                self.world,
-                self.graph,
-                pose,
-                &self.achievers,
-                self.start_of(knowledge, &session.base, pose, &session.story),
-            );
-            if session.trace {
-                eprintln!(
-                    "[plan] story reachability: {} passes, {:.2} s",
-                    levels.passes,
-                    t.elapsed().as_secs_f64()
-                );
-            }
-            session.levels = Rc::new(levels);
-        }
-        let penalty = self.penalty_model(&knowledge.world, &session.story);
-        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = Some(penalty));
+        let session = self.session(knowledge, pose.as_ref());
         let root = OpenGoal {
             p: goal.clone(),
             depth: 0,
@@ -928,6 +862,116 @@ impl<'a> Planner<'a> {
             cost_s: sub.cost - saved - repeated + audits,
             belief_snapshot: snapshot_id(original),
         })
+    }
+
+    /// A planning session from `knowledge` (choices already inferred) at
+    /// `pose`: the belief, what the knowledge and the position imply, the
+    /// story's reachability and the edge penalties the routes use.
+    fn session<'s>(
+        &'s self,
+        knowledge: &'s SavedKnowledge,
+        pose: Option<&PlayerPose>,
+    ) -> Session<'s, 's> {
+        let mut base = StateBelief::new(knowledge, self.data, pose.cloned());
+        base.floors = self.var_floors(knowledge);
+        base.confidence = self.options.confidence;
+        let mut session = Session {
+            planner: self,
+            base,
+            expanded: Cell::new(0),
+            started: Instant::now(),
+            nesting: Cell::new(0),
+            active: RefCell::new(Vec::new()),
+            partial: RefCell::new(None),
+            prefix: RefCell::new(Vec::new()),
+            routes: RefCell::new(HashMap::new()),
+            open_routes: RefCell::new(HashMap::new()),
+            reaches: RefCell::new(HashMap::new()),
+            sighted: RefCell::new(HashMap::new()),
+            hops: pose.map(|p| hops(self.world, &p.map)).unwrap_or_default(),
+            grass_routes: RefCell::new(HashMap::new()),
+            map_costs: RefCell::new(HashMap::new()),
+            heal_trips: RefCell::new(HashMap::new()),
+            min_costs: RefCell::new(BTreeMap::new()),
+            readiness: RefCell::new(BTreeMap::new()),
+            methods: RefCell::new(BTreeMap::new()),
+            seq: Cell::new(0),
+            trace: std::env::var_os("POKEBOT_PLAN_TRACE").is_some(),
+            spent: RefCell::new([0.0; 4]),
+            levels: Rc::new(Levels::unknown()),
+            bound_routes: RefCell::new(HashMap::new()),
+            story: StoryPrior {
+                implied: {
+                    let mut implied = self.implied_flags(knowledge);
+                    for (flag, v) in self.history(knowledge).flags {
+                        if knowledge.world.flag(&flag).value.is_none() {
+                            implied.entry(flag).or_insert(v);
+                        }
+                    }
+                    implied
+                },
+                ..self.story.clone()
+            },
+            spot_needs_cache: RefCell::new(HashMap::new()),
+            candidate_memo: RefCell::new(HashMap::new()),
+        };
+        if session.trace {
+            eprintln!(
+                "[plan] the knowledge implies var floors {:?}",
+                session.base.floors
+            );
+        }
+        if let Some(pose) = pose {
+            let (flags, floors) = self.position_implied(&session.base, &session.story, pose);
+            if session.trace {
+                eprintln!("[plan] where the player is implies {flags:?} and {floors:?}");
+            }
+            for (f, v) in flags {
+                session.story.implied.entry(f).or_insert(v);
+            }
+            for (var, floor) in floors {
+                let entry = session.base.floors.entry(var).or_insert(floor);
+                *entry = (*entry).max(floor);
+            }
+            let t = Instant::now();
+            let levels = crate::levels::compute(
+                self.world,
+                self.graph,
+                pose,
+                &self.achievers,
+                self.start_of(knowledge, &session.base, pose, &session.story),
+            );
+            if session.trace {
+                eprintln!(
+                    "[plan] story reachability: {} passes, {:.2} s",
+                    levels.passes,
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            session.levels = Rc::new(levels);
+        }
+        let penalty = self.penalty_model(&knowledge.world, &session.story);
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = Some(penalty));
+        session
+    }
+
+    /// The areas the readiness planner is offered to train and catch in
+    /// from `knowledge` at `pose`, with their travel and heal minutes.
+    pub fn training_areas(
+        &self,
+        knowledge: &SavedKnowledge,
+        pose: Option<PlayerPose>,
+    ) -> Vec<Area> {
+        let inferred = self.infer_choices(knowledge);
+        let knowledge = inferred.as_ref().unwrap_or(knowledge);
+        let session = self.session(knowledge, pose.as_ref());
+        let areas = session
+            .base
+            .party_members()
+            .map(|party| session.training_areas(&session.base, &party))
+            .unwrap_or_default();
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = None);
+        areas
     }
 
     /// What must hold for the player to start `script` once on `map`:
@@ -2236,6 +2280,8 @@ type CandidateMemo = HashMap<(GoalPredicate, Vec<GoalPredicate>), Rc<Vec<Candida
 /// (map, spots, route key) → what the walk to the spots needs.
 type SpotNeeds =
     HashMap<(String, Vec<(i32, i32)>, u32, Vec<GoalPredicate>), Option<Vec<GoalPredicate>>>;
+/// Seconds to each map ([`Session::map_costs`]).
+type MapCosts = Rc<BTreeMap<String, f64>>;
 /// The encounter tile chosen on a map and the route to it.
 type GrassRoute = Option<((i32, i32), Rc<RouteResult>)>;
 /// Floods by (map, start tile).
@@ -2271,6 +2317,10 @@ struct Session<'p, 'a> {
     /// which shops and areas are worth routing to.
     hops: BTreeMap<String, u32>,
     grass_routes: RefCell<HashMap<RouteKey, GrassRoute>>,
+    /// Seconds to every map from the pose ([`Session::map_costs`]).
+    map_costs: RefCell<HashMap<Vec<GoalPredicate>, MapCosts>>,
+    /// Round trips from an area's grass to its nearest Center.
+    heal_trips: RefCell<HashMap<RouteKey, Option<f64>>>,
     /// Cheapest primitive cost per predicate (the heuristic).
     min_costs: RefCell<BTreeMap<GoalPredicate, f64>>,
     /// Readiness plans per (trainer, experience the lead gains first, the
@@ -5530,7 +5580,7 @@ impl<'p, 'a> Session<'p, 'a> {
                 lead.moves.clear();
             }
         }
-        let areas = self.training_areas(belief);
+        let areas = self.training_areas(belief, &party);
         let request = Request {
             party,
             targets: vec![trainer.to_string()],
@@ -5717,9 +5767,6 @@ impl<'p, 'a> Session<'p, 'a> {
         Some(c)
     }
 
-    /// Nearest maps with a land encounter table, for the readiness
-    /// planner: the closest by maps crossed, priced by the route to their
-    /// grass (those with none are left out).
     /// Whether `route` meets on the way a trainer battle the party isn't
     /// ready for: a trainer it can't go round (sight, trigger), not beaten
     /// and not `CanBeat`.
@@ -5743,73 +5790,207 @@ impl<'p, 'a> Session<'p, 'a> {
         })
     }
 
-    fn training_areas(&self, belief: &StateBelief<'a>) -> Vec<Area> {
-        let world = self.planner.world;
+    /// Where the readiness planner may train or catch: the places worth
+    /// it rather than the nearest by maps crossed (the Switch, Lv35
+    /// DODRIO with FLY, trained on Route 7's Lv17–22 because it was next
+    /// door). Every reachable map with land encounters (not the Safari
+    /// Zone, where nothing is fought) is ranked for each party member by a
+    /// rough estimate ([`rough_training`]: the way there, Fly counted, the
+    /// experience its encounters yield for that member, rough heals); the
+    /// best of each member's ranking in turn, after the nearest, are priced
+    /// exactly: the route to their grass, and the round trip to their own
+    /// nearest Center (not the one nearest the player).
+    fn training_areas(&self, belief: &StateBelief<'a>, party: &[PartyMember]) -> Vec<Area> {
         let has_land = |map: &str| self.planner.grass.contains_key(map);
-        let Some(pose) = &self.base.pose else {
+        if self.base.pose.is_none() {
             return DEFAULT_AREAS
                 .iter()
                 .filter(|m| has_land(m))
                 .map(|m| Area {
                     map: (*m).to_string(),
                     travel_minutes: 3.0,
-                    heal_minutes: 3.0,
+                    heal_minutes: ROUGH_HEAL_MINUTES,
                 })
                 .collect();
-        };
-        let from_here = hops(world, &pose.map);
-        let mut near: Vec<(u32, &String)> = from_here
-            .iter()
-            .filter(|(m, _)| has_land(m))
-            .map(|(m, d)| (*d, m))
-            .collect();
-        near.sort();
-        near.truncate(TRAINING_AREAS * 2);
-        // The nearest Center from here stands in for each area's.
-        let mut near_centers: Vec<(u32, &String)> = self
+        }
+        let data = self.planner.data;
+        let costs = self.map_costs(belief);
+        let mut pool: Vec<(OrdF64, &String)> = self
             .planner
-            .centers
+            .grass
+            .keys()
+            .filter(|m| !m.starts_with(SAFARI_ZONE))
+            .filter_map(|m| Some((OrdF64(*costs.get(m).filter(|c| c.is_finite())?), m)))
+            .collect();
+        pool.sort();
+        // The member a weaker one is carried by: the highest-level other.
+        let carrier = |i: usize| {
+            party
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, m)| m.level)
+                .max()
+                .unwrap_or(0)
+        };
+        // Each member's areas, best first, by a rough training time on top
+        // of `travel` and `heal` (minutes) per area.
+        let rank = |maps: &[(&String, f64, f64)]| -> Vec<Vec<String>> {
+            party
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.level < 100)
+                .map(|(i, m)| {
+                    let mut scored: Vec<(OrdF64, &String)> = maps
+                        .iter()
+                        .filter_map(|(map, travel, heal)| {
+                            let (minutes, battles) =
+                                rough_training(data, m, ROUGH_LEVELS, map, carrier(i))?;
+                            let heals = (battles / ROUGH_BATTLES_PER_HEAL).floor();
+                            Some((OrdF64(travel + minutes + heals * heal), *map))
+                        })
+                        .collect();
+                    scored.sort();
+                    scored.into_iter().map(|(_, m)| m.clone()).collect()
+                })
+                .collect()
+        };
+        // The nearest (the old offer: early on the only areas a starter can
+        // fight in) and each member's best, in turn.
+        let pick = |rankings: Vec<Vec<String>>, by_travel: &[&String]| {
+            let lists: Vec<Vec<String>> =
+                std::iter::once(by_travel.iter().map(|m| (*m).clone()).collect())
+                    .chain(rankings)
+                    .collect();
+            let deepest = lists.iter().map(Vec::len).max().unwrap_or(0);
+            let mut picked: Vec<String> = Vec::new();
+            for r in 0..deepest {
+                for m in lists.iter().filter_map(|l| l.get(r)) {
+                    if !picked.contains(m) {
+                        picked.push(m.clone());
+                    }
+                }
+            }
+            picked
+        };
+        let rough: Vec<(&String, f64, f64)> = pool
             .iter()
-            .map(|c| (self.hops.get(c).copied().unwrap_or(u32::MAX), c))
+            .map(|(c, m)| (*m, c.0 / 60.0, ROUGH_HEAL_MINUTES))
             .collect();
-        near_centers.sort();
-        near_centers.truncate(NEAREST_SHOPS);
-        let center = near_centers
-            .into_iter()
-            .map(|(_, c)| c)
-            .filter_map(|c| {
-                let r = self.open_route(c, belief)?;
-                r.found().then_some(r.cost_s)
-            })
-            .min_by(f64::total_cmp)
-            .unwrap_or(120.0);
-        let mut areas: Vec<(OrdF64, bool, Area)> = near
-            .into_iter()
-            .filter_map(|(_, map)| {
-                let (_, route) = self.grass_route(map, belief)?;
-                Some((
-                    OrdF64(route.cost_s),
-                    self.meets_unready(&route, belief),
-                    Area {
-                        map: map.clone(),
-                        travel_minutes: route.cost_s / 60.0,
-                        heal_minutes: (2.0 * center) / 60.0 + 0.5,
-                    },
-                ))
-            })
-            .collect();
+        let by_travel: Vec<&String> = pool.iter().map(|(_, m)| *m).collect();
+        // Priced in that order until enough are short of an unready
+        // trainer (or three times that many were priced).
+        let mut areas: Vec<(bool, Area)> = Vec::new();
+        for (priced, map) in pick(rank(&rough), &by_travel).into_iter().enumerate() {
+            if priced >= 3 * PRICED_AREAS
+                || areas.iter().filter(|(unready, _)| !unready).count() >= PRICED_AREAS
+            {
+                break;
+            }
+            let Some((end, route)) = self.grass_route(&map, belief) else {
+                continue;
+            };
+            let travel = route.cost_s;
+            let heal = self.heal_trip(&map, end, belief).unwrap_or(2.0 * travel);
+            areas.push((
+                self.meets_unready(&route, belief),
+                Area {
+                    map,
+                    travel_minutes: travel / 60.0,
+                    heal_minutes: heal / 60.0 + 0.5,
+                },
+            ));
+        }
         // The way to an area that meets a trainer the party can't beat yet
         // (a sight line it can't go round, a battle trigger) walks the
         // party it prepares into that battle first (Route 3's trainers on
         // the way to Mt. Moon's grass, the readiness being for them):
         // areas short of them, while there are any.
-        if areas.iter().any(|(_, unready, _)| !unready) {
-            areas.retain(|(_, unready, _)| !unready);
+        if areas.iter().any(|(unready, _)| !unready) {
+            areas.retain(|(unready, _)| !unready);
         }
-        let mut areas: Vec<(OrdF64, Area)> = areas.into_iter().map(|(c, _, a)| (c, a)).collect();
-        areas.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.map.cmp(&b.1.map)));
-        areas.truncate(TRAINING_AREAS);
-        areas.into_iter().map(|(_, a)| a).collect()
+        let mut areas: Vec<Area> = areas.into_iter().map(|(_, a)| a).collect();
+        areas.sort_by(|a, b| {
+            a.travel_minutes
+                .total_cmp(&b.travel_minutes)
+                .then_with(|| a.map.cmp(&b.map))
+        });
+        let exact: Vec<(&String, f64, f64)> = areas
+            .iter()
+            .map(|a| (&a.map, a.travel_minutes, a.heal_minutes))
+            .collect();
+        let by_travel: Vec<&String> = areas.iter().map(|a| &a.map).collect();
+        let mut chosen = pick(rank(&exact), &by_travel);
+        chosen.truncate(TRAINING_AREAS);
+        areas.retain(|a| chosen.contains(&a.map));
+        if self.trace {
+            for a in &areas {
+                eprintln!(
+                    "[areas] {}: travel {:.1} min, heal {:.1} min",
+                    a.map, a.travel_minutes, a.heal_minutes
+                );
+            }
+        }
+        areas
+    }
+
+    /// Seconds the open way from the pose takes to every map, Fly counted
+    /// (one search over the whole graph, per route-relevant facts).
+    fn map_costs(&self, belief: &StateBelief<'a>) -> MapCosts {
+        let key = self.route_key(belief);
+        if let Some(c) = self.map_costs.borrow().get(&key) {
+            return Rc::clone(c);
+        }
+        let t = Instant::now();
+        let ctx = self.context(belief);
+        let costs = Rc::new(ctx.pose.as_ref().map_or_else(BTreeMap::new, |pose| {
+            open_costs_to_maps(ctx.world, ctx.graph, belief, pose, ctx.policy)
+        }));
+        self.spent.borrow_mut()[0] += t.elapsed().as_secs_f64();
+        self.map_costs.borrow_mut().insert(key, Rc::clone(&costs));
+        costs
+    }
+
+    /// Seconds from `map`'s grass at `at` to its nearest Pokémon Center
+    /// and back to the grass, Fly counted (out flies to a town, back
+    /// walks from it); `None` when no Center is reached.
+    fn heal_trip(&self, map: &str, at: (i32, i32), belief: &StateBelief<'a>) -> Option<f64> {
+        let key: RouteKey = (format!("{map} {at:?}"), self.route_key(belief));
+        if let Some(c) = self.heal_trips.borrow().get(&key) {
+            return *c;
+        }
+        let t = Instant::now();
+        let ctx = self.context(belief);
+        let from = PlayerPose {
+            map: map.to_string(),
+            x: at.0,
+            y: at.1,
+        };
+        let centers = &self.planner.centers;
+        let out = open_route_to_any_map(ctx.world, ctx.graph, belief, &from, centers, ctx.policy);
+        let trip = out.found().then(|| {
+            let center = out.legs.last().map_or_else(
+                || from.clone(),
+                |l| PlayerPose {
+                    map: l.to.map.clone(),
+                    x: l.to.x,
+                    y: l.to.y,
+                },
+            );
+            let tiles = self.planner.grass.get(map).map_or(&[][..], Vec::as_slice);
+            let back = open_route_to_tiles(
+                ctx.world, ctx.graph, belief, &center, map, tiles, ctx.policy,
+            );
+            out.cost_s
+                + if back.found() {
+                    back.cost_s
+                } else {
+                    out.cost_s
+                }
+        });
+        self.spent.borrow_mut()[0] += t.elapsed().as_secs_f64();
+        self.heal_trips.borrow_mut().insert(key, trip);
+        trip
     }
 }
 

@@ -1455,3 +1455,80 @@ fn an_evolved_starter_implies_the_starter_choice() {
     assert_ne!(of("SPECIES_SQUIRTLE"), chose);
     assert!(of("SPECIES_PIDGEY").is_empty());
 }
+
+/// The Switch (four badges, FLY, Fuchsia visited) trained its Lv35
+/// DODRIO for KOGA on Route 7, Lv17–22, because the areas offered were
+/// the nearest by maps crossed, each healing at the Center nearest the
+/// player. Areas are now offered by what training there takes: one with
+/// stronger wild Pokémon, flown to, wins over Route 7, and each heals at
+/// its own nearest Center.
+#[test]
+fn training_goes_where_it_pays_and_heals_at_the_areas_own_center() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 1200.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, pose) = checkpoint("switch_route7_state.json");
+    let areas = planner.training_areas(&knowledge, pose.clone());
+    for a in &areas {
+        println!(
+            "{}: travel {:.1} min, heal {:.1} min",
+            a.map, a.travel_minutes, a.heal_minutes
+        );
+    }
+    let top = |map: &str| {
+        f.data.wild[map]["land"]
+            .slots
+            .iter()
+            .map(|s| s.max_level)
+            .max()
+            .unwrap()
+    };
+    let route7 = areas
+        .iter()
+        .find(|a| a.map == "Route7")
+        .expect("Route 7, next door");
+    // Each area's heal is its own Center's round trip: Route 7's (Celadon
+    // next door) is the cheapest, not the one every area shares.
+    assert!(areas
+        .iter()
+        .any(|a| a.heal_minutes > route7.heal_minutes + 0.1));
+    assert!(areas.iter().all(|a| a.heal_minutes >= route7.heal_minutes));
+    let goal = parse_goal("badge 5").unwrap();
+    let plan = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
+    print(&plan, 10);
+    let (map, trained) = plan
+        .intents
+        .iter()
+        .find_map(|s| match &s.intent {
+            Intent::Train { map, species, .. } if species == "SPECIES_DODRIO" => {
+                Some((map.clone(), s.cost_s))
+            }
+            _ => None,
+        })
+        .expect("DODRIO trains for KOGA");
+    assert_ne!(map, "Route7");
+    assert!(top(&map) > top("Route7"), "{map}");
+    // The same training on Route 7 alone takes longer.
+    let belief = pokebot_planner::StateBelief::new(&knowledge, &f.data, pose);
+    let request = pokebot_planner::Request {
+        party: belief.party_members().unwrap(),
+        targets: vec!["TRAINER_LEADER_KOGA".to_string()],
+        areas: vec![route7.clone()],
+        confidence: PlanOptions::default().confidence,
+        money: 0,
+        data: &f.data,
+        handicap: 0,
+    };
+    let on_route7: f64 = pokebot_planner::plan_training(&request, 1)[0]
+        .steps
+        .iter()
+        .map(|s| match s {
+            pokebot_planner::PlanStep::Train { minutes, .. } => *minutes,
+            _ => 0.0,
+        })
+        .sum();
+    println!("{map}: {trained:.0} s, Route 7: {:.0} s", on_route7 * 60.0);
+    assert!(trained < on_route7 * 60.0);
+}

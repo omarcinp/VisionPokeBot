@@ -1541,6 +1541,8 @@ struct Found {
 enum Goal<'a> {
     Place(&'a Place),
     Map(&'a str),
+    /// Any place on any of these maps (the nearest Pokémon Center).
+    Maps(&'a [String]),
     /// Explore everything reachable.
     Nowhere,
     /// Any of these tiles of a map (the spots around an NPC).
@@ -1552,6 +1554,7 @@ impl Goal<'_> {
         match self {
             Goal::Place(p) => *key == p.key(),
             Goal::Map(m) => key.0 == m,
+            Goal::Maps(ms) => ms.contains(&key.0),
             Goal::Nowhere => false,
             Goal::Tiles(ts) => ts.iter().any(|p| *key == p.key()),
         }
@@ -1589,7 +1592,7 @@ pub fn reachable(
     from: &PlayerPose,
     policy: UnknownPolicy,
 ) -> (BTreeSet<String>, TilesByMap) {
-    let mut places = BTreeSet::new();
+    let mut settled = BTreeMap::new();
     let start = Place::from(from);
     search(
         world,
@@ -1599,8 +1602,9 @@ pub fn reachable(
         Goal::Nowhere,
         policy,
         Pass::Open,
-        Some(&mut places),
+        Some(&mut settled),
     );
+    let mut places: BTreeSet<PlaceKey> = settled.into_keys().collect();
     places.insert((from.map.clone(), from.x, from.y));
     let maps: BTreeSet<String> = places.iter().map(|k| k.0.clone()).collect();
     let mut tiles: BTreeMap<String, BTreeSet<(i32, i32)>> = BTreeMap::new();
@@ -1690,6 +1694,48 @@ pub fn open_route_to_tiles(
     )
 }
 
+/// The open route to the nearest (cheapest) place on any of `maps`, in
+/// one search; no blocked alternatives.
+pub fn open_route_to_any_map(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    maps: &[String],
+    policy: UnknownPolicy,
+) -> RouteResult {
+    plan_with(world, graph, belief, from, Goal::Maps(maps), policy, false)
+}
+
+/// Seconds the open way from `from` takes to each map it reaches (to the
+/// map's cheapest place), Fly and all, in one search over the whole graph.
+pub fn open_costs_to_maps(
+    world: &World,
+    graph: &PlaceGraph,
+    belief: &dyn BeliefView,
+    from: &PlayerPose,
+    policy: UnknownPolicy,
+) -> BTreeMap<String, f64> {
+    let mut settled = BTreeMap::new();
+    let start = Place::from(from);
+    search(
+        world,
+        graph,
+        belief,
+        &start,
+        Goal::Nowhere,
+        policy,
+        Pass::Open,
+        Some(&mut settled),
+    );
+    let mut costs = BTreeMap::from([(from.map.clone(), 0.0)]);
+    for ((map, _, _), cost) in settled {
+        let best = costs.entry(map).or_insert(f64::INFINITY);
+        *best = f64::min(*best, cost);
+    }
+    costs
+}
+
 /// [`route`] without the blocked alternatives.
 pub fn open_route(
     world: &World,
@@ -1773,7 +1819,7 @@ fn search(
     goal: Goal,
     policy: UnknownPolicy,
     pass: Pass,
-    settled: Option<&mut BTreeSet<PlaceKey>>,
+    settled: Option<&mut BTreeMap<PlaceKey, f64>>,
 ) -> Option<Found> {
     let surf_ok = pass.allows(&unmet_of(&check(belief, &surf_requirement()), policy));
     let (escape_to, escape_edges) = escape_edges(world, graph, belief, start);
@@ -1984,7 +2030,10 @@ fn search(
         }
     }
     if let Some(out) = settled {
-        out.extend(done.iter().cloned());
+        out.extend(
+            done.iter()
+                .map(|k| (k.clone(), dist.get(k).copied().unwrap_or(0.0))),
+        );
     }
     let reached = reached?;
     let cost_s = *dist.get(&reached)?;

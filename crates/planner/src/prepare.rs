@@ -289,6 +289,57 @@ fn battles_cost(
     Some((minutes, battles as u32))
 }
 
+/// Battles a training trip is assumed to fight between heals when the
+/// matchups aren't worked out (a rough ranking of the places to train).
+pub const ROUGH_BATTLES_PER_HEAL: f64 = 10.0;
+
+/// Rough (minutes, battles) for `member` to gain `levels` levels on
+/// `map`'s land encounters, the matchups left out: what each encounter
+/// yields (`exp_gain` of its species at its middle level, weighted by its
+/// chance) against what it takes (the walk to it, the battle). Fought
+/// alone when no wild level tops the member's, else carried by a member
+/// at `carrier_level` (half the experience, a turn more for the SHIFT);
+/// `None` when neither can or the map has no land encounters. A quick
+/// sort of where to train before [`plan_preparation`] prices it exactly.
+pub fn rough_training(
+    data: &GameData,
+    member: &PartyMember,
+    levels: u8,
+    map: &str,
+    carrier_level: u8,
+) -> Option<(f64, f64)> {
+    let table = data.wild.get(map)?.get("land")?;
+    let top = table.slots.iter().map(|s| s.max_level).max()?;
+    let (share, extra) = if top <= member.level {
+        (1.0, 0.0)
+    } else if top <= carrier_level {
+        (0.5, TURN_S)
+    } else {
+        return None;
+    };
+    let species = data.evolved_at(&member.species, member.level);
+    let growth = &data.species(&species)?.growth_rate;
+    let to = member.level.saturating_add(levels).min(100);
+    let start = member
+        .exp
+        .unwrap_or_else(|| exp_for_level(growth, member.level));
+    let needed = exp_for_level(growth, to).saturating_sub(start) as f64;
+    let (mut exp, mut weight) = (0.0, 0.0);
+    for slot in &table.slots {
+        let level = (slot.min_level + slot.max_level) / 2;
+        let w = f64::from(slot.chance);
+        exp += w * exp_gain(data, &slot.species, level, false) as f64 * share;
+        weight += w;
+    }
+    if weight == 0.0 || exp == 0.0 {
+        return None;
+    }
+    let battles = (needed / (exp / weight)).ceil();
+    let steps = 2880.0 / (16.0 * f64::from(table.rate.max(1)));
+    let per_battle = BATTLE_OVERHEAD_S + extra + 2.0 * TURN_S + steps * STEP_SECONDS;
+    Some((battles * per_battle / 60.0, battles))
+}
+
 /// Whether a trainee that beats a wild one in `alone` turns should fight
 /// it itself rather than hand it to a carrier that takes `carried`: alone
 /// it earns all the experience, switched half, a turn later (the SHIFT).
