@@ -257,6 +257,15 @@ game clear. It saves progress and restarts from its last save after a failed
 cycle, with a 240-second planning budget. Campaign tooling is still incomplete;
 the task exposes its current progress and failures in the worker report.
 
+**Continuing campaign** (`"task":"autonomy-continue"`, API only) starts workers
+`emu-continue-<k>` in stable directories `saves/emulators/continue-<k>`: the
+first time they play autonomy worker k's game (same starter, fossil, name and
+gender), and on every later launch only the goal loop on their own save. The
+autonomy workers find early-game regressions; these reach the late game.
+`tools/seed-continue.py` seeds them from the most advanced finished worker of
+the same game. A full redeploy: `tools/live-run.sh --hub … --max-emulators 12`,
+then POST 6 `autonomy` and 6 `autonomy-continue`, then relaunch the Switch run.
+
 Every worker is a separate process containing one bot and one in-process
 libretro emulator. It uses deterministic stepped mode with no real-time sleep,
 no virtual webcam, and no recording overhead. The process boundary isolates
