@@ -5102,43 +5102,63 @@ impl<'p, 'a> Session<'p, 'a> {
         let Some(obtain) = self.planner.obtain else {
             return vec![self.unsupported("no obtain.json".into(), p, ctx)];
         };
-        // Catches in grass only: they are priced with the open walk there
-        // (a gift or trade's walk is a precondition, not in its cost, and
-        // water needs Surf).
-        for (species, entry) in &obtain.species {
-            if !data.can_learn(species, hm) || !entry.methods.iter().any(|m| m.method == "wild") {
-                continue;
+        // Catches in grass, and gifts and static encounters (their walk is
+        // a precondition, not in their cost: the search prices it), but not
+        // in water (Surf, the move being taught, or a rod). Switch: a full
+        // party with HM03 and no grass SURF learner in reach left the plan
+        // "Unsupported", while SILPH CO. 7F's LAPRAS was still to be had.
+        // Gifts look cheap (their walk isn't in their cost): only when no
+        // grass catch can, or they crowd the search out.
+        for gifts in [false, true] {
+            if gifts && !options.is_empty() {
+                break;
             }
-            let caught = GoalPredicate::caught(species);
-            let best = self
+            for (species, entry) in &obtain.species {
+                let way = |m: &str| {
+                    if gifts {
+                        matches!(m, "gift" | "static")
+                    } else {
+                        m == "wild"
+                    }
+                };
+                if !data.can_learn(species, hm) || !entry.methods.iter().any(|m| way(&m.method)) {
+                    continue;
+                }
+                let caught = GoalPredicate::caught(species);
+                let best = self
                 .catch_candidates(species, &caught, belief, ctx)
                 .into_iter()
                 .filter(|c| {
                     c.cost.is_finite()
-                        && c.steps
-                            .iter()
-                            .any(|s| matches!(&s.planned.intent, Intent::Catch { slot, .. } if slot == "land"))
+                        && c.steps.iter().any(|s| match &s.planned.intent {
+                            Intent::Catch { slot, .. } => !gifts && slot == "land",
+                            _ => gifts,
+                        })
+                        && !c.steps.iter().any(|s| {
+                            matches!(&s.planned.intent, Intent::Catch { slot, .. } if slot != "land")
+                        })
                 })
                 .min_by_key(|c| c.sort_key());
-            let Some(mut c) = best else {
-                continue;
-            };
-            if full {
-                // Ranked by its catch; the swap's own need plans it.
-                if let Some(swap) = swap_in(species) {
-                    options.push((OrdF64(c.cost + swap.cost), species.clone(), swap));
+                let Some(mut c) = best else {
+                    continue;
+                };
+                if full {
+                    // Ranked by its catch; the swap's own need plans it.
+                    if let Some(swap) = swap_in(species) {
+                        options.push((OrdF64(c.cost + swap.cost), species.clone(), swap));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            let then = teach(species);
-            c.steps.extend(then.steps);
-            for pre in then.preconditions {
-                if !c.preconditions.contains(&pre) {
-                    c.preconditions.push(pre);
+                let then = teach(species);
+                c.steps.extend(then.steps);
+                for pre in then.preconditions {
+                    if !c.preconditions.contains(&pre) {
+                        c.preconditions.push(pre);
+                    }
                 }
+                c.cost += then.cost;
+                options.push((OrdF64(c.cost), species.clone(), c));
             }
-            c.cost += then.cost;
-            options.push((OrdF64(c.cost), species.clone(), c));
         }
         options.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
         options.truncate(TEACH_CATCH_OPTIONS);

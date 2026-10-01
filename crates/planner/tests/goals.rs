@@ -1285,6 +1285,82 @@ fn a_safari_zone_species_is_not_planned_as_a_catch() {
         .any(|s| matches!(&s.intent, Intent::Catch { map, .. } if map.starts_with("SafariZone"))));
 }
 
+/// Switch, HM03 in hand: a full party none of which can learn SURF, no
+/// grass catch in reach that can, but SILPH CO. 7F's LAPRAS still to be
+/// had: the gift is taken (to the box, the party being full), swapped in
+/// and taught, instead of "Unsupported".
+#[test]
+fn a_full_party_takes_a_gift_that_can_learn_the_hm() {
+    use pokebot_state::Knowledge;
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (mut knowledge, pose) = checkpoint("switch_silph_state.json");
+    let lead = knowledge.party.value.as_ref().unwrap()[0].clone();
+    let party = [
+        ("SPECIES_VENUSAUR", 59),
+        ("SPECIES_PIDGEY", 7),
+        ("SPECIES_PARAS", 8),
+        ("SPECIES_DUGTRIO", 29),
+        ("SPECIES_VENONAT", 24),
+        ("SPECIES_DODRIO", 47),
+    ];
+    let members = party
+        .iter()
+        .map(|(species, level)| {
+            assert!(!f.data.can_learn(species, "ITEM_HM03"), "{species}");
+            let mut m = lead.clone();
+            m.species = Knowledge::observed((*species).to_owned(), 1);
+            m.level = Knowledge::observed(*level, 1);
+            m
+        })
+        .collect();
+    knowledge.party = Knowledge::observed(members, 1);
+    knowledge.bag.pockets.insert(
+        Pocket::TmCase,
+        Knowledge::observed(vec![("ITEM_HM03".to_owned(), 1)], 1),
+    );
+    knowledge.world.flags.insert(
+        "FLAG_GOT_LAPRAS_FROM_SILPH".to_owned(),
+        Knowledge::observed(false, 1),
+    );
+    // The Pokédex audited: no SURF learner caught.
+    for species in f.data.species.keys() {
+        if f.data.can_learn(species, "ITEM_HM03") {
+            knowledge
+                .pokedex
+                .caught
+                .insert(species.clone(), Knowledge::observed(false, 1));
+        }
+    }
+    let goal = GoalPredicate::party_has_move("MOVE_SURF");
+    let plan = planner.plan(&goal, &knowledge, pose).expect("a plan");
+    print(&plan, 20);
+    assert!(
+        !plan
+            .intents
+            .iter()
+            .any(|s| matches!(&s.intent, Intent::Unsupported { .. })),
+        "no Unsupported step"
+    );
+    let teach = position(
+        &plan,
+        |i| matches!(i, Intent::Teach { hm, .. } if hm == "ITEM_HM03"),
+    );
+    let Intent::Teach { mon, .. } = &plan.intents[teach].intent else {
+        unreachable!()
+    };
+    assert!(f.data.can_learn(mon, "ITEM_HM03"), "taught to {mon}");
+    let swap = position(
+        &plan,
+        |i| matches!(i, Intent::Swap { withdraw, .. } if withdraw == mon),
+    );
+    assert!(swap < teach);
+    // Obtained first, not assumed: the gift's script runs before the swap.
+    assert!(plan.intents[..swap].iter().any(
+        |s| matches!(&s.intent, Intent::RunScript { script, .. } if script.contains("Lapras"))
+    ));
+}
+
 /// With a member that can learn Cut, it is taught to that one directly.
 #[test]
 fn cut_goes_to_the_member_that_can_learn_it() {
