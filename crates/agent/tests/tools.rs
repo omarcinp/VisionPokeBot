@@ -1018,9 +1018,13 @@ fn a_tool_that_makes_no_progress_leaves_its_frame() {
             .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).collect())
             .unwrap_or_default()
     };
-    for (i, (why, expect)) in [("PC: no progress in box", 1), ("no path to (3, 4)", 0)]
-        .into_iter()
-        .enumerate()
+    for (i, (why, expect)) in [
+        ("PC: no progress in box", 1),
+        ("stuck waiting: letting the scene settle", 1),
+        ("no path to (3, 4)", 0),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let dir = root.join(i.to_string());
         let (mut runtime, _) = runtime(&d, vec![overworld.clone()]);

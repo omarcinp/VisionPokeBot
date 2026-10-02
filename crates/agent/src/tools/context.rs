@@ -1070,7 +1070,11 @@ impl ToolContext<'_> {
     /// failed "no progress in box" with no frame to tell why (fleet
     /// continue-1, Fuchsia's PC).
     fn keep_evidence(&mut self, tool: &str, why: &str) {
-        if !why.contains("no progress") || self.evidence.len() >= MAX_EVIDENCE {
+        // Or that waited for a screen that never came (fleet continue-3,
+        // Route 7 by Celadon's gate: a "battle wipe" read every 64 frames,
+        // and the walk failed "stuck waiting: letting the scene settle").
+        let stuck = why.contains("no progress") || why.contains("stuck waiting");
+        if !stuck || self.evidence.len() >= MAX_EVIDENCE {
             return;
         }
         if !self.evidence.insert(format!("{tool}: {why}")) {
