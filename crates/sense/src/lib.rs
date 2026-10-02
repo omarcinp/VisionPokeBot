@@ -334,6 +334,9 @@ impl Sensor {
         events.extend(self.field.observe(o, state));
         if let Some(world) = &self.world {
             events.extend(shown_objects(world, state, &self.field.visible()));
+            if let Some(p) = &o.player {
+                events.extend(stood_on_items(world, state, &p.pose));
+            }
         }
         if let (Some(world), Some((map, absent))) =
             (&self.world, self.field.absent_for(RETRACT_ABSENT_FRAMES))
@@ -1151,6 +1154,29 @@ fn shown_objects(
         }
     }
     out
+}
+
+/// An item ball whose tile the player stands on is gone: its hide flag
+/// is set (fleet continue-5, Rocket Hideout B2F: the MOON STONE's ball at
+/// (2, 5) was taken but unknown; the player stepped onto its tile, A found
+/// nothing, and every plan tried it again: "does not answer to A").
+fn stood_on_items(
+    world: &pokebot_world::World,
+    state: &GameState,
+    pose: &pokebot_state::PlayerPose,
+) -> Vec<GameEvent> {
+    let Some(map) = world.map(&pose.map) else {
+        return Vec::new();
+    };
+    map.objects
+        .iter()
+        .filter(|o| (o.x, o.y) == (Some(pose.x), Some(pose.y)))
+        .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_ITEM_BALL"))
+        .filter_map(|o| o.flag.clone())
+        .filter(|f| !pokebot_world::gates::is_local_flag(f))
+        .filter(|f| state.world.flags.get(f).and_then(|k| k.value) != Some(true))
+        .map(|flag| GameEvent::FlagObserved { flag, value: true })
+        .collect()
 }
 
 fn party_observed(slot: u8, fill: impl FnOnce(&mut Fields)) -> GameEvent {

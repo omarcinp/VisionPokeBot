@@ -1593,3 +1593,33 @@ fn the_old_mans_catch_is_not_the_players() {
     let (after, _) = run(&mut s, party(1), pages("RED"));
     assert!(caught(&after), "the player's own catch");
 }
+
+/// Fleet continue-5, Rocket Hideout B2F: the MOON STONE's ball at (2, 5)
+/// had been taken, its flag unknown; the player stood on its tile, A
+/// found nothing and every plan tried again. Stood on, an item ball is
+/// gone; a ball beside the player says nothing.
+#[test]
+fn an_item_ball_stood_on_is_gone() {
+    let Some(world) = world() else { return };
+    let state = GameState::default();
+    let flag = "FLAG_HIDE_ROCKET_HIDEOUT_B2F_MOON_STONE";
+    let at = |x, y| pokebot_state::PlayerPose {
+        map: "RocketHideout_B2F".into(),
+        x,
+        y,
+    };
+    assert_eq!(
+        stood_on_items(&world, &state, &at(2, 5)),
+        vec![GameEvent::FlagObserved {
+            flag: flag.into(),
+            value: true
+        }]
+    );
+    assert!(stood_on_items(&world, &state, &at(2, 4)).is_empty());
+    let mut taken = state.clone();
+    taken
+        .world
+        .flags
+        .insert(flag.into(), Knowledge::observed(true, 1));
+    assert!(stood_on_items(&world, &taken, &at(2, 5)).is_empty());
+}
