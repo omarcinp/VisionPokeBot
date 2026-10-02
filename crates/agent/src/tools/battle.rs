@@ -315,12 +315,23 @@ impl BattleStep {
         // covers the lower panels' names, and falling back to the slot
         // there opened and closed the windows for two hours (fleet worker
         // 3: WARTORTLE's row, "close another member's actions").
+        // Of two members of one name, the one that can still fight (fleet
+        // continue-6, Victory Road: two DUGTRIO, the first fainted; its
+        // row was opened six times, no SHIFT, then B on a send-out that
+        // can't be backed out of, 40 times).
         let by_name = name
             .and_then(|n| {
+                let named =
+                    |r: &&pokebot_state::PartyRowObservation| r.nickname.as_deref() == Some(n);
+                let able = |r: &pokebot_state::PartyRowObservation| {
+                    r.status != Some(pokebot_state::Status::Fainted)
+                        && r.hp.is_none_or(|(hp, _)| hp > 0)
+                };
                 party
                     .members
                     .iter()
-                    .position(|r| r.nickname.as_deref() == Some(n))
+                    .position(|r| named(&r) && able(r))
+                    .or_else(|| party.members.iter().position(|r| named(&r)))
             })
             .map(|row| row as u8);
         if !party.actions {
@@ -1090,6 +1101,47 @@ mod tests {
         let mut fleeing = decided(pidgey);
         fleeing.flee = true;
         assert_eq!(spares(pidgey, &fleeing), None);
+    }
+
+    /// Fleet continue-6, Victory Road: two DUGTRIO, the first fainted. The
+    /// send-out went to the first row with the name, never offered SHIFT,
+    /// and gave up with a B the send-out can't be left by. The one able
+    /// to fight is the row.
+    #[test]
+    fn of_two_members_of_one_name_the_able_one_is_sent_out() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let row = |name: &str, hp: u16| pokebot_state::PartyRowObservation {
+            nickname: Some(name.into()),
+            level: None,
+            hp: Some((hp, 65)),
+            status: Some(if hp == 0 {
+                pokebot_state::Status::Fainted
+            } else {
+                pokebot_state::Status::Healthy
+            }),
+        };
+        let menu = pokebot_state::PartyMenuObservation {
+            count: 6,
+            selected: Some(1),
+            members: vec![
+                row("SPEAROW", 0),
+                row("DUGTRIO", 0),
+                row("RATTATA", 0),
+                row("PIDGEY", 0),
+                row("DUGTRIO", 65),
+                row("BLASTOISE", 0),
+            ],
+            ..Default::default()
+        };
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(4);
+        match step.shift_in_party_menu(&menu, 4, Some("DUGTRIO")) {
+            Decision::Act(a) => assert_eq!(a.label, "shift: Down toward slot 4"),
+            _ => panic!("expected a move toward the able DUGTRIO"),
+        }
     }
 
     /// In battle the party menu is in battle order: the member to SHIFT to
