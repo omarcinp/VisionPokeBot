@@ -48,8 +48,28 @@ pub(crate) fn is_cancel(name: &str) -> bool {
     fits("CANCEL", name)
 }
 
+/// Where a search for an item not on screen has got to: Up to the top of
+/// the list first, then Down to CANCEL.
+#[derive(Debug, Clone, Default)]
+pub struct Seek {
+    /// The top was passed (an Up changed nothing): searching down.
+    down: bool,
+    /// The ▶ row and rows an Up was sent from.
+    from: Option<(u8, ShownRows)>,
+}
+
+/// A bag list's rows as shown: name and count.
+type ShownRows = Vec<(String, Option<u16>)>;
+
 /// Select one known item and its USE/OPEN action, checking both cursors.
-pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expectation) -> Decision {
+/// `seek` carries the search for an item not on screen from call to call.
+pub fn select_item(
+    o: &Observation,
+    data: &GameData,
+    item: &str,
+    opened: Expectation,
+    seek: &mut Seek,
+) -> Decision {
     let Some(bag) = &o.bag else {
         return Decision::Wait("waiting for bag".into());
     };
@@ -130,10 +150,24 @@ pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expecta
             }
         }
     }
-    press(
-        if cancel { Button::Up } else { Button::Down },
-        Expectation::InputsDone,
-    )
+    // Up to the top, then down to CANCEL: choosing by whether CANCEL shows
+    // flips between the two once the list scrolls (Switch, Victory Road
+    // 3F: an item not in the ITEMS pocket, Up while CANCEL showed and Down
+    // once it scrolled away, for over an hour).
+    let view = (cursor, bag.rows.clone());
+    if !seek.down && seek.from.as_ref() == Some(&view) {
+        seek.down = true;
+    }
+    if seek.down && cancel {
+        return Decision::Fail(format!("{item} is not in the pocket"));
+    }
+    let button = if seek.down {
+        Button::Down
+    } else {
+        seek.from = Some(view);
+        Button::Up
+    };
+    press(button, Expectation::InputsDone)
 }
 
 /// Where `name` (`HM03`, `TM34` or their `ITEM_` keys) sorts in the TM
@@ -423,7 +457,13 @@ impl PocketAudit {
                         .iter()
                         .any(|(n, _)| data.item_named(n) == Some(item));
                     if visible || bag.prompt.is_some() {
-                        return select_item(o, data, item, Expectation::BagPocket(title.into()));
+                        return select_item(
+                            o,
+                            data,
+                            item,
+                            Expectation::BagPocket(title.into()),
+                            &mut Seek::default(),
+                        );
                     }
                     return self.search(bag, item);
                 }
@@ -856,7 +896,13 @@ mod tests {
     fn an_item_missing_from_a_whole_pocket_fails() {
         let Some(data) = data() else { return };
         let o = bag(1, "ITEMS", &[("CANCEL", None)], 0);
-        match select_item(&o, &data, "ITEM_POTION", Expectation::InputsDone) {
+        match select_item(
+            &o,
+            &data,
+            "ITEM_POTION",
+            Expectation::InputsDone,
+            &mut Seek::default(),
+        ) {
             Decision::Fail(r) => assert!(r.contains("not in the pocket"), "{r}"),
             _ => panic!("expected a failure"),
         }
@@ -875,11 +921,68 @@ mod tests {
                 &o,
                 &data,
                 "ITEM_POTION",
-                Expectation::InputsDone
+                Expectation::InputsDone,
+                &mut Seek::default()
             ))
             .commands,
             vec![ControllerCommand::Press(Button::Up)]
         );
+    }
+
+    /// Switch, Victory Road 3F: an item not in an ITEMS pocket longer than
+    /// its window. The search went Up while CANCEL showed and Down once the
+    /// list scrolled it away, for over an hour. It goes up to the top, then
+    /// down to CANCEL, and fails there.
+    #[test]
+    fn an_item_not_in_a_long_pocket_is_searched_up_then_down() {
+        let Some(data) = data() else { return };
+        let mut seek = Seek::default();
+        let mut next = |o: &Observation| match select_item(
+            o,
+            &data,
+            "ITEM_ESCAPE_ROPE",
+            Expectation::InputsDone,
+            &mut seek,
+        ) {
+            Decision::Act(a) => Ok(a.commands),
+            Decision::Fail(why) => Err(why),
+            _ => panic!("expected an input or a failure"),
+        };
+        let up = Ok(vec![ControllerCommand::Press(Button::Up)]);
+        let down = Ok(vec![ControllerCommand::Press(Button::Down)]);
+        let bottom: Vec<(&str, Option<u16>)> = vec![
+            ("LEAF STONE", Some(1)),
+            ("FULL RESTORE", Some(2)),
+            ("PROTEIN", Some(2)),
+            ("CARBOS", Some(1)),
+            ("FULL HEAL", Some(1)),
+            ("CANCEL", None),
+        ];
+        let middle: Vec<(&str, Option<u16>)> = vec![
+            ("ZINC", Some(2)),
+            ("LEAF STONE", Some(1)),
+            ("FULL RESTORE", Some(2)),
+            ("PROTEIN", Some(2)),
+            ("CARBOS", Some(1)),
+            ("FULL HEAL", Some(1)),
+        ];
+        let top: Vec<(&str, Option<u16>)> = vec![
+            ("CALCIUM", Some(1)),
+            ("ZINC", Some(2)),
+            ("LEAF STONE", Some(1)),
+            ("FULL RESTORE", Some(2)),
+            ("PROTEIN", Some(2)),
+            ("CARBOS", Some(1)),
+        ];
+        assert_eq!(next(&bag(1, "ITEMS", &bottom, 3)), up);
+        // Scrolled up, CANCEL gone: still up, not back down.
+        assert_eq!(next(&bag(2, "ITEMS", &middle, 3)), up);
+        assert_eq!(next(&bag(3, "ITEMS", &top, 0)), up);
+        // The Up changed nothing: the top. Down from there to CANCEL.
+        assert_eq!(next(&bag(4, "ITEMS", &top, 0)), down);
+        assert_eq!(next(&bag(5, "ITEMS", &middle, 3)), down);
+        let end = next(&bag(6, "ITEMS", &bottom, 5)).unwrap_err();
+        assert!(end.contains("not in the pocket"), "{end}");
     }
 
     /// Switch: the TM Case scrolled to its end showed TM19–TM39 and
@@ -897,7 +1000,14 @@ mod tests {
         ];
         let o = bag(1, "TM CASE", &end, 4);
         assert_eq!(
-            act(select_item(&o, &data, "ITEM_HM02", Expectation::InputsDone)).commands,
+            act(select_item(
+                &o,
+                &data,
+                "ITEM_HM02",
+                Expectation::InputsDone,
+                &mut Seek::default()
+            ))
+            .commands,
             vec![ControllerCommand::Press(Button::Up)]
         );
         // Scrolled one up, CANCEL gone: still up, not back down (Switch:
@@ -911,18 +1021,37 @@ mod tests {
         ];
         let o = bag(3, "TM CASE", &middle, 2);
         assert_eq!(
-            act(select_item(&o, &data, "ITEM_HM03", Expectation::InputsDone)).commands,
+            act(select_item(
+                &o,
+                &data,
+                "ITEM_HM03",
+                Expectation::InputsDone,
+                &mut Seek::default()
+            ))
+            .commands,
             vec![ControllerCommand::Press(Button::Up)]
         );
         // A TM between the ones shown, not among them: not in the case.
         assert!(matches!(
-            select_item(&o, &data, "ITEM_TM30", Expectation::InputsDone),
+            select_item(
+                &o,
+                &data,
+                "ITEM_TM30",
+                Expectation::InputsDone,
+                &mut Seek::default()
+            ),
             Decision::Fail(_)
         ));
         // Four rows and CANCEL in the bag's six-row window: the whole pocket.
         let o = bag(2, "ITEMS", &end, 4);
         assert!(matches!(
-            select_item(&o, &data, "ITEM_HM02", Expectation::InputsDone),
+            select_item(
+                &o,
+                &data,
+                "ITEM_HM02",
+                Expectation::InputsDone,
+                &mut Seek::default()
+            ),
             Decision::Fail(_)
         ));
     }

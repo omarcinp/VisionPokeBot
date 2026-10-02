@@ -38,6 +38,7 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
         retries: Retries::default(),
         closer: Closer::default(),
         applied: None,
+        seek: Default::default(),
     };
     ctx.drive(&mut step)?;
     let improved = |ctx: &ToolContext<'_>| {
@@ -83,6 +84,7 @@ struct UseMedicine {
     retries: Retries,
     closer: Closer,
     applied: Option<u64>,
+    seek: crate::bag::Seek,
 }
 impl ToolStep for UseMedicine {
     fn expects(&self) -> Expects {
@@ -149,7 +151,13 @@ impl ToolStep for UseMedicine {
                     SCREEN_FRAMES,
                 );
             }
-            return crate::bag::select_item(o, &self.data, &self.item, Expectation::PartyList);
+            return crate::bag::select_item(
+                o,
+                &self.data,
+                &self.item,
+                Expectation::PartyList,
+                &mut self.seek,
+            );
         }
         if let Some(menu) = &o.menu {
             return pick_row(
@@ -227,6 +235,7 @@ mod tests {
             retries: Retries::default(),
             closer: Closer::default(),
             applied: None,
+            seek: Default::default(),
         };
         let label = |d: Decision| match d {
             Decision::Act(a) => a.label,

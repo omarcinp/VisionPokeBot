@@ -261,6 +261,8 @@ pub enum Taught {
 /// The step: from the overworld to "learned" and back.
 pub struct TeachStep {
     item: String,
+    /// The search for the TM CASE or the item not on screen.
+    seek: crate::bag::Seek,
     mv: String,
     slot: u8,
     species: String,
@@ -311,6 +313,7 @@ impl TeachStep {
         let forget = forget_slot(&data, &species, &moves, &mv);
         Ok(Self {
             item: item.to_owned(),
+            seek: Default::default(),
             mv,
             slot,
             species,
@@ -569,7 +572,13 @@ impl TeachStep {
                     self.outcome = Some(Err(format!("{} is not in the TM CASE", self.item)));
                     return Decision::Wait("closing".into());
                 }
-                match crate::bag::select_item(o, &self.data, &self.item, Expectation::PartyList) {
+                match crate::bag::select_item(
+                    o,
+                    &self.data,
+                    &self.item,
+                    Expectation::PartyList,
+                    &mut self.seek,
+                ) {
                     // Failed with the case open: closed before failing (the
                     // Switch's next walk waited behind an open TM Case).
                     Decision::Fail(why) => {
@@ -586,6 +595,7 @@ impl TeachStep {
                     &self.data,
                     "ITEM_TM_CASE",
                     Expectation::BagPocket("TM CASE".into()),
+                    &mut self.seek,
                 )
             }
             Some(other) => {

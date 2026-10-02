@@ -73,6 +73,7 @@ pub fn escape(
                 closer: Closer::default(),
                 used: false,
                 refused: None,
+                seek: Default::default(),
             };
             ctx.drive(&mut step)?;
         }
@@ -101,6 +102,7 @@ struct UseEscapeRope {
     used: bool,
     /// What the game said instead of using it.
     refused: Option<String>,
+    seek: crate::bag::Seek,
 }
 
 impl ToolStep for UseEscapeRope {
@@ -166,6 +168,7 @@ impl ToolStep for UseEscapeRope {
                 &self.data,
                 ITEM_ESCAPE_ROPE,
                 Expectation::InputsDone,
+                &mut self.seek,
             );
         }
         if let Some(menu) = &o.menu {
