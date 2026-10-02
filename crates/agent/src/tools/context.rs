@@ -269,11 +269,21 @@ impl<'a> ToolContext<'a> {
     /// The story passages as the belief stands now: what a walk must go
     /// around and may go through.
     pub fn gate_tiles(&self) -> pokebot_world::gates::GateTiles {
-        pokebot_world::gates::GateTiles::believed(
+        let mut tiles = pokebot_world::gates::GateTiles::believed(
             &self.world,
             &self.story_gates(),
             &crate::belief_view::StateBelief(self.runtime.state()),
-        )
+        );
+        // No one to use Flash: the ways into a dark map are shut, as the
+        // route model has them (fleet continue-4: with no plan in budget,
+        // a Go fell back on the walk, which took Rock Tunnel unlit).
+        let flash = pokebot_world::route::MOVE_FLASH;
+        if super::field::carrier(self.runtime.state(), flash).is_none() {
+            for (map, tile) in dark_entries(&self.world) {
+                tiles.closed.entry(map).or_default().insert(tile);
+            }
+        }
+        tiles
     }
 
     /// The trainer `intent` fights: a `Beat`, or a script path that
@@ -1066,6 +1076,25 @@ fn count_interrupt(
         .then(|| format!("interrupted at {pose} {n} times: something there turns the step back"))
 }
 
+/// The warp tiles of lit maps that lead into dark ones (the mouths of
+/// Rock Tunnel).
+pub fn dark_entries(world: &pokebot_world::World) -> Vec<(String, (i32, i32))> {
+    let mut out = Vec::new();
+    for map in world.maps().filter(|m| !m.requires_flash) {
+        for w in &map.warps {
+            let dark = world
+                .name_of(&w.dest_map)
+                .and_then(|n| world.map(n))
+                .is_some_and(|d| d.requires_flash);
+            if dark {
+                out.push((map.name.clone(), (w.x, w.y)));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// What a step turned back at `pose` shows of the coord triggers there: a
 /// trigger fires only while its var holds its value, so the one var of
 /// the triggers on the tile (or, the player pushed back, next to it) is
@@ -1353,6 +1382,19 @@ mod tests {
         for n in 1..=60 {
             assert_eq!(repeats.note(&action, &list(n)), None, "row {n}");
         }
+    }
+
+    /// Fleet continue-4: the ways into Rock Tunnel are Route 10's two cave
+    /// mouths, shut to a walk with no one to use Flash.
+    #[test]
+    fn the_ways_into_rock_tunnel_are_its_mouths() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let entries = dark_entries(&world);
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|(m, _)| m == "Route10"), "{entries:?}");
     }
 
     /// The museum's ticket gate turns the walk back at one tile: the third
