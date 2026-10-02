@@ -1136,10 +1136,12 @@ impl ActRepeats {
 }
 
 /// What a screen shows that an action is meant to change (not frame
-/// counters or match scores).
+/// counters or match scores). The Pokédex list too: scrolling it row by
+/// row moves no cursor (Switch: "Pokédex: Down to the next row" judged
+/// "sent 40 times on an unchanged screen" at No040, every audit).
 fn screen_fingerprint(o: &Observation) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         o.screen.value,
         o.dialogue.as_ref().map(|d| &d.lines),
         o.menu,
@@ -1156,6 +1158,7 @@ fn screen_fingerprint(o: &Observation) -> String {
         o.summary.as_ref().map(|s| (s.page, &s.nickname)),
         o.move_list,
         o.pc_storage,
+        o.pokedex_list,
     )
 }
 
@@ -1297,6 +1300,40 @@ mod tests {
             .vars
             .insert(var.into(), pokebot_state::Knowledge::observed(0, 1));
         assert!(trigger_vars_shown(&world, &pose, &belief).is_empty());
+    }
+
+    /// Switch: the Pokédex audit scrolls the list row by row with the ▶
+    /// on the bottom row; each scroll is a new screen, not the same one
+    /// 40 times.
+    #[test]
+    fn a_scrolling_pokedex_list_is_not_an_unchanged_screen() {
+        let list = |first: u16| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.pokedex_list = Some(pokebot_state::PokedexListObservation {
+                rows: (first..first + 9)
+                    .map(|n| (format!("No{n:03}"), false))
+                    .collect(),
+                cursor: Some(8),
+            });
+            o
+        };
+        let action = Action::new(
+            "Pokédex: Down to the next row",
+            vec![ControllerCommand::Press(Button::Down)],
+            Expectation::InputsDone,
+            30,
+        );
+        let mut repeats = ActRepeats::default();
+        for n in 1..=60 {
+            assert_eq!(repeats.note(&action, &list(n)), None, "row {n}");
+        }
     }
 
     /// The museum's ticket gate turns the walk back at one tile: the third
