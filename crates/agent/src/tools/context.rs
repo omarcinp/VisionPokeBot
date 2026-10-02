@@ -663,6 +663,25 @@ impl<'a> ToolContext<'a> {
                 break;
             }
         }
+        // A trigger on a map's own scratch var (reset on every entry, so
+        // never in the belief) is a wall for this visit: the walk goes
+        // round it (fleet continue-3, Cinnabar: the Gym's locked door
+        // fires below it while the Secret Key isn't taken; the way to the
+        // Mansion crossed it and was turned back three times a plan).
+        if let Some(p) = pose.as_ref().filter(|_| !battled) {
+            let tiles = local_trigger_tiles(&self.world, p);
+            if !tiles.is_empty() {
+                let mut blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner());
+                for t in &tiles {
+                    blocked.insert(&p.map, *t);
+                }
+                drop(blocked);
+                self.info(format!(
+                    "{}: the trigger at {tiles:?} turns the step back",
+                    p.map
+                ));
+            }
+        }
         let counts = self.interrupt_counts.last_mut()?;
         let learned = self.learned.get(learned_before..).unwrap_or_default();
         count_interrupt(counts, pose, learned)
@@ -1213,6 +1232,35 @@ fn trigger_vars_shown(
     vec![GameEvent::VarObserved { var, value }]
 }
 
+/// The tiles of triggers on a map's scratch var under `pose` (or next to
+/// it, the player pushed back off it).
+fn local_trigger_tiles(
+    world: &pokebot_world::World,
+    pose: &pokebot_state::PlayerPose,
+) -> Vec<(i32, i32)> {
+    let Some(map) = world.map(&pose.map) else {
+        return Vec::new();
+    };
+    let at = |d: i32| -> Vec<(i32, i32)> {
+        map.triggers
+            .iter()
+            .filter(|t| (t.x - pose.x).abs() + (t.y - pose.y).abs() <= d)
+            .filter(|t| {
+                t.var
+                    .as_deref()
+                    .is_some_and(pokebot_world::gates::is_local_var)
+            })
+            .map(|t| (t.x, t.y))
+            .collect()
+    };
+    let under = at(0);
+    if under.is_empty() {
+        at(1)
+    } else {
+        under
+    }
+}
+
 /// Interruptions (a scene, a conversation) at the same tile within one
 /// step before it fails.
 pub const MAX_SAME_INTERRUPTS: u32 = 3;
@@ -1393,6 +1441,38 @@ mod tests {
             wrong_gate_flags(&gates, &b1f, &crate::belief_view::StateBelief(&unknown)),
             [("TRAINER_TEAM_ROCKET_GRUNT_12".to_owned(), true)]
         );
+    }
+
+    /// Fleet continue-3, Cinnabar: the Gym's locked door fires below it on
+    /// the map's scratch var; turned back on it (or pushed back next to
+    /// it), that tile is a wall for the visit. Route 8's guard fires on a
+    /// story var, which the belief learns instead (`trigger_vars_shown`).
+    #[test]
+    fn a_trigger_on_a_scratch_var_is_a_wall_for_the_visit() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let at = |map: &str, x, y| pokebot_state::PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        assert_eq!(
+            local_trigger_tiles(&world, &at("CinnabarIsland", 20, 5)),
+            vec![(20, 5)]
+        );
+        assert_eq!(
+            local_trigger_tiles(&world, &at("CinnabarIsland", 20, 6)),
+            vec![(20, 5)]
+        );
+        assert!(local_trigger_tiles(&world, &at("CinnabarIsland", 14, 8)).is_empty());
+        let guard = world
+            .map("Route8_WestEntrance")
+            .and_then(|m| m.triggers.first().map(|t| at(&m.name, t.x, t.y)));
+        if let Some(guard) = guard {
+            assert!(local_trigger_tiles(&world, &guard).is_empty(), "{guard:?}");
+        }
     }
 
     /// Fleet continue-2: turned back by Route 8's thirsty guard (his
