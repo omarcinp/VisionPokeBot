@@ -1115,14 +1115,20 @@ pub fn plan_route_with(
     // gone): head for the destination's map anyway, but only through an
     // exit the player can walk to from here. A map-level guess through an
     // exit in a walled-off part of the map fails every time.
-    let hop = route_from(world, pose, dest.map()).or_else(|| {
-        route_exit(world, &pose.map, dest.map())
-            .filter(|hop| reachable_hop(world, pose, *hop, gone, gates))
-    });
+    let hop = route_from(world, pose, dest.map())
+        .filter(|hop| reachable_hop(world, pose, *hop, gone, gates))
+        .or_else(|| {
+            route_exit(world, &pose.map, dest.map())
+                .filter(|hop| reachable_hop(world, pose, *hop, gone, gates))
+        });
     (hop, None)
 }
 
-/// Whether the player can walk from `pose` to where `hop` leaves the map.
+/// Whether the player can walk from `pose` to where `hop` leaves the map,
+/// on that map alone: a way out and back in further along doesn't make
+/// the hop one the walk takes (fleet continue-6, Route 16's east half:
+/// its Down edge, reached only through the gatehouse into the west half,
+/// failed "no path to the Down edge on Route16" every replan).
 fn reachable_hop(
     world: &World,
     pose: &PlayerPose,
@@ -1130,27 +1136,44 @@ fn reachable_hop(
     gone: &Gone,
     gates: &GateTiles,
 ) -> bool {
-    match hop {
-        Hop::Warp(warp) => {
-            let dest = Destination::Warp {
+    let Some(map) = world.map(&pose.map) else {
+        return false;
+    };
+    let goals: HashSet<(i32, i32)> = match hop {
+        Hop::Warp(warp) => goal_tiles(
+            world,
+            &Destination::Warp {
                 map: pose.map.clone(),
                 warp,
-            };
-            let goals = goal_tiles(world, &dest);
-            route_search_with(world, pose, &pose.map, |p| goals.contains(&p), gone, gates).is_some()
-        }
-        Hop::Edge(dir) => {
-            let Some(map) = world.map(&pose.map) else {
-                return false;
-            };
-            let sides: HashSet<(i32, i32)> = world
-                .crossings(map, dir)
-                .into_iter()
-                .map(|(here, _)| here)
-                .collect();
-            route_search_with(world, pose, &pose.map, |p| sides.contains(&p), gone, gates).is_some()
-        }
-    }
+            },
+        )
+        .into_iter()
+        .collect(),
+        Hop::Edge(dir) => world
+            .crossings(map, dir)
+            .into_iter()
+            .map(|(here, _)| here)
+            .collect(),
+    };
+    let mut obstacles = object_obstacles(map, gone);
+    obstacles.extend(gates.closed_on(&pose.map));
+    obstacles.remove(&(pose.x, pose.y));
+    let opened = gates.opened_on(&pose.map);
+    let walk = Walk {
+        obstacles: &obstacles,
+        surf: false,
+        opened: Some(&opened),
+    };
+    goals.contains(&(pose.x, pose.y))
+        || find_path_with(
+            map,
+            (pose.x, pose.y),
+            &walk,
+            |_| 0,
+            |t| goals.contains(&t),
+            |_| 0,
+        )
+        .is_some()
 }
 
 fn warp_is_marked(map: &MapData, warp: &pokebot_world::Warp) -> bool {
@@ -1811,7 +1834,10 @@ mod tests {
         };
         let mut nav = Navigator::new(Arc::clone(&world), north.clone()).with_gates(&armed);
         match nav.next(&o) {
-            NavStatus::Fail(r) => assert!(r.contains("no path"), "{r}"),
+            // The edge isn't taken when the walk can't reach it.
+            NavStatus::Fail(r) => {
+                assert!(r.contains("no path") || r.contains("no known route"), "{r}")
+            }
             _ => panic!("expected no way past the trigger"),
         }
         // As the map draws it (nothing known): the walk goes north.
@@ -1988,6 +2014,44 @@ mod tests {
             .with_gone(gone)
             .with_maybe_gone(unknown_gone(&world, &state));
         assert!(matches!(trying.next(&o), NavStatus::Act(_)));
+    }
+
+    /// Fleet continue-6, Route 16's east half (47, 12) bound for Route 13:
+    /// the Down edge out of the map is in its west half, reached only
+    /// through the gatehouse; the hop taken is one walked to on the map.
+    #[test]
+    fn a_hop_is_one_walked_to_on_its_map() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "Route16".into(),
+            x: 47,
+            y: 12,
+        };
+        let dest = Destination::Tile {
+            map: "Route13".into(),
+            x: 30,
+            y: 8,
+        };
+        let gates = GateTiles::default();
+        // Every object gone but Route 16's SNORLAX, who stands between its
+        // halves: the way round through the gatehouse is open.
+        let gone: Gone = world
+            .maps()
+            .flat_map(|m| m.objects.iter().map(move |o| (m.name.clone(), o.local_id)))
+            .filter(|k| *k != ("Route16".to_owned(), 10))
+            .collect();
+        assert!(!reachable_hop(
+            &world,
+            &pose,
+            Hop::Edge(Direction::Down),
+            &gone,
+            &gates
+        ));
+        let (hop, _) = plan_route_with(&world, &pose, &dest, &gone, &gates);
+        assert_ne!(hop, Some(Hop::Edge(Direction::Down)), "{hop:?}");
     }
 
     /// Live: in MtMoon_B2F's featureless bottom corridor two Right taps
