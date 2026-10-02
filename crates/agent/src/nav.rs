@@ -402,6 +402,17 @@ impl Navigator {
         self.surf
     }
 
+    /// Whether the walk from `pose` goes over water: only while the player
+    /// is on it. Landed, the way back onto water takes SURF again (fleet
+    /// continue-2, Pallet Town's pond: surfed ashore at (6, 19), then
+    /// pressed into the pond from the bank tile by tile, "looping").
+    fn surfs_at(&self, map: &MapData, pose: &PlayerPose) -> bool {
+        self.surf
+            && map
+                .tile(pose.x, pose.y)
+                .is_some_and(|t| pokebot_world::behavior::is_water(t.behavior))
+    }
+
     /// The tiles of `map` to go round when a way round exists (replacing
     /// what was set for it).
     pub fn set_avoid(&mut self, map: &str, tiles: Obstacles) {
@@ -686,7 +697,7 @@ impl Navigator {
         let opened = self.gates.opened_on(&map.name);
         let walk = Walk {
             obstacles: &obstacles,
-            surf: self.surf,
+            surf: self.surfs_at(map, &pose),
             opened: Some(&opened),
         };
         let avoid = self.avoid.get(&map.name);
@@ -721,7 +732,7 @@ impl Navigator {
         let opened = self.gates.opened_on(&map.name);
         let walk = Walk {
             obstacles: &obstacles,
-            surf: self.surf,
+            surf: self.surfs_at(map, pose),
             opened: Some(&opened),
         };
         find_path_with(map, (pose.x, pose.y), &walk, |_| 0, &goal, |_| 0).is_some()
@@ -952,7 +963,7 @@ impl Navigator {
             let opened = self.gates.opened_on(&map.name);
             let walk = Walk {
                 obstacles: &obstacles,
-                surf: self.surf,
+                surf: self.surfs_at(map, pose),
                 opened: Some(&opened),
             };
             if let Some(dir) = Direction::ALL
@@ -996,7 +1007,7 @@ impl Navigator {
         let opened = self.gates.opened_on(&map.name);
         let walk = Walk {
             obstacles: &obstacles,
-            surf: self.surf,
+            surf: self.surfs_at(map, pose),
             opened: Some(&opened),
         };
         match find_path_with(
@@ -2444,5 +2455,34 @@ mod tests {
             &GateTiles::default(),
         );
         assert!(route.is_some());
+    }
+
+    /// Fleet continue-2, Pallet Town's pond: surfed ashore at (6, 19),
+    /// the walk pressed back into the pond from the bank, tile by tile.
+    /// A surfer walks over water only while on it; ashore, the pond is
+    /// out of reach until SURF is used again.
+    #[test]
+    fn a_surfer_ashore_doesnt_walk_back_into_the_water() {
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let map = world.map("PalletTown").unwrap();
+        let nav = Navigator::new(
+            Arc::clone(&world),
+            Destination::Tile {
+                map: "PalletTown".into(),
+                x: 8,
+                y: 19,
+            },
+        )
+        .with_surf(true);
+        let at = |x, y| PlayerPose {
+            map: "PalletTown".into(),
+            x,
+            y,
+        };
+        let pond = |t: (i32, i32)| t == (8, 19);
+        assert!(nav.reachable(map, &at(7, 19), pond), "on the water");
+        assert!(!nav.reachable(map, &at(6, 19), pond), "ashore");
     }
 }
