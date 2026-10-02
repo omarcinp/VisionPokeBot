@@ -914,6 +914,8 @@ impl<'a> Planner<'a> {
             trace: std::env::var_os("POKEBOT_PLAN_TRACE").is_some(),
             spent: RefCell::new([0.0; 4]),
             levels: Rc::new(Levels::unknown()),
+            pass_start: None,
+            without: RefCell::new(HashMap::new()),
             bound_routes: RefCell::new(HashMap::new()),
             story: StoryPrior {
                 implied: {
@@ -949,13 +951,10 @@ impl<'a> Planner<'a> {
                 *entry = (*entry).max(floor);
             }
             let t = Instant::now();
-            let levels = crate::levels::compute(
-                self.world,
-                self.graph,
-                pose,
-                &self.achievers,
-                self.start_of(knowledge, &session.base, pose, &session.story),
-            );
+            let start = self.start_of(knowledge, &session.base, pose, &session.story);
+            session.pass_start = Some((pose.clone(), start.clone()));
+            let levels =
+                crate::levels::compute(self.world, self.graph, pose, &self.achievers, start);
             if session.trace {
                 eprintln!(
                     "[plan] story reachability: {} passes, {:.2} s",
@@ -2414,6 +2413,11 @@ struct Session<'p, 'a> {
     spent: RefCell<[f64; 4]>,
     /// How far into the story each fact lies ([`crate::levels`]).
     levels: Rc<Levels>,
+    /// Where the reachability pass started from, to run it again.
+    pass_start: Option<(PlayerPose, crate::levels::Start)>,
+    /// The pass again with a fact's achievers left out: what the story
+    /// provides before that fact.
+    without: RefCell<HashMap<Predicate, Rc<Levels>>>,
     /// The story prior with what the knowledge implies.
     story: StoryPrior,
     /// Candidates per (goal, facts established) for goals whose candidates
@@ -2969,6 +2973,21 @@ impl<'p, 'a> Session<'p, 'a> {
                 if !seen.insert(n.signature()) {
                     continue;
                 }
+                // A plan still needing what is being planned further up is
+                // dropped whichever of its goals comes first; dropped now,
+                // its siblings don't multiply first (cont-4, Route 10: every
+                // way to HM05 ran through Rock Tunnel's Flash or its gates,
+                // and 80000 partial plans carried Flash open).
+                if let Some(cycle) = n
+                    .open
+                    .iter()
+                    .find(|g| self.waits_on_itself(&n, g, base) || self.comes_after_active(&g.p))
+                {
+                    if self.trace {
+                        eprintln!("[plan]        dropped a plan needing {} (active)", cycle.p);
+                    }
+                    continue;
+                }
                 n.seq = self.next_seq();
                 n.f = n.g + self.heuristic(&n.open);
                 heap.push((n.key(), n.seq));
@@ -2976,6 +2995,88 @@ impl<'p, 'a> Session<'p, 'a> {
             }
         }
         Err(Failure::NoPlan)
+    }
+
+    /// Whether open goal `g` of `node` is one being planned further up and
+    /// doesn't hold where it is needed.
+    fn waits_on_itself(&self, node: &Node, g: &OpenGoal, base: &BTreeSet<GoalPredicate>) -> bool {
+        if !self.is_active(&g.p) {
+            return false;
+        }
+        let at = g
+            .before
+            .and_then(|id| node.position(id))
+            .unwrap_or(node.plan.len());
+        let established = node.established_before(base, at);
+        let truth = self.belief(&established).eval_goal(&g.p);
+        truth == Truth::False || (g.establish && truth == Truth::Unknown)
+    }
+
+    /// Whether `p` (not yet held) is something the story provides only
+    /// after a fact being planned further up: by the reachability pass
+    /// without that fact's achievers.
+    fn comes_after_active(&self, p: &GoalPredicate) -> bool {
+        let GoalPredicate::World(q) = p else {
+            return false;
+        };
+        if !self.levels.known() || self.base.eval(q) == Truth::True {
+            return false;
+        }
+        let active: Vec<Predicate> = self
+            .active
+            .borrow()
+            .iter()
+            .filter_map(|a| match a {
+                GoalPredicate::World(w) if self.base.eval(w) != Truth::True => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        active
+            .iter()
+            .any(|a| self.levels_without(a).is_some_and(|l| l.level(q).is_none()))
+    }
+
+    /// [`Session::without`], worked out once per fact.
+    fn levels_without(&self, fact: &Predicate) -> Option<Rc<Levels>> {
+        if let Some(l) = self.without.borrow().get(fact) {
+            return Some(Rc::clone(l));
+        }
+        // Maps are walked to, not achieved: without achievers the pass is
+        // the same.
+        if !self
+            .planner
+            .achievers
+            .iter()
+            .any(|a| a.effects.contains(fact))
+        {
+            return None;
+        }
+        let (pose, start) = self.pass_start.as_ref()?;
+        let t = Instant::now();
+        let achievers: Vec<Achiever> = self
+            .planner
+            .achievers
+            .iter()
+            .filter(|a| !a.effects.contains(fact))
+            .cloned()
+            .collect();
+        let levels = Rc::new(crate::levels::compute(
+            self.planner.world,
+            self.planner.graph,
+            pose,
+            &achievers,
+            start.clone(),
+        ));
+        if self.trace {
+            eprintln!(
+                "[plan]        story reachability without {fact:?}: {:.2} s",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        self.without
+            .borrow_mut()
+            .insert(fact.clone(), Rc::clone(&levels));
+        Some(levels)
     }
 
     /// Whether `p` is being planned further up the nesting (reaching a map
@@ -3923,15 +4024,37 @@ impl<'p, 'a> Session<'p, 'a> {
             return f64::INFINITY;
         };
         let mut cost = c.cost;
+        // What is being planned further up can't come first: a way that
+        // needs it is no way (cont-4, Route 10: Fly to the HM05 Aide, its
+        // HM02 behind Rock Tunnel's Flash, looked cheap and its branches
+        // filled the budget).
+        let waits = |q: &GoalPredicate| self.is_active(q) && belief.eval_goal(q) != Truth::True;
         for pre in &c.preconditions {
             if belief.eval_goal(pre) == Truth::True {
                 continue;
             }
+            if waits(pre) {
+                return f64::INFINITY;
+            }
             cost += match pre {
-                GoalPredicate::World(Predicate::At { map }) => self
-                    .route_to(map, belief)
-                    .filter(|r| r.found())
-                    .map_or(self.planner.options.expensive_secs, |r| r.cost_s),
+                GoalPredicate::World(Predicate::At { map }) => {
+                    match self.route_to(map, belief).filter(|r| r.found()) {
+                        Some(r) => {
+                            let mut needs: Vec<GoalPredicate> = r
+                                .assumes
+                                .iter()
+                                .cloned()
+                                .map(GoalPredicate::World)
+                                .collect();
+                            self.route_needs(&r, &mut needs);
+                            if needs.iter().any(waits) {
+                                return f64::INFINITY;
+                            }
+                            r.cost_s
+                        }
+                        None => self.planner.options.expensive_secs,
+                    }
+                }
                 GoalPredicate::World(_) if depth > 0 => {
                     self.establish_bound(pre, belief, depth - 1)
                 }

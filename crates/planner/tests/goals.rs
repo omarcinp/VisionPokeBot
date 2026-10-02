@@ -1823,3 +1823,56 @@ fn silph_cos_giovanni_waits_for_the_card_key() {
     let key = at("SilphCo_5F_EventScript_ItemCardKey");
     assert!(key < giovanni, "Card Key at {key}, Giovanni at {giovanni}");
 }
+
+/// Fleet, continue-4: three badges at Route 10, nine species caught, no
+/// Flash (Rock Tunnel is dark: entered only with it). Every way to the
+/// HM05 Aide but the walk through Diglett's Cave (Fly, its HM02 behind
+/// the Saffron gates' Tea, Celadon behind Rock Tunnel) needs Flash
+/// first; those partial plans filled the budget and the game stood
+/// without a plan. What the story gives only after Flash is pruned while
+/// Flash is planned: two catches, the Aide, Teach, then the tunnel.
+#[test]
+fn flash_is_planned_before_the_dark_tunnel_from_route_10() {
+    let Some(f) = fixture() else { return };
+    // As the goal loop plans: its methods and probes, the node cap of
+    // 240 s.
+    let methods = Methods::load(root().join("data/rules/methods.json")).unwrap();
+    let planner = Planner::new(
+        &f.world,
+        &f.graph,
+        &f.data,
+        Some(&f.obtain),
+        Some(&f.priors),
+        &methods,
+        PlanOptions {
+            budget_s: 240.0,
+            node_budget: 80_000,
+            supported_probes: Some(
+                ["party", "trainer_card", "bag_pocket", "fly_map", "pokedex"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            prefer_species: vec!["SPECIES_BULBASAUR".into()],
+            ..PlanOptions::default()
+        },
+    );
+    let (knowledge, pose) = checkpoint("route10_no_flash_state.json");
+    let plan = planner
+        .plan(&parse_goal("at RockTunnel_1F").unwrap(), &knowledge, pose)
+        .unwrap();
+    print(&plan, 20);
+    let aide = position(
+        &plan,
+        |i| matches!(i, Intent::RunScript { script, .. } if script == "Route2_EastBuilding_EventScript_Aide"),
+    );
+    let teach = position(
+        &plan,
+        |i| matches!(i, Intent::Teach { hm, .. } if hm == "ITEM_HM05"),
+    );
+    let tunnel = position(
+        &plan,
+        |i| matches!(i, Intent::Go { dest } if dest == "RockTunnel_1F"),
+    );
+    assert!(aide < teach && teach < tunnel && tunnel < plan.intents.len());
+}
