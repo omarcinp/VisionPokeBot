@@ -38,6 +38,9 @@ use crate::{Action, Decision, Expectation, Outcome};
 /// Frames without dialogue after the last page before an overworld prompt
 /// counts as over.
 const PROMPT_SETTLE_FRAMES: u32 = 40;
+/// Frames without dialogue after YES before the move's "used" page is
+/// given up on (its cut-in plays first).
+const USED_PAGE_FRAMES: u32 = 420;
 /// After the last page the move's cut-in (a black band across the screen
 /// with the Pokémon, animated) and the obstacle's own animation play; a
 /// step onto the tree's tile before `removeobject` bumps. The move counts
@@ -335,6 +338,12 @@ impl ObstaclePrompt {
         }
         if ctx.quiet_frames < PROMPT_SETTLE_FRAMES {
             return Decision::Wait("letting the field move play out".into());
+        }
+        // YES answered: the move's cut-in plays before "<mon> used <MOVE>"
+        // prints (Switch, Victory Road: STRENGTH's page came 70-330 frames
+        // after the YES; the step had given up after 50).
+        if self.offered && !self.used && !self.refused && ctx.quiet_frames < USED_PAGE_FRAMES {
+            return Decision::Wait("waiting for the move's page after YES".into());
         }
         if self.used {
             let since = *self.quiet_since.get_or_insert(o.frame_id);
@@ -1340,6 +1349,52 @@ mod tests {
     /// Without the badge or the move the tree only says it can be cut: the
     /// prompt fails without having been offered (the caller may try the
     /// party menu, or replan).
+    /// Switch, Victory Road: YES to STRENGTH, then the move's cut-in plays
+    /// with no dialogue before "LAPRAS used STRENGTH!" prints; the step
+    /// gave up after 50 quiet frames. It waits for the page, and fails
+    /// only long after.
+    #[test]
+    fn the_moves_page_is_waited_for_after_yes() {
+        let Some(world) = world() else { return };
+        let nav = NavParts {
+            world,
+            gone: Default::default(),
+            maybe_gone: Default::default(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+            data: None,
+        };
+        let facing = Destination::Facing {
+            map: "VictoryRoad_1F".into(),
+            x: 7,
+            y: 18,
+        };
+        let mut step = ObstaclePrompt::new(&nav, FieldMove::Strength, facing).facing_now();
+        // Past the question: YES answered, the dialogue closed.
+        step.phase = PromptPhase::Talk;
+        step.offered = true;
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(100);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "VictoryRoad_1F".into(),
+                x: 7,
+                y: 17,
+            },
+            score: 1000,
+        });
+        assert!(matches!(
+            step.next(&mut step_ctx(&o, &state, &mut events, 60)),
+            Decision::Wait(_)
+        ));
+        match step.next(&mut step_ctx(&o, &state, &mut events, 600)) {
+            Decision::Fail(why) => assert!(why.contains("no page said it was used"), "{why}"),
+            _ => panic!("expected the failure, long after"),
+        }
+    }
+
     #[test]
     fn a_tree_that_is_not_offered_fails_the_prompt() {
         let Some(world) = world() else { return };
