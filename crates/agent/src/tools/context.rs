@@ -467,8 +467,7 @@ impl<'a> ToolContext<'a> {
                 | GameEvent::ScriptPathRetracted { .. }
                 | GameEvent::CheckpointRestored { .. }
         ) {
-            let known = crate::nav::belief_gone(&self.world, self.runtime.state());
-            self.gone.extend(known);
+            crate::nav::refresh_gone(&mut self.gone, &self.world, self.runtime.state());
         }
         if self
             .scheduler

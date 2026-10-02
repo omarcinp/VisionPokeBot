@@ -279,6 +279,23 @@ pub type Gone = BTreeSet<(String, u32)>;
 /// Mt. Moon B2F: after a restart both taken fossils blocked the only
 /// corridor between the ladders, and every replan walked into a part of
 /// B1F without the exit).
+/// `gone` as the belief now has it: the objects it holds hidden added,
+/// and those whose hide flag is known clear again taken out (fleet
+/// continue-3, Victory Road 3F: the boulder that fell through the hole
+/// was gone from the save, Route 23 cleared its flag on the way back, and
+/// every push left it out: "no boulder can be pushed onto (34, 18)").
+pub fn refresh_gone(gone: &mut Gone, world: &World, state: &pokebot_state::GameState) {
+    gone.extend(belief_gone(world, state));
+    gone.retain(|(map, id)| {
+        let flag = world
+            .map(map)
+            .and_then(|m| m.objects.iter().find(|o| o.local_id == *id))
+            .and_then(|o| o.flag.as_deref())
+            .filter(|f| *f != "0");
+        flag.is_none_or(|f| state.world.flag(f).value != Some(false))
+    });
+}
+
 pub fn belief_gone(world: &World, state: &pokebot_state::GameState) -> Gone {
     let mut gone = Gone::new();
     for map in world.maps() {
@@ -2484,5 +2501,30 @@ mod tests {
         let pond = |t: (i32, i32)| t == (8, 19);
         assert!(nav.reachable(map, &at(7, 19), pond), "on the water");
         assert!(!nav.reachable(map, &at(6, 19), pond), "ashore");
+    }
+
+    /// Fleet continue-3: Victory Road 3F's boulder, gone while its flag
+    /// was set, is back once Route 23 clears it.
+    #[test]
+    fn an_object_whose_flag_clears_is_back() {
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let flag = "FLAG_HIDE_VICTORY_ROAD_3F_BOULDER";
+        let key = ("VictoryRoad_3F".to_owned(), 8);
+        let mut state = pokebot_state::GameState::default();
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::tracked(true, None));
+        let mut gone = Gone::new();
+        refresh_gone(&mut gone, &world, &state);
+        assert!(gone.contains(&key));
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::tracked(false, None));
+        refresh_gone(&mut gone, &world, &state);
+        assert!(!gone.contains(&key));
     }
 }
