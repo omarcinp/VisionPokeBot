@@ -78,6 +78,66 @@ impl Target {
     }
 }
 
+/// Tiles of the player's map the walk reaches from `pose`, round people,
+/// tiles learnt blocked and the passages the belief holds shut (fleet
+/// continue-2, Silph Co. 5F: the worker behind door 3, seen shut, was
+/// tried again each time what was known changed, "looping" at the door).
+fn reachable(ctx: &ToolContext<'_>, pose: &PlayerPose) -> Option<pokebot_world::path::Reach> {
+    let blocked = ctx
+        .blocked
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .on_map(&pose.map);
+    reach_from(&ctx.world, pose, &ctx.gone, &blocked, &ctx.gate_tiles())
+}
+
+/// [`reachable`] from its parts.
+fn reach_from(
+    world: &World,
+    pose: &PlayerPose,
+    gone: &crate::nav::Gone,
+    blocked: &pokebot_world::path::Obstacles,
+    gates: &pokebot_world::gates::GateTiles,
+) -> Option<pokebot_world::path::Reach> {
+    let map = world.map(&pose.map)?;
+    let mut obstacles = crate::nav::object_obstacles(map, gone);
+    obstacles.extend(blocked.iter().copied());
+    obstacles.extend(gates.closed_on(&pose.map));
+    obstacles.remove(&(pose.x, pose.y));
+    let opened = gates.opened_on(&pose.map);
+    let walk = pokebot_world::path::Walk {
+        obstacles: &obstacles,
+        surf: false,
+        opened: Some(&opened),
+    };
+    Some(pokebot_world::path::reach(
+        map,
+        (pose.x, pose.y),
+        &walk,
+        |_| 0,
+    ))
+}
+
+/// Whether a tile `(x, y)` is faced from (next to it, or across a
+/// counter) is reached.
+fn beside(
+    map: &pokebot_world::MapData,
+    reach: &pokebot_world::path::Reach,
+    (x, y): (i32, i32),
+) -> bool {
+    crate::nav::facing_spots(map, x, y)
+        .into_iter()
+        .any(|(spot, _)| reach.cost(spot).is_some())
+}
+
+/// Where `target` stands on `map`.
+fn target_tile(world: &World, map: &str, target: &Target) -> Option<(i32, i32)> {
+    match target {
+        Target::Sprite { x, y } | Target::Sign { x, y, .. } => Some((*x, *y)),
+        Target::Object { local_id } => super::lookup::object_tile(world, map, *local_id),
+    }
+}
+
 /// `targets` of `map` with what the ledger says of each under the belief
 /// `state`, the spent ones left out.
 pub fn fresh(
@@ -206,8 +266,18 @@ impl ExploreTool {
                 unnamed.push((s.x, s.y));
             }
         }
+        let reach = reachable(ctx, pose);
+        let map = ctx.world.map(&pose.map);
         fresh(&ctx.world, &ctx.ledger, state, pose, &unnamed)
             .into_iter()
+            .filter(|(t, _)| {
+                let (Some(tile), Some(r), Some(map)) =
+                    (target_tile(&ctx.world, &pose.map, t), &reach, map)
+                else {
+                    return true;
+                };
+                beside(map, r, tile)
+            })
             .take(MAX_TARGETS)
             .collect()
     }
@@ -350,6 +420,39 @@ mod tests {
 
     /// Bill's Sea Cottage before he is helped: Bill as a Clefairy (on
     /// screen) comes before the PC, human Bill (gone) is left out.
+    /// Fleet continue-2, Silph Co. 5F at (20, 13): the worker at (16, 13)
+    /// is behind door 3; seen shut, he is out of reach, and not tried.
+    #[test]
+    fn someone_behind_a_shut_door_is_out_of_reach() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let story = pokebot_world::gates::derive(&world);
+        let pose = PlayerPose {
+            map: "SilphCo_5F".into(),
+            x: 20,
+            y: 13,
+        };
+        let map = world.map("SilphCo_5F").unwrap();
+        let worker = (16, 13);
+        let reached = |open: bool| {
+            let mut state = pokebot_state::GameState::default();
+            state.world.flags.insert(
+                "FLAG_SILPH_5F_DOOR_3".into(),
+                pokebot_state::Knowledge::observed(open, 1),
+            );
+            let gates = pokebot_world::gates::GateTiles::believed(
+                &world,
+                &story,
+                &crate::belief_view::StateBelief(&state),
+            );
+            let gone = crate::nav::belief_gone(&world, &state);
+            let reach = reach_from(&world, &pose, &gone, &Default::default(), &gates).unwrap();
+            beside(map, &reach, worker)
+        };
+        assert!(!reached(false));
+        assert!(reached(true));
+    }
+
     #[test]
     fn bills_cottage_tries_the_clefairy_first() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
