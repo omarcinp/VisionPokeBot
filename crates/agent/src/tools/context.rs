@@ -167,6 +167,9 @@ pub struct ToolContext<'a> {
     pub unknown_dir: PathBuf,
     /// Where a tool's "no progress" leaves its frame ([`STUCK_DIR`]).
     pub stuck_dir: PathBuf,
+    /// What the last plan found the knowledge implies, for the routes the
+    /// tools plan to read the belief as the plan did.
+    pub inferred: crate::belief_view::Inferred,
     /// The failures whose frame was kept this session.
     evidence: std::collections::BTreeSet<String>,
     pub scheduler: crate::scheduler::Scheduler,
@@ -256,6 +259,7 @@ impl<'a> ToolContext<'a> {
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
             stuck_dir: PathBuf::from(STUCK_DIR),
+            inferred: Default::default(),
             evidence: Default::default(),
             scheduler: crate::scheduler::Scheduler::default(),
             running_script: None,

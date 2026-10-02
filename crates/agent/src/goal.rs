@@ -318,6 +318,11 @@ impl Run<'_, '_> {
                     }
                 }
             };
+            // The tools' routes read the belief as the plan did.
+            ctx.inferred = crate::belief_view::Inferred {
+                flags: plan.implied.flags.clone(),
+                floors: plan.implied.var_floors.clone(),
+            };
             self.log_plan(ctx, plan_no, &plan_reason, pose, plan.clone())?;
             if plan.intents.is_empty() {
                 self.report.outcome =

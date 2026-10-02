@@ -9,6 +9,57 @@ use pokebot_world::predicate::{BeliefView, Predicate, Truth};
 /// whatever their provenance otherwise.
 pub struct StateBelief<'a>(pub &'a GameState);
 
+/// What the planner found the knowledge implies, for facts it doesn't
+/// hold: flags, and least values of vars (`Plan::implied_flags`,
+/// `Plan::var_floors`).
+#[derive(Debug, Clone, Default)]
+pub struct Inferred {
+    pub flags: std::collections::BTreeMap<String, bool>,
+    pub floors: std::collections::BTreeMap<String, i64>,
+}
+
+/// `base` with the gaps [`Inferred`] fills: the walk reads the belief as
+/// the plan did (fleet continue-2: the plan's way to Cinnabar ran through
+/// Pallet Town, whose passages need FLAG_OPENED_START_MENU and Oak's
+/// scene var above 0, both unknown to the belief but implied; the walk
+/// found "no known route" and wandered off west).
+pub struct InferredBelief<'a> {
+    pub base: &'a dyn BeliefView,
+    pub inferred: &'a Inferred,
+}
+
+impl BeliefView for InferredBelief<'_> {
+    fn eval(&self, p: &Predicate) -> Truth {
+        let truth = self.base.eval(p);
+        if truth != Truth::Unknown {
+            return truth;
+        }
+        match p {
+            Predicate::Flag { name, is } => self
+                .inferred
+                .flags
+                .get(name)
+                .map_or(Truth::Unknown, |v| known(Some(v == is))),
+            Predicate::Var { name, op, value } => {
+                use pokebot_world::predicate::CmpOp;
+                match (self.inferred.floors.get(name), op) {
+                    (Some(floor), CmpOp::Ge) if floor >= value => Truth::True,
+                    (Some(floor), CmpOp::Gt) if floor > value => Truth::True,
+                    (Some(floor), CmpOp::Ne) if floor > value => Truth::True,
+                    (Some(floor), CmpOp::Eq | CmpOp::Le) if floor > value => Truth::False,
+                    (Some(floor), CmpOp::Lt) if floor >= value => Truth::False,
+                    _ => Truth::Unknown,
+                }
+            }
+            _ => Truth::Unknown,
+        }
+    }
+
+    fn escape(&self) -> Option<pokebot_state::EscapeWarp> {
+        self.base.escape()
+    }
+}
+
 fn known(v: Option<bool>) -> Truth {
     match v {
         Some(true) => Truth::True,

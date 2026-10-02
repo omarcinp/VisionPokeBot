@@ -344,6 +344,18 @@ pub struct Plan {
     pub cost_s: f64,
     /// Digest of the knowledge the plan was made against.
     pub belief_snapshot: u64,
+    /// What the knowledge implies, as the plan read it.
+    #[serde(default)]
+    pub implied: Box<Implied>,
+}
+
+/// Facts the knowledge implies but doesn't hold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Implied {
+    /// Flags unknown in the knowledge.
+    pub flags: BTreeMap<String, bool>,
+    /// Least values of vars unknown in it.
+    pub var_floors: BTreeMap<String, i64>,
 }
 
 impl Plan {
@@ -380,7 +392,7 @@ pub enum PlanError {
         elapsed_s: f64,
         /// The cheapest partial plan when the search stopped: its steps so
         /// far, with an `Unsupported` placeholder per predicate still open.
-        best_partial: Option<Plan>,
+        best_partial: Option<Box<Plan>>,
     },
 }
 
@@ -854,7 +866,7 @@ impl<'a> Planner<'a> {
                 goal: goal.clone(),
                 nodes: session.expanded.get(),
                 elapsed_s: session.started.elapsed().as_secs_f64(),
-                best_partial: session.partial_plan(knowledge),
+                best_partial: session.partial_plan(knowledge).map(Box::new),
             },
         })?;
         let mut assumes = sub.assumes;
@@ -876,6 +888,10 @@ impl<'a> Planner<'a> {
             assumes,
             cost_s: sub.cost - saved - repeated + audits,
             belief_snapshot: snapshot_id(original),
+            implied: Box::new(Implied {
+                flags: session.story.implied.clone(),
+                var_floors: session.base.floors.clone(),
+            }),
         })
     }
 
@@ -2875,6 +2891,10 @@ impl<'p, 'a> Session<'p, 'a> {
             assumes,
             cost_s: node.g,
             belief_snapshot: snapshot_id(knowledge),
+            implied: Box::new(Implied {
+                flags: self.story.implied.clone(),
+                var_floors: self.base.floors.clone(),
+            }),
         })
     }
 

@@ -484,10 +484,18 @@ pub fn field_route(ctx: &mut ToolContext<'_>, dest: &Dest) -> Option<Vec<Leg>> {
         .scheduler
         .graph
         .get_or_insert_with(|| crate::scheduler::graph(&world));
-    plan_field_route(&world, graph, ctx.runtime.state(), &pose, dest)
+    plan_field_route_with(
+        &world,
+        graph,
+        ctx.runtime.state(),
+        &ctx.inferred,
+        &pose,
+        dest,
+    )
 }
 
 /// [`field_route`] without a context.
+#[cfg(test)]
 pub fn plan_field_route(
     world: &World,
     graph: &route::PlaceGraph,
@@ -495,7 +503,23 @@ pub fn plan_field_route(
     pose: &PlayerPose,
     dest: &Dest,
 ) -> Option<Vec<Leg>> {
-    let belief = StateBelief(state);
+    plan_field_route_with(world, graph, state, &Default::default(), pose, dest)
+}
+
+/// [`plan_field_route`] with what the plan found the knowledge implies.
+pub fn plan_field_route_with(
+    world: &World,
+    graph: &route::PlaceGraph,
+    state: &pokebot_state::GameState,
+    inferred: &crate::belief_view::Inferred,
+    pose: &PlayerPose,
+    dest: &Dest,
+) -> Option<Vec<Leg>> {
+    let state_belief = StateBelief(state);
+    let belief = crate::belief_view::InferredBelief {
+        base: &state_belief,
+        inferred,
+    };
     // Unknown facts count as unmet, but for a trainer: one not known beaten
     // is a battle on the way, not a wall (Switch, Rocket Hideout: out of
     // Giovanni's side, the elevator to B1F passes GRUNT_12, never met on
@@ -1881,5 +1905,47 @@ mod tests {
             learned: &[],
         };
         assert!(matches!(step.next(&mut ctx), Decision::Done(_)));
+    }
+
+    /// Fleet continue-2, Celadon City bound for the Pokémon Mansion: the
+    /// plan's way runs through Pallet Town to Surf, whose passages need
+    /// Oak's scene var above 0, unknown to the belief but implied (the
+    /// planner's floor of 1). Without what the plan inferred the walk had
+    /// "no known route" and wandered west; with it, the legs are planned.
+    #[test]
+    fn the_walk_reads_the_belief_as_the_plan_did() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cont2_celadon_state.json");
+        let Ok(Some(c)) = crate::checkpoint::load(&path) else {
+            return;
+        };
+        use pokebot_state::StateReducer;
+        let state = pokebot_state::DefaultReducer.reduce(
+            &pokebot_state::GameState::default(),
+            &[pokebot_state::EventRecord {
+                frame_id: 0,
+                event: pokebot_state::GameEvent::CheckpointRestored {
+                    knowledge: Box::new(c.knowledge),
+                },
+            }],
+        );
+        let pose = PlayerPose {
+            map: "CeladonCity".into(),
+            x: 12,
+            y: 22,
+        };
+        let dest = Dest::Map {
+            map: "PokemonMansion_1F".into(),
+        };
+        assert!(plan_field_route(&world, &graph, &state, &pose, &dest).is_none());
+        let mut inferred = crate::belief_view::Inferred::default();
+        inferred
+            .floors
+            .insert("VAR_MAP_SCENE_PALLET_TOWN_OAK".into(), 1);
+        let legs = plan_field_route_with(&world, &graph, &state, &inferred, &pose, &dest)
+            .expect("a way to the Mansion");
+        assert!(legs.iter().any(|l| l.to.map == "PalletTown"), "{legs:?}");
     }
 }

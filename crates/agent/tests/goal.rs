@@ -351,6 +351,7 @@ fn plan(steps: Vec<PlannedIntent>) -> Plan {
         intents: steps,
         cost_s: 10.0,
         belief_snapshot: 0,
+        implied: Default::default(),
     }
 }
 
