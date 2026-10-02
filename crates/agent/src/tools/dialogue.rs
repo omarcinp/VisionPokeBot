@@ -1007,9 +1007,37 @@ pub fn twin_path(
             && branches[..answered.len()] == *answered
             && possible
             && recognised.iter().all(|l| prints.contains(&l.as_str()))
-            && !same_effects(events, script, planned, i))
+            && !same_effects(events, script, planned, i)
+            && !toggle_pair(events, script, planned, i))
         .then_some(i)
     })
+}
+
+/// Whether paths `a` and `b` of `script` are the two halves of a switch:
+/// one runs with flag F at v and sets it to !v, the other the reverse.
+/// Either way the press flips F: the planned half is recorded, and a
+/// passage met the other way corrects it (fleet continue-3, the Pokémon
+/// Mansion's statues, the switch's state unknown: "can't tell path 2 from
+/// 1", nothing recorded, and every plan pressed the statue again).
+fn toggle_pair(events: &pokebot_world::events::Events, script: &str, a: usize, b: usize) -> bool {
+    let Some(s) = events.script(script) else {
+        return false;
+    };
+    let flips = |i: usize| -> Option<(String, bool)> {
+        let p = s.paths.get(i)?;
+        p.when.iter().find_map(|c| match c {
+            Condition::Flag { flag, is } => {
+                let sets = p.does.iter().any(|e| match e {
+                    Effect::Set { set } => set == flag && !is,
+                    Effect::Clear { clear } => clear == flag && *is,
+                    _ => false,
+                });
+                sets.then(|| (flag.clone(), *is))
+            }
+            _ => None,
+        })
+    };
+    matches!((flips(a), flips(b)), (Some((f, x)), Some((g, y))) if f == g && x != y)
 }
 
 /// Whether two paths of `script` change the same things (they differ only
@@ -1951,6 +1979,33 @@ mod tests {
                 "path {planned}"
             );
         }
+    }
+
+    /// Fleet continue-3, the Pokémon Mansion: a statue's two halves (set
+    /// the switch, clear it) read the same; the switch's state unknown,
+    /// the planned half is recorded, not refused for its twin.
+    #[test]
+    fn a_switch_pressed_is_recorded_as_planned() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let script = "PokemonMansion_1F_EventScript_Statue";
+        let s = events.script(script).unwrap();
+        let state = GameState::default();
+        let read: Vec<String> = s.paths[2]
+            .does
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Say { say } => Some(say.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(toggle_pair(events, script, 1, 2));
+        assert_eq!(
+            twin_path(events, script, 2, &read, &[true], &StateBelief(&state)),
+            None
+        );
     }
 
     /// Fleet (continue-2): a beaten trainer's after-battle words show its
