@@ -176,6 +176,8 @@ pub struct PcSwapStep {
     /// as another Pokémon.
     deposit_slot: u8,
     wrong_slots: BTreeSet<u8>,
+    /// A party slot read empty while looking for the member to store.
+    free_slot: bool,
     /// The next deposit's slot is taken afresh (a deposit before it moved
     /// the members after it up).
     retarget: bool,
@@ -247,6 +249,7 @@ impl PcSwapStep {
             ops: ops.into(),
             deposit_slot,
             wrong_slots: BTreeSet::new(),
+            free_slot: false,
             retarget: false,
             storing: None,
             taking: None,
@@ -463,8 +466,20 @@ impl PcSwapStep {
                 }
                 read => {
                     self.wrong_slots.insert(target);
+                    self.free_slot |= read.is_none();
                     match (0..6u8).find(|k| !self.wrong_slots.contains(k)) {
                         Some(next) => self.deposit_slot = next,
+                        // Not in the party, which has room: nothing to
+                        // store (Switch: VENONAT stored by a swap that
+                        // failed after it, the game saved since; the
+                        // belief still held him, slot 5 read empty).
+                        None if self.free_slot => {
+                            self.ops.pop_front();
+                            return Decision::Wait(format!(
+                                "no {} in the party, which has room: none stored",
+                                display_name(species)
+                            ));
+                        }
                         None => self.fail(format!(
                             "no party member reads {} (slot {target}: {read:?})",
                             display_name(species)
@@ -1378,6 +1393,50 @@ mod tests {
             })
         );
         assert!(step.ops.is_empty());
+    }
+
+    /// Switch, Celadon: the belief held VENONAT, stored by an earlier swap
+    /// that failed after it (the game saved since); his slot read empty.
+    /// Not in the party, which has room: nothing is stored, the withdrawal
+    /// goes on.
+    #[test]
+    fn a_member_already_stored_is_not_looked_for_in_a_party_with_room() {
+        let Some(data) = data() else { return };
+        let mut run = Run {
+            state: state(&["SPECIES_IVYSAUR", "SPECIES_PIDGEY"], None),
+            events: Vec::new(),
+        };
+        let mut step = PcSwapStep::new(
+            Arc::clone(&data),
+            None,
+            "SPECIES_PIDGEY",
+            "SPECIES_PARAS",
+            &run.state,
+        );
+        assert!(matches!(step.ops.front(), Some(Op::Deposit(..))));
+        let mut cursor = PcCursor::Party(step.deposit_slot);
+        let mut frame = 1;
+        for _ in 0..40 {
+            if matches!(step.ops.front(), Some(Op::Withdraw(_))) {
+                break;
+            }
+            let read = match cursor {
+                PcCursor::Party(0) => Some("IVYSAUR"),
+                _ => None,
+            };
+            let o = storage(frame, PcMode::Party, cursor, read);
+            frame += 100;
+            if let Decision::Act(a) = run.settled(&mut step, &o) {
+                if let Expectation::PcCursorAt(next) = a.expect {
+                    cursor = next;
+                }
+            }
+        }
+        assert!(step.failure.is_none(), "{:?}", step.failure);
+        assert_eq!(
+            step.ops.front(),
+            Some(&Op::Withdraw("SPECIES_PARAS".into()))
+        );
     }
 
     /// Switch, Celadon: BOX1 searched, the next box (BOX2, empty) scrolled
