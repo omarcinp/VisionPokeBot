@@ -746,6 +746,36 @@ fn surf_entry_from(
     None
 }
 
+/// Where to face to SURF onto `surf`'s first tile when `edge` crosses
+/// onto it from another map: just past the edge, off the shore's map (the
+/// navigator walks to the shore tile and turns there).
+fn surf_across_edge(world: &World, edge: &Leg, surf: &Leg) -> Option<Destination> {
+    if edge.kind != EdgeKind::Connection || edge.to != surf.from {
+        return None;
+    }
+    let into = world.map(&surf.from.map)?;
+    into.tile(surf.from.x, surf.from.y)
+        .filter(|t| is_water(t.behavior))?;
+    let shore = world.map(&edge.from.map)?;
+    let (x, y) = (edge.from.x, edge.from.y);
+    let past = if y == 0 {
+        (x, -1)
+    } else if y == shore.height - 1 {
+        (x, shore.height)
+    } else if x == 0 {
+        (-1, y)
+    } else if x == shore.width - 1 {
+        (shore.width, y)
+    } else {
+        return None;
+    };
+    Some(Destination::Facing {
+        map: edge.from.map.clone(),
+        x: past.0,
+        y: past.1,
+    })
+}
+
 fn on_water(ctx: &ToolContext<'_>) -> bool {
     ctx.pose().is_some_and(|p| {
         ctx.world
@@ -952,7 +982,7 @@ pub fn walk_legs(
     dest: &Dest,
 ) -> Result<Option<PlayerPose>, ToolError> {
     let world = Arc::clone(&ctx.world);
-    for leg in legs {
+    for (i, leg) in legs.iter().enumerate() {
         if !special(&world, leg) {
             // A warp of the route: taken where the route takes it.
             if leg.kind == EdgeKind::Warp {
@@ -1007,6 +1037,19 @@ pub fn walk_legs(
                 // the walk pressed into the water, learnt it "blocked" tile
                 // by tile and failed "looping").
                 let mut landings = 0;
+                // The water begins across a map edge (fleet continue-1,
+                // Cinnabar Island's north shore at (15, 0), Route 21's sea
+                // beyond it): SURF facing over the edge, from the party
+                // menu; the edge's own leg can't be walked.
+                if let Some(over) = i
+                    .checked_sub(1)
+                    .and_then(|j| legs.get(j))
+                    .filter(|_| landings == 0 && !on_water(ctx))
+                    .and_then(|prev| surf_across_edge(&world, prev, leg))
+                {
+                    go(ctx, over)?;
+                    use_move(ctx, FieldMove::Surf, None)?;
+                }
                 loop {
                     if !on_water(ctx) {
                         let start = ctx
@@ -1736,6 +1779,44 @@ mod tests {
         assert!(!water(shore) && water(into), "{shore:?} -> {into:?}");
         assert_eq!((shore.0 - into.0).abs() + (shore.1 - into.1).abs(), 1);
         assert!(into.1 >= 31, "on toward (9, 49): {into:?}");
+    }
+
+    /// Fleet continue-1, Cinnabar Island's north shore: the route crosses
+    /// the edge at (15, 0) onto Route 21's water, then surfs. The walk
+    /// stalled at the shore ("cannot move toward Route21_South (15, 49)");
+    /// SURF is used facing over the edge, from (15, 0) facing Up.
+    #[test]
+    fn water_across_a_map_edge_is_surfed_onto_from_the_shore() {
+        let Some(world) = world() else { return };
+        let edge = Leg {
+            from: Place::tile("CinnabarIsland", 15, 0),
+            to: Place::tile("Route21_South", 15, 49),
+            kind: EdgeKind::Connection,
+            cost_s: 0.0,
+            requires: Vec::new(),
+        };
+        let surf = Leg {
+            from: Place::tile("Route21_South", 15, 49),
+            to: Place::tile("Route21_South", 15, 0),
+            kind: EdgeKind::Walk {
+                tiles: 49,
+                surf: true,
+            },
+            cost_s: 0.0,
+            requires: Vec::new(),
+        };
+        let over = surf_across_edge(&world, &edge, &surf).expect("surfed onto");
+        assert_eq!(
+            over,
+            Destination::Facing {
+                map: "CinnabarIsland".into(),
+                x: 15,
+                y: -1
+            }
+        );
+        let map = world.map("CinnabarIsland").unwrap();
+        assert!(crate::nav::facing_spots(map, 15, -1)
+            .contains(&((15, 0), pokebot_state::Direction::Up)));
     }
 
     /// Fleet continue-2, Route 12: the route's surf leg from (0, 70) to
