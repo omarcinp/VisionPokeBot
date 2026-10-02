@@ -1013,10 +1013,14 @@ pub fn walk_legs(
                             .pose()
                             .filter(|p| p.map == leg.from.map && landings > 0)
                             .map_or((leg.from.x, leg.from.y), |p| (p.x, p.y));
-                        let (shore, water) =
-                            surf_entry_from(&world, leg, start).ok_or_else(|| {
-                                ToolError::Failed(format!("no water on the surf leg {leg}"))
-                            })?;
+                        // The leg's shortest way may have no water on it
+                        // (fleet continue-2, Route 12: from (0, 70) the
+                        // bridge leads to (14, 119) dry, and the leg failed
+                        // "no water on the surf leg" every plan): walked.
+                        let Some((shore, water)) = surf_entry_from(&world, leg, start) else {
+                            walk_to(ctx, &leg.to)?;
+                            break;
+                        };
                         walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
                         use_move(
                             ctx,
@@ -1732,6 +1736,25 @@ mod tests {
         assert!(!water(shore) && water(into), "{shore:?} -> {into:?}");
         assert_eq!((shore.0 - into.0).abs() + (shore.1 - into.1).abs(), 1);
         assert!(into.1 >= 31, "on toward (9, 49): {into:?}");
+    }
+
+    /// Fleet continue-2, Route 12: the route's surf leg from (0, 70) to
+    /// (14, 119) has a dry way along the bridge; with no water on it the
+    /// leg is walked, not failed "no water on the surf leg".
+    #[test]
+    fn a_surf_leg_with_a_dry_way_has_no_water_to_enter() {
+        let Some(world) = world() else { return };
+        let leg = Leg {
+            from: Place::tile("Route12", 0, 70),
+            to: Place::tile("Route12", 14, 119),
+            kind: EdgeKind::Walk {
+                tiles: 75,
+                surf: true,
+            },
+            cost_s: 0.0,
+            requires: Vec::new(),
+        };
+        assert_eq!(surf_entry_from(&world, &leg, (0, 70)), None);
     }
 
     #[test]
