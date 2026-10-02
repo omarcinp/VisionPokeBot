@@ -1054,6 +1054,7 @@ pub fn boulder_pushes(
     target: (i32, i32),
 ) -> Option<((i32, i32), Vec<Direction>)> {
     use pokebot_world::behavior::{is_water, ledge};
+    use pokebot_world::path::walkable_elevation;
     use std::collections::{HashSet, VecDeque};
     const MAX_STATES: usize = 200_000;
     for &start in boulders {
@@ -1087,7 +1088,21 @@ pub fn boulder_pushes(
                 let (dx, dy) = dir.delta();
                 let behind = (b.0 - dx, b.1 - dy);
                 let next = (b.0 + dx, b.1 + dy);
-                if (behind != p && reach.cost(behind).is_none()) || !floor(next) {
+                // Both moves keep to one elevation: the player's into the
+                // boulder (a mismatch stops the step before the boulder is
+                // tried) and the boulder's onward (Switch, Victory Road 2F:
+                // a boulder on the platform's rim, the player on the cave
+                // floor below it, pushed Down three times and didn't move).
+                let level = |from: (i32, i32), to: (i32, i32)| {
+                    map.tile(from.0, from.1)
+                        .zip(map.tile(to.0, to.1))
+                        .is_some_and(|(a, b)| walkable_elevation(a.elevation, b.elevation))
+                };
+                if (behind != p && reach.cost(behind).is_none())
+                    || !floor(next)
+                    || !level(behind, b)
+                    || !level(b, next)
+                {
                     continue;
                 }
                 if seen.insert((next, b)) {
@@ -1976,5 +1991,50 @@ mod tests {
             (x + dx, y + dy)
         });
         assert_eq!(end, switch);
+    }
+
+    /// Switch, Victory Road 2F: the pushes took the boulder at (6, 17) up
+    /// the stairs at (9, 12) onto the platform (elevation 4), then had the
+    /// player push it Down from the cave floor at (9, 9) (elevation 3): the
+    /// game stops that step at the elevation mismatch and the boulder never
+    /// moved. Every push keeps the player and the boulder each on one level;
+    /// the boulder on the switch's row, below the platform, is the one.
+    #[test]
+    fn a_boulder_is_not_pushed_across_an_elevation_change() {
+        use pokebot_world::path::walkable_elevation;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = pokebot_world::World::load(&dir) else {
+            return;
+        };
+        let map = world.map("VictoryRoad_2F").unwrap();
+        let switch = (14, 19);
+        let boulders: Vec<(i32, i32)> = map
+            .objects
+            .iter()
+            .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_PUSHABLE_BOULDER"))
+            .filter_map(|o| Some((o.x?, o.y?)))
+            .collect();
+        let mut blocked = crate::nav::object_obstacles(map, &Default::default());
+        for b in &boulders {
+            blocked.remove(b);
+        }
+        let (boulder, pushes) =
+            boulder_pushes(map, &boulders, &blocked, (5, 17), switch).expect("pushes");
+        let elevation = |(x, y): (i32, i32)| map.tile(x, y).unwrap().elevation;
+        let mut at = boulder;
+        for d in &pushes {
+            let (dx, dy) = d.delta();
+            let behind = (at.0 - dx, at.1 - dy);
+            let next = (at.0 + dx, at.1 + dy);
+            assert!(
+                walkable_elevation(elevation(behind), elevation(at)),
+                "{d:?} from {behind:?} onto the boulder at {at:?}"
+            );
+            assert!(walkable_elevation(elevation(at), elevation(next)));
+            at = next;
+        }
+        assert_eq!(at, switch);
+        // The boulder on the switch's own row, not the one by the stairs.
+        assert_eq!(boulder, (33, 19));
     }
 }

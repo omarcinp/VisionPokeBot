@@ -19,7 +19,9 @@ pub struct Step {
 /// tiles found blocked at runtime).
 pub type Obstacles = HashSet<(i32, i32)>;
 
-fn walkable_elevation(a: u8, b: u8) -> bool {
+/// Whether an object at elevation `a` may move onto a tile at elevation
+/// `b` (0 and 15 match any).
+pub fn walkable_elevation(a: u8, b: u8) -> bool {
     let any = |e: u8| e == 0 || e == 15;
     any(a) || any(b) || a == b
 }
