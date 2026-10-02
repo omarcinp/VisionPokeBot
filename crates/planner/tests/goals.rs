@@ -1876,3 +1876,44 @@ fn flash_is_planned_before_the_dark_tunnel_from_route_10() {
     );
     assert!(aide < teach && teach < tunnel && tunnel < plan.intents.len());
 }
+
+/// Fleet, continue-4, Rocket Hideout B1F after Giovanni: a partial plan's
+/// open goals (60 of them) were each checked against the facts being
+/// planned further up, and a fact no achiever produces was looked for
+/// among all the achievers each time: 3 ms a node, 80000 nodes took the
+/// whole 240 s budget and the game stood without a plan. Expanding a
+/// ten thousand nodes takes seconds, not a minute.
+#[test]
+fn a_crowded_partial_plan_is_expanded_quickly() {
+    let Some(f) = fixture() else { return };
+    let methods = Methods::load(root().join("data/rules/methods.json")).unwrap();
+    let planner = Planner::new(
+        &f.world,
+        &f.graph,
+        &f.data,
+        Some(&f.obtain),
+        Some(&f.priors),
+        &methods,
+        PlanOptions {
+            budget_s: 600.0,
+            node_budget: 10_000,
+            ..PlanOptions::default()
+        },
+    );
+    let (knowledge, _) = checkpoint("rocket_hideout_b1f_after_giovanni_state.json");
+    let pose = Some(PlayerPose {
+        map: "RocketHideout_B1F".into(),
+        x: 22,
+        y: 27,
+    });
+    let t = std::time::Instant::now();
+    let _ = planner.plan(
+        &parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap(),
+        &knowledge,
+        pose,
+    );
+    let took = t.elapsed().as_secs_f64();
+    eprintln!("10000 nodes in {took:.1} s");
+    // 13 s here, 36 s before (and debug-built: opt-level 1).
+    assert!(took < 25.0, "10000 nodes took {took:.1} s");
+}

@@ -2417,7 +2417,7 @@ struct Session<'p, 'a> {
     pass_start: Option<(PlayerPose, crate::levels::Start)>,
     /// The pass again with a fact's achievers left out: what the story
     /// provides before that fact.
-    without: RefCell<HashMap<Predicate, Rc<Levels>>>,
+    without: RefCell<HashMap<Predicate, Option<Rc<Levels>>>>,
     /// The story prior with what the knowledge implies.
     story: StoryPrior,
     /// Candidates per (goal, facts established) for goals whose candidates
@@ -3039,7 +3039,7 @@ impl<'p, 'a> Session<'p, 'a> {
     /// [`Session::without`], worked out once per fact.
     fn levels_without(&self, fact: &Predicate) -> Option<Rc<Levels>> {
         if let Some(l) = self.without.borrow().get(fact) {
-            return Some(Rc::clone(l));
+            return l.clone();
         }
         // Maps are walked to, not achieved: without achievers the pass is
         // the same.
@@ -3049,6 +3049,9 @@ impl<'p, 'a> Session<'p, 'a> {
             .iter()
             .any(|a| a.effects.contains(fact))
         {
+            // Remembered too: asked per open goal of every partial plan,
+            // and the achievers are many (fleet continue-4: 3 ms a node).
+            self.without.borrow_mut().insert(fact.clone(), None);
             return None;
         }
         let (pose, start) = self.pass_start.as_ref()?;
@@ -3075,7 +3078,7 @@ impl<'p, 'a> Session<'p, 'a> {
         }
         self.without
             .borrow_mut()
-            .insert(fact.clone(), Rc::clone(&levels));
+            .insert(fact.clone(), Some(Rc::clone(&levels)));
         Some(levels)
     }
 
