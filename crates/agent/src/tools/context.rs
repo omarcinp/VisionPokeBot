@@ -1105,9 +1105,13 @@ impl ToolContext<'_> {
         // and the walk failed "stuck waiting: letting the scene settle").
         // Or a screen it couldn't read (fleet continue-1: "party audit:
         // screen or field stayed unreadable", no frame to say which).
+        // Or a walk going round on one tile (fleet continue-2, surfing
+        // Route 21 north: the pose jumped between water tiles, "looping",
+        // and no frame said what the localizer saw).
         let stuck = why.contains("no progress")
             || why.contains("stuck waiting")
-            || why.contains("unreadable");
+            || why.contains("unreadable")
+            || why.contains("looping at");
         if !stuck || self.evidence.len() >= MAX_EVIDENCE {
             return;
         }

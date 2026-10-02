@@ -1022,6 +1022,10 @@ fn a_tool_that_makes_no_progress_leaves_its_frame() {
         ("PC: no progress in box", 1),
         ("stuck waiting: letting the scene settle", 1),
         ("party audit: screen or field stayed unreadable", 1),
+        (
+            "looping at Route21_North (7, 44): 4 acts from the same tile",
+            1,
+        ),
         ("no path to (3, 4)", 0),
     ]
     .into_iter()
