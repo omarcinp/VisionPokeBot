@@ -898,6 +898,8 @@ fn push_boulder(
             ctx.info(format!(
                 "{map}: the pushes failed ({e}); out and back to reset the boulders"
             ));
+            // The frame of the failed push, before the walk out.
+            ctx.keep_evidence("Push", &e.to_string());
             let _ = super::go::reenter(ctx, map, &Default::default());
         }
         return Err(e);

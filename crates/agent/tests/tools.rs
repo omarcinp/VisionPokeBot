@@ -1026,6 +1026,7 @@ fn a_tool_that_makes_no_progress_leaves_its_frame() {
             "looping at Route21_North (7, 44): 4 acts from the same tile",
             1,
         ),
+        ("the boulder did not move Down", 1),
         ("no path to (3, 4)", 0),
     ]
     .into_iter()
