@@ -1132,7 +1132,93 @@ pub fn reconcile_gifts(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         ctx.info(format!("{species} was given but never recorded caught"));
         ctx.emit(GameEvent::SpeciesCaught { species })?;
     }
+    for (flag, value) in scene_var_flags(events, ctx.state()) {
+        ctx.info(format!("a scene var shows {flag} {value}"));
+        ctx.emit(GameEvent::FlagObserved { flag, value })?;
+    }
     Ok(())
+}
+
+/// Flags a map's scene var proves: set to its value only by script paths
+/// that all set (or all clear) the flag too, a flag no script turns back
+/// (fleet continue-3: Silph Co. 11F's scene var at 1, set only with
+/// Giovanni's defeat, which hides Saffron's rockets; the belief held them
+/// there from before, and no plan could clear Saffron).
+pub fn scene_var_flags(
+    events: &pokebot_world::events::Events,
+    state: &GameState,
+) -> Vec<(String, bool)> {
+    use pokebot_world::gates::is_local_flag;
+    // Flags some script sets, and some clears.
+    let mut set: std::collections::BTreeSet<&str> = Default::default();
+    let mut cleared: std::collections::BTreeSet<&str> = Default::default();
+    for p in events.scripts.values().flat_map(|s| &s.paths) {
+        for e in &p.does {
+            match e {
+                Effect::Set { set: f } => {
+                    set.insert(f);
+                }
+                Effect::Clear { clear: f } => {
+                    cleared.insert(f);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for (var, k) in &state.world.vars {
+        let (true, Some(value)) = (var.starts_with("VAR_MAP_SCENE_"), k.value) else {
+            continue;
+        };
+        if value == 0 {
+            continue;
+        }
+        let sets_it = |p: &&pokebot_world::events::ScriptPath| {
+            p.does.iter().any(|e| {
+                matches!(e, Effect::Var { var: v, change } if v == var
+                    && change.eq.as_ref().and_then(Val::as_int) == Some(i64::from(value)))
+            })
+        };
+        let paths: Vec<&pokebot_world::events::ScriptPath> = events
+            .scripts
+            .values()
+            .flat_map(|s| &s.paths)
+            .filter(sets_it)
+            .collect();
+        let Some(first) = paths.first() else {
+            continue;
+        };
+        let flags = |p: &pokebot_world::events::ScriptPath| -> Vec<(String, bool)> {
+            p.does
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Set { set: f } => Some((f.clone(), true)),
+                    Effect::Clear { clear: f } => Some((f.clone(), false)),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (flag, is) in flags(first) {
+            let shared = paths.iter().all(|p| flags(p).contains(&(flag.clone(), is)));
+            // One way only: never turned back by another script.
+            let one_way = if is {
+                !cleared.contains(flag.as_str())
+            } else {
+                !set.contains(flag.as_str())
+            };
+            let differs = state.world.flags.get(&flag).and_then(|k| k.value) != Some(is);
+            if shared
+                && one_way
+                && differs
+                && !is_local_flag(&flag)
+                && !out.contains(&(flag.clone(), is))
+            {
+                out.push((flag, is));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The species of [`reconcile_gifts`], sorted.
@@ -2593,6 +2679,37 @@ mod tests {
         };
         assert!(!readable((5, 16)), "the first tile, from the lift's side");
         assert!(tiles.iter().any(|t| readable(*t)), "{tiles:?}");
+    }
+
+    /// Fleet continue-3: Silph Co. 11F's scene var known at 1 (Giovanni
+    /// beaten), Saffron's rockets held there from an older sighting; the
+    /// var shows them hidden.
+    #[test]
+    fn a_scene_var_shows_the_flags_set_with_it() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cont3_silph_11f_after_giovanni_state.json");
+        let Ok(Some(checkpoint)) = crate::checkpoint::load(&path) else {
+            return;
+        };
+        use pokebot_state::StateReducer;
+        let state = pokebot_state::DefaultReducer.reduce(
+            &GameState::default(),
+            &[pokebot_state::EventRecord {
+                frame_id: 0,
+                event: GameEvent::CheckpointRestored {
+                    knowledge: Box::new(checkpoint.knowledge),
+                },
+            }],
+        );
+        let shown = scene_var_flags(world.events().unwrap(), &state);
+        eprintln!("{shown:?}");
+        assert!(
+            shown.contains(&("FLAG_HIDE_SAFFRON_ROCKETS".to_owned(), true)),
+            "{shown:?}"
+        );
     }
 
     /// Switch, Vermilion: the belief held the city's scene var at 1 (the
