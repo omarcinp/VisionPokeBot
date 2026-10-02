@@ -849,8 +849,24 @@ struct Push {
     from: pokebot_state::PlayerPose,
     /// The boulder's tile before the push.
     boulder: (i32, i32),
+    world: std::sync::Arc<pokebot_world::World>,
     done: bool,
     tries: u32,
+}
+
+/// Whether the tile `at` looks like the map's own floor there (nothing
+/// drawn on it): `None` without a frame, a located player or a render.
+fn bare_floor(
+    world: &pokebot_world::World,
+    o: &Observation,
+    frame: Option<&pokebot_core::NormalizedFrame>,
+    at: (i32, i32),
+) -> Option<bool> {
+    let (frame, p) = (frame?, o.player.as_ref()?);
+    let data = world.map(&p.pose.map)?;
+    let render = data.render().ok()?;
+    pokebot_world::localize::tile_score(frame.image(), render, data, &p.pose, at)
+        .map(|s| s >= OBSTACLE_GONE_SCORE)
 }
 
 /// Whether the screen shows the boulder pushed from `old` to `new`: a
@@ -896,7 +912,12 @@ impl ToolStep for Push {
         let (dx, dy) = self.dir.delta();
         let new = (self.boulder.0 + dx, self.boulder.1 + dy);
         let moved = boulder_moved(ctx.observation, self.boulder, new);
-        if outcome == Outcome::Confirmed && moved != Some(false) {
+        // The sensor rarely reads a moved boulder: its new tile still the
+        // map's bare floor means nothing landed there (Switch, Victory Road
+        // 1F: a push that didn't happen counted, the player having stepped
+        // all the same, and the pushes after it went astray).
+        let empty = bare_floor(&self.world, ctx.observation, ctx.frame, new);
+        if outcome == Outcome::Confirmed && moved != Some(false) && empty != Some(true) {
             self.done = true;
         } else {
             self.tries += 1;
@@ -1114,6 +1135,7 @@ pub fn strength(
             dir,
             from,
             boulder,
+            world: std::sync::Arc::clone(&ctx.world),
             done: false,
             tries: 0,
         };
@@ -1793,6 +1815,36 @@ mod tests {
             "IVYSAUR's STRENGTH made it possible to move boulders around!",
             FieldMove::Strength
         ));
+    }
+
+    /// Switch, Victory Road 1F, after the first push down: the player at
+    /// (7, 18), the boulder below at (7, 19). The sensor doesn't read a
+    /// moved boulder, but its tile doesn't look like the map's floor; the
+    /// floor beside it does.
+    #[test]
+    fn a_boulders_tile_is_not_bare_floor() {
+        let Some(world) = world() else { return };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(image) = pokebot_video::png::load(
+            root.join("captures/fixtures/switch-vr1f-boulder-below-player.png"),
+        ) else {
+            return;
+        };
+        let Ok(frame) = pokebot_core::NormalizedFrame::new(1, std::time::Instant::now(), image)
+        else {
+            return;
+        };
+        let mut o = bare(1);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "VictoryRoad_1F".into(),
+                x: 7,
+                y: 18,
+            },
+            score: 1000,
+        });
+        assert_eq!(bare_floor(&world, &o, Some(&frame), (7, 19)), Some(false));
+        assert_eq!(bare_floor(&world, &o, Some(&frame), (6, 19)), Some(true));
     }
 
     /// Switch, Victory Road 1F: between pushes the walk to the tile behind
