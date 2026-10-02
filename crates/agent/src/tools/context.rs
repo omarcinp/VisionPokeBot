@@ -402,6 +402,25 @@ impl<'a> ToolContext<'a> {
             self.runtime.set_pose_hint_inferred(pose.clone());
         }
         self.runtime.emit(event.clone())?;
+        // A drawn gate believed open, found blocked: the flags it was open
+        // by are wrong, now (the walk forgets what it learnt before the step
+        // fails: Switch, the Pokémon Mansion's 2F barrier at (12, 4–8),
+        // drawn while the belief held the switch clear; the step failed
+        // with nothing learnt, and the next plan walked into it again).
+        if let GameEvent::TileBlocked { map, x, y } = event.clone() {
+            let gates = self.story_gates();
+            let blocked = std::collections::BTreeMap::from([(map.clone(), vec![(x, y)])]);
+            let wrong = {
+                let belief = crate::belief_view::StateBelief(self.runtime.state());
+                wrong_gate_flags(&gates, &blocked, &belief)
+            };
+            self.learn(event);
+            for (flag, is) in wrong {
+                self.info(format!("{map} ({x}, {y}) is drawn shut: {flag} isn't {is}"));
+                self.emit(GameEvent::FlagObserved { flag, value: !is })?;
+            }
+            return Ok(());
+        }
         self.learn(event);
         Ok(())
     }
