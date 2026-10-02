@@ -968,8 +968,16 @@ pub fn twin_path(
     belief: &dyn BeliefView,
 ) -> Option<usize> {
     let s = events.script(script)?;
-    let known = requirement_of(&s.paths.get(planned)?.when)
-        .is_some_and(|req| req.iter().all(|q| belief.eval(q) == Truth::True));
+    // Only flags (a trainer's defeat among them) count: a var the belief
+    // can't track tells nothing about the path (fleet continue-1, the
+    // Rocket Hideout's lift: its floor panel's paths differ by
+    // VAR_ELEVATOR_FLOOR, "can't tell path 6 from 1" every ride, and the
+    // plan never left the car).
+    let known = requirement_of(&s.paths.get(planned)?.when).is_some_and(|req| {
+        req.iter()
+            .filter(|q| matches!(q, pokebot_world::predicate::Predicate::Flag { .. }))
+            .all(|q| belief.eval(q) == Truth::True)
+    });
     if known {
         return None;
     }
@@ -1777,6 +1785,32 @@ mod tests {
             pokebot_state::Knowledge::observed(true, 1),
         );
         assert!(unrecorded_gifts(events, &state).is_empty());
+    }
+
+    /// Fleet continue-1, the Rocket Hideout's lift: the floor panel's
+    /// paths differ only by the car's floor (a var nothing tracks): the
+    /// planned floor's path is taken, not refused for a twin.
+    #[test]
+    fn an_elevator_floor_is_not_refused_for_an_untracked_var() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let script = "RocketHideout_Elevator_EventScript_FloorSelect";
+        let s = events.script(script).unwrap();
+        let mut state = GameState::default();
+        state.world.flags.insert(
+            "FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        for planned in 1..s.paths.len() {
+            let read: Vec<String> = Vec::new();
+            assert_eq!(
+                twin_path(events, script, planned, &read, &[], &StateBelief(&state)),
+                None,
+                "path {planned}"
+            );
+        }
     }
 
     /// Fleet (continue-2): a beaten trainer's after-battle words show its
