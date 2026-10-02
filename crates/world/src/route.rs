@@ -341,6 +341,26 @@ pub fn surf_requirement() -> Requirement {
     ]
 }
 
+/// What Surf on `map` takes: [`surf_requirement`], and on Seafoam's
+/// lowest floors their current stopped. Until the boulders above are
+/// pushed down, those floors keep the fast-current layout, and Surf
+/// there only says "The current is much too fast!" (Switch, B3F: every
+/// walk across its water failed so); entering with the boulders in
+/// place, their `OnTransition` swaps the layout and sets the flag.
+pub fn surf_requirement_on(map: &str) -> Requirement {
+    let mut r = surf_requirement();
+    let stopped = match map {
+        "SeafoamIslands_B3F" => Some("FLAG_STOPPED_SEAFOAM_B3F_CURRENT"),
+        "SeafoamIslands_B4F" => Some("FLAG_STOPPED_SEAFOAM_B4F_CURRENT"),
+        _ => None,
+    };
+    r.extend(stopped.map(|flag| Predicate::Flag {
+        name: flag.to_string(),
+        is: true,
+    }));
+    r
+}
+
 /// What Fly to `dest` takes: the move, the Thunder Badge and having been there.
 pub fn fly_requirement(dest: &str) -> Requirement {
     vec![
@@ -1385,7 +1405,7 @@ impl PlaceGraph {
             prev = s.to;
         }
         if surf {
-            requires.extend(surf_requirement());
+            requires.extend(surf_requirement_on(&map.name));
         }
         requires.sort();
         requires.dedup();

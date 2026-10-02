@@ -1055,3 +1055,44 @@ fn a_dark_map_is_entered_with_flash() {
         assert!(!flash.iter().any(|p| e.requires.contains(p)), "{e:?}");
     }
 }
+
+/// Switch, Seafoam Islands B3F: with the boulders above not pushed down,
+/// the floor keeps its fast-current layout and Surf there only says "The
+/// current is much too fast!"; every walk across its water failed so.
+/// A leg on B3F's water needs the current stopped; stopped, it is open.
+#[test]
+fn seafoams_water_is_surfed_once_its_current_stops() {
+    let Some(world) = world() else { return };
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let from = pose("SeafoamIslands_B3F", 27, 11);
+    let flag = "FLAG_STOPPED_SEAFOAM_B3F_CURRENT";
+    let needs_flag = |r: &RouteResult| {
+        r.legs.iter().any(|l| {
+            l.requires
+                .iter()
+                .any(|p| matches!(p, Predicate::Flag { name, .. } if name == flag))
+        })
+    };
+    let fast = traveller().flag(flag, false);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &fast,
+        &from,
+        "SeafoamIslands_B4F",
+        UnknownPolicy::Pessimistic,
+    );
+    print("fast current", &r);
+    assert!(!needs_flag(&r) || !r.found(), "surfed the fast current");
+    let calm = traveller().flag(flag, true);
+    let r = route_to_map(
+        &world,
+        &graph,
+        &calm,
+        &from,
+        "SeafoamIslands_B4F",
+        UnknownPolicy::Pessimistic,
+    );
+    print("current stopped", &r);
+    assert!(r.found() && needs_flag(&r));
+}
