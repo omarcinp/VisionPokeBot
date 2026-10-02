@@ -892,15 +892,20 @@ impl ToolStep for Push {
         if ctx.quiet_frames < 20 {
             return Decision::Wait("settling before the push".into());
         }
-        Decision::Act(Action::new(
-            format!("push the boulder {:?}", self.dir),
-            vec![ControllerCommand::Hold {
-                buttons: direction_button(self.dir).into(),
-                duration: std::time::Duration::from_millis(400),
-            }],
-            Expectation::PlayerMovedFrom(self.from.clone()),
-            90,
-        ))
+        // One tap: a held direction pushed and then walked on, a second
+        // push or a step astray (Switch, Victory Road 1F: 400 ms held, the
+        // player went on into the boulder's new tile 15 frames after the
+        // push). A tap that only turns the player toward the boulder makes
+        // no move: the next try pushes.
+        Decision::Act(
+            Action::new(
+                format!("push the boulder {:?}", self.dir),
+                vec![ControllerCommand::Press(direction_button(self.dir))],
+                Expectation::PlayerMovedFrom(self.from.clone()),
+                90,
+            )
+            .timed(crate::motion::InputKind::WalkTile, 1),
+        )
     }
 
     fn on_outcome(&mut self, _: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
@@ -1815,6 +1820,33 @@ mod tests {
             "IVYSAUR's STRENGTH made it possible to move boulders around!",
             FieldMove::Strength
         ));
+    }
+
+    /// Switch, Victory Road 1F: a push held the direction 400 ms, and the
+    /// player walked on into the boulder's new tile after it. A push is
+    /// one tap.
+    #[test]
+    fn a_push_is_one_tap() {
+        let Some(world) = world() else { return };
+        let mut push = Push {
+            dir: Direction::Right,
+            from: pokebot_state::PlayerPose {
+                map: "VictoryRoad_1F".into(),
+                x: 10,
+                y: 18,
+            },
+            boulder: (11, 18),
+            world,
+            done: false,
+            tries: 0,
+        };
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let o = bare(1);
+        let Decision::Act(a) = push.next(&mut step_ctx(&o, &state, &mut events, 60)) else {
+            panic!("expected the push")
+        };
+        assert_eq!(a.commands, vec![ControllerCommand::Press(Button::Right)]);
     }
 
     /// Switch, Victory Road 1F, after the first push down: the player at
