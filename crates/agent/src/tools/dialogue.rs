@@ -785,7 +785,19 @@ fn push_onto_switch(
         "{map}: the boulder at {boulder:?} pushed {} times onto the switch at {switch:?}",
         pushes.len()
     ));
-    super::field::strength(ctx, map, boulder, &pushes)?;
+    if let Err(e) = super::field::strength(ctx, map, boulder, &pushes) {
+        // Pushed part of the way, the boulders stand where no plan knows:
+        // out and back puts them on their own tiles for the next try
+        // (Switch, Victory Road 1F: the retry took the boulder at (7, 18),
+        // already moved, and STRENGTH "Can't use that here").
+        if !matches!(e, ToolError::Stopped | ToolError::Device(_)) {
+            ctx.info(format!(
+                "{map}: the pushes failed ({e}); out and back to reset the boulders"
+            ));
+            let _ = super::go::reenter(ctx, map, &Default::default());
+        }
+        return Err(e);
+    }
     let path = path.unwrap_or(0);
     record_path(ctx, script, path)
 }

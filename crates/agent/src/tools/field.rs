@@ -1001,6 +1001,15 @@ pub fn fly(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// `nav` with the boulder at `tile` of `map` a closed tile: the walk
+/// goes round it, never into it.
+fn boulder_walled(mut nav: NavParts, map: &str, tile: (i32, i32)) -> NavParts {
+    let mut gates = (*nav.gates).clone();
+    gates.closed.entry(map.to_owned()).or_default().insert(tile);
+    nav.gates = std::sync::Arc::new(gates);
+    nav
+}
+
 /// A push search's state: the boulder, the player, the pushes so far.
 type PushState = ((i32, i32), (i32, i32), Vec<Direction>);
 
@@ -1084,14 +1093,20 @@ pub fn strength(
     for &dir in pushes {
         let (dx, dy) = dir.delta();
         let behind = (boulder.0 - dx, boulder.1 - dy);
-        super::go::go(
-            ctx,
+        // The boulder's tile is a wall to the walk behind it: with Strength
+        // on, a step into it pushes it (Switch, Victory Road 1F: the walk
+        // round to the next push went through the boulder's tile, pushed
+        // it off the planned line, and the pushes after met nothing).
+        let nav = boulder_walled(NavParts::of(ctx), map, boulder);
+        let mut walk = GoStep::with(
+            &nav,
             Destination::Tile {
                 map: map.to_owned(),
                 x: behind.0,
                 y: behind.1,
             },
-        )?;
+        );
+        ctx.drive(&mut walk)?;
         let from = ctx
             .pose()
             .ok_or_else(|| ToolError::Failed("not located behind the boulder".into()))?;
@@ -1778,6 +1793,48 @@ mod tests {
             "IVYSAUR's STRENGTH made it possible to move boulders around!",
             FieldMove::Strength
         ));
+    }
+
+    /// Switch, Victory Road 1F: between pushes the walk to the tile behind
+    /// the boulder went through the boulder's own tile, which with
+    /// Strength on pushes it. The walk round treats the boulder as a wall:
+    /// from (11, 19) to (10, 18) with the boulder at (11, 18), the route
+    /// doesn't cross (11, 18).
+    #[test]
+    fn the_walk_between_pushes_goes_round_the_boulder() {
+        let Some(world) = world() else { return };
+        let nav = NavParts {
+            world: std::sync::Arc::clone(&world),
+            gone: Default::default(),
+            maybe_gone: Default::default(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+            data: None,
+        };
+        let walled = boulder_walled(nav, "VictoryRoad_1F", (11, 18));
+        assert!(walled
+            .gates
+            .closed_on("VictoryRoad_1F")
+            .any(|t| t == (11, 18)));
+        let pose = pokebot_state::PlayerPose {
+            map: "VictoryRoad_1F".into(),
+            x: 11,
+            y: 19,
+        };
+        let map = world.map("VictoryRoad_1F").unwrap();
+        let mut obstacles: pokebot_world::path::Obstacles =
+            walled.gates.closed_on("VictoryRoad_1F").collect();
+        obstacles.remove(&(pose.x, pose.y));
+        let walk = pokebot_world::path::Walk {
+            obstacles: &obstacles,
+            surf: false,
+            opened: None,
+        };
+        let path = pokebot_world::path::reach(map, (11, 19), &walk, |_| 0)
+            .path((10, 18))
+            .expect("a way round");
+        assert!(path.iter().all(|s| s.to != (11, 18)), "{path:?}");
     }
 
     /// Switch, Victory Road 1F: a wild battle cut a push short and the

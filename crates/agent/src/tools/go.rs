@@ -776,7 +776,7 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
 /// back, and forgets the tiles learnt blocked on it: whoever stood on
 /// them is back on their own tile. Nothing happens when no warp is
 /// reached.
-fn reenter(
+pub(crate) fn reenter(
     ctx: &mut ToolContext<'_>,
     map: &str,
     learnt: &pokebot_world::path::Obstacles,
