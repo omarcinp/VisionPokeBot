@@ -454,6 +454,11 @@ pub struct PartyFieldMove {
     pub nothing_there: bool,
     /// Action windows closed because another member's opened.
     wrong_member: u32,
+    /// The slot A was pressed on to open the action window: the window
+    /// covers the bottom of the list, so the highlight of a member there
+    /// can't be read under it (fleet continue-4: FLY on slot 5 failed "the
+    /// action window never belonged to slot 5 (read None)").
+    opened_on: Option<u8>,
 }
 
 impl PartyFieldMove {
@@ -469,6 +474,7 @@ impl PartyFieldMove {
             failed: None,
             nothing_there: false,
             wrong_member: 0,
+            opened_on: None,
         }
     }
 
@@ -563,7 +569,7 @@ impl ToolStep for PartyFieldMove {
         if let Some(party) = &o.party_menu {
             if !party.options.is_empty() {
                 self.retries.enter("actions");
-                if party.selected != Some(self.slot) {
+                if party.selected.or(self.opened_on) != Some(self.slot) {
                     // The window of another member: back to the list.
                     self.wrong_member += 1;
                     if self.wrong_member > 3 {
@@ -572,6 +578,7 @@ impl ToolStep for PartyFieldMove {
                             self.slot, party.selected
                         ));
                     }
+                    self.opened_on = None;
                     return self.retries.act(
                         "close the wrong member's actions",
                         Button::B,
@@ -625,6 +632,7 @@ impl ToolStep for PartyFieldMove {
                 return self.retries.wait(o, "reading the selected member");
             };
             if at == self.slot {
+                self.opened_on = Some(at);
                 return self.retries.act(
                     "open the member's actions",
                     Button::A,
@@ -1347,6 +1355,30 @@ mod tests {
             step.next(&mut step_ctx(&o, &state, &mut events, 60)),
             Decision::Done(_)
         ));
+    }
+
+    /// Fleet continue-4: FLY on the last slot. The action window covers the
+    /// bottom of the list, so the highlight under it reads as nobody; the
+    /// window is the one A was pressed on, not another member's.
+    #[test]
+    fn the_last_members_window_hides_its_highlight() {
+        let mut step = PartyFieldMove::new(FieldMove::Fly, 5);
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        let mut list = party_menu(5, &[], None);
+        list.count = 6;
+        o.party_menu = Some(list);
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 0));
+        assert_eq!(pressed(&d), Some(Button::A));
+        let mut window = party_menu(5, &["SUMMARY", "FLY", "SWITCH", "ITEM", "CANCEL"], Some(0));
+        window.count = 6;
+        window.selected = None;
+        o.party_menu = Some(window);
+        let Decision::Act(a) = step.next(&mut step_ctx(&o, &state, &mut events, 0)) else {
+            panic!("the window is used")
+        };
+        assert_eq!(a.expect, Expectation::PartyOptionAt(1));
     }
 
     /// DIG asks "Want to escape from here and return to ROUTE 4?" over the
