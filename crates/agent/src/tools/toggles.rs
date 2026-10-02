@@ -563,7 +563,16 @@ fn run_at(
     path: usize,
     answers: Vec<Answer>,
 ) -> Result<(), ToolError> {
-    super::go::reach_facing(ctx, map, at)?;
+    // A walk, not `reach_facing`: that only clears the way (fleet
+    // continue-3: the statue at (24, 29) pressed again from beside it).
+    super::go::go(
+        ctx,
+        Destination::Facing {
+            map: map.to_owned(),
+            x: at.0,
+            y: at.1,
+        },
+    )?;
     run(ctx, script, path, answers)
 }
 
