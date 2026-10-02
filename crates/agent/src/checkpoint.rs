@@ -96,7 +96,7 @@ pub fn correct(path: &Path, events: &[pokebot_state::EventRecord]) -> Result<boo
         })
         .map(|r| r.frame_id)
         .collect();
-    let apply: Vec<EventRecord> = events
+    let mut apply: Vec<EventRecord> = events
         .iter()
         .filter(|r| frames.contains(&r.frame_id))
         .filter(|r| match &r.event {
@@ -106,6 +106,29 @@ pub fn correct(path: &Path, events: &[pokebot_state::EventRecord]) -> Result<boo
         })
         .cloned()
         .collect();
+    // An object seen standing whose hide flag the checkpoint doesn't know,
+    // or a trainer seen unbeaten, when no script of the cycle touched the
+    // flag: so it stood at the save too (fleet continue-6: Route 16's
+    // SNORLAX, met and seen every cycle, unknown again after every reload,
+    // and every plan assumed him gone; continue-3: Rocket Hideout B1F's
+    // barrier showed GRUNT_12 unbeaten every cycle).
+    let touched: std::collections::BTreeSet<&str> = events
+        .iter()
+        .filter_map(|r| match &r.event {
+            GameEvent::FlagTracked { flag, .. } => Some(flag.as_str()),
+            _ => None,
+        })
+        .collect();
+    for r in events {
+        if let GameEvent::FlagObserved { flag, value: false } = &r.event {
+            let unknown = knowledge.world.flag(flag).value.is_none();
+            let seen = apply.iter().any(|a| a.event == r.event);
+            let absent = flag.starts_with("FLAG_HIDE_") || flag.starts_with("TRAINER_");
+            if absent && unknown && !touched.contains(flag.as_str()) && !seen {
+                apply.push(r.clone());
+            }
+        }
+    }
     if apply.is_empty() {
         return Ok(false);
     }
@@ -523,6 +546,45 @@ mod tests {
         assert!(!c.knowledge.world.flags.contains_key("FLAG_OTHER"));
         // Corrected once: the path is gone, nothing more to do.
         assert!(!correct(&path, &fired).unwrap());
+    }
+
+    /// Fleet continue-6: Route 16's SNORLAX, his hide flag unknown in the
+    /// checkpoint, seen standing in the cycle (nothing touched the flag):
+    /// kept for the next reload. A flag a script of the cycle set, or one
+    /// the checkpoint knows, isn't.
+    #[test]
+    fn an_object_seen_standing_is_kept_in_the_checkpoint() {
+        use pokebot_state::{EventRecord, GameEvent};
+        let dir = temp_dir("seen");
+        let path = dir.join("state.json");
+        let k = SavedKnowledge::default();
+        let id = Identity::of(&progress(&["A"], 7));
+        store(&path, &id, &k).unwrap();
+        let seen = |flag: &str| EventRecord {
+            frame_id: 30,
+            event: GameEvent::FlagObserved {
+                flag: flag.into(),
+                value: false,
+            },
+        };
+        let snorlax = "FLAG_HIDE_ROUTE_16_SNORLAX";
+        let grunt = "TRAINER_TEAM_ROCKET_GRUNT_12";
+        let ball = "FLAG_HIDE_ROUTE_16_ITEM";
+        let touched = EventRecord {
+            frame_id: 20,
+            event: GameEvent::FlagTracked {
+                flag: ball.into(),
+                value: false,
+            },
+        };
+        assert!(correct(&path, &[touched, seen(snorlax), seen(ball), seen(grunt)]).unwrap());
+        let c = load(&path).unwrap().unwrap();
+        assert_eq!(c.knowledge.world.flags[snorlax].value, Some(false));
+        assert_eq!(c.knowledge.world.flags[grunt].value, Some(false));
+        assert!(!c.knowledge.world.flags.contains_key(ball));
+        // Known now: nothing more to do.
+        assert!(!correct(&path, &[seen(snorlax)]).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

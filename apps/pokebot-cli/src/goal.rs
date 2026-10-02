@@ -785,7 +785,8 @@ impl Runner for CliRunner<'_> {
                 if matches!(record.event,
                     GameEvent::ScriptPathRetracted { .. }
                         | GameEvent::VarObserved { .. }
-                        | GameEvent::FlagObserved { .. }))
+                        | GameEvent::FlagObserved { .. }
+                        | GameEvent::FlagTracked { .. }))
         });
         let result = self.play(start);
         if self.args.save_game {
