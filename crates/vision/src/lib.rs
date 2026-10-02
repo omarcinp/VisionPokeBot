@@ -2304,6 +2304,28 @@ mod tests {
         }
     }
 
+    /// Fleet continue-2, surfing Route 21 north past its rocks: each rock's
+    /// block is drawn on animated sea, but only water blocks forgave the
+    /// waves. The true tile, (5, 36), scored 900, and a step from it the
+    /// search took (7, 40) at 903; the pose wandered and every walk
+    /// "looped". Water pixels inside other blocks are forgiven too.
+    #[test]
+    fn the_sea_round_rocks_doesnt_move_the_player() {
+        let Some(world) = world() else { return };
+        let Some(image) = fixture("emu-route21-north-rocks-surf.png") else {
+            return;
+        };
+        let pose = |x, y| PlayerPose {
+            map: "Route21_North".into(),
+            x,
+            y,
+        };
+        let mut p = FireRedPerception::with_world(world);
+        p.set_pose_hint(pose(5, 37));
+        let seen = p.observe(&frame(1, image)).player.map(|o| o.pose);
+        assert_eq!(seen, Some(pose(5, 36)));
+    }
+
     /// A dark cave's view at sprite map pixel `(px, py)`: the map's render
     /// inside the lit disc (as fleet worker 1 saw it in Rock Tunnel: its
     /// box 96–143 × 56–104), black around it, the player's sprite on top.

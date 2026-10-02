@@ -173,10 +173,14 @@ fn score_plain(
             let same =
                 (0..3).all(|c| frame_bytes[fi + c].abs_diff(render_bytes[ri + c]) <= TOLERANCE);
             let block = (ry / BLOCK) * (rw / BLOCK) + rx / BLOCK;
-            if !same
-                && water.get(block as usize).copied().unwrap_or(false)
-                && looks_like_water(&frame_bytes[fi..fi + 3])
-            {
+            // Or water drawn inside another block (the sea round a rock,
+            // a shore's foam): both pixels water, the wave not the same
+            // frame (fleet continue-2, Route 21's rocks: the true tile
+            // scored 900, every rock's waves a miss, and a tile eight off
+            // won at 911).
+            let wet = water.get(block as usize).copied().unwrap_or(false)
+                || looks_like_water(&render_bytes[ri..ri + 3]);
+            if !same && wet && looks_like_water(&frame_bytes[fi..fi + 3]) {
                 void += 1;
                 continue;
             }
