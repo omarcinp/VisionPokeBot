@@ -406,12 +406,34 @@ pub fn continue_game(
         runtime.set_pose_hint(pose.clone());
     }
     bring_up_game(runtime, stop, snapshots)?;
-    executor.run(runtime, &mut ContinueTask::default(), stop)?;
+    match executor.run(runtime, &mut ContinueTask::default(), stop) {
+        // Not where the progress file says the save was: the game kept an
+        // older save (Switch: a restart a minute after "saved at Seafoam
+        // Islands B3F" resumed on Route 21 North, and the search near B3F
+        // found the player nowhere, cycle after cycle). Every map is
+        // searched, once.
+        Err(e) if not_at_the_saved_spot(&e) => {
+            runtime.error(format!(
+                "continue: {e}; not at the saved spot, looking everywhere"
+            ));
+            runtime.clear_pose_hint();
+            executor.run(runtime, &mut ContinueTask::default(), stop)?;
+        }
+        other => {
+            other?;
+        }
+    }
     runtime.info(format!(
         "continuing after: {}",
         progress.milestones.join(", ")
     ));
     restore_checkpoint(runtime, state_path, progress, data)
+}
+
+/// Whether CONTINUE failed for want of the player where the progress file
+/// says the save was: the game resumed elsewhere (an older save).
+fn not_at_the_saved_spot(e: &ExecutorError) -> bool {
+    matches!(e, ExecutorError::TaskFailed { reason, .. } if reason.contains("isn't located"))
 }
 
 /// Saves in-game and writes the checkpoint (`state.json` first, then
@@ -449,6 +471,22 @@ mod tests {
     /// What a new game starts with, from the rules and the compiled events:
     /// nothing held, ¥3000, the story at its start (the flags the new-game
     /// script sets on, the rest off, every var 0).
+    /// Switch: a restart resumed on Route 21 North while the progress file
+    /// said Seafoam Islands B3F; the search near B3F failed CONTINUE every
+    /// cycle. That failure, and only it, is tried again without the hint.
+    #[test]
+    fn continue_looks_everywhere_when_not_at_the_saved_spot() {
+        let failed = |reason: &str| ExecutorError::TaskFailed {
+            task: "ContinueGame".into(),
+            reason: reason.into(),
+        };
+        assert!(not_at_the_saved_spot(&failed(
+            "the player isn't located after 120 presses past the recap"
+        )));
+        assert!(!not_at_the_saved_spot(&failed("no main menu")));
+        assert!(!not_at_the_saved_spot(&ExecutorError::Stopped));
+    }
+
     #[test]
     fn a_new_game_starts_known() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
