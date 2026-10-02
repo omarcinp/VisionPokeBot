@@ -179,6 +179,20 @@ impl WorldBelief {
     /// Records a compiled path run to completion, forgetting the oldest
     /// beyond [`PATHS_RUN_KEPT`].
     pub fn record_path(&mut self, script: &str, path: usize) {
+        // Run again: moved to the end, not kept twice, which at the cap
+        // drops the oldest path (fleet continue-2: talking to SILPH CO.
+        // 7F's LAPRAS man again recorded his path again, a path fell off
+        // each time, the belief "changed" and Explore replanned and talked
+        // to him again, 20 times in ten minutes).
+        if let Some(i) = self
+            .paths_run
+            .iter()
+            .position(|(s, p)| s == script && *p == path)
+        {
+            let run = self.paths_run.remove(i);
+            self.paths_run.push(run);
+            return;
+        }
         self.paths_run.push((script.to_owned(), path));
         if self.paths_run.len() > PATHS_RUN_KEPT {
             let extra = self.paths_run.len() - PATHS_RUN_KEPT;
@@ -208,6 +222,22 @@ pub(crate) fn track<T: PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At the cap, a path run again keeps every path recorded: moved to the
+    /// end, never a second copy that pushes the oldest out.
+    #[test]
+    fn a_path_run_again_drops_no_other() {
+        let mut w = WorldBelief::default();
+        for i in 0..PATHS_RUN_KEPT {
+            w.record_path("S", i);
+        }
+        let before: std::collections::BTreeSet<_> = w.paths_run.iter().cloned().collect();
+        w.record_path("S", 3);
+        let after: std::collections::BTreeSet<_> = w.paths_run.iter().cloned().collect();
+        assert_eq!(before, after);
+        assert_eq!(w.paths_run.last(), Some(&("S".to_owned(), 3)));
+        assert_eq!(w.paths_run.len(), PATHS_RUN_KEPT);
+    }
     use crate::{GameState, KnowledgeSource, SavedKnowledge};
 
     /// A checkpoint is read with its knowledge flattened beside the
