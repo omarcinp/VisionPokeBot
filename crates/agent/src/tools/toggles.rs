@@ -244,8 +244,13 @@ pub fn open_plan(
         VecDeque::from([(pose.clone(), State::new(), Vec::new())]);
     while let Some((here, set, runs)) = queue.pop_front() {
         let belief = Flags { base, flags: &set };
+        // As with switches, a way the first script's spot has already is a
+        // detour, not the scripts' doing.
         if !runs.is_empty() && reaches(world, graph, &belief, &here, dest, policy) {
-            return Some(runs);
+            if !reaches(world, graph, base, &runs[0].stand, dest, policy) {
+                return Some(runs);
+            }
+            continue;
         }
         if runs.len() >= MAX_OPENS {
             continue;
@@ -393,8 +398,17 @@ pub fn plan(
             VecDeque::from([(pose.clone(), value, Vec::new())]);
         while let Some((here, value, presses)) = queue.pop_front() {
             let belief = Overlay { base, flag, value };
+            // A way the first switch's spot has already, untouched, is no
+            // switch's doing: the walk there is just a detour (Switch, the
+            // west half of Route 20, joined to the rest only through
+            // Seafoam: the walk to B4F failed, and Mansion statues were
+            // "pressed" only to walk on from Cinnabar).
             if !presses.is_empty() && reaches(world, graph, &belief, &here, dest, policy) {
-                return Some(presses);
+                let detour = reaches(world, graph, base, &presses[0].stand, dest, policy);
+                if !detour {
+                    return Some(presses);
+                }
+                continue;
             }
             if presses.len() >= MAX_PRESSES {
                 continue;
@@ -736,5 +750,48 @@ mod tests {
         for r in &runs {
             assert_eq!((r.stand.x, r.stand.y), (r.opener.at.0, r.opener.at.1 + 1));
         }
+    }
+
+    /// Switch, Route 20 at (7, 9) (mislocated at sea) bound for Seafoam
+    /// B4F: no walk, and the switch search "pressed" a Pokémon Mansion
+    /// statue to walk on from Cinnabar. A press that doesn't open the way
+    /// from where it is made is no way through.
+    #[test]
+    fn a_switch_is_pressed_only_where_it_opens_the_way() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let all = toggles(&world);
+        let pose = PlayerPose {
+            map: "Route20".into(),
+            x: 7,
+            y: 9,
+        };
+        let dest = Dest::Map {
+            map: "SeafoamIslands_B4F".into(),
+        };
+        let policy = UnknownPolicy::Optimistic {
+            penalty_of: crate::tools::go::battle_on_the_way,
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/switch_seafoam_trip_state.json");
+        let Ok(Some(checkpoint)) = crate::checkpoint::load(&path) else {
+            return;
+        };
+        let knowledge = checkpoint.knowledge;
+        use pokebot_state::StateReducer;
+        let state = pokebot_state::DefaultReducer.reduce(
+            &pokebot_state::GameState::default(),
+            &[pokebot_state::EventRecord {
+                frame_id: 0,
+                event: pokebot_state::GameEvent::CheckpointRestored {
+                    knowledge: Box::new(knowledge),
+                },
+            }],
+        );
+        let belief = StateBelief(&state);
+        assert_eq!(
+            plan(&world, &graph, &belief, &pose, &dest, &all, policy),
+            None
+        );
     }
 }
