@@ -342,6 +342,16 @@ impl ToolStep for GoStep {
             }
         }
         let pose = ctx.observation.player.as_ref().map(|p| p.pose.clone());
+        // On water the player is surfing: the walk goes over water too.
+        let wet = pose.as_ref().is_some_and(|p| {
+            self.world
+                .map(&p.map)
+                .and_then(|m| m.tile(p.x, p.y))
+                .is_some_and(|t| is_water(t.behavior))
+        });
+        if wet && !self.nav.surfing() {
+            self.nav.start_surfing();
+        }
         if self.any_tile && pose.as_ref().is_some_and(|p| p.map == self.dest.map()) {
             return Decision::Done(format!("arrived on {}", self.dest.map()));
         }

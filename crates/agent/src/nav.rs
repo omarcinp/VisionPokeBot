@@ -389,6 +389,19 @@ impl Navigator {
         self
     }
 
+    /// Walks over water from now on (the player was found surfing): the
+    /// route out of this map is planned again.
+    pub fn start_surfing(&mut self) {
+        if !self.surf {
+            self.surf = true;
+            self.hop = None;
+        }
+    }
+
+    pub fn surfing(&self) -> bool {
+        self.surf
+    }
+
     /// The tiles of `map` to go round when a way round exists (replacing
     /// what was set for it).
     pub fn set_avoid(&mut self, map: &str, tiles: Obstacles) {
@@ -1440,9 +1453,16 @@ pub fn route_search_via(
             o.extend(gates.closed_on(&name));
             (o, gates.opened_on(&name))
         });
+        // A player on water is surfing: on to water or ashore, but back
+        // onto water from land only by using Surf again (fleet continue-2,
+        // surfed up Route 21 into Pallet Town's pond: every way from the
+        // water was "no known route", even to the house next to it).
+        let surfing = map
+            .tile(x, y)
+            .is_some_and(|t| pokebot_world::behavior::is_water(t.behavior));
         let walk = Walk {
             obstacles,
-            surf: false,
+            surf: surfing,
             opened: Some(opened),
         };
         for (n, hop) in neighbours(world, map, (x, y), &walk) {
@@ -2400,5 +2420,29 @@ mod tests {
         // Released half a tile early: the game finishes the step it's in.
         assert_eq!(run_hold(1).as_millis(), TILE_MS as u128 / 2);
         assert_eq!(run_hold(4).as_millis(), (TILE_MS * 4 - TILE_MS / 2) as u128);
+    }
+
+    /// Fleet continue-2 surfed up Route 21 into Pallet Town's pond at
+    /// (7, 19): every way from the water was "no known route", even to the
+    /// house next to it. A player on water is surfing and may go ashore.
+    #[test]
+    fn a_route_starts_from_the_water_the_player_surfs() {
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "PalletTown".into(),
+            x: 7,
+            y: 19,
+        };
+        let route = route_search_via(
+            &world,
+            &pose,
+            "PalletTown_RivalsHouse",
+            |_| true,
+            &Gone::default(),
+            &GateTiles::default(),
+        );
+        assert!(route.is_some());
     }
 }
