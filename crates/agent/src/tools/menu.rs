@@ -150,6 +150,18 @@ impl Retries {
 /// Opens the Start menu from the overworld, once the player is located and
 /// the scene has settled (Start during a scripted pause lands mid-cutscene).
 pub fn open_start_menu(retries: &mut Retries, o: &Observation, quiet_frames: u32) -> Decision {
+    // A page of the Start menu that wasn't asked for (its cursor read a
+    // row off): B goes back (fleet continue-6, a Teach's way to the bag
+    // opened the TRAINER CARD, and the step waited there for the player
+    // to show until "no progress in open").
+    if o.trainer_card.is_some() || o.pokedex_list.is_some() || o.pokedex_page {
+        return retries.act(
+            "leave the page opened by mistake",
+            Button::B,
+            Expectation::InputsDone,
+            MENU_FRAMES,
+        );
+    }
     if o.player.is_none() {
         return retries.wait(o, "locating before opening the Start menu");
     }
@@ -339,6 +351,32 @@ mod tests {
 
     fn lines(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Fleet continue-6: on the way to the bag the TRAINER CARD opened;
+    /// no player shows on it, and the step waited for one. B leaves it.
+    #[test]
+    fn a_page_opened_by_mistake_is_left_with_b() {
+        let mut o = Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: pokebot_state::ScreenState::Unknown,
+                detector: "trainer-card".into(),
+            },
+            Default::default(),
+        );
+        o.trainer_card = Some(pokebot_state::TrainerCardObservation {
+            badges: vec![1, 2, 3, 4, 5, 6],
+            pokedex_count: Some(14),
+            money: Some(78920),
+        });
+        let mut retries = Retries::default();
+        match open_start_menu(&mut retries, &o, 100) {
+            Decision::Act(a) => {
+                assert_eq!(a.commands, vec![ControllerCommand::Press(Button::B)])
+            }
+            _ => panic!("expected B"),
+        }
     }
 
     #[test]
