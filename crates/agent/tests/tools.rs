@@ -982,3 +982,68 @@ fn a_script_opening_the_way_runs_within_a_run_script() {
     let got = result.lock().unwrap().clone().expect("the tool ran");
     assert!(!got.contains("is busy"), "{got}");
 }
+
+/// Fails every Unstick with the reason it is given.
+struct GivesUp {
+    why: String,
+}
+
+impl Tool for GivesUp {
+    fn name(&self) -> &str {
+        "GivesUp"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::Unstick)
+    }
+
+    fn run(&mut self, _intent: &Intent, _ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        ToolOutcome::failed(self.why.clone())
+    }
+}
+
+/// Fleet continue-1, Fuchsia's PC: "PC: no progress in box", and fleet
+/// workers record no frames, so nothing told why. A tool that gives up
+/// for want of progress leaves its frame and why, once per failure a
+/// session; other failures leave nothing.
+#[test]
+fn a_tool_that_makes_no_progress_leaves_its_frame() {
+    let Some(d) = data() else { return };
+    let Some(overworld) = fixture("emu-tools-overworld.png") else {
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("pokebot-evidence-{}", std::process::id()));
+    let bundles = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    for (i, (why, expect)) in [("PC: no progress in box", 1), ("no path to (3, 4)", 0)]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = root.join(i.to_string());
+        let (mut runtime, _) = runtime(&d, vec![overworld.clone()]);
+        runtime.observe().expect("a frame");
+        let executor = Executor::default();
+        let stop = AtomicBool::new(false);
+        let mut ctx = ToolContext::new(
+            &mut runtime,
+            &executor,
+            Arc::clone(&d.world),
+            Arc::clone(&d.data),
+            &stop,
+        )
+        .with_toolbox(Toolbox::new(vec![Box::new(GivesUp { why: why.into() })]));
+        ctx.stuck_dir = dir.clone();
+        // Twice: the same failure is kept once.
+        let _ = ctx.invoke(&Intent::Unstick).result;
+        let _ = ctx.invoke(&Intent::Unstick).result;
+        let kept = bundles(&dir);
+        assert_eq!(kept.len(), expect, "{why}: {kept:?}");
+        for b in &kept {
+            assert!(b.join("reason.txt").exists() && b.join("normalized.png").exists());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

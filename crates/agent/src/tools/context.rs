@@ -34,6 +34,11 @@ const TRAINER_DIALOGUE_WINDOW: u64 = 600;
 const MAX_DEPTH: usize = 6;
 /// Where unrecognised dialogue frames and their text are saved.
 const UNKNOWN_DIR: &str = "captures/unknown";
+/// Where a tool that made no progress leaves the frame it gave up on
+/// (pruned with the debug bundles by `tools/disk-guard.sh`).
+const STUCK_DIR: &str = "captures/stuck";
+/// Such frames a session keeps at most.
+const MAX_EVIDENCE: usize = 20;
 
 /// What the running step treats as normal on screen. Anything else is an
 /// interrupt: a battle box runs the battle tool, dialogue or a menu runs
@@ -160,6 +165,10 @@ pub struct ToolContext<'a> {
     pub checkpoint: Option<(PathBuf, checkpoint::Identity)>,
     /// Where unrecognised dialogue is saved (frame and text).
     pub unknown_dir: PathBuf,
+    /// Where a tool's "no progress" leaves its frame ([`STUCK_DIR`]).
+    pub stuck_dir: PathBuf,
+    /// The failures whose frame was kept this session.
+    evidence: std::collections::BTreeSet<String>,
     pub scheduler: crate::scheduler::Scheduler,
     /// The compiled script `RunScript` is following, if any (a battle it
     /// starts is its battle).
@@ -246,6 +255,8 @@ impl<'a> ToolContext<'a> {
             blocked: Blocked::default(),
             checkpoint: None,
             unknown_dir: PathBuf::from(UNKNOWN_DIR),
+            stuck_dir: PathBuf::from(STUCK_DIR),
+            evidence: Default::default(),
             scheduler: crate::scheduler::Scheduler::default(),
             running_script: None,
             ledger: crate::ledger::Ledger::default(),
@@ -1025,7 +1036,12 @@ impl<'a> ToolContext<'a> {
         }
         match &outcome.result {
             Ok(()) => self.runtime.info(format!("tool {intent}: done")),
-            Err(e) => self.runtime.error(format!("tool {intent}: {e}")),
+            Err(e) => {
+                self.runtime.error(format!("tool {intent}: {e}"));
+                if let ToolError::Failed(why) = e {
+                    self.keep_evidence(intent.name(), why);
+                }
+            }
         }
         // A trainer battle's result is kept across reloads: a loss makes
         // the next plan for that trainer ask for more (the ledger's
@@ -1047,6 +1063,52 @@ impl<'a> ToolContext<'a> {
         outcome
     }
 }
+impl ToolContext<'_> {
+    /// A tool that gave up for want of progress (the screen not what it
+    /// waits for) leaves the frame, its observation and why, once per
+    /// failure a session: fleet workers record nothing, and their PC
+    /// failed "no progress in box" with no frame to tell why (fleet
+    /// continue-1, Fuchsia's PC).
+    fn keep_evidence(&mut self, tool: &str, why: &str) {
+        if !why.contains("no progress") || self.evidence.len() >= MAX_EVIDENCE {
+            return;
+        }
+        if !self.evidence.insert(format!("{tool}: {why}")) {
+            return;
+        }
+        let frame = self.runtime.last_frame().map_or(0, |f| f.frame_id);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let dir = self.stuck_dir.join(format!("{stamp}-tool-{tool}-f{frame}"));
+        let saved = std::fs::create_dir_all(&dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                std::fs::write(dir.join("reason.txt"), format!("{tool}: {why}\n"))
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|()| match self.runtime.last_frame() {
+                Some(f) => pokebot_video::png::save(f.image(), dir.join("normalized.png"))
+                    .map_err(|e| e.to_string()),
+                None => Ok(()),
+            })
+            .and_then(|()| match self.runtime.observation() {
+                Some(o) => serde_json::to_string_pretty(o)
+                    .map_err(|e| e.to_string())
+                    .and_then(|j| {
+                        std::fs::write(dir.join("observation.json"), j).map_err(|e| e.to_string())
+                    }),
+                None => Ok(()),
+            });
+        match saved {
+            Ok(()) => self.info(format!("tool evidence: {}", dir.display())),
+            Err(e) => self
+                .runtime
+                .error(format!("tool evidence: {}: {e}", dir.display())),
+        }
+    }
+}
+
 /// Counts an interruption at `pose` that learned `learned`; the failure
 /// once the same tile has turned the step back [`MAX_SAME_INTERRUPTS`]
 /// times. A scene at one spot every time the step comes by (a ticket gate
