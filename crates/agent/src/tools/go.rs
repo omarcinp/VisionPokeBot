@@ -813,12 +813,18 @@ pub fn walk_legs(
                         leg.to.map
                     ))
                 })?;
-                ctx.invoke(&Intent::RunScript {
-                    script: script.clone(),
-                    path: Some(path),
-                    answers,
-                })
-                .result?;
+                // Within a RunScript (its walk to the script's map), the
+                // tool is busy: the panel is run in place.
+                if ctx.running().contains(&"RunScript") {
+                    super::dialogue::run_nested(ctx, script, Some(path), &answers)?;
+                } else {
+                    ctx.invoke(&Intent::RunScript {
+                        script: script.clone(),
+                        path: Some(path),
+                        answers,
+                    })
+                    .result?;
+                }
                 if ctx.pose().is_some_and(|p| p.map == leg.from.map) {
                     if let Some(warp) = dynamic_door(&world, &leg.from.map) {
                         go(

@@ -1523,6 +1523,23 @@ fn disarmed(world: &World, script: &str, map: &str, tile: (i32, i32)) -> Vec<(St
     out
 }
 
+/// Runs path `path` of `script` within the tool already running: a
+/// RunScript whose walk rides an elevator runs the car's panel itself
+/// (the toolbox holds RunScript out while it runs: Switch, SILPH CO.
+/// 7F's LAPRAS gift failed "RunScript is busy" before a step, the car's
+/// panel on its way).
+pub(crate) fn run_nested(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: Option<usize>,
+    answers: &[Answer],
+) -> Result<(), ToolError> {
+    let outer = ctx.running_script.replace(script.to_owned());
+    let result = run_script(ctx, script, path, answers);
+    ctx.running_script = outer;
+    result
+}
+
 fn run_script(
     ctx: &mut ToolContext<'_>,
     script: &str,
