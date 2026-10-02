@@ -72,6 +72,9 @@ pub struct BattleMemory {
     /// Move types the foe out took nothing from ("It doesn't affect …"),
     /// until another foe comes out.
     pub no_effect: Vec<String>,
+    /// The one out has no move the game takes and the foe feels: a wild
+    /// battle is run from.
+    pub nothing_to_use: bool,
 }
 
 impl BattleMemory {
@@ -539,6 +542,21 @@ pub fn fallback_move(
         .map(|(slot, m)| (slot as u8, m.clone()))
 }
 
+/// A move with PP the game takes, whether or not the foe out feels it
+/// (its type had no effect): a turn spent when nothing else is left.
+fn ignored_move(data: &GameData, party: &Party, memory: &BattleMemory) -> Option<(u8, String)> {
+    let lead = party.lead()?;
+    lead.moves
+        .iter()
+        .enumerate()
+        .find(|(_, m)| {
+            lead.pp_left(data, m) > 0
+                && memory.disabled.as_deref() != Some(m.as_str())
+                && memory.limits.allows(data, m, memory.last_move.as_deref())
+        })
+        .map(|(slot, m)| (slot as u8, m.clone()))
+}
+
 /// The next battle input, if a battle menu is open.
 pub fn decide(
     observation: &Observation,
@@ -639,7 +657,8 @@ pub fn decide(
     // one out still wins (the user's rule: Pokémon may faint, as long as
     // not all of them do).
     let low = low && !(usable > 1 && risk.is_some());
-    let wants_out = (low || high_risk || no_attacks || memory.catch.flee) && !memory.trainer;
+    let wants_out = (low || high_risk || no_attacks || memory.catch.flee || memory.nothing_to_use)
+        && !memory.trainer;
     // Trapped (ARENA TRAP, MEAN LOOK, WRAP…): the game refuses RUN and
     // puts the menu back; fight on.
     let flee = wants_out && memory.limits.can_run();
@@ -671,6 +690,9 @@ pub fn decide(
                 ),
             }),
             no_attacks.then(|| "no attacking move".to_owned()),
+            memory
+                .nothing_to_use
+                .then(|| "no move the foe feels".to_owned()),
             memory.catch.flee.then(|| "not catching it".to_owned()),
         ]
         .into_iter()
@@ -720,7 +742,26 @@ pub fn decide(
                 }
                 opener.or_else(|| choose_move(data, party, opponent.as_ref(), memory, policy))
             };
-            let Some((slot, name)) = chosen.or_else(|| fallback_move(data, party, memory)) else {
+            let chosen = chosen.or_else(|| fallback_move(data, party, memory));
+            // Nothing the foe out feels (fleet continue-5, Pokémon Tower: a
+            // wild GASTLY, a RATTATA with only NORMAL moves out; the party
+            // the run-or-fight check read had another lead, and the turn
+            // failed "no move has PP left" again and again). A wild battle
+            // is run from; a trainer's turn is spent on a move it ignores.
+            let chosen = match chosen {
+                Some(c) => Some(c),
+                None if !memory.trainer && memory.limits.can_run() => {
+                    memory.nothing_to_use = true;
+                    return Some(Decision::Act(Action::new(
+                        "back to the command menu to RUN",
+                        vec![ControllerCommand::Press(Button::B)],
+                        Expectation::ScreenIs(ScreenState::BattleCommand),
+                        45,
+                    )));
+                }
+                None => ignored_move(data, party, memory),
+            };
+            let Some((slot, name)) = chosen else {
                 return Some(Decision::Fail("no move has PP left".into()));
             };
             memory.last_move = Some(name.clone());
@@ -1245,6 +1286,68 @@ mod tests {
         // No damaging PP at all: nothing to choose (the battle policy runs).
         let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
         assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
+    }
+
+    /// Fleet continue-5, Pokémon Tower: a wild GASTLY against a RATTATA
+    /// whose moves are all NORMAL, which it took nothing from. The move
+    /// menu failed "no move has PP left" turn after turn. From a wild
+    /// battle it backs out to RUN; a trainer's turn is spent on a move.
+    #[test]
+    fn nothing_the_foe_feels_runs_from_a_wild_battle() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        // The party read has another lead (IVYSAUR, with GRASS moves); the
+        // move menu shows the RATTATA out.
+        let party = ivysaur(&data, &[]);
+        let normal = data
+            .move_("MOVE_TACKLE")
+            .and_then(|m| m.kind.clone())
+            .unwrap();
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: ScreenState::BattleMoveSelection,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Moves { column: 0, row: 1 }),
+            player_name: Some("RATTATA".into()),
+            player_level: Some(11),
+            player_hp_numbers: Some((29, 29)),
+            opponent_name: Some("GASTLY".into()),
+            opponent_level: Some(18),
+            player_hp: Some(1000),
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: ["TACKLE", "TAIL WHIP", "CUT", "QUICK ATTACK"]
+                .map(String::from)
+                .to_vec(),
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: None,
+        });
+        let mut wild = BattleMemory {
+            no_effect: vec![normal.clone()],
+            ..BattleMemory::default()
+        };
+        wild.catch.decided = true;
+        let mut events = Vec::new();
+        match decide(&o, &policy, &mut wild, &party, &data, &mut events) {
+            Some(Decision::Act(a)) => assert_eq!(a.label, "back to the command menu to RUN"),
+            _ => panic!("expected a way back to RUN"),
+        }
+        assert!(wild.nothing_to_use);
+        let mut trainer = BattleMemory {
+            trainer: true,
+            no_effect: vec![normal],
+            ..BattleMemory::default()
+        };
+        match decide(&o, &policy, &mut trainer, &party, &data, &mut events) {
+            Some(Decision::Act(a)) => assert!(a.label.contains("TACKLE"), "{}", a.label),
+            _ => panic!("expected a move"),
+        }
     }
 
     /// Review: in a trainer battle with the only damaging move disabled,
