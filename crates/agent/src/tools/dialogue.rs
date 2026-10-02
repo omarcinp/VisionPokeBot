@@ -2446,6 +2446,32 @@ mod tests {
         assert_eq!(question_branches(&when), vec![true, false, false]);
     }
 
+    /// Pokémon Mansion B1F's two statues share one script: it starts at
+    /// the one nearest the player, so a chosen statue is walked to first
+    /// (fleet continue-3: the switch search chose (27, 5), the run pressed
+    /// (24, 29) beside the player, and the flip shut the way north).
+    #[test]
+    fn a_shared_switch_script_starts_at_the_statue_beside_the_player() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let script = "PokemonMansion_B1F_EventScript_Statue";
+        let sign_at = |x, y| {
+            let pose = PlayerPose {
+                map: "PokemonMansion_B1F".into(),
+                x,
+                y,
+            };
+            match start_of(&world, script, Some(&pose)) {
+                Some(Start::Sign { x, y, .. }) => Some((x, y)),
+                _ => None,
+            }
+        };
+        assert_eq!(sign_at(24, 30), Some((24, 29)));
+        assert_eq!(sign_at(27, 6), Some((27, 5)));
+    }
+
     /// The Cerulean grunt's after-battle text: the path that fought him
     /// when a battle was fought, else the one for him already beaten.
     #[test]

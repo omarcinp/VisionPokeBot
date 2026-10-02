@@ -514,7 +514,14 @@ pub fn through(
             } else {
                 p.toggle.clear_path
             };
-            run(ctx, &p.toggle.script, path, vec![Answer::Yes])?;
+            run_at(
+                ctx,
+                &p.toggle.map,
+                p.toggle.at,
+                &p.toggle.script,
+                path,
+                vec![Answer::Yes],
+            )?;
         }
         match dest {
             Dest::Map { map } => super::go::go_to_map(ctx, map),
@@ -543,6 +550,23 @@ pub fn run(
     .result
 }
 
+/// Runs path `path` of `script` at the switch on `at` of `map`, walked to
+/// first: a script several switches share starts at the one nearest the
+/// player (Pokémon Mansion B1F: the search chose the statue at (27, 5),
+/// the run pressed the one at (24, 29) beside the player, and the flip
+/// shut the way north it was to open).
+fn run_at(
+    ctx: &mut ToolContext<'_>,
+    map: &str,
+    at: (i32, i32),
+    script: &str,
+    path: usize,
+    answers: Vec<Answer>,
+) -> Result<(), ToolError> {
+    super::go::reach_facing(ctx, map, at)?;
+    run(ctx, script, path, answers)
+}
+
 /// Runs `runs` in turn, then walks to `dest`.
 fn run_openers(
     ctx: &mut ToolContext<'_>,
@@ -562,7 +586,14 @@ fn run_openers(
         } else {
             Answer::No
         };
-        run(ctx, &r.opener.script, r.opener.path, vec![answer])?;
+        run_at(
+            ctx,
+            &r.opener.map,
+            r.opener.at,
+            &r.opener.script,
+            r.opener.path,
+            vec![answer],
+        )?;
     }
     match dest {
         Dest::Map { map } => super::go::go_to_map(ctx, map),
