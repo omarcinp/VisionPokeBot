@@ -692,7 +692,22 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
         .map(|(t, _)| t)
         .collect();
     let gates = ctx.gate_tiles();
-    if walks_to(m, (pose.x, pose.y), &spots, &ctx.gone, &gates) {
+    let none = pokebot_world::path::Obstacles::new();
+    if walks_to(m, (pose.x, pose.y), &spots, &ctx.gone, &gates, &none) {
+        // The map's own way, but tiles found blocked on it shut it: someone
+        // stands where the map has floor (Switch, Viridian Gym: Black Belt
+        // Takashi walked down to challenge the player and stayed in the
+        // one-tile corridor to Giovanni, "no path next to (2, 2)"). Going
+        // out and back puts everyone on their own tile again.
+        let learnt = ctx
+            .blocked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .on_map(map);
+        if !learnt.is_empty() && !walks_to(m, (pose.x, pose.y), &spots, &ctx.gone, &gates, &learnt)
+        {
+            reenter(ctx, map, &learnt)?;
+        }
         return Ok(());
     }
     for (x, y) in spots {
@@ -733,15 +748,74 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
 /// its own obstacles: objects and closed gates (Switch, Silph Co. 11F: its
 /// shut door was left out here, the way next to the door read plain, and
 /// the walk then found none: "no path next to (6, 16)").
+/// Leaves `map` by the nearest warp the walk reaches past `learnt`, comes
+/// back, and forgets the tiles learnt blocked on it: whoever stood on
+/// them is back on their own tile. Nothing happens when no warp is
+/// reached.
+fn reenter(
+    ctx: &mut ToolContext<'_>,
+    map: &str,
+    learnt: &pokebot_world::path::Obstacles,
+) -> Result<(), ToolError> {
+    let Some(pose) = ctx.pose().filter(|p| p.map == map) else {
+        return Ok(());
+    };
+    let world = Arc::clone(&ctx.world);
+    let Some(m) = world.map(map) else {
+        return Ok(());
+    };
+    let gates = ctx.gate_tiles();
+    let mut warps: Vec<(i32, usize)> = m
+        .warps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let tiles: Vec<(i32, i32)> = crate::nav::goal_tiles(
+                &world,
+                &Destination::Warp {
+                    map: map.to_owned(),
+                    warp: *i,
+                },
+            )
+            .into_iter()
+            .collect();
+            walks_to(m, (pose.x, pose.y), &tiles, &ctx.gone, &gates, learnt)
+        })
+        .map(|(i, w)| ((w.x - pose.x).abs() + (w.y - pose.y).abs(), i))
+        .collect();
+    warps.sort();
+    let Some(&(_, warp)) = warps.first() else {
+        return Ok(());
+    };
+    ctx.info(format!(
+        "{map}: someone stands in the way; out by warp {warp} and back"
+    ));
+    go(
+        ctx,
+        Destination::Warp {
+            map: map.to_owned(),
+            warp,
+        },
+    )?;
+    go_to_map(ctx, map)?;
+    ctx.blocked
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forget(map);
+    Ok(())
+}
+
 fn walks_to(
     m: &pokebot_world::MapData,
     from: (i32, i32),
     spots: &[(i32, i32)],
     gone: &Gone,
     gates: &GateTiles,
+    learnt: &pokebot_world::path::Obstacles,
 ) -> bool {
     let mut obstacles = crate::nav::object_obstacles(m, gone);
     obstacles.extend(gates.closed_on(&m.name));
+    obstacles.extend(learnt.iter().copied());
     obstacles.remove(&from);
     let opened = gates.opened_on(&m.name);
     let walk = Walk {
@@ -1427,7 +1501,41 @@ mod tests {
             .flags
             .insert("FLAG_SILPH_11F_DOOR".into(), Knowledge::observed(false, 1));
         let shut = GateTiles::believed(&world, graph.gates(), &StateBelief(&state));
-        assert!(!walks_to(m, (13, 3), &spots, &Gone::new(), &shut));
+        assert!(!walks_to(
+            m,
+            (13, 3),
+            &spots,
+            &Gone::new(),
+            &shut,
+            &Default::default()
+        ));
+    }
+
+    /// Switch, Viridian Gym: Black Belt Takashi walked down to challenge
+    /// the player and stayed at (10, 4), in the one-tile corridor to
+    /// Giovanni. By the map Giovanni is a walk away; with the tile found
+    /// blocked he isn't: someone stands there, and going out and back is
+    /// the way (`reenter`).
+    #[test]
+    fn a_trainer_left_in_a_corridor_is_waited_out_by_reentering() {
+        let Some(world) = world() else { return };
+        let m = world.map("ViridianCity_Gym").unwrap();
+        let spots: Vec<(i32, i32)> = crate::nav::facing_spots(m, 2, 2)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        let shut = GateTiles::default();
+        let from = (10, 6);
+        assert!(walks_to(
+            m,
+            from,
+            &spots,
+            &Gone::new(),
+            &shut,
+            &Default::default()
+        ));
+        let learnt: pokebot_world::path::Obstacles = [(10, 4)].into_iter().collect();
+        assert!(!walks_to(m, from, &spots, &Gone::new(), &shut, &learnt));
     }
 
     /// Switch, Saffron Gym's door (14, 22): SABRINA's room is reached only
