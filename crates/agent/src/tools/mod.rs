@@ -434,11 +434,11 @@ pub(crate) fn parse_answers(answers: &[String]) -> Vec<Answer> {
             a => {
                 let (choice, row) = a.split_once('=')?;
                 let row: u8 = row.trim().parse().ok()?;
-                match choice {
-                    "MULTICHOICE_YES_NO" => None,
-                    c if c.contains("ELEVATOR") => Some(Answer::ListRow(row)),
-                    _ => Some(Answer::Menu(row)),
-                }
+                // A multichoice shows all its rows and wraps (the Rocket
+                // Hideout's and the Department Store's lifts): the row is
+                // walked to from the cursor seen. Scrolling floor lists
+                // (Silph Co.) are rows of the floor special, not choices.
+                (choice != "MULTICHOICE_YES_NO").then_some(Answer::Menu(row))
             }
         })
         .collect()

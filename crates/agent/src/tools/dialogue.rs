@@ -2604,8 +2604,9 @@ mod tests {
             "MULTICHOICE_YES_NO=0".into(),
             "yes".into(),
         ]);
-        // An elevator's floors are a list menu: answered by row in the list.
-        assert_eq!(answers, vec![Answer::ListRow(2), Answer::Yes]);
+        // The lift's floors are a multichoice (all shown, wrapping): the
+        // row is walked to from the cursor.
+        assert_eq!(answers, vec![Answer::Menu(2), Answer::Yes]);
         let mut c = Conversation::new(
             world,
             data,
