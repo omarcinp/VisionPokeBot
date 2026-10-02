@@ -108,10 +108,44 @@ pub fn select_item(o: &Observation, data: &GameData, item: &str, opened: Expecta
     if cancel && bag.rows.len() < window_rows(pocket_from_title(&bag.pocket)) {
         return Decision::Fail(format!("{item} is not in the pocket"));
     }
+    // The TM Case is sorted, HMs first (`SortPocketAndPlaceHMsFirst`),
+    // then TMs, then CANCEL: the way to the item is known from what shows
+    // (Switch: HM03 sought among TM28–TM49, pressed Up while CANCEL showed
+    // and Down once it scrolled away, 24 times, never reaching the HMs on
+    // top, and SURF was "not in the TM CASE").
+    if pocket_from_title(&bag.pocket) == Some(Pocket::TmCase) {
+        if let Some(want) = case_rank(item) {
+            let seen = bag
+                .rows
+                .iter()
+                .filter_map(|(name, _)| case_rank(name).or(is_cancel(name).then_some(u32::MAX)));
+            if let (Some(lo), Some(hi)) = (seen.clone().min(), seen.max()) {
+                if want < lo {
+                    return press(Button::Up, Expectation::InputsDone);
+                }
+                if want > hi {
+                    return press(Button::Down, Expectation::InputsDone);
+                }
+                return Decision::Fail(format!("{item} is not in the TM CASE"));
+            }
+        }
+    }
     press(
         if cancel { Button::Up } else { Button::Down },
         Expectation::InputsDone,
     )
+}
+
+/// Where `name` (`HM03`, `TM34` or their `ITEM_` keys) sorts in the TM
+/// Case: HMs by number, then TMs by number.
+fn case_rank(name: &str) -> Option<u32> {
+    let name = name.strip_prefix("ITEM_").unwrap_or(name);
+    let (base, n) = if let Some(n) = name.strip_prefix("HM") {
+        (0, n)
+    } else {
+        (100, name.strip_prefix("TM")?)
+    };
+    Some(base + n.parse::<u32>().ok()?)
 }
 
 /// Rows a pocket's list shows at once: six in the bag, five in the TM
@@ -866,6 +900,25 @@ mod tests {
             act(select_item(&o, &data, "ITEM_HM02", Expectation::InputsDone)).commands,
             vec![ControllerCommand::Press(Button::Up)]
         );
+        // Scrolled one up, CANCEL gone: still up, not back down (Switch:
+        // the case's rows TM28–TM47, HM03 above them).
+        let middle: Vec<(&str, Option<u16>)> = vec![
+            ("TM28", None),
+            ("TM32", None),
+            ("TM34", None),
+            ("TM39", None),
+            ("TM47", None),
+        ];
+        let o = bag(3, "TM CASE", &middle, 2);
+        assert_eq!(
+            act(select_item(&o, &data, "ITEM_HM03", Expectation::InputsDone)).commands,
+            vec![ControllerCommand::Press(Button::Up)]
+        );
+        // A TM between the ones shown, not among them: not in the case.
+        assert!(matches!(
+            select_item(&o, &data, "ITEM_TM30", Expectation::InputsDone),
+            Decision::Fail(_)
+        ));
         // Four rows and CANCEL in the bag's six-row window: the whole pocket.
         let o = bag(2, "ITEMS", &end, 4);
         assert!(matches!(
