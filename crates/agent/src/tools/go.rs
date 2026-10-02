@@ -65,6 +65,8 @@ pub struct GoStep {
 pub struct NavParts {
     pub world: Arc<World>,
     pub gone: Gone,
+    /// Objects whose hide flag the belief doesn't know.
+    pub maybe_gone: Gone,
     pub syncer: Option<SyncerHandle>,
     /// The session's tiles learnt to be blocked.
     pub blocked: Blocked,
@@ -79,6 +81,7 @@ impl NavParts {
         Self {
             world: Arc::clone(&ctx.world),
             gone: ctx.gone.clone(),
+            maybe_gone: crate::nav::unknown_gone(&ctx.world, ctx.state()),
             syncer: ctx.syncer.clone(),
             blocked: Arc::clone(&ctx.blocked),
             gates: Arc::new(ctx.gate_tiles()),
@@ -100,6 +103,7 @@ impl GoStep {
     pub fn with_surf(parts: &NavParts, dest: Destination, surf: bool) -> Self {
         let nav = Navigator::new(Arc::clone(&parts.world), dest.clone())
             .with_gone(parts.gone.clone())
+            .with_maybe_gone(parts.maybe_gone.clone())
             .with_blocked(Arc::clone(&parts.blocked))
             .with_gates(&parts.gates)
             .with_surf(surf);
@@ -943,6 +947,7 @@ mod tests {
         let parts = NavParts {
             world,
             gone: Gone::new(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Blocked::default(),
             gates: Arc::default(),
@@ -1010,6 +1015,7 @@ mod tests {
         let parts = NavParts {
             world,
             gone: Gone::new(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Blocked::default(),
             gates: Arc::default(),
@@ -1646,6 +1652,7 @@ mod tests {
         let parts = NavParts {
             world,
             gone: Gone::new(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Blocked::default(),
             gates: Arc::default(),

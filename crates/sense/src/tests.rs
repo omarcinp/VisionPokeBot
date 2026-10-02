@@ -1452,6 +1452,45 @@ fn an_object_seen_standing_is_not_hidden() {
     );
 }
 
+/// Fleet continue-1/3/6: Route 12's SNORLAX, his hide flag unknown (the
+/// plans assumed him gone). Seen lying on the road, he is there.
+#[test]
+fn an_object_seen_whose_hide_flag_is_unknown_is_there() {
+    let Some(d) = data() else { return };
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+    let Ok(world) = pokebot_world::World::load(&dir) else {
+        return;
+    };
+    let mut s = Sensor::new(d).with_world(Arc::new(world));
+    let frames = (0..60).map(|f| {
+        let mut o = bare(f, ScreenState::Unknown);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "Route12".into(),
+                x: 14,
+                y: 68,
+            },
+            score: 990,
+        });
+        o.sprites = vec![pokebot_state::SpriteObservation {
+            x: 14,
+            y: 70,
+            local_id: Some(5),
+            facing: None,
+        }];
+        o
+    });
+    let (after, _) = run(&mut s, GameState::default(), frames);
+    assert_eq!(
+        after
+            .world
+            .flags
+            .get("FLAG_HIDE_ROUTE_12_SNORLAX")
+            .and_then(|k| k.value),
+        Some(false)
+    );
+}
+
 /// The committed pose walks `poses`, one frame each (the extractor's
 /// moves, applied before the sensor reads the next frame).
 fn walk_poses(s: &mut Sensor, mut state: GameState, poses: &[(&str, i32, i32)]) -> GameState {

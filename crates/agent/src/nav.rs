@@ -210,6 +210,9 @@ pub struct Navigator {
     /// Map objects no longer there (items and fossils taken), by map and
     /// local id: they don't block their tiles.
     gone: Gone,
+    /// Objects maybe gone (their hide flag unknown), tried only when the
+    /// known ones leave no way on.
+    maybe_gone: Gone,
     /// Water is walkable: the player is surfing (or about to).
     surf: bool,
     /// Story passages as the belief stands (closed triggers, opened doors),
@@ -306,6 +309,28 @@ pub fn belief_gone(world: &World, state: &pokebot_state::GameState) -> Gone {
     gone
 }
 
+/// Objects whose hide flag the belief doesn't know: maybe gone. The
+/// planner assumes such a one gone at a price when that is cheaper than
+/// making sure; the navigator goes that way only when nothing it knows
+/// leads on ([`Navigator::with_maybe_gone`]).
+pub fn unknown_gone(world: &World, state: &pokebot_state::GameState) -> Gone {
+    let mut out = Gone::new();
+    for map in world.maps() {
+        for o in &map.objects {
+            let Some(flag) = o.flag.as_deref() else {
+                continue;
+            };
+            if flag == "0" || pokebot_world::gates::is_local_flag(flag) {
+                continue;
+            }
+            if state.world.flag(flag).value.is_none() {
+                out.insert((map.name.clone(), o.local_id));
+            }
+        }
+    }
+    out
+}
+
 impl Navigator {
     pub fn new(world: Arc<World>, destination: Destination) -> Self {
         Self {
@@ -320,6 +345,7 @@ impl Navigator {
             syncer: Arc::new(Mutex::new(Syncer::new("emulator"))),
             hop: None,
             gone: Gone::new(),
+            maybe_gone: Gone::new(),
             surf: false,
             gates: Arc::new(GateTiles::default()),
             entries: MapEntries::default(),
@@ -374,6 +400,16 @@ impl Navigator {
     /// Objects known to be gone (taken items, fossils) don't block the way.
     pub fn with_gone(mut self, gone: Gone) -> Self {
         self.gone = gone;
+        self
+    }
+
+    /// Objects that may be gone ([`unknown_gone`]): when nothing known
+    /// leads to another map, the walk goes their way and finds out
+    /// (fleet continue-1/3/6: the plan assumed Route 12's SNORLAX gone,
+    /// the walk believed him there, "no known route", every replan; met,
+    /// he is seen, and the plan wakes him).
+    pub fn with_maybe_gone(mut self, maybe: Gone) -> Self {
+        self.maybe_gone = maybe;
         self
     }
 
@@ -435,8 +471,21 @@ impl Navigator {
         let (hop, via) = match &self.hop {
             Some((map, route)) if *map == pose.map => *route,
             _ => {
-                let route =
+                let mut route =
                     plan_route_with(&world, &pose, &self.destination, &self.gone, &self.gates);
+                if route.0.is_none()
+                    && pose.map != self.destination.map()
+                    && !self.maybe_gone.is_subset(&self.gone)
+                {
+                    let mut maybe = self.gone.clone();
+                    maybe.extend(self.maybe_gone.iter().cloned());
+                    let tried =
+                        plan_route_with(&world, &pose, &self.destination, &maybe, &self.gates);
+                    if tried.0.is_some() {
+                        self.gone = maybe;
+                        route = tried;
+                    }
+                }
                 self.hop = Some((pose.map.clone(), route));
                 route
             }
@@ -1892,6 +1941,53 @@ mod tests {
             plan_hop(&world, &pose, &gym, &belief_gone(&world, &state)),
             Some(Hop::Warp(3))
         );
+    }
+
+    /// Fleet continue-1/3/6: Route 12's SNORLAX, his hide flag unknown,
+    /// stood (for the walk) between Lavender and Route 13, which the plan
+    /// assumed him gone for: "no known route", every replan. Nothing known
+    /// leading on, the walk goes the way he may be gone from.
+    #[test]
+    fn a_walk_with_no_known_way_tries_where_an_object_may_be_gone() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = Arc::new(world);
+        let state = pokebot_state::GameState::default();
+        let pose = PlayerPose {
+            map: "Route12".into(),
+            x: 14,
+            y: 20,
+        };
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation {
+            pose: pose.clone(),
+            score: 1000,
+        });
+        let dest = Destination::Tile {
+            map: "Route13".into(),
+            x: 30,
+            y: 8,
+        };
+        let gone = belief_gone(&world, &state);
+        let mut blind = Navigator::new(Arc::clone(&world), dest.clone()).with_gone(gone.clone());
+        match blind.next(&o) {
+            NavStatus::Fail(why) => assert!(why.contains("no known route"), "{why}"),
+            _ => panic!("expected no known route without trying"),
+        }
+        let mut trying = Navigator::new(Arc::clone(&world), dest)
+            .with_gone(gone)
+            .with_maybe_gone(unknown_gone(&world, &state));
+        assert!(matches!(trying.next(&o), NavStatus::Act(_)));
     }
 
     /// Live: in MtMoon_B2F's featureless bottom corridor two Right taps

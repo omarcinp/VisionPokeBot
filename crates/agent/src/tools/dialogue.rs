@@ -1923,6 +1923,7 @@ mod tests {
         let parts = NavParts {
             world: Arc::clone(&world),
             gone: Default::default(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),

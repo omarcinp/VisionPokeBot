@@ -969,6 +969,7 @@ mod tests {
             nav: NavParts {
                 world: Arc::new(world),
                 gone: Gone::new(),
+                maybe_gone: Gone::new(),
                 syncer: None,
                 blocked: Default::default(),
                 gates: Default::default(),
@@ -1019,6 +1020,7 @@ mod tests {
         let nav = NavParts {
             world: Arc::new(world),
             gone: Gone::new(),
+            maybe_gone: Gone::new(),
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),

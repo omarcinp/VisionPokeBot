@@ -1119,9 +1119,11 @@ fn contradicted_paths(
     out
 }
 
-/// Objects seen standing whose hide flag the belief holds set: the flag
-/// is clear (Switch, Rocket Hideout: the Silph Scope, taken for gone and
-/// saved so, stood on its tile, and no plan could get it).
+/// Objects seen standing whose hide flag the belief holds set, or doesn't
+/// know: the flag is clear (Switch, Rocket Hideout: the Silph Scope, taken
+/// for gone and saved so, stood on its tile, and no plan could get it;
+/// fleet continue-1/3/6: Route 12's SNORLAX, unknown, assumed gone by
+/// every plan).
 fn shown_objects(
     world: &pokebot_world::World,
     state: &GameState,
@@ -1140,7 +1142,7 @@ fn shown_objects(
         else {
             continue;
         };
-        let hidden = state.world.flags.get(&flag).and_then(|k| k.value) == Some(true);
+        let hidden = state.world.flags.get(&flag).and_then(|k| k.value) != Some(false);
         let told = out
             .iter()
             .any(|e| matches!(e, GameEvent::FlagObserved { flag: f, .. } if *f == flag));

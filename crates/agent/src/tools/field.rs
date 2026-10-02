@@ -1136,6 +1136,7 @@ mod tests {
         let nav = NavParts {
             world,
             gone: Default::default(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),
@@ -1249,6 +1250,7 @@ mod tests {
         let nav = NavParts {
             world,
             gone: Default::default(),
+            maybe_gone: Default::default(),
             syncer: None,
             blocked: Default::default(),
             gates: Default::default(),
