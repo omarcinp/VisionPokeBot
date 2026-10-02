@@ -193,17 +193,27 @@ pub fn translate(
             let (Val::Sym(species), Some(level)) = (givemon, level.as_int()) else {
                 return skip("givemon: species or level not a constant");
             };
+            // Given is caught, wherever it goes (Switch: SILPH CO. 7F's
+            // LAPRAS went to the box, a full party; nothing was recorded,
+            // and the swap to bring it out for SURF could never be planned:
+            // "Caught(SPECIES_LAPRAS) could not be planned").
+            let caught = GameEvent::SpeciesCaught {
+                species: species.clone(),
+            };
             let Some(party) = state.party.value.as_ref() else {
-                return skip("givemon: party unknown");
+                return Ok(vec![caught]);
             };
             if party.len() >= 6 {
-                return skip("givemon: party full (sent to the PC)");
+                return Ok(vec![caught]);
             }
             let level = u8::try_from(level).map_err(|_| Skipped("givemon: level".into()))?;
-            Ok(vec![GameEvent::PartyMonDerived {
-                slot: party.len() as u8,
-                mon: Box::new(crate::party::starter_mon(data, species, level)),
-            }])
+            Ok(vec![
+                caught,
+                GameEvent::PartyMonDerived {
+                    slot: party.len() as u8,
+                    mon: Box::new(crate::party::starter_mon(data, species, level)),
+                },
+            ])
         }
         Effect::GiveEgg { .. } => skip("giveegg"),
         Effect::Wild { .. } => skip("wild"),
@@ -560,8 +570,11 @@ mod tests {
             .any(|e| matches!(e, GameEvent::ScriptPathRun { .. })));
     }
 
-    /// A gift of a Pokémon joins the party (known empty or not full) as
-    /// the species at the script's level, with its default moves.
+    /// A gift of a Pokémon is caught, wherever it goes, and joins the
+    /// party (known empty or not full) as the species at the script's
+    /// level, with its default moves. Switch: SILPH CO. 7F's LAPRAS, the
+    /// party full, went to the box unrecorded, and its swap for SURF could
+    /// never be planned.
     #[test]
     fn a_given_pokemon_joins_the_party() {
         let Some((world, data)) = world() else { return };
@@ -571,9 +584,13 @@ mod tests {
             level: Val::Int(5),
         };
         let name = |_: &str| None;
+        let caught = GameEvent::SpeciesCaught {
+            species: "SPECIES_SQUIRTLE".into(),
+        };
         let mut state = GameState::default();
-        assert!(
-            translate(&effect, &state, &data, None, &name).is_err(),
+        assert_eq!(
+            translate(&effect, &state, &data, None, &name).unwrap(),
+            std::slice::from_ref(&caught),
             "party unknown"
         );
         state.party = Knowledge::derived(Vec::new(), 0);
@@ -581,7 +598,7 @@ mod tests {
             .unwrap()
             .as_slice()
         {
-            [GameEvent::PartyMonDerived { slot: 0, mon }] => {
+            [c, GameEvent::PartyMonDerived { slot: 0, mon }] if *c == caught => {
                 assert_eq!(mon.species.value.as_deref(), Some("SPECIES_SQUIRTLE"));
                 assert_eq!(mon.level.value, Some(5));
                 assert!(mon.moves[0].is_some());
@@ -589,9 +606,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         state.party = Knowledge::derived(vec![PartyMon::default(); 6], 0);
-        assert!(
-            translate(&effect, &state, &data, None, &name).is_err(),
-            "party full"
+        assert_eq!(
+            translate(&effect, &state, &data, None, &name).unwrap(),
+            [caught],
+            "party full: to the box, caught all the same"
         );
     }
 }

@@ -79,6 +79,7 @@ pub fn audit_core(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
     }
     super::dialogue::reconcile_badges(ctx)?;
     super::dialogue::reconcile_key_items(ctx)?;
+    super::dialogue::reconcile_gifts(ctx)?;
     super::dialogue::reconcile_choices(ctx, &[])?;
     ctx.scheduler.enabled = true;
     let party = ctx.state().party.value.clone().unwrap_or_default();

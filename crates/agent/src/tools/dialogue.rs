@@ -1095,6 +1095,44 @@ pub fn reconcile_choices(ctx: &mut ToolContext<'_>, also: &[String]) -> Result<(
     Ok(())
 }
 
+/// Species a recorded script path gave that the Pokédex belief doesn't
+/// hold caught: caught (Switch: SILPH CO. 7F's LAPRAS, given to a full
+/// party and sent to the box, its path recorded but no catch; the swap
+/// bringing it out for SURF could never be planned).
+pub fn reconcile_gifts(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    let world = Arc::clone(&ctx.world);
+    let Some(events) = world.events() else {
+        return Ok(());
+    };
+    for species in unrecorded_gifts(events, ctx.state()) {
+        ctx.info(format!("{species} was given but never recorded caught"));
+        ctx.emit(GameEvent::SpeciesCaught { species })?;
+    }
+    Ok(())
+}
+
+/// The species of [`reconcile_gifts`], sorted.
+pub fn unrecorded_gifts(events: &pokebot_world::events::Events, state: &GameState) -> Vec<String> {
+    let mut out: Vec<String> = state
+        .world
+        .paths_run
+        .iter()
+        .filter_map(|(script, path)| events.script(script)?.paths.get(*path))
+        .flat_map(|p| &p.does)
+        .filter_map(|e| match e {
+            Effect::GiveMon {
+                givemon: Val::Sym(species),
+                ..
+            } => Some(species.clone()),
+            _ => None,
+        })
+        .filter(|s| state.pokedex.caught.get(s).and_then(|k| k.value) != Some(true))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Key items the bag holds whose giving script path was never recorded:
 /// the path is recorded, so what it set follows the item (Switch: the
 /// LIFT KEY in the bag, FLAG_CAN_USE_ROCKET_HIDEOUT_LIFT unset, and every
@@ -1718,6 +1756,27 @@ mod tests {
         world.events()?;
         let data = GameData::load(dir.join("gamedata.json")).ok()?;
         Some((Arc::new(world), Arc::new(data)))
+    }
+
+    /// Switch: SILPH CO. 7F's LAPRAS path recorded, the catch not: the
+    /// path shows it caught.
+    #[test]
+    fn a_recorded_gift_is_caught() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let mut state = GameState::default();
+        state
+            .world
+            .paths_run
+            .push(("SilphCo_7F_EventScript_LaprasGuy".into(), 1));
+        assert_eq!(unrecorded_gifts(events, &state), ["SPECIES_LAPRAS"]);
+        state.pokedex.caught.insert(
+            "SPECIES_LAPRAS".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        assert!(unrecorded_gifts(events, &state).is_empty());
     }
 
     /// Fleet (continue-2): a beaten trainer's after-battle words show its
