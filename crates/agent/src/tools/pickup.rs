@@ -381,11 +381,15 @@ pub fn pick_up_on_the_way(ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> 
     if destination.as_deref().is_some_and(|d| d != pose.map) && ctx.scheduler.graph.is_none() {
         ctx.scheduler.graph = Some(crate::scheduler::graph(&world));
     }
-    let blocked = ctx
+    let mut blocked = ctx
         .blocked
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .on_map(&pose.map);
+    // Passages the belief holds shut too (fleet continue-3, Silph Co. 5F:
+    // door 2 seen shut, and the PROTEIN and TM01 behind it were walked to
+    // in turn, each failing "looping" at the door).
+    blocked.extend(ctx.gate_tiles().closed_on(&pose.map));
     let choice = choose(
         &Around {
             world: &world,
@@ -602,6 +606,70 @@ mod tests {
             .vars
             .insert("VAR_MAP_SCENE_ROUTE24".into(), Knowledge::observed(1, 1));
         assert!(tm45(&state));
+    }
+
+    /// Fleet continue-3, Silph Co. 5F at (9, 18): door 2 seen shut, the
+    /// TM01 behind it was walked to and failed "looping" at the door. The
+    /// passages the belief holds shut are walls to a pickup too.
+    #[test]
+    fn a_ball_behind_a_shut_door_is_left() {
+        let Some((world, d)) = loaded() else { return };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cont3_silph_5f_state.json");
+        let Ok(Some(checkpoint)) = crate::checkpoint::load(&path) else {
+            return;
+        };
+        use pokebot_state::StateReducer;
+        let state = pokebot_state::DefaultReducer.reduce(
+            &GameState::default(),
+            &[pokebot_state::EventRecord {
+                frame_id: 0,
+                event: GameEvent::CheckpointRestored {
+                    knowledge: Box::new(checkpoint.knowledge),
+                },
+            }],
+        );
+        assert_eq!(
+            state
+                .world
+                .flags
+                .get("FLAG_SILPH_5F_DOOR_2")
+                .and_then(|k| k.value),
+            Some(false)
+        );
+        let from = at("SilphCo_5F", 9, 18);
+        let gone = crate::nav::belief_gone(&world, &state);
+        let pick_with = |blocked: &Obstacles| {
+            choose(
+                &Around {
+                    world: &world,
+                    data: &d,
+                    state: &state,
+                    gone: &gone,
+                    blocked,
+                    tried: &BTreeSet::new(),
+                    onward: None,
+                },
+                &from,
+            )
+            .map(|p| p.ball.item)
+        };
+        // As it was: the shut door no wall.
+        let before = pick_with(&Obstacles::new());
+        let shut: Obstacles = pokebot_world::gates::GateTiles::believed(
+            &world,
+            &pokebot_world::gates::derive(&world),
+            &crate::belief_view::StateBelief(&state),
+        )
+        .closed_on("SilphCo_5F")
+        .collect();
+        let after = pick_with(&shut);
+        // The PROTEIN behind door 1 and the TM01 behind door 2, both
+        // seen shut, were each walked to in turn.
+        let walled =
+            |item: &Option<String>| matches!(item.as_deref(), Some("ITEM_PROTEIN" | "ITEM_TM01"));
+        assert!(walled(&before), "{before:?}");
+        assert!(!walled(&after), "{after:?}");
     }
 
     /// A cheap item is not worth a long way: the Antidote from twelve
