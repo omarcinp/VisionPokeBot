@@ -963,6 +963,25 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
             )
         };
         if let Some(twin) = twin {
+            // Twins that end alike: one sets a flag the other needs set
+            // already, so the flag holds whichever ran (fleet continue-6,
+            // Cinnabar Gym: quiz 1 answered right, its flag unknown, "can't
+            // tell path 1 from 0" and the same quiz planned again, eleven
+            // plans without a step).
+            let settled = converged_flags(events, &script, path, twin);
+            if !settled.is_empty() {
+                ctx.emit(progress(
+                    "Dialogue",
+                    format!(
+                        "{script}[{path}] reads the same as [{twin}]; either way {}",
+                        settled.join(", ")
+                    ),
+                ))?;
+                for flag in settled {
+                    ctx.emit(GameEvent::FlagObserved { flag, value: true })?;
+                }
+                return Ok(());
+            }
             // What it fought is the battle tool's to record.
             ctx.emit(progress(
                 "Dialogue",
@@ -1161,6 +1180,39 @@ pub fn twin_path(
             && !toggle_pair(events, script, planned, i))
         .then_some(i)
     })
+}
+
+/// The flags set after either of paths `a` and `b` of `script`: one runs
+/// with the flag clear and sets it, the other runs only with it set.
+pub fn converged_flags(
+    events: &pokebot_world::events::Events,
+    script: &str,
+    a: usize,
+    b: usize,
+) -> Vec<String> {
+    use pokebot_world::events::{Condition, Effect};
+    let Some(s) = events.script(script) else {
+        return Vec::new();
+    };
+    let (Some(pa), Some(pb)) = (s.paths.get(a), s.paths.get(b)) else {
+        return Vec::new();
+    };
+    let needs = |p: &pokebot_world::events::ScriptPath, f: &str, v: bool| {
+        p.when
+            .iter()
+            .any(|c| matches!(c, Condition::Flag { flag, is } if flag == f && *is == v))
+    };
+    let mut out = Vec::new();
+    for (setter, other) in [(pa, pb), (pb, pa)] {
+        for e in &setter.does {
+            if let Effect::Set { set } = e {
+                if needs(setter, set, false) && needs(other, set, true) && !out.contains(set) {
+                    out.push(set.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether paths `a` and `b` of `script` are the two halves of a switch:
@@ -2445,6 +2497,24 @@ mod tests {
             cond_choice(None, Some(0)),
         ];
         assert_eq!(question_branches(&when), vec![true, false, false]);
+    }
+
+    /// Fleet continue-6, Cinnabar Gym: quiz 1's right answer reads the
+    /// same with its flag set or not; either way the flag is set after.
+    #[test]
+    fn a_quiz_answered_right_is_known_answered_either_way() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let quiz = "CinnabarIsland_Gym_EventScript_Quiz1Left";
+        assert_eq!(
+            converged_flags(events, quiz, 1, 0),
+            vec!["FLAG_CINNABAR_GYM_QUIZ_1".to_owned()]
+        );
+        // A right and a wrong answer don't end alike.
+        assert!(converged_flags(events, quiz, 1, 6).is_empty());
     }
 
     /// Pokémon Mansion B1F's two statues share one script: it starts at
