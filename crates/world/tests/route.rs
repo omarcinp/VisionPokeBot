@@ -1021,3 +1021,37 @@ fn an_elevator_ride_does_not_need_the_floor_the_car_is_on() {
     print("Rocket Hideout lift -> B4F", &r);
     assert!(r.found());
 }
+
+/// Fleet continue-4/6, Rock Tunnel without Flash: the dark floor repeats
+/// tile by tile, a step looks like standing still, and the walks failed
+/// for hours. Entering a dark map takes Flash (and the Boulder Badge);
+/// moving between dark maps, or leaving one, doesn't.
+#[test]
+fn a_dark_map_is_entered_with_flash() {
+    let Some(world) = world() else { return };
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    let flash = pokebot_world::route::flash_requirement();
+    let edges = |map: &str| -> Vec<pokebot_world::route::Edge> {
+        graph
+            .places_on(map)
+            .iter()
+            .flat_map(|p| graph.edges_from(map, p.x, p.y).iter().cloned())
+            .collect()
+    };
+    let into: Vec<pokebot_world::route::Edge> = edges("Route10")
+        .into_iter()
+        .filter(|e| e.to.map == "RockTunnel_1F")
+        .collect();
+    assert!(!into.is_empty());
+    for e in &into {
+        assert!(flash.iter().all(|p| e.requires.contains(p)), "{e:?}");
+    }
+    let below: Vec<pokebot_world::route::Edge> = edges("RockTunnel_1F")
+        .into_iter()
+        .filter(|e| e.to.map != "RockTunnel_1F")
+        .collect();
+    assert!(below.iter().any(|e| e.to.map == "RockTunnel_B1F"));
+    for e in &below {
+        assert!(!flash.iter().any(|p| e.requires.contains(p)), "{e:?}");
+    }
+}

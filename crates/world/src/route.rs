@@ -314,6 +314,23 @@ pub fn escape_rope_requirement() -> Requirement {
     }]
 }
 
+pub const MOVE_FLASH: &str = "MOVE_FLASH";
+
+/// What entering a dark map takes: Flash in the party and the Boulder
+/// Badge to use it. The game lets the player walk in dark, but in a dark
+/// cave the lit disc repeats with every tile of rock floor, so a step and
+/// standing still look the same (fleet continue-4/6, Rock Tunnel: the
+/// reckoning held still while the player walked three tiles, then tiles
+/// were learnt "blocked" that weren't, and every walk failed).
+pub fn flash_requirement() -> Requirement {
+    vec![
+        Predicate::Badge { n: 1 },
+        Predicate::PartyHasMove {
+            mv: MOVE_FLASH.to_string(),
+        },
+    ]
+}
+
 /// What Surf takes: the move in the party and the Soul Badge.
 pub fn surf_requirement() -> Requirement {
     vec![
@@ -415,6 +432,8 @@ pub struct PlaceGraph {
     escape_links: BTreeMap<String, BTreeSet<String>>,
     /// The maps an escape warp set on entering a map holds on, by map.
     escape_regions: RefCell<HashMap<String, Rc<BTreeSet<String>>>>,
+    /// Maps dark until Flash is used: entered with it.
+    dark: BTreeSet<String>,
 }
 
 impl PlaceGraph {
@@ -435,6 +454,11 @@ impl PlaceGraph {
             intercepted: BTreeSet::new(),
             escape_links: BTreeMap::new(),
             escape_regions: RefCell::new(HashMap::new()),
+            dark: world
+                .maps()
+                .filter(|m| m.requires_flash)
+                .map(|m| m.name.clone())
+                .collect(),
         };
         let mut maps: Vec<&MapData> = world.maps().collect();
         maps.sort_by(|a, b| a.name.cmp(&b.name));
@@ -760,7 +784,12 @@ impl PlaceGraph {
         p
     }
 
-    fn add_edge(&mut self, from: &Place, edge: Edge) {
+    fn add_edge(&mut self, from: &Place, mut edge: Edge) {
+        if self.dark.contains(&edge.to.map) && !self.dark.contains(&from.map) {
+            edge.requires.extend(flash_requirement());
+            edge.requires.sort();
+            edge.requires.dedup();
+        }
         self.edges.entry(from.key()).or_default().push(edge);
     }
 
