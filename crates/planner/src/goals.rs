@@ -616,10 +616,28 @@ impl<'a> Planner<'a> {
                     else {
                         continue;
                     };
-                    let pre: Vec<GoalPredicate> = crate::intents::path_preconditions(path)
+                    let mut pre: Vec<GoalPredicate> = crate::intents::path_preconditions(path)
                         .into_iter()
                         .filter(|g| matches!(g, GoalPredicate::World(_)))
                         .collect();
+                    // The trigger fires only on its own var's value: once
+                    // past it (the rival fought), it is no one on the way
+                    // (fleet continue-4, Pokémon Tower 2F: the scene var at
+                    // 1, the rival's defeat unknown, and the way up taken
+                    // to need his battle, which the story can't give again:
+                    // no plan for FLAG_RESCUED_MR_FUJI, cycle after cycle).
+                    for c in &t.when {
+                        if let Condition::Var { var, .. } = c {
+                            if is_local_var(var) {
+                                continue;
+                            }
+                        }
+                        if let Some(g) = GoalPredicate::from_condition(c) {
+                            if !pre.contains(&g) {
+                                pre.push(g);
+                            }
+                        }
+                    }
                     battle_triggers.entry(t.map.clone()).or_default().push((
                         (t.x, t.y),
                         trainer.to_string(),

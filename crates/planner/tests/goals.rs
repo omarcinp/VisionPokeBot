@@ -1877,14 +1877,14 @@ fn flash_is_planned_before_the_dark_tunnel_from_route_10() {
     assert!(aide < teach && teach < tunnel && tunnel < plan.intents.len());
 }
 
-/// Fleet, continue-4, Rocket Hideout B1F after Giovanni: a partial plan's
-/// open goals (60 of them) were each checked against the facts being
-/// planned further up, and a fact no achiever produces was looked for
-/// among all the achievers each time: 3 ms a node, 80000 nodes took the
-/// whole 240 s budget and the game stood without a plan. Expanding a
-/// ten thousand nodes takes seconds, not a minute.
+/// Fleet, continue-4, Rocket Hideout B1F after Giovanni: every goal ran
+/// out of budget, cycle after cycle. Two causes: each open goal of a
+/// partial plan was checked against the achievers in full (3 ms a node,
+/// a53ede7), and Pokémon Tower's rival, already fought, was taken for a
+/// battle still on the way up (his trigger fires on its var at 0). The whole
+/// game now plans within the goal loop's 240 s and 80000 nodes.
 #[test]
-fn a_crowded_partial_plan_is_expanded_quickly() {
+fn the_game_plans_from_the_hideout_after_giovanni() {
     let Some(f) = fixture() else { return };
     let methods = Methods::load(root().join("data/rules/methods.json")).unwrap();
     let planner = Planner::new(
@@ -1895,8 +1895,14 @@ fn a_crowded_partial_plan_is_expanded_quickly() {
         Some(&f.priors),
         &methods,
         PlanOptions {
-            budget_s: 600.0,
-            node_budget: 10_000,
+            budget_s: 240.0,
+            node_budget: 80_000,
+            supported_probes: Some(
+                ["party", "trainer_card", "bag_pocket", "fly_map", "pokedex"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
             ..PlanOptions::default()
         },
     );
@@ -1906,14 +1912,40 @@ fn a_crowded_partial_plan_is_expanded_quickly() {
         x: 22,
         y: 27,
     });
-    let t = std::time::Instant::now();
-    let _ = planner.plan(
-        &parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap(),
-        &knowledge,
-        pose,
-    );
-    let took = t.elapsed().as_secs_f64();
-    eprintln!("10000 nodes in {took:.1} s");
-    // 13 s here, 36 s before (and debug-built: opt-level 1).
-    assert!(took < 25.0, "10000 nodes took {took:.1} s");
+    let plan = planner
+        .plan(
+            &parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .expect("a plan within the budget");
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
+}
+
+/// Fleet, continue-4: Pokémon Tower 2F's scene var at 1 (the rival
+/// fought), his defeat flag unknown. His trigger fires only on the var at
+/// 0, so he is no one on the way up; taken for one, the way to 7F needed
+/// a battle the story can't give again, and Mr. Fuji had no plan.
+#[test]
+fn a_trigger_past_its_var_is_no_one_on_the_way() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 120.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, _) = checkpoint("pokemon_tower_rival_fought_state.json");
+    let pose = Some(PlayerPose {
+        map: "RocketHideout_B1F".into(),
+        x: 22,
+        y: 27,
+    });
+    let plan = planner
+        .plan(
+            &parse_goal("flag FLAG_RESCUED_MR_FUJI").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .unwrap();
+    print(&plan, 20);
+    assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
 }
