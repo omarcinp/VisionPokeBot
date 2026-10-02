@@ -79,7 +79,10 @@ pub fn detect(
     if share(image, PANEL_TOP, PANEL_GRAY, 1) < 800
         || share(image, FRAME_LEFT, FRAME_GRAY, 1) < 800
         || share(image, PANEL_LEFT, PANEL_GRAY, 1) < 800
-        || share_any(image, PICTURE_TOP, &PICTURE_BLUES, 1) < 400
+        // A tall picture covers much of the box's top rows (fleet
+        // continue-6: FEAROW's left 372 of 1000, the screen read Unknown,
+        // and the swap failed "no progress in box").
+        || share_any(image, PICTURE_TOP, &PICTURE_BLUES, 1) < 250
     {
         return None;
     }

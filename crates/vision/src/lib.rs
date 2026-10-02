@@ -1524,6 +1524,14 @@ mod tests {
             assert_eq!(o.screen.value, ScreenState::PcStorage);
             assert!(o.menu.is_none() && o.dialogue.is_none());
         }
+        // Fleet continue-6: a box with FEAROW under the hand, its tall
+        // picture over most of the picture box's top rows; read Unknown,
+        // the swap failed "no progress in box".
+        if let Some(o) = observe("emu-pc-box-grass-fearow") {
+            assert_eq!(o.screen.value, ScreenState::PcStorage);
+            let pc = o.pc_storage.expect("the storage screen");
+            assert_eq!(pc.species.as_deref(), Some("FEAROW"));
+        }
     }
 
     /// Teaching a TM/HM: the mauve-framed messages over the party menu and
