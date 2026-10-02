@@ -352,6 +352,20 @@ pub fn tile_score(
     pose: &PlayerPose,
     tile: (i32, i32),
 ) -> Option<u32> {
+    tile_rows_score(frame, render, map, pose, tile, 0..BLOCK)
+}
+
+/// [`tile_score`] over the tile's pixel `rows` only (0 is its top): an
+/// object stands drawn half a tile up, over its own tile's top and the
+/// tile above's bottom.
+pub fn tile_rows_score(
+    frame: &RgbImage,
+    render: &RgbImage,
+    map: &MapData,
+    pose: &PlayerPose,
+    tile: (i32, i32),
+    rows: std::ops::Range<i32>,
+) -> Option<u32> {
     let sx0 = PLAYER_SCREEN_X + (tile.0 - pose.x) * BLOCK;
     let sy0 = PLAYER_SCREEN_Y + (tile.1 - pose.y) * BLOCK;
     let rx0 = (tile.0 + map.pad) * BLOCK;
@@ -365,7 +379,8 @@ pub fn tile_score(
         return None;
     }
     let mut matched = 0u32;
-    for dy in 0..BLOCK {
+    let height = rows.len() as u32;
+    for dy in rows {
         for dx in 0..BLOCK {
             let f = frame.pixel((sx0 + dx) as u32, (sy0 + dy) as u32);
             let r = render.pixel((rx0 + dx) as u32, (ry0 + dy) as u32);
@@ -374,7 +389,7 @@ pub fn tile_score(
             }
         }
     }
-    Some(matched * 1000 / (BLOCK * BLOCK) as u32)
+    (height > 0).then(|| matched * 1000 / (BLOCK as u32 * height))
 }
 
 /// A pixel of FireRed's water, whatever its animation frame: clearly blue

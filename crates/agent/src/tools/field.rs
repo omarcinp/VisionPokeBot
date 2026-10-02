@@ -880,9 +880,14 @@ fn pushed(
         .and_then(|p| world.map(&p.pose.map))
         .and_then(|m| m.tile(new.0, new.1))
         .is_some_and(|t| t.behavior == pokebot_world::boulders::FALL_WARP);
+    // The top halves: a boulder is drawn half a tile up, over the tile
+    // above's bottom half, and the player's head over the tile above it
+    // (fleet continue-2, Victory Road 2F: pushed Down from (6, 17), the
+    // boulder at rest on (6, 18) covered (6, 17)'s bottom half, which never
+    // read bare; the push was judged failed three times).
     match (
-        bare_floor(world, o, frame, old),
-        bare_floor(world, o, frame, new),
+        bare_top(world, o, frame, old),
+        bare_top(world, o, frame, new),
     ) {
         (Some(true), _) if falls => true,
         (Some(true), Some(false)) => true,
@@ -891,9 +896,10 @@ fn pushed(
     }
 }
 
-/// Whether the tile `at` looks like the map's own floor there (nothing
-/// drawn on it): `None` without a frame, a located player or a render.
-fn bare_floor(
+/// Whether the top half of tile `at` looks like the map's floor there:
+/// what stands on a tile is drawn over its top half, what stands below it
+/// only over its bottom half.
+fn bare_top(
     world: &pokebot_world::World,
     o: &Observation,
     frame: Option<&pokebot_core::NormalizedFrame>,
@@ -902,8 +908,15 @@ fn bare_floor(
     let (frame, p) = (frame?, o.player.as_ref()?);
     let data = world.map(&p.pose.map)?;
     let render = data.render().ok()?;
-    pokebot_world::localize::tile_score(frame.image(), render, data, &p.pose, at)
-        .map(|s| s >= OBSTACLE_GONE_SCORE)
+    pokebot_world::localize::tile_rows_score(
+        frame.image(),
+        render,
+        data,
+        &p.pose,
+        at,
+        0..pokebot_world::BLOCK / 2,
+    )
+    .map(|s| s >= OBSTACLE_GONE_SCORE)
 }
 
 /// Whether the screen shows the boulder pushed from `old` to `new`: a
@@ -1881,6 +1894,28 @@ mod tests {
         assert!(pushed(&world, &o, Some(&frame), (6, 7), Direction::Right));
         // Not from (7, 7) on: nothing went to (8, 7).
         assert!(!pushed(&world, &o, Some(&frame), (7, 7), Direction::Right));
+        // Fleet continue-2, Victory Road 2F: pushed Down from (6, 17), the
+        // player above at (6, 16). The boulder on (6, 18) is drawn over
+        // (6, 17)'s bottom half; its top half is bare floor.
+        let Ok(image) = pokebot_video::png::load(
+            root.join("captures/fixtures/emu-vr2f-boulder-pushed-down.png"),
+        ) else {
+            return;
+        };
+        let Ok(frame) = pokebot_core::NormalizedFrame::new(2, std::time::Instant::now(), image)
+        else {
+            return;
+        };
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "VictoryRoad_2F".into(),
+                x: 6,
+                y: 16,
+            },
+            score: 1000,
+        });
+        assert!(pushed(&world, &o, Some(&frame), (6, 17), Direction::Down));
+        assert!(!pushed(&world, &o, Some(&frame), (6, 18), Direction::Down));
     }
 
     /// Switch, Victory Road 1F, after the first push down: the player at
@@ -1909,8 +1944,8 @@ mod tests {
             },
             score: 1000,
         });
-        assert_eq!(bare_floor(&world, &o, Some(&frame), (7, 19)), Some(false));
-        assert_eq!(bare_floor(&world, &o, Some(&frame), (6, 19)), Some(true));
+        assert_eq!(bare_top(&world, &o, Some(&frame), (7, 19)), Some(false));
+        assert_eq!(bare_top(&world, &o, Some(&frame), (6, 19)), Some(true));
     }
 
     /// Switch, Victory Road 1F: between pushes the walk to the tile behind
