@@ -119,6 +119,31 @@ pub fn correct(path: &Path, events: &[pokebot_state::EventRecord]) -> Result<boo
             _ => None,
         })
         .collect();
+    // A map's scene var seen, unknown to the checkpoint and set by no
+    // script of the cycle: so it held at the save too (fleet continue-3,
+    // Silph Co. 11F: Giovanni beaten long before the save, the var seen
+    // at 1, unknown again after every reload; each plan walked onto his
+    // trigger, "no scene started", four cycles in a row).
+    let touched_vars: std::collections::BTreeSet<&str> = events
+        .iter()
+        .filter_map(|r| match &r.event {
+            GameEvent::VarTracked { var, .. } => Some(var.as_str()),
+            _ => None,
+        })
+        .collect();
+    for r in events {
+        if let GameEvent::VarObserved { var, .. } = &r.event {
+            let unknown = knowledge.world.var(var).value.is_none();
+            let seen = apply.iter().any(|a| a.event == r.event);
+            if var.starts_with("VAR_MAP_SCENE_")
+                && unknown
+                && !touched_vars.contains(var.as_str())
+                && !seen
+            {
+                apply.push(r.clone());
+            }
+        }
+    }
     for r in events {
         if let GameEvent::FlagObserved { flag, value: false } = &r.event {
             let unknown = knowledge.world.flag(flag).value.is_none();
@@ -584,6 +609,43 @@ mod tests {
         assert!(!c.knowledge.world.flags.contains_key(ball));
         // Known now: nothing more to do.
         assert!(!correct(&path, &[seen(snorlax)]).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Fleet continue-3: Silph Co. 11F's scene var seen at 1 (Giovanni
+    /// beaten before the save), unknown in the checkpoint, kept; one a
+    /// script of the cycle set is not.
+    #[test]
+    fn a_map_scene_var_seen_is_kept_in_the_checkpoint() {
+        use pokebot_state::{EventRecord, GameEvent};
+        let dir = temp_dir("scene-var");
+        let path = dir.join("state.json");
+        store(
+            &path,
+            &Identity::of(&progress(&["A"], 7)),
+            &SavedKnowledge::default(),
+        )
+        .unwrap();
+        let silph = "VAR_MAP_SCENE_SILPH_CO_11F";
+        let tower = "VAR_MAP_SCENE_POKEMON_TOWER_2F";
+        let seen = |var: &str| EventRecord {
+            frame_id: 30,
+            event: GameEvent::VarObserved {
+                var: var.into(),
+                value: 1,
+            },
+        };
+        let set = EventRecord {
+            frame_id: 20,
+            event: GameEvent::VarTracked {
+                var: tower.into(),
+                value: 1,
+            },
+        };
+        assert!(correct(&path, &[set, seen(silph), seen(tower)]).unwrap());
+        let c = load(&path).unwrap().unwrap();
+        assert_eq!(c.knowledge.world.var(silph).value, Some(1));
+        assert_eq!(c.knowledge.world.var(tower).value, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

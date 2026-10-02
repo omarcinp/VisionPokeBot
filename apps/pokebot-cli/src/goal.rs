@@ -781,12 +781,7 @@ impl Runner for CliRunner<'_> {
         // the game contradicted) is corrected in the checkpoint before the
         // next reload restores it.
         let corrections = self.runtime.subscribe(|n| {
-            matches!(n, pokebot_runtime::Notice::Event { record, origin: pokebot_runtime::Origin::Perception }
-                if matches!(record.event,
-                    GameEvent::ScriptPathRetracted { .. }
-                        | GameEvent::VarObserved { .. }
-                        | GameEvent::FlagObserved { .. }
-                        | GameEvent::FlagTracked { .. }))
+            matches!(n, pokebot_runtime::Notice::Event { record, origin } if corrects(*origin, &record.event))
         });
         let result = self.play(start);
         if self.args.save_game {
@@ -967,5 +962,54 @@ pub fn print_plan(plan: &Plan) {
         for b in blocked {
             println!("  - {b}");
         }
+    }
+}
+
+/// Whether an event goes to [`checkpoint::correct`]: what the screen
+/// showed and what the tools worked out from it (a trigger that didn't
+/// fire, a door met shut, a text's conditions), and what scripts set,
+/// which keeps a fact the cycle changed out of the save (fleet
+/// continue-3: Silph Co. 11F's scene var, found by the trigger tool, never
+/// reached the checkpoint; only perception's events were taken).
+fn corrects(origin: pokebot_runtime::Origin, event: &GameEvent) -> bool {
+    use pokebot_runtime::Origin;
+    matches!(origin, Origin::Perception | Origin::Agent)
+        && matches!(
+            event,
+            GameEvent::ScriptPathRetracted { .. }
+                | GameEvent::VarObserved { .. }
+                | GameEvent::VarTracked { .. }
+                | GameEvent::FlagObserved { .. }
+                | GameEvent::FlagTracked { .. }
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checkpoint corrections take the tools' findings as well as the
+    /// screen's, and what scripts set (fleet continue-3).
+    #[test]
+    fn corrections_take_the_tools_findings() {
+        use pokebot_runtime::Origin;
+        let var = GameEvent::VarObserved {
+            var: "VAR_MAP_SCENE_SILPH_CO_11F".into(),
+            value: 1,
+        };
+        let set = GameEvent::VarTracked {
+            var: "VAR_MAP_SCENE_SILPH_CO_11F".into(),
+            value: 1,
+        };
+        assert!(corrects(Origin::Agent, &var));
+        assert!(corrects(Origin::Perception, &var));
+        assert!(corrects(Origin::Agent, &set));
+        assert!(!corrects(Origin::Input, &var));
+        assert!(!corrects(
+            Origin::Agent,
+            &GameEvent::MapVisited {
+                map: "SilphCo_11F".into()
+            }
+        ));
     }
 }
