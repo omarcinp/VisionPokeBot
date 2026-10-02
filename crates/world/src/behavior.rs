@@ -34,6 +34,13 @@ pub fn is_water(b: u16) -> bool {
     matches!(b, 0x10..=0x15 | 0x19..=0x1B)
 }
 
+/// Tiles drawn as animated water: Surf's water and the currents
+/// (`MB_EASTWARD_CURRENT`..`MB_SOUTHWARD_CURRENT`, Seafoam's lower floors),
+/// whose frames the render doesn't match.
+pub fn animates_as_water(b: u16) -> bool {
+    is_water(b) || matches!(b, 0x50..=0x53)
+}
+
 /// Ledge on this tile, and the only direction it can be jumped.
 pub fn ledge(b: u16) -> Option<Direction> {
     match b {

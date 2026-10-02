@@ -694,7 +694,7 @@ impl<'w> Localizer<'w> {
                 .map(|(bx, by)| {
                     self.resolve(map, bx - map.pad, by - map.pad)
                         .and_then(|(m, x, y)| m.tile(x, y))
-                        .is_some_and(|t| crate::behavior::is_water(t.behavior))
+                        .is_some_and(|t| crate::behavior::animates_as_water(t.behavior))
                 })
                 .collect()
         })

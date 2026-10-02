@@ -2273,6 +2273,29 @@ mod tests {
         }
     }
 
+    /// Switch, Seafoam Islands B3F at (27, 11): the currents (behaviours
+    /// 0x50–0x53) animate like water, but only Surf's water was left out
+    /// of the match; on a third of the frames the player was not located,
+    /// the walk waited for the scene to settle, and every plan failed
+    /// there. The currents are left out too.
+    #[test]
+    fn seafoams_currents_dont_hide_the_player() {
+        let Some(world) = world() else { return };
+        let pose = PlayerPose {
+            map: "SeafoamIslands_B3F".into(),
+            x: 27,
+            y: 11,
+        };
+        for id in ["00031260", "00031380", "00031570"] {
+            let name = format!("switch-seafoam-b3f-current-{id}.png");
+            let Some(image) = fixture(&name) else { return };
+            let mut p = FireRedPerception::with_world(world.clone());
+            p.set_pose_hint(pose.clone());
+            let seen = p.observe(&frame(1, image)).player.map(|o| o.pose);
+            assert_eq!(seen, Some(pose.clone()), "{name}");
+        }
+    }
+
     /// A dark cave's view at sprite map pixel `(px, py)`: the map's render
     /// inside the lit disc (as fleet worker 1 saw it in Rock Tunnel: its
     /// box 96–143 × 56–104), black around it, the player's sprite on top.
