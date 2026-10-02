@@ -1668,19 +1668,57 @@ fn run_script(
             finish(ctx, step.conversation())
         }
         Start::Sign { map, x, y, facing } => {
-            super::go::reach_facing(ctx, &map, (x, y))?;
-            let mut step = TalkStep::toward(
-                ctx,
-                &map,
-                (x, y),
-                facing,
-                Some(script.to_owned()),
-                answers.to_vec(),
-            )
-            .with_scene();
-            step.scene.conversation = conversation;
-            ctx.drive(&mut step)?;
-            finish(ctx, step.conversation())
+            // A sign several tiles show (a 2 × 2 card-key door) is read
+            // at the first of them the walk reaches (fleet continue-2,
+            // Silph Co. 11F: the door's top tile, read only from the side
+            // it shuts, failed "no path next to (5, 16)" from the lift).
+            let world = Arc::clone(&ctx.world);
+            let mut tiles: Vec<((i32, i32), Option<pokebot_state::Direction>)> =
+                vec![((x, y), facing)];
+            if let Some(m) = world.map(&map) {
+                tiles.extend(
+                    m.signs
+                        .iter()
+                        .filter(|g| g.script.as_deref() == Some(script) && (g.x, g.y) != (x, y))
+                        .map(|g| ((g.x, g.y), g.facing_dir())),
+                );
+            }
+            let mut last = None;
+            let mut first = Some(conversation);
+            for (at, facing) in tiles {
+                // Each try reads afresh (the walk ran no page of it).
+                let conversation = first.take().unwrap_or_else(|| {
+                    Conversation::new(
+                        Arc::clone(&ctx.world),
+                        Arc::clone(&ctx.data),
+                        Some(script.to_owned()),
+                        path,
+                        answers.to_vec(),
+                    )
+                    .near(ctx.pose())
+                });
+                let reached = super::go::reach_facing(ctx, &map, at).and_then(|()| {
+                    let mut step = TalkStep::toward(
+                        ctx,
+                        &map,
+                        at,
+                        facing,
+                        Some(script.to_owned()),
+                        answers.to_vec(),
+                    )
+                    .with_scene();
+                    step.scene.conversation = conversation;
+                    ctx.drive(&mut step).map(|_| step)
+                });
+                match reached {
+                    Ok(step) => return finish(ctx, step.conversation()),
+                    Err(ToolError::Failed(why)) if why.contains("no path") => {
+                        last = Some(ToolError::Failed(why));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(last.unwrap_or_else(|| ToolError::Failed(format!("{script}: no sign"))))
         }
         Start::Trigger { map, tiles } => {
             let (x, y) = tiles[0];
@@ -2509,6 +2547,52 @@ mod tests {
             conditions_shown_by(events, &index, &said, speaker.as_deref()),
             vec![flag]
         );
+    }
+
+    /// Fleet continue-2, Silph Co. 11F: the card-key door is a 2 × 2 block
+    /// of signs on one script. From the lift's side, south, with the door
+    /// shut, its top tiles are faced from nowhere the walk reaches; a
+    /// bottom one is (from (5, 18)). RunScript tries the script's tiles
+    /// in turn rather than only the first.
+    #[test]
+    fn a_door_of_several_sign_tiles_is_read_where_reached() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let map = world.map("SilphCo_11F").unwrap();
+        let script = "SilphCo_11F_EventScript_Door";
+        let tiles: Vec<(i32, i32)> = map
+            .signs
+            .iter()
+            .filter(|g| g.script.as_deref() == Some(script))
+            .map(|g| (g.x, g.y))
+            .collect();
+        assert_eq!(tiles.len(), 4, "{tiles:?}");
+        let mut state = GameState::default();
+        state.world.flags.insert(
+            "FLAG_SILPH_11F_DOOR".into(),
+            pokebot_state::Knowledge::observed(false, 1),
+        );
+        let gates = pokebot_world::gates::GateTiles::believed(
+            &world,
+            &pokebot_world::gates::derive(&world),
+            &crate::belief_view::StateBelief(&state),
+        );
+        let mut obstacles = crate::nav::object_obstacles(map, &Default::default());
+        obstacles.extend(gates.closed_on("SilphCo_11F"));
+        let walk = pokebot_world::path::Walk {
+            obstacles: &obstacles,
+            surf: false,
+            opened: None,
+        };
+        let reach = pokebot_world::path::reach(map, (5, 19), &walk, |_| 0);
+        let readable = |(x, y): (i32, i32)| {
+            crate::nav::facing_spots(map, x, y)
+                .into_iter()
+                .any(|(spot, _)| reach.cost(spot).is_some())
+        };
+        assert!(!readable((5, 16)), "the first tile, from the lift's side");
+        assert!(tiles.iter().any(|t| readable(*t)), "{tiles:?}");
     }
 
     /// Switch, Vermilion: the belief held the city's scene var at 1 (the
