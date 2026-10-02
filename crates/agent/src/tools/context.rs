@@ -1073,7 +1073,11 @@ impl ToolContext<'_> {
         // Or that waited for a screen that never came (fleet continue-3,
         // Route 7 by Celadon's gate: a "battle wipe" read every 64 frames,
         // and the walk failed "stuck waiting: letting the scene settle").
-        let stuck = why.contains("no progress") || why.contains("stuck waiting");
+        // Or a screen it couldn't read (fleet continue-1: "party audit:
+        // screen or field stayed unreadable", no frame to say which).
+        let stuck = why.contains("no progress")
+            || why.contains("stuck waiting")
+            || why.contains("unreadable");
         if !stuck || self.evidence.len() >= MAX_EVIDENCE {
             return;
         }

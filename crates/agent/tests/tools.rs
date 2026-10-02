@@ -1021,6 +1021,7 @@ fn a_tool_that_makes_no_progress_leaves_its_frame() {
     for (i, (why, expect)) in [
         ("PC: no progress in box", 1),
         ("stuck waiting: letting the scene settle", 1),
+        ("party audit: screen or field stayed unreadable", 1),
         ("no path to (3, 4)", 0),
     ]
     .into_iter()
