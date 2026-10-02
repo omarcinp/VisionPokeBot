@@ -1377,11 +1377,99 @@ pub fn reconcile_gifts(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         ctx.info(format!("{species} was given but never recorded caught"));
         ctx.emit(GameEvent::SpeciesCaught { species })?;
     }
+    // A flag seen the other way refutes the scene var instead (fleet
+    // continue-4: Silph Co. 11F's var believed 1 from a session long gone,
+    // Saffron's grunts seen standing all the same; the flag went back and
+    // forth, the var stayed, Giovanni's trigger looked spent, and no plan
+    // could reach the gym).
+    for (var, value) in refuted_scene_vars(events, ctx.state()) {
+        ctx.info(format!("a flag seen refutes {var}: back to {value}"));
+        ctx.emit(GameEvent::VarObserved { var, value })?;
+    }
     for (flag, value) in scene_var_flags(events, ctx.state()) {
         ctx.info(format!("a scene var shows {flag} {value}"));
         ctx.emit(GameEvent::FlagObserved { flag, value })?;
     }
     Ok(())
+}
+
+/// Scene vars a flag seen refutes: the var at a value set only by trigger
+/// paths that all set (or clear) a flag, the flag seen the other way. The
+/// var is put back to the value the triggers fire on.
+pub fn refuted_scene_vars(
+    events: &pokebot_world::events::Events,
+    state: &GameState,
+) -> Vec<(String, u16)> {
+    let mut out = Vec::new();
+    for (var, k) in &state.world.vars {
+        let (true, Some(value)) = (var.starts_with("VAR_MAP_SCENE_"), k.value) else {
+            continue;
+        };
+        if value == 0 {
+            continue;
+        }
+        let setters: Vec<(&String, &pokebot_world::events::ScriptPath)> = events
+            .scripts
+            .iter()
+            .flat_map(|(name, s)| s.paths.iter().map(move |p| (name, p)))
+            .filter(|(_, p)| {
+                p.does.iter().any(|e| {
+                    matches!(e, Effect::Var { var: v, change } if v == var
+                        && change.eq.as_ref().and_then(Val::as_int) == Some(i64::from(value)))
+                })
+            })
+            .collect();
+        if setters.is_empty() {
+            continue;
+        }
+        let shared = |flag: &str, is: bool| {
+            setters.iter().all(|(_, p)| {
+                p.does.iter().any(|e| match e {
+                    Effect::Set { set } => is && set == flag,
+                    Effect::Clear { clear } => !is && clear == flag,
+                    _ => false,
+                })
+            })
+        };
+        let refuted = setters[0].1.does.iter().any(|e| {
+            let (flag, is) = match e {
+                Effect::Set { set } => (set, true),
+                Effect::Clear { clear } => (clear, false),
+                _ => return false,
+            };
+            let seen = state.world.flags.get(flag).filter(|k| {
+                k.source == pokebot_state::KnowledgeSource::Observed && k.value == Some(!is)
+            });
+            seen.is_some() && shared(flag, is)
+        });
+        if !refuted {
+            continue;
+        }
+        // The value every trigger running a setter fires on.
+        let armed: std::collections::BTreeSet<u16> = events
+            .triggers
+            .iter()
+            .filter(|t| {
+                setters
+                    .iter()
+                    .any(|(name, _)| t.script.as_deref() == Some(name.as_str()))
+            })
+            .flat_map(|t| &t.when)
+            .filter_map(|c| match c {
+                Condition::Var { var: v, cmp } if v == var => cmp
+                    .eq
+                    .as_ref()
+                    .and_then(Val::as_int)
+                    .and_then(|x| u16::try_from(x).ok()),
+                _ => None,
+            })
+            .collect();
+        if let (Some(&before), 1) = (armed.iter().next(), armed.len()) {
+            out.push((var.clone(), before));
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Flags a map's scene var proves: set to its value only by script paths
@@ -2512,6 +2600,46 @@ mod tests {
             cond_choice(None, Some(0)),
         ];
         assert_eq!(question_branches(&when), vec![true, false, false]);
+    }
+
+    /// Fleet continue-4: Silph Co. 11F's scene var believed 1 (Giovanni
+    /// beaten), Saffron's grunts seen standing on their tiles. The sighting
+    /// refutes the var, put back to the value Giovanni's triggers fire on;
+    /// a flag only tracked doesn't.
+    #[test]
+    fn grunts_seen_standing_refute_the_scene_var_that_hides_them() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let var = "VAR_MAP_SCENE_SILPH_CO_11F";
+        let flag = "FLAG_HIDE_SAFFRON_ROCKETS";
+        let mut state = GameState::default();
+        state
+            .world
+            .vars
+            .insert(var.into(), pokebot_state::Knowledge::observed(1, 1));
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::tracked(false, None));
+        assert!(refuted_scene_vars(events, &state).is_empty());
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::observed(false, 2));
+        assert_eq!(
+            refuted_scene_vars(events, &state),
+            vec![(var.to_owned(), 0)]
+        );
+        state
+            .world
+            .vars
+            .insert(var.into(), pokebot_state::Knowledge::observed(0, 3));
+        assert!(!scene_var_flags(events, &state)
+            .iter()
+            .any(|(f, _)| f == flag));
     }
 
     /// Fleet continue-6, Victory Road 1F: its boulder at (7, 18) was seen
