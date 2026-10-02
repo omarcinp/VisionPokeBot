@@ -156,7 +156,23 @@ fn reaches(
             policy,
         )
         .found(),
-        Dest::Map { map } | Dest::Facing { map, .. } | Dest::Warp { map, .. } => {
+        // Next to it: one of the tiles it is talked to from.
+        Dest::Facing { map, x, y } => world.map(map).is_some_and(|m| {
+            crate::nav::facing_spots(m, *x, *y)
+                .into_iter()
+                .any(|((sx, sy), _)| {
+                    route::route(
+                        world,
+                        graph,
+                        belief,
+                        pose,
+                        &Place::tile(map, sx, sy),
+                        policy,
+                    )
+                    .found()
+                })
+        }),
+        Dest::Map { map } | Dest::Warp { map, .. } => {
             route::route_to_map(world, graph, belief, pose, map, policy).found()
         }
     }
@@ -388,5 +404,47 @@ mod tests {
             };
             assert!(reaches(&world, &graph, &last, &here, &dest, policy));
         }
+    }
+
+    /// Switch, the Mansion's B1F: the SECRET KEY at (5, 7), "no path next
+    /// to" it whichever state the plan pressed; from the statue at
+    /// (24, 29), in either state, it is reached (through presses when the
+    /// state shuts it).
+    #[test]
+    fn the_secret_key_is_reached_in_either_switch_state() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let all = toggles(&world);
+        let pose = PlayerPose {
+            map: "PokemonMansion_B1F".into(),
+            x: 24,
+            y: 30,
+        };
+        let key = Dest::Facing {
+            map: "PokemonMansion_B1F".into(),
+            x: 5,
+            y: 7,
+        };
+        let policy = UnknownPolicy::Optimistic {
+            penalty_of: crate::tools::go::battle_on_the_way,
+        };
+        let flag = "FLAG_POKEMON_MANSION_SWITCH_STATE";
+        let mut state = pokebot_state::GameState::default();
+        let mut shut = 0;
+        for value in [false, true] {
+            state
+                .world
+                .flags
+                .insert(flag.into(), pokebot_state::Knowledge::observed(value, 1));
+            let belief = StateBelief(&state);
+            if reaches(&world, &graph, &belief, &pose, &key, policy) {
+                continue;
+            }
+            shut += 1;
+            let presses = plan(&world, &graph, &belief, &pose, &key, &all, policy)
+                .unwrap_or_else(|| panic!("a way from {value}"));
+            assert!(!presses.is_empty());
+        }
+        assert!(shut > 0, "one state shuts the key away");
     }
 }

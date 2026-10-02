@@ -710,6 +710,17 @@ pub fn reach_facing(ctx: &mut ToolContext<'_>, map: &str, at: (i32, i32)) -> Res
             return walk_legs(ctx, &legs, &dest).map(|_| ());
         }
     }
+    // Behind a barrier a switch opens (Switch, the Pokémon Mansion's B1F:
+    // the SECRET KEY, "no path next to (5, 7)" in either switch state the
+    // plan pressed): the switches' states are searched.
+    let next_to = Dest::Facing {
+        map: map.to_owned(),
+        x: at.0,
+        y: at.1,
+    };
+    if let Some(walked) = super::toggles::through(ctx, &next_to) {
+        return walked.map(|_| ());
+    }
     Ok(())
 }
 
