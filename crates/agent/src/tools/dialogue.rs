@@ -762,7 +762,8 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
     // path printing it shares (Switch, Vermilion: "The ship set sail." is
     // only printed with the city's scene var at 3, the belief held 1 and
     // walks went on through the ticket check it turns back).
-    let shown = conditions_shown(events, &index, &conversation.recognised);
+    let speaker = conversation.resolved_script(&index);
+    let shown = conditions_shown_by(events, &index, &conversation.recognised, speaker.as_deref());
     for event in shown {
         let differs = match &event {
             GameEvent::VarObserved { var, value } => {
@@ -906,6 +907,20 @@ pub fn conditions_shown(
     index: &LabelIndex,
     recognised: &[String],
 ) -> Vec<GameEvent> {
+    conditions_shown_by(events, index, recognised, None)
+}
+
+/// [`conditions_shown`] among `script`'s paths only, when the speaker is
+/// known (fleet continue-2, Silph Co. 10F: "The door is open…" is printed
+/// by the doors of every floor, each on its own flag, so nothing was
+/// shared; read at 10F's door, it shows FLAG_SILPH_10F_DOOR set, which
+/// the belief held clear, and the door was explored twenty times).
+pub fn conditions_shown_by(
+    events: &pokebot_world::events::Events,
+    index: &LabelIndex,
+    recognised: &[String],
+    script: Option<&str>,
+) -> Vec<GameEvent> {
     use pokebot_world::gates::{is_local_flag, is_local_var};
     let Some(first) = recognised.first() else {
         return Vec::new();
@@ -913,6 +928,7 @@ pub fn conditions_shown(
     let paths: Vec<&pokebot_world::events::ScriptPath> = index
         .paths_for(first)
         .iter()
+        .filter(|(s, _)| script.is_none_or(|only| s == only))
         .filter_map(|(s, i)| events.script(s)?.paths.get(*i))
         .filter(|p| {
             let labels = path_labels(&p.does);
@@ -2460,6 +2476,39 @@ mod tests {
         );
         let lab = fights("PalletTown_ProfessorOaksLab_EventScript_RivalBattleTriggerMid");
         assert!(lab.is_empty(), "{lab:?}");
+    }
+
+    /// Fleet continue-2, Silph Co. 10F: "The door is open…" is printed by
+    /// the card-key doors of every floor, each on its own flag; read at
+    /// 10F's door (the only one on the player's map), it shows 10F's door
+    /// open. Across every floor it shows nothing.
+    #[test]
+    fn a_text_many_doors_print_shows_the_one_beside_the_player() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let said = vec!["Text_TheDoorIsOpen".to_owned()];
+        let index = LabelIndex::build_for(events, &said);
+        let flag = GameEvent::FlagObserved {
+            flag: "FLAG_SILPH_10F_DOOR".into(),
+            value: true,
+        };
+        assert!(!conditions_shown(events, &index, &said).contains(&flag));
+        let mut c = Conversation::new(Arc::clone(&world), data, None, None, Vec::new()).near(Some(
+            PlayerPose {
+                map: "SilphCo_10F".into(),
+                x: 13,
+                y: 10,
+            },
+        ));
+        c.recognised = said.clone();
+        let speaker = c.resolved_script(&index);
+        assert_eq!(speaker.as_deref(), Some("SilphCo_10F_EventScript_Door"));
+        assert_eq!(
+            conditions_shown_by(events, &index, &said, speaker.as_deref()),
+            vec![flag]
+        );
     }
 
     /// Switch, Vermilion: the belief held the city's scene var at 1 (the
