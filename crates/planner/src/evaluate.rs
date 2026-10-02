@@ -60,6 +60,26 @@ impl Combatant {
     }
 }
 
+/// Damaging moves not chosen for their power: they fail unless the foe or
+/// the user is asleep (DREAM EATER, SNORE), faint the user (EXPLOSION),
+/// need a setup first (SPIT UP), only return damage taken (BIDE, COUNTER,
+/// MIRROR COAT), land two turns later (FUTURE SIGHT), or fail against a
+/// higher level (the OHKO moves, whose power is nominal). Neither the
+/// battle tool nor a matchup counts on them (fleet continue-1: HAUNTER's
+/// DREAM EATER made Route 18's DODUO and SPEAROW, immune to its GHOST
+/// moves, a win on paper; in battle it had no attack and fled them all).
+pub const UNRELIABLE_EFFECTS: [&str; 9] = [
+    "EFFECT_DREAM_EATER",
+    "EFFECT_SNORE",
+    "EFFECT_EXPLOSION",
+    "EFFECT_SPIT_UP",
+    "EFFECT_BIDE",
+    "EFFECT_COUNTER",
+    "EFFECT_MIRROR_COAT",
+    "EFFECT_FUTURE_SIGHT",
+    "EFFECT_OHKO",
+];
+
 /// The attacker's best move against `defender`: fewest expected attacks to
 /// faint it (ties: move name order). `None` if nothing does damage.
 pub fn best_move(
@@ -74,6 +94,13 @@ pub fn best_move(
         let Some(mv) = data.move_(&name) else {
             continue;
         };
+        if mv
+            .effect
+            .as_deref()
+            .is_some_and(|e| UNRELIABLE_EFFECTS.contains(&e))
+        {
+            continue;
+        }
         let Some(mut rolls) = damage(
             data,
             mv,
@@ -513,4 +540,40 @@ pub fn battle_vs_trainer(
         opponents,
         matchups,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fleet continue-1: HAUNTER (LICK, DREAM EATER, CURSE, NIGHT SHADE)
+    /// against Route 18's DODUO: its GHOST moves don't touch a NORMAL
+    /// type, and DREAM EATER fails on a foe awake. No move does damage.
+    #[test]
+    fn dream_eater_is_no_attack_on_a_foe_awake() {
+        let Ok(data) = GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let moves: Vec<String> = [
+            "MOVE_LICK",
+            "MOVE_DREAM_EATER",
+            "MOVE_CURSE",
+            "MOVE_NIGHT_SHADE",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let haunter = Combatant::new(&data, "SPECIES_HAUNTER", 40, moves, 15).unwrap();
+        let doduo = Combatant::new(
+            &data,
+            "SPECIES_DODUO",
+            26,
+            data.default_moves("SPECIES_DODUO", 26),
+            15,
+        )
+        .unwrap();
+        assert_eq!(best_move(&data, &haunter, &doduo).map(|(m, _)| m), None);
+    }
 }

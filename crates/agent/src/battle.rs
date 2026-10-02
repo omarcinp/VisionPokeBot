@@ -419,22 +419,7 @@ pub fn identify_opponent(data: &GameData, observation: &Observation) -> Option<C
     )
 }
 
-/// Damaging moves not chosen for their power: they fail unless the foe or
-/// the user is asleep (DREAM EATER, SNORE), faint the user (EXPLOSION),
-/// need a setup first (SPIT UP), only return damage taken (BIDE, COUNTER,
-/// MIRROR COAT), land two turns later (FUTURE SIGHT), or fail against a
-/// higher level (the OHKO moves, whose power is nominal).
-const UNRELIABLE_EFFECTS: [&str; 9] = [
-    "EFFECT_DREAM_EATER",
-    "EFFECT_SNORE",
-    "EFFECT_EXPLOSION",
-    "EFFECT_SPIT_UP",
-    "EFFECT_BIDE",
-    "EFFECT_COUNTER",
-    "EFFECT_MIRROR_COAT",
-    "EFFECT_FUTURE_SIGHT",
-    "EFFECT_OHKO",
-];
+use pokebot_planner::evaluate::UNRELIABLE_EFFECTS;
 
 /// The move slot to use: the evaluator's best damaging move among those
 /// with PP to spare; in wild battles, the trainer reserve is spent only when
