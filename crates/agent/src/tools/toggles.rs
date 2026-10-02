@@ -500,18 +500,33 @@ pub fn through(
             } else {
                 p.toggle.clear_path
             };
-            ctx.invoke(&Intent::RunScript {
-                script: p.toggle.script.clone(),
-                path: Some(path),
-                answers: vec![Answer::Yes],
-            })
-            .result?;
+            run(ctx, &p.toggle.script, path, vec![Answer::Yes])?;
         }
         match dest {
             Dest::Map { map } => super::go::go_to_map(ctx, map),
             other => super::go::go(ctx, Destination::from(other)),
         }
     })())
+}
+
+/// Runs path `path` of `script`; in place within a RunScript (its walk
+/// to the script's target), where the tool is busy (Switch, Cinnabar Gym:
+/// the quiz machines opening the way to Zac failed "RunScript is busy").
+pub fn run(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: usize,
+    answers: Vec<Answer>,
+) -> Result<(), ToolError> {
+    if ctx.running().contains(&"RunScript") {
+        return super::dialogue::run_nested(ctx, script, Some(path), &answers);
+    }
+    ctx.invoke(&Intent::RunScript {
+        script: script.to_owned(),
+        path: Some(path),
+        answers,
+    })
+    .result
 }
 
 /// Runs `runs` in turn, then walks to `dest`.
@@ -528,16 +543,12 @@ fn run_openers(
             .join(", then ")
     ));
     for r in runs {
-        ctx.invoke(&Intent::RunScript {
-            script: r.opener.script.clone(),
-            path: Some(r.opener.path),
-            answers: vec![if r.opener.yes {
-                Answer::Yes
-            } else {
-                Answer::No
-            }],
-        })
-        .result?;
+        let answer = if r.opener.yes {
+            Answer::Yes
+        } else {
+            Answer::No
+        };
+        run(ctx, &r.opener.script, r.opener.path, vec![answer])?;
     }
     match dest {
         Dest::Map { map } => super::go::go_to_map(ctx, map),

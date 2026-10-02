@@ -918,3 +918,67 @@ fn a_pose_a_tool_infers_is_tracked_from() {
         Some(pose(FIXTURE_POSE.0, FIXTURE_POSE.1, FIXTURE_POSE.2))
     );
 }
+
+/// Runs a switch's script from inside a RunScript (its walk to the
+/// target), like a walk that needs a door opened first.
+struct NestedRun {
+    result: Arc<Mutex<Option<String>>>,
+}
+
+impl Tool for NestedRun {
+    fn name(&self) -> &str {
+        "RunScript"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::RunScript { .. })
+    }
+
+    fn run(&mut self, _intent: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        let r = pokebot_agent::tools::toggles::run(
+            ctx,
+            "CinnabarIsland_Gym_EventScript_NoSuchMachine",
+            0,
+            vec![Answer::Yes],
+        );
+        *self.result.lock().unwrap() = Some(match r {
+            Err(e) => e.to_string(),
+            Ok(()) => "ok".into(),
+        });
+        ToolOutcome::ok()
+    }
+}
+
+/// Switch, Cinnabar Gym: a RunScript's walk to Zac found the quiz
+/// machines that open the doors, and running the first one failed
+/// "RunScript is busy". Within a RunScript a script is run in place.
+#[test]
+fn a_script_opening_the_way_runs_within_a_run_script() {
+    let Some(d) = data() else { return };
+    let Some(overworld) = fixture("emu-tools-overworld.png") else {
+        return;
+    };
+    let (mut runtime, _) = runtime(&d, vec![overworld]);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let result = Arc::new(Mutex::new(None));
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(Toolbox::new(vec![Box::new(NestedRun {
+        result: Arc::clone(&result),
+    })]));
+    let _ = ctx
+        .invoke(&Intent::RunScript {
+            script: "CinnabarIsland_Gym_EventScript_Zac".into(),
+            path: None,
+            answers: Vec::new(),
+        })
+        .result;
+    let got = result.lock().unwrap().clone().expect("the tool ran");
+    assert!(!got.contains("is busy"), "{got}");
+}
