@@ -326,7 +326,7 @@ impl ObstaclePrompt {
             }
         }
         if o.dialogue.is_some() {
-            return crate::new_game::advance_or_wait(o.dialogue.as_ref(), "reading");
+            return crate::new_game::decline_or_advance(o, "reading");
         }
         if o.menu.is_some() {
             return Decision::Act(Action::new(
@@ -677,7 +677,7 @@ impl ToolStep for PartyFieldMove {
             }
         }
         if o.dialogue.is_some() {
-            return crate::new_game::advance_or_wait(o.dialogue.as_ref(), "reading");
+            return crate::new_game::decline_or_advance(o, "reading");
         }
         self.retries.enter("open");
         if self.unlocated_ok && o.player.is_none() && ctx.quiet_frames >= 30 {

@@ -488,6 +488,28 @@ pub(crate) fn select(menu: &MenuObservation, row: u8, label: &str) -> Decision {
 
 /// Presses A when the game waits for it, otherwise waits. HELP System
 /// pages are closed with B instead: A there opens topics and never leaves.
+/// [`advance_or_wait`] for a tool that asked nothing: a YES/NO box is
+/// declined with B (NO), as an unplanned question is (fleet continue-3 and
+/// continue-6, Cinnabar Island: Bill's scene started under a FLY from the
+/// party menu, whose A to advance the text took YES, and the boat sailed
+/// to ONE ISLAND).
+pub(crate) fn decline_or_advance(o: &pokebot_state::Observation, waiting: &str) -> Decision {
+    if let (Some(d), Some(menu)) = (&o.dialogue, &o.menu) {
+        if menu.rows == 2 {
+            return Decision::Act(Action::new(
+                "decline a question nobody asked (B: NO)",
+                vec![ControllerCommand::Press(Button::B)],
+                Expectation::TextAdvanced {
+                    kind: d.kind,
+                    baseline: d.text_cells.clone(),
+                },
+                90,
+            ));
+        }
+    }
+    advance_or_wait(o.dialogue.as_ref(), waiting)
+}
+
 pub(crate) fn advance_or_wait(dialogue: Option<&DialogueObservation>, waiting: &str) -> Decision {
     match dialogue {
         Some(d) if d.help => Decision::Act(Action::new(
@@ -544,6 +566,37 @@ mod tests {
         // Even with no arrow: menus in the HELP System show none.
         let commands = pressed(advance_or_wait(Some(&info_page(true, false)), "")).unwrap();
         assert_eq!(commands, vec![ControllerCommand::Press(Button::B)]);
+    }
+
+    /// Fleet continue-3 and continue-6, Cinnabar Island: Bill's "Do you
+    /// feel like coming with me?" under a FLY from the party menu. A took
+    /// YES and the boat sailed; a tool that asked nothing declines.
+    #[test]
+    fn a_question_nobody_asked_is_declined() {
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: pokebot_state::ScreenState::Dialogue,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.dialogue = Some(info_page(false, true));
+        assert_eq!(
+            pressed(decline_or_advance(&o, "")).unwrap(),
+            vec![ControllerCommand::Press(Button::A)],
+            "plain text advances"
+        );
+        o.menu = Some(pokebot_state::MenuObservation {
+            window: Region::new(184, 64, 48, 32),
+            rows: 2,
+            cursor_row: 0,
+            cursor_y: 72,
+        });
+        assert_eq!(
+            pressed(decline_or_advance(&o, "")).unwrap(),
+            vec![ControllerCommand::Press(Button::B)]
+        );
     }
 
     #[test]
