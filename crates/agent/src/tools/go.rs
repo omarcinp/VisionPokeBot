@@ -576,8 +576,14 @@ fn walk_to(ctx: &mut ToolContext<'_>, place: &Place) -> Result<(), ToolError> {
     .map(|_| ())
 }
 
-/// The shore tile and the first water tile of a surf leg's path.
-fn surf_entry(world: &World, leg: &Leg) -> Option<((i32, i32), (i32, i32))> {
+/// The shore tile and the first water tile of a surf leg's path from
+/// `start` on the leg's map (its start, or a sandbar on the way: the
+/// surfer lands on it and surfs again from it).
+fn surf_entry_from(
+    world: &World,
+    leg: &Leg,
+    start: (i32, i32),
+) -> Option<((i32, i32), (i32, i32))> {
     let map = world.map(&leg.from.map)?;
     let obstacles = crate::nav::static_obstacles(map);
     let walk = Walk {
@@ -588,13 +594,13 @@ fn surf_entry(world: &World, leg: &Leg) -> Option<((i32, i32), (i32, i32))> {
     let to = (leg.to.x, leg.to.y);
     let path = find_path_with(
         map,
-        (leg.from.x, leg.from.y),
+        start,
         &walk,
         |_| 0,
         |p| p == to,
         |p| (p.0 - to.0).abs() + (p.1 - to.1).abs(),
     )?;
-    let mut prev = (leg.from.x, leg.from.y);
+    let mut prev = start;
     for step in path {
         if map
             .tile(step.to.0, step.to.1)
@@ -778,28 +784,46 @@ pub fn walk_legs(
                 walk_to(ctx, &leg.to)?;
             }
             EdgeKind::Walk { surf: true, .. } => {
-                if !on_water(ctx) {
-                    let (shore, water) = surf_entry(&world, leg).ok_or_else(|| {
-                        ToolError::Failed(format!("no water on the surf leg {leg}"))
-                    })?;
-                    walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
-                    use_move(
-                        ctx,
-                        FieldMove::Surf,
-                        Some(Dest::Facing {
-                            map: leg.from.map.clone(),
-                            x: water.0,
-                            y: water.1,
-                        }),
-                    )?;
+                // A sandbar on the way lands the surfer, who surfs again
+                // from it (Switch, Route 21: landed on the islet at (9, 31),
+                // the walk pressed into the water, learnt it "blocked" tile
+                // by tile and failed "looping").
+                let mut landings = 0;
+                loop {
+                    if !on_water(ctx) {
+                        let start = ctx
+                            .pose()
+                            .filter(|p| p.map == leg.from.map && landings > 0)
+                            .map_or((leg.from.x, leg.from.y), |p| (p.x, p.y));
+                        let (shore, water) =
+                            surf_entry_from(&world, leg, start).ok_or_else(|| {
+                                ToolError::Failed(format!("no water on the surf leg {leg}"))
+                            })?;
+                        walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
+                        use_move(
+                            ctx,
+                            FieldMove::Surf,
+                            Some(Dest::Facing {
+                                map: leg.from.map.clone(),
+                                x: water.0,
+                                y: water.1,
+                            }),
+                        )?;
+                    }
+                    let to = Destination::Tile {
+                        map: leg.to.map.clone(),
+                        x: leg.to.x,
+                        y: leg.to.y,
+                    };
+                    let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
+                    match ctx.drive(&mut step) {
+                        Ok(_) => break,
+                        Err(ToolError::Failed(_)) if landings < MAX_LANDINGS && !on_water(ctx) => {
+                            landings += 1;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                let to = Destination::Tile {
-                    map: leg.to.map.clone(),
-                    x: leg.to.x,
-                    y: leg.to.y,
-                };
-                let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
-                ctx.drive(&mut step)?;
             }
             EdgeKind::ScriptWarp { script } => {
                 // Switch, Rocket Hideout B4F: the stairs from B3F land west
@@ -890,6 +914,9 @@ pub fn walk_legs(
         other => go(ctx, Destination::from(other)),
     }
 }
+
+/// Sandbars a surf leg lands on before it gives up.
+const MAX_LANDINGS: u32 = 4;
 
 /// Where a FLY leg is walked to first: its start, unless the player is
 /// on that map already (anywhere outdoors does).
@@ -1379,6 +1406,31 @@ mod tests {
     /// Switch, Saffron Gym's door (14, 22): SABRINA's room is reached only
     /// by the gym's pads, warps onto the gym itself; every RunScript failed
     /// "no path next to (14, 11)". The route's pads are followed.
+    /// Switch, Route 21: the surf leg south crosses the sandbar at
+    /// (9, 31); landed there, the surfer surfs again from it, into the
+    /// water next to it.
+    #[test]
+    fn a_sandbar_on_a_surf_leg_is_surfed_from_again() {
+        let Some(world) = world() else { return };
+        let leg = Leg {
+            from: Place::tile("Route21_North", 9, 20),
+            to: Place::tile("Route21_North", 9, 49),
+            kind: EdgeKind::Walk {
+                tiles: 29,
+                surf: true,
+            },
+            cost_s: 0.0,
+            requires: Vec::new(),
+        };
+        let map = world.map("Route21_North").unwrap();
+        let water = |t: (i32, i32)| map.tile(t.0, t.1).is_some_and(|t| is_water(t.behavior));
+        assert!(!water((9, 31)), "the sandbar");
+        let (shore, into) = surf_entry_from(&world, &leg, (9, 31)).expect("water on the way");
+        assert!(!water(shore) && water(into), "{shore:?} -> {into:?}");
+        assert_eq!((shore.0 - into.0).abs() + (shore.1 - into.1).abs(), 1);
+        assert!(into.1 >= 31, "on toward (9, 49): {into:?}");
+    }
+
     #[test]
     fn saffron_gyms_pads_lead_next_to_sabrina() {
         let Some(world) = world() else { return };
