@@ -31,6 +31,7 @@ pub mod scene;
 pub mod sell;
 mod talk;
 pub mod teach;
+pub mod toggles;
 mod trash_cans;
 mod unstick;
 

@@ -324,7 +324,7 @@ impl Tool for GoTool {
         let Intent::Go { dest } = intent else {
             return ToolOutcome::failed("not a Go");
         };
-        let walked = match field_route(ctx, dest) {
+        let first = match field_route(ctx, dest) {
             Some(legs) => {
                 ctx.info(format!(
                     "go: the route needs field moves: {}",
@@ -339,6 +339,17 @@ impl Tool for GoTool {
                 Dest::Map { map } => go_to_map(ctx, map),
                 other => go(ctx, Destination::from(other)),
             },
+        };
+        // No way on: switches that flip a flag may open one (Switch, the
+        // Pokémon Mansion: "no known route from PokemonMansion_1F to
+        // PokemonMansion_B1F").
+        let walked = match first {
+            Err(ToolError::Failed(why))
+                if why.contains("no known route") || why.contains("no path") =>
+            {
+                super::toggles::through(ctx, dest).unwrap_or(Err(ToolError::Failed(why)))
+            }
+            other => other,
         };
         // A map may play a scene on arrival (an entry scene, a trigger at
         // the door): it is over, and recognised, before the leg is.
@@ -543,7 +554,7 @@ pub fn plan_field_route(
 
 /// The price of assuming `p` for a route the tools walk: a trainer not
 /// known beaten is fought on the way; anything else unknown is unmet.
-fn battle_on_the_way(p: &pokebot_world::predicate::Predicate) -> f64 {
+pub(crate) fn battle_on_the_way(p: &pokebot_world::predicate::Predicate) -> f64 {
     match p {
         pokebot_world::predicate::Predicate::Flag { name, is: true }
             if name.starts_with("TRAINER_") =>
