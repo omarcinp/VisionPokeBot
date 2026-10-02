@@ -7,7 +7,9 @@ use super::{Expects, StepContext, ToolContext, ToolError, ToolStep};
 use crate::{Action, Decision, Expectation, Outcome};
 use pokebot_core::Button;
 use pokebot_gamedata::GameData;
-use pokebot_state::{GameEvent, Knowledge, MoveSlot, PartyMon, SummaryObservation, SummaryPage};
+use pokebot_state::{
+    GameEvent, Knowledge, MoveSlot, PartyMenuObservation, PartyMon, SummaryObservation, SummaryPage,
+};
 use std::sync::Arc;
 
 pub fn audit(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
@@ -126,6 +128,33 @@ impl PartyAudit {
     }
 }
 
+/// Whether two readings of the party menu agree, a doubtful glyph (`?`)
+/// in a name matching any letter: the highlighted panel's first letter
+/// reads now `F`, now `?` (fleet continue-1: FEAROW on the last slot), and
+/// the wait for two equal readings ran out ("party audit: screen or field
+/// stayed unreadable", twice a cycle).
+fn same_panels(a: &PartyMenuObservation, b: &PartyMenuObservation) -> bool {
+    let names = |x: &Option<String>, y: &Option<String>| match (x, y) {
+        (Some(x), Some(y)) => {
+            x.chars().count() == y.chars().count()
+                && x.chars()
+                    .zip(y.chars())
+                    .all(|(p, q)| p == q || p == '?' || q == '?')
+        }
+        (x, y) => x == y,
+    };
+    a.count == b.count
+        && a.selected == b.selected
+        && a.actions == b.actions
+        && a.options == b.options
+        && a.members.len() == b.members.len()
+        && a.members.iter().zip(&b.members).all(|(p, q)| {
+            let mut p2 = p.clone();
+            p2.nickname = q.nickname.clone();
+            names(&p.nickname, &q.nickname) && p2 == *q
+        })
+}
+
 impl ToolStep for PartyAudit {
     fn expects(&self) -> Expects {
         Expects::MENUS
@@ -226,9 +255,13 @@ impl ToolStep for PartyAudit {
             if !self
                 .menu_candidate
                 .as_ref()
-                .is_some_and(|(f, m)| o.frame_id.saturating_sub(*f) >= 15 && m == menu)
+                .is_some_and(|(f, m)| o.frame_id.saturating_sub(*f) >= 15 && same_panels(m, menu))
             {
-                if self.menu_candidate.as_ref().is_none_or(|(_, m)| m != menu) {
+                if self
+                    .menu_candidate
+                    .as_ref()
+                    .is_none_or(|(_, m)| !same_panels(m, menu))
+                {
                     self.menu_candidate = Some((o.frame_id, menu.clone()));
                 }
                 return self.retries.wait(o, "letting party panels finish drawing");
@@ -295,6 +328,33 @@ mod tests {
     use pokebot_vision::{text::Font, FireRedPerception, PerceptionSystem};
 
     use super::*;
+
+    /// Fleet continue-1: FEAROW on the highlighted last panel read now
+    /// `FEAROW`, now `?EAROW`; the two readings are the same panel. A
+    /// different name, or level, is not.
+    #[test]
+    fn a_doubtful_glyph_reads_as_the_same_panel() {
+        let row = |name: &str, level: u8| pokebot_state::PartyRowObservation {
+            nickname: Some(name.into()),
+            level: Some(level),
+            hp: Some((73, 73)),
+            status: Some(pokebot_state::Status::Healthy),
+        };
+        let menu = |name: &str, level: u8| PartyMenuObservation {
+            count: 1,
+            selected: Some(0),
+            actions: false,
+            prompt: "Choose a POKéMON.".into(),
+            options: Vec::new(),
+            option_cursor: None,
+            able: Vec::new(),
+            members: vec![row(name, level)],
+            double: false,
+        };
+        assert!(same_panels(&menu("FEAROW", 25), &menu("?EAROW", 25)));
+        assert!(!same_panels(&menu("FEAROW", 25), &menu("SPEAROW", 25)));
+        assert!(!same_panels(&menu("FEAROW", 25), &menu("?EAROW", 26)));
+    }
 
     /// Switch, a new game before Oak gives the starter: the Start menu has
     /// no POKéMON row (the audit waited for one and failed, every cycle).
