@@ -838,8 +838,22 @@ impl ToolStep for FlyTo {
 struct Push {
     dir: Direction,
     from: pokebot_state::PlayerPose,
+    /// The boulder's tile before the push.
+    boulder: (i32, i32),
     done: bool,
     tries: u32,
+}
+
+/// Whether the screen shows the boulder pushed from `old` to `new`: a
+/// sprite on its new tile and none left on the old one. `None` when no
+/// sprite is read near either (the move is taken on the player's word).
+fn boulder_moved(o: &Observation, old: (i32, i32), new: (i32, i32)) -> Option<bool> {
+    let at = |t: (i32, i32)| o.sprites.iter().any(|s| (s.x, s.y) == t);
+    match (at(old), at(new)) {
+        (true, _) => Some(false),
+        (false, true) => Some(true),
+        (false, false) => None,
+    }
 }
 
 impl ToolStep for Push {
@@ -864,8 +878,16 @@ impl ToolStep for Push {
         ))
     }
 
-    fn on_outcome(&mut self, _: &Action, outcome: Outcome, _: &mut StepContext<'_>) {
-        if outcome == Outcome::Confirmed {
+    fn on_outcome(&mut self, _: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
+        // The player's move alone isn't the boulder's (Switch, Victory Road
+        // 1F: a wild battle cut the push short, the reckoned pose took the
+        // player into the boulder's tile, and the pushes went on with the
+        // boulder unmoved, until the walk left the cave). The boulder's
+        // sprite says, when it shows.
+        let (dx, dy) = self.dir.delta();
+        let new = (self.boulder.0 + dx, self.boulder.1 + dy);
+        let moved = boulder_moved(ctx.observation, self.boulder, new);
+        if outcome == Outcome::Confirmed && moved != Some(false) {
             self.done = true;
         } else {
             self.tries += 1;
@@ -1067,6 +1089,7 @@ pub fn strength(
         let mut push = Push {
             dir,
             from,
+            boulder,
             done: false,
             tries: 0,
         };
@@ -1700,6 +1723,27 @@ mod tests {
             "IVYSAUR's STRENGTH made it possible to move boulders around!",
             FieldMove::Strength
         ));
+    }
+
+    /// Switch, Victory Road 1F: a wild battle cut a push short and the
+    /// reckoned pose counted it done. The boulder's sprite decides: still
+    /// on its tile, it didn't move; on the next one, it did; out of
+    /// sight, the player's move is taken.
+    #[test]
+    fn a_push_counts_only_when_the_boulder_moved() {
+        let mut o = bare(1);
+        let sprite = |x, y| pokebot_state::SpriteObservation {
+            x,
+            y,
+            local_id: None,
+            facing: None,
+        };
+        o.sprites = vec![sprite(7, 18)];
+        assert_eq!(boulder_moved(&o, (7, 18), (7, 19)), Some(false));
+        o.sprites = vec![sprite(7, 19)];
+        assert_eq!(boulder_moved(&o, (7, 18), (7, 19)), Some(true));
+        o.sprites = Vec::new();
+        assert_eq!(boulder_moved(&o, (7, 18), (7, 19)), None);
     }
 
     /// Switch, Victory Road 1F: the barrier at (12, 14) opens when a
