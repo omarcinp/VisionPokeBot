@@ -488,6 +488,59 @@ fn fainted_trainee<'p>(
 }
 
 /// Whether any encounter tile of the player's map can be walked to.
+/// On `map` with none of its grass reachable on foot (Route 21's islets):
+/// the field route there first (Switch, LAPRAS's SURF: every Train on
+/// Route21_North failed "no encounter tile of Route21_North is reachable
+/// from Route21_North (13, 48)", eight plans in a row).
+fn reach_grass(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
+    let Some(pose) = ctx.pose().filter(|p| p.map == map) else {
+        return Ok(());
+    };
+    if encounter_tiles_reachable(&NavParts::of(ctx), &pose) {
+        return Ok(());
+    }
+    let Some((x, y)) = grass_across(ctx, &pose) else {
+        return Ok(());
+    };
+    let dest = super::Dest::Tile {
+        map: map.to_owned(),
+        x,
+        y,
+    };
+    if let Some(legs) = super::go::field_route(ctx, &dest) {
+        ctx.info(format!(
+            "the grass of {map} is reached by field moves: to ({x}, {y})"
+        ));
+        super::go::walk_legs(ctx, &legs, &dest)?;
+    }
+    Ok(())
+}
+
+/// The nearest encounter tile of the player's map the field route reaches.
+fn grass_across(ctx: &mut ToolContext<'_>, pose: &pokebot_state::PlayerPose) -> Option<(i32, i32)> {
+    let world = std::sync::Arc::clone(&ctx.world);
+    let m = world.map(&pose.map)?;
+    let mut tiles: Vec<(i32, i32)> = (0..m.height)
+        .flat_map(|y| (0..m.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| encounter_tile(&t)))
+        .collect();
+    tiles.sort_by_key(|&(x, y)| ((x - pose.x).abs() + (y - pose.y).abs(), y, x));
+    tiles.into_iter().take(GRASS_TRIED).find(|&(x, y)| {
+        super::go::field_route(
+            ctx,
+            &super::Dest::Tile {
+                map: pose.map.clone(),
+                x,
+                y,
+            },
+        )
+        .is_some()
+    })
+}
+
+/// Encounter tiles tried for a field route, nearest first.
+const GRASS_TRIED: usize = 8;
+
 fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -> bool {
     let Some(m) = nav.world.map(&pose.map) else {
         return false;
@@ -585,6 +638,7 @@ fn hunt_for(
         // every time, FLY known).
         if let Some(map) = map {
             super::go::reach_map(ctx, map)?;
+            reach_grass(ctx, map)?;
         }
         let mut step = HuntStep::new(ctx, hunt.clone(), map);
         step.dex_marked_before = dex_marked_before;
@@ -819,6 +873,65 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    /// Switch, Route 21 with SURF: from (13, 48) none of the map's grass is
+    /// reachable on foot (it lies on islets), and every Train failed; the
+    /// field route surfs to it.
+    #[test]
+    fn grass_on_islets_is_reached_by_surf() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let world = Arc::new(world);
+        let pose = PlayerPose {
+            map: "Route21_North".into(),
+            x: 13,
+            y: 48,
+        };
+        let nav = NavParts {
+            world: Arc::clone(&world),
+            gone: Gone::new(),
+            maybe_gone: Gone::new(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+            data: None,
+        };
+        assert!(!encounter_tiles_reachable(&nav, &pose));
+        let mut state = pokebot_state::GameState::default();
+        let mut surfer = pokebot_state::PartyMon::default();
+        surfer.moves[0] = Some(pokebot_state::MoveSlot {
+            mv: pokebot_state::Knowledge::observed("MOVE_SURF".into(), 1),
+            pp: pokebot_state::Knowledge::unknown(),
+        });
+        state.party = pokebot_state::Knowledge::observed(vec![surfer], 1);
+        state.world.flags.insert(
+            "FLAG_BADGE05_GET".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        let graph = crate::scheduler::graph(&world);
+        let m = world.map("Route21_North").unwrap();
+        let reached = (0..m.height)
+            .flat_map(|y| (0..m.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| encounter_tile(&t)))
+            .find_map(|(x, y)| {
+                crate::tools::go::plan_field_route(
+                    &world,
+                    &graph,
+                    &state,
+                    &pose,
+                    &crate::tools::Dest::Tile {
+                        map: "Route21_North".into(),
+                        x,
+                        y,
+                    },
+                )
+            });
+        let legs = reached.expect("a field route to the grass");
+        assert!(legs.iter().any(|l| matches!(
+            l.kind,
+            pokebot_world::route::EdgeKind::Walk { surf: true, .. }
+        )));
+    }
 
     /// Fleet worker 2: PIDGEY marked caught long before, the plan's Catch
     /// (for a second one in the party) ended at once and was planned again
