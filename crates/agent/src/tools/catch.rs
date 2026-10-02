@@ -888,6 +888,7 @@ mod tests {
             y: 48,
         };
         let nav = NavParts {
+            story: None,
             world: Arc::clone(&world),
             gone: Gone::new(),
             maybe_gone: Gone::new(),
@@ -1080,6 +1081,7 @@ mod tests {
             side: crate::catch::SideCatch::default(),
             side_caught: Vec::new(),
             nav: NavParts {
+                story: None,
                 world: Arc::new(world),
                 gone: Gone::new(),
                 maybe_gone: Gone::new(),
@@ -1131,6 +1133,7 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
         let Ok(world) = World::load(&dir) else { return };
         let nav = NavParts {
+            story: None,
             world: Arc::new(world),
             gone: Gone::new(),
             maybe_gone: Gone::new(),

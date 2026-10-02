@@ -57,6 +57,78 @@ pub struct GoStep {
     /// back if something (a wild battle's fade, a trainer's "!") came up
     /// right after, since that is what stopped the step.
     last_block: Option<(String, (i32, i32), u64)>,
+    /// The passages the walk was given, to work out again as the belief
+    /// changes on the way ([`GateRefresh`]).
+    refresh: Option<GateRefresh>,
+}
+
+/// A walk's passages kept up with the belief: a flag a walk sees change
+/// (a switch flipped, a barrier read shut) reroutes it (fleet continue-2,
+/// Pokémon Mansion B1F: the switch read off halfway, the walk went on
+/// through the barrier it shut, tile by tile, until it was "looping").
+struct GateRefresh {
+    story: Arc<pokebot_world::gates::Gates>,
+    /// The passages given, and what the caller added to the belief's
+    /// (a boulder's tile walled), worked out on the first frame.
+    given: Arc<GateTiles>,
+    added: Option<GateTiles>,
+    /// The flags and vars the passages were last worked out from.
+    key: Option<u64>,
+}
+
+impl GateRefresh {
+    /// The passages anew when the believed flags or vars changed.
+    fn check(&mut self, world: &World, state: &pokebot_state::GameState) -> Option<GateTiles> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (name, k) in &state.world.flags {
+            (name, k.value).hash(&mut h);
+        }
+        for (name, k) in &state.world.vars {
+            (name, k.value).hash(&mut h);
+        }
+        let key = h.finish();
+        let last = self.key.replace(key);
+        let believed = || super::context::believed_gates(world, &self.story, state);
+        if last.is_none() {
+            let now = believed();
+            self.added = Some(GateTiles {
+                closed: difference(&self.given.closed, &now.closed),
+                opened: difference(&self.given.opened, &now.opened),
+            });
+            return None;
+        }
+        if last == Some(key) {
+            return None;
+        }
+        let mut now = believed();
+        if let Some(added) = &self.added {
+            for (map, tiles) in &added.closed {
+                now.closed.entry(map.clone()).or_default().extend(tiles);
+            }
+            for (map, tiles) in &added.opened {
+                now.opened.entry(map.clone()).or_default().extend(tiles);
+            }
+        }
+        Some(now)
+    }
+}
+
+/// The tiles of `a` not in `b`, by map.
+fn difference(
+    a: &std::collections::BTreeMap<String, std::collections::BTreeSet<(i32, i32)>>,
+    b: &std::collections::BTreeMap<String, std::collections::BTreeSet<(i32, i32)>>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<(i32, i32)>> {
+    a.iter()
+        .filter_map(|(map, tiles)| {
+            let rest: std::collections::BTreeSet<_> = tiles
+                .iter()
+                .filter(|t| !b.get(map).is_some_and(|o| o.contains(t)))
+                .copied()
+                .collect();
+            (!rest.is_empty()).then(|| (map.clone(), rest))
+        })
+        .collect()
 }
 
 /// What a navigator is built from: the world, the objects known to be
@@ -72,6 +144,9 @@ pub struct NavParts {
     pub blocked: Blocked,
     /// Story passages as the belief stood when the parts were taken.
     pub gates: Arc<GateTiles>,
+    /// The story's gates, to work the passages out again when the belief
+    /// changes during a walk (`None`: the passages stay as taken).
+    pub story: Option<Arc<pokebot_world::gates::Gates>>,
     /// The game data (trainers' sight), when the walk has it.
     pub data: Option<Arc<pokebot_gamedata::GameData>>,
 }
@@ -85,6 +160,7 @@ impl NavParts {
             syncer: ctx.syncer.clone(),
             blocked: Arc::clone(&ctx.blocked),
             gates: Arc::new(ctx.gate_tiles()),
+            story: Some(ctx.story_gates()),
             data: Some(Arc::clone(&ctx.data)),
         }
     }
@@ -122,6 +198,12 @@ impl GoStep {
             last_map: None,
             last_tile: None,
             last_block: None,
+            refresh: parts.story.as_ref().map(|story| GateRefresh {
+                story: Arc::clone(story),
+                given: Arc::clone(&parts.gates),
+                added: None,
+                key: None,
+            }),
         }
     }
 
@@ -235,6 +317,13 @@ impl GoStep {
 
 impl ToolStep for GoStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+        if let Some(gates) = self
+            .refresh
+            .as_mut()
+            .and_then(|r| r.check(&self.world, ctx.state))
+        {
+            self.nav.set_gates(&gates);
+        }
         if ctx.quiet_frames < SETTLE_FRAMES {
             return Decision::Wait("letting the scene settle".into());
         }
@@ -1064,6 +1153,55 @@ impl From<&Destination> for Dest {
 mod tests {
     use super::*;
 
+    /// Fleet continue-2, Pokémon Mansion B1F: the switch was read off
+    /// halfway through a walk, and the walk kept the passages it set out
+    /// with, stepping at the barrier the switch shut until it was
+    /// "looping". The walk's passages follow the belief; what its caller
+    /// added stays.
+    #[test]
+    fn a_walk_reroutes_when_a_switch_is_seen_flipped() {
+        let Some(world) = world() else { return };
+        let story = Arc::new(pokebot_world::gates::derive(&world));
+        let mut state = pokebot_state::GameState::default();
+        let flag = "FLAG_POKEMON_MANSION_SWITCH_STATE";
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::observed(true, 1));
+        let mut given = crate::tools::context::believed_gates(&world, &story, &state);
+        let barrier = (21, 23);
+        let shut = |g: &GateTiles| {
+            g.closed_on("PokemonMansion_B1F").any(|t| t == barrier)
+                || !g.opened_on("PokemonMansion_B1F").contains(&barrier)
+                    && world
+                        .map("PokemonMansion_B1F")
+                        .and_then(|m| m.tile(barrier.0, barrier.1))
+                        .is_some_and(|t| t.collision != 0)
+        };
+        assert!(!shut(&given), "open with the switch on");
+        // The caller walls a tile of its own.
+        given
+            .closed
+            .entry("PokemonMansion_B1F".into())
+            .or_default()
+            .insert((30, 30));
+        let mut refresh = GateRefresh {
+            story,
+            given: Arc::new(given),
+            added: None,
+            key: None,
+        };
+        assert!(refresh.check(&world, &state).is_none());
+        assert!(refresh.check(&world, &state).is_none(), "nothing changed");
+        state
+            .world
+            .flags
+            .insert(flag.into(), pokebot_state::Knowledge::observed(false, 2));
+        let now = refresh.check(&world, &state).expect("worked out anew");
+        assert!(shut(&now), "shut with the switch off");
+        assert!(now.closed_on("PokemonMansion_B1F").any(|t| t == (30, 30)));
+    }
+
     fn world() -> Option<Arc<World>> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
         World::load(&dir).ok().map(Arc::new)
@@ -1097,6 +1235,7 @@ mod tests {
     fn four_arrivals_on_one_tile_without_progress_fail_the_leg() {
         let Some(world) = world() else { return };
         let parts = NavParts {
+            story: None,
             world,
             gone: Gone::new(),
             maybe_gone: Default::default(),
@@ -1165,6 +1304,7 @@ mod tests {
         };
         let Some(world) = world() else { return };
         let parts = NavParts {
+            story: None,
             world,
             gone: Gone::new(),
             maybe_gone: Default::default(),
@@ -1863,6 +2003,7 @@ mod tests {
         use pokebot_state::{GameState, Observation, Observed, PoseObservation, ScreenState};
         let Some(world) = world() else { return };
         let parts = NavParts {
+            story: None,
             world,
             gone: Gone::new(),
             maybe_gone: Default::default(),

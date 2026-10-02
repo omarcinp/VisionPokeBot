@@ -2316,6 +2316,7 @@ mod tests {
             return;
         };
         let parts = NavParts {
+            story: None,
             world: Arc::clone(&world),
             gone: Default::default(),
             maybe_gone: Default::default(),

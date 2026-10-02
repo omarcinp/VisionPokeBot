@@ -1236,6 +1236,7 @@ mod tests {
     fn the_cut_prompt_is_answered_yes_and_verified_by_its_text() {
         let Some(world) = world() else { return };
         let nav = NavParts {
+            story: None,
             world,
             gone: Default::default(),
             maybe_gone: Default::default(),
@@ -1354,6 +1355,7 @@ mod tests {
     fn the_moves_page_is_waited_for_after_yes() {
         let Some(world) = world() else { return };
         let nav = NavParts {
+            story: None,
             world,
             gone: Default::default(),
             maybe_gone: Default::default(),
@@ -1396,6 +1398,7 @@ mod tests {
     fn a_tree_that_is_not_offered_fails_the_prompt() {
         let Some(world) = world() else { return };
         let nav = NavParts {
+            story: None,
             world,
             gone: Default::default(),
             maybe_gone: Default::default(),
@@ -1843,6 +1846,7 @@ mod tests {
     fn the_walk_between_pushes_goes_round_the_boulder() {
         let Some(world) = world() else { return };
         let nav = NavParts {
+            story: None,
             world: std::sync::Arc::clone(&world),
             gone: Default::default(),
             maybe_gone: Default::default(),

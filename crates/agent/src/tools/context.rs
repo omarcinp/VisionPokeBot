@@ -284,21 +284,7 @@ impl<'a> ToolContext<'a> {
     /// The story passages as the belief stands now: what a walk must go
     /// around and may go through.
     pub fn gate_tiles(&self) -> pokebot_world::gates::GateTiles {
-        let mut tiles = pokebot_world::gates::GateTiles::believed(
-            &self.world,
-            &self.story_gates(),
-            &crate::belief_view::StateBelief(self.runtime.state()),
-        );
-        // No one to use Flash: the ways into a dark map are shut, as the
-        // route model has them (fleet continue-4: with no plan in budget,
-        // a Go fell back on the walk, which took Rock Tunnel unlit).
-        let flash = pokebot_world::route::MOVE_FLASH;
-        if super::field::carrier(self.runtime.state(), flash).is_none() {
-            for (map, tile) in dark_entries(&self.world) {
-                tiles.closed.entry(map).or_default().insert(tile);
-            }
-        }
-        tiles
+        believed_gates(&self.world, &self.story_gates(), self.runtime.state())
     }
 
     /// The trainer `intent` fights: a `Beat`, or a script path that
@@ -326,7 +312,7 @@ impl<'a> ToolContext<'a> {
         }
     }
 
-    fn story_gates(&self) -> Arc<pokebot_world::gates::Gates> {
+    pub(crate) fn story_gates(&self) -> Arc<pokebot_world::gates::Gates> {
         Arc::clone(self.gates.get_or_init(|| match &self.scheduler.graph {
             Some(g) => Arc::new(g.gates().clone()),
             None => Arc::new(pokebot_world::gates::derive(&self.world)),
@@ -1192,6 +1178,30 @@ fn count_interrupt(
 
 /// The warp tiles of lit maps that lead into dark ones (the mouths of
 /// Rock Tunnel).
+/// The story passages as `state` believes them: what a walk must go
+/// around and may go through.
+pub(crate) fn believed_gates(
+    world: &pokebot_world::World,
+    story: &pokebot_world::gates::Gates,
+    state: &GameState,
+) -> pokebot_world::gates::GateTiles {
+    let mut tiles = pokebot_world::gates::GateTiles::believed(
+        world,
+        story,
+        &crate::belief_view::StateBelief(state),
+    );
+    // No one to use Flash: the ways into a dark map are shut, as the
+    // route model has them (fleet continue-4: with no plan in budget,
+    // a Go fell back on the walk, which took Rock Tunnel unlit).
+    let flash = pokebot_world::route::MOVE_FLASH;
+    if super::field::carrier(state, flash).is_none() {
+        for (map, tile) in dark_entries(world) {
+            tiles.closed.entry(map).or_default().insert(tile);
+        }
+    }
+    tiles
+}
+
 pub fn dark_entries(world: &pokebot_world::World) -> Vec<(String, (i32, i32))> {
     let mut out = Vec::new();
     for map in world.maps().filter(|m| !m.requires_flash) {

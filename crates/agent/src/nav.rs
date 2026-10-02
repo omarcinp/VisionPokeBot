@@ -369,6 +369,19 @@ impl Navigator {
         self
     }
 
+    /// The passages anew mid-walk (the belief changed): the route out of
+    /// this map is planned again.
+    pub fn set_gates(&mut self, gates: &GateTiles) {
+        let gates = match &self.destination {
+            Destination::Tile { map, x, y } => gates.clone().without(map, (*x, *y)),
+            _ => gates.clone(),
+        };
+        if *self.gates != gates {
+            self.gates = Arc::new(gates);
+            self.hop = None;
+        }
+    }
+
     /// Walks over water too (the player surfs on it; stepping back onto
     /// land dismounts).
     pub fn with_surf(mut self, surf: bool) -> Self {
