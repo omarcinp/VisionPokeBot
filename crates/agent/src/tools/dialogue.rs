@@ -771,9 +771,30 @@ fn push_into_hole(
     push_boulder(ctx, script, Some(0), map, &holes, Some(local_id))
 }
 
+/// The boulders of `m` there now: not taken off the map, and hidden only
+/// by a hide flag known set. A boulder is back on its tile whenever the
+/// map loads, whatever was last seen of it (fleet continue-6, Victory
+/// Road 1F: the boulder at (7, 18), seen gone after a push, was left out,
+/// "no boulder can be pushed onto (20, 16)").
+pub fn boulders_there<'m>(
+    m: &'m pokebot_world::MapData,
+    state: &GameState,
+    gone: &crate::nav::Gone,
+) -> Vec<&'m pokebot_world::ObjectEvent> {
+    m.objects
+        .iter()
+        .filter(|o| pokebot_world::boulders::is_boulder(o))
+        .filter(|o| !gone.contains(&(m.name.clone(), o.local_id)))
+        .filter(|o| {
+            pokebot_world::boulders::hide_flag(o)
+                .is_none_or(|f| state.world.flag(f).value != Some(true))
+        })
+        .collect()
+}
+
 /// Pushes a boulder of `map` (only `local_id`, when given) onto one of
 /// `targets`, walking behind it before each push, then records `script`'s
-/// `path`. Boulders known hidden are left out (Switch, Victory Road 2F:
+/// `path`. Boulders whose hide flag is known set are left out (Switch, Victory Road 2F:
 /// the one boulder that reaches the switch at (14, 19) shows only once its
 /// twin on 3F falls through the hole).
 fn push_boulder(
@@ -792,13 +813,7 @@ fn push_boulder(
     let m = world
         .map(map)
         .ok_or_else(|| ToolError::Failed(format!("unknown map {map}")))?;
-    let present: Vec<&pokebot_world::ObjectEvent> = m
-        .objects
-        .iter()
-        .filter(|o| pokebot_world::boulders::is_boulder(o))
-        .filter(|o| !ctx.gone.contains(&(map.to_owned(), o.local_id)))
-        .filter(|o| object_shown(&world, ctx.state(), map, o.local_id) != Some(false))
-        .collect();
+    let present = boulders_there(m, ctx.state(), &ctx.gone);
     let boulders: Vec<(i32, i32)> = present
         .iter()
         .filter(|o| local_id.is_none_or(|id| o.local_id == id))
@@ -2497,6 +2512,45 @@ mod tests {
             cond_choice(None, Some(0)),
         ];
         assert_eq!(question_branches(&when), vec![true, false, false]);
+    }
+
+    /// Fleet continue-6, Victory Road 1F: its boulder at (7, 18) was seen
+    /// gone after a push and left out of the next try. Sightings don't
+    /// count; a hide flag known set does (2F's boulder until its twin falls).
+    #[test]
+    fn a_boulder_seen_gone_is_back_but_a_hidden_one_is_not() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let mut state = GameState::default();
+        state
+            .world
+            .npcs
+            .entry("VictoryRoad_1F".into())
+            .or_default()
+            .insert(
+                5,
+                pokebot_state::NpcBelief {
+                    present: pokebot_state::Knowledge::observed(false, 1),
+                    ..Default::default()
+                },
+            );
+        let one = world.map("VictoryRoad_1F").unwrap();
+        let ids = |m, s: &GameState| -> Vec<u32> {
+            boulders_there(m, s, &Default::default())
+                .iter()
+                .map(|o| o.local_id)
+                .collect()
+        };
+        assert!(ids(one, &state).contains(&5));
+        let two = world.map("VictoryRoad_2F").unwrap();
+        assert!(ids(two, &state).contains(&12), "flag unknown: maybe there");
+        state.world.flags.insert(
+            "FLAG_HIDE_VICTORY_ROAD_2F_BOULDER".into(),
+            pokebot_state::Knowledge::observed(true, 1),
+        );
+        assert!(!ids(two, &state).contains(&12));
     }
 
     /// Fleet continue-6, Cinnabar Gym: quiz 1's right answer reads the
