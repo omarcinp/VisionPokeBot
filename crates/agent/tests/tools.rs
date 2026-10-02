@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use pokebot_agent::tools::effects::{path_events, translate, LabelIndex, Skipped};
 use pokebot_agent::tools::{
-    dialogue, identify, Answer, BattlePlan, Dest, Expects, Intent, StepContext, Tool, ToolContext,
-    ToolOutcome, ToolStep, Toolbox,
+    dialogue, identify, Answer, BattlePlan, Dest, Expects, Intent, ProbeFact, StepContext, Tool,
+    ToolContext, ToolError, ToolOutcome, ToolStep, Toolbox,
 };
 use pokebot_agent::{Action, Decision, Executor, Expectation, InputKind, Outcome, Syncer};
 use pokebot_core::{
@@ -1051,4 +1051,60 @@ fn a_tool_that_makes_no_progress_leaves_its_frame() {
         }
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Records the pockets probed.
+struct Probed {
+    pockets: Arc<Mutex<Vec<Pocket>>>,
+}
+
+impl Tool for Probed {
+    fn name(&self) -> &str {
+        "Probe"
+    }
+
+    fn serves(&self, intent: &Intent) -> bool {
+        matches!(intent, Intent::Probe { .. })
+    }
+
+    fn run(&mut self, intent: &Intent, _ctx: &mut ToolContext<'_>) -> ToolOutcome {
+        if let Intent::Probe {
+            fact: ProbeFact::Pocket { pocket },
+        } = intent
+        {
+            self.pockets.lock().unwrap().push(*pocket);
+        }
+        ToolOutcome::ok()
+    }
+}
+
+/// Fleet continue-5: a HYPER POTION the belief counted was "not in the
+/// pocket", and seven plans in a row went to use it. A use that finds its
+/// item missing has the pocket read again; other failures don't.
+#[test]
+fn an_item_found_missing_has_its_pocket_read_again() {
+    let Some(d) = data() else { return };
+    let Some(overworld) = fixture("emu-tools-overworld.png") else {
+        return;
+    };
+    let (mut runtime, _) = runtime(&d, vec![overworld]);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let pockets = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = ToolContext::new(
+        &mut runtime,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(Toolbox::new(vec![Box::new(Probed {
+        pockets: Arc::clone(&pockets),
+    })]));
+    let missing = ToolError::Failed("ITEM_HYPER_POTION is not in the pocket".into());
+    let e = pokebot_agent::tools::menu::recount_if_missing(&mut ctx, Pocket::Items, missing);
+    assert!(e.to_string().contains("not in the pocket"));
+    let other = ToolError::Failed("the party menu didn't open".into());
+    let _ = pokebot_agent::tools::menu::recount_if_missing(&mut ctx, Pocket::Items, other);
+    assert_eq!(*pockets.lock().unwrap(), vec![Pocket::Items]);
 }

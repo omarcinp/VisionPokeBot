@@ -75,7 +75,8 @@ pub fn escape(
                 refused: None,
                 seek: Default::default(),
             };
-            ctx.drive(&mut step)?;
+            ctx.drive(&mut step)
+                .map_err(|e| super::menu::recount_if_missing(ctx, Pocket::Items, e))?;
         }
         other => return Err(ToolError::Failed(format!("{other} is no escape"))),
     }

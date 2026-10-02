@@ -149,6 +149,25 @@ impl Retries {
 
 /// Opens the Start menu from the overworld, once the player is located and
 /// the scene has settled (Start during a scripted pause lands mid-cutscene).
+/// A use that found its item missing from the pocket the belief counted
+/// it in: the pocket is read again so the next plan doesn't count on it
+/// (fleet continue-5: a HYPER POTION believed held, "not in the pocket",
+/// seven plans in a row). `e`, passed on.
+pub fn recount_if_missing(
+    ctx: &mut super::ToolContext<'_>,
+    pocket: pokebot_state::Pocket,
+    e: super::ToolError,
+) -> super::ToolError {
+    if matches!(&e, super::ToolError::Failed(why) if why.contains("not in the pocket")) {
+        let _ = ctx
+            .invoke(&super::Intent::Probe {
+                fact: super::ProbeFact::Pocket { pocket },
+            })
+            .result;
+    }
+    e
+}
+
 pub fn open_start_menu(retries: &mut Retries, o: &Observation, quiet_frames: u32) -> Decision {
     // A page of the Start menu that wasn't asked for (its cursor read a
     // row off): B goes back (fleet continue-6, a Teach's way to the bag

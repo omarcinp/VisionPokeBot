@@ -40,7 +40,8 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
         applied: None,
         seek: Default::default(),
     };
-    ctx.drive(&mut step)?;
+    ctx.drive(&mut step)
+        .map_err(|e| super::menu::recount_if_missing(ctx, Pocket::Items, e))?;
     let improved = |ctx: &ToolContext<'_>| {
         ctx.state()
             .party
