@@ -970,6 +970,71 @@ pub fn fly(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// A push search's state: the boulder, the player, the pushes so far.
+type PushState = ((i32, i32), (i32, i32), Vec<Direction>);
+
+/// Pushes that take one of `boulders` onto `target` on `map` from the
+/// player at `player`: the boulder, and its pushes in order. A push moves
+/// the boulder a tile onto walkable floor (not water, a ledge or anything
+/// standing there) and the player into its old tile; between pushes the
+/// player walks round everything, the boulders included. Breadth-first
+/// over (boulder, player) for each boulder in turn, the others left
+/// where they stand.
+pub fn boulder_pushes(
+    map: &pokebot_world::MapData,
+    boulders: &[(i32, i32)],
+    blocked: &pokebot_world::path::Obstacles,
+    player: (i32, i32),
+    target: (i32, i32),
+) -> Option<((i32, i32), Vec<Direction>)> {
+    use pokebot_world::behavior::{is_water, ledge};
+    use std::collections::{HashSet, VecDeque};
+    const MAX_STATES: usize = 200_000;
+    for &start in boulders {
+        let others: HashSet<(i32, i32)> =
+            boulders.iter().copied().filter(|b| *b != start).collect();
+        let floor = |t: (i32, i32)| {
+            map.tile(t.0, t.1).is_some_and(|tile| {
+                tile.collision == 0 && !is_water(tile.behavior) && ledge(tile.behavior).is_none()
+            }) && !blocked.contains(&t)
+                && !others.contains(&t)
+        };
+        let mut seen: HashSet<((i32, i32), (i32, i32))> = HashSet::from([(start, player)]);
+        let mut queue: VecDeque<PushState> = VecDeque::from([(start, player, Vec::new())]);
+        while let Some((b, p, pushes)) = queue.pop_front() {
+            if b == target {
+                return Some((start, pushes));
+            }
+            if seen.len() > MAX_STATES {
+                break;
+            }
+            let mut obstacles: pokebot_world::path::Obstacles = blocked.clone();
+            obstacles.extend(others.iter().copied());
+            obstacles.insert(b);
+            let walk = pokebot_world::path::Walk {
+                obstacles: &obstacles,
+                surf: false,
+                opened: None,
+            };
+            let reach = pokebot_world::path::reach(map, p, &walk, |_| 0);
+            for dir in Direction::ALL {
+                let (dx, dy) = dir.delta();
+                let behind = (b.0 - dx, b.1 - dy);
+                let next = (b.0 + dx, b.1 + dy);
+                if (behind != p && reach.cost(behind).is_none()) || !floor(next) {
+                    continue;
+                }
+                if seen.insert((next, b)) {
+                    let mut more = pushes.clone();
+                    more.push(dir);
+                    queue.push_back((next, b, more));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Activates Strength on the boulder at `(x, y)` of `map`, then pushes it
 /// along `pushes`, walking behind it before each push.
 pub fn strength(
@@ -1635,5 +1700,41 @@ mod tests {
             "IVYSAUR's STRENGTH made it possible to move boulders around!",
             FieldMove::Strength
         ));
+    }
+
+    /// Switch, Victory Road 1F: the barrier at (12, 14) opens when a
+    /// boulder lands on the floor switch at (20, 16). From the entrance the
+    /// pushes are found, each from a tile the player walks to, the last
+    /// landing the boulder on the switch.
+    #[test]
+    fn a_boulder_is_pushed_onto_the_floor_switch() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = pokebot_world::World::load(&dir) else {
+            return;
+        };
+        let map = world.map("VictoryRoad_1F").unwrap();
+        let switch = (20, 16);
+        assert_eq!(
+            map.tile(switch.0, switch.1).unwrap().behavior,
+            pokebot_world::behavior::STRENGTH_BUTTON
+        );
+        let boulders: Vec<(i32, i32)> = map
+            .objects
+            .iter()
+            .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_PUSHABLE_BOULDER"))
+            .filter_map(|o| Some((o.x?, o.y?)))
+            .collect();
+        let mut blocked = crate::nav::object_obstacles(map, &Default::default());
+        for b in &boulders {
+            blocked.remove(b);
+        }
+        let (boulder, pushes) =
+            boulder_pushes(map, &boulders, &blocked, (11, 19), switch).expect("pushes");
+        eprintln!("{boulder:?} {pushes:?}");
+        let end = pushes.iter().fold(boulder, |(x, y), d| {
+            let (dx, dy) = d.delta();
+            (x + dx, y + dy)
+        });
+        assert_eq!(end, switch);
     }
 }

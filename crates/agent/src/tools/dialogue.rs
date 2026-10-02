@@ -741,6 +741,55 @@ impl ToolStep for Conversation {
     }
 }
 
+/// Pushes a boulder of `map` onto the floor switch at `switch` (Strength,
+/// [`super::field::boulder_pushes`]), then records the switch's path: the
+/// boulder landing is what runs it.
+fn push_onto_switch(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: Option<usize>,
+    map: &str,
+    switch: (i32, i32),
+) -> Result<(), ToolError> {
+    if ctx.pose().is_none_or(|p| p.map != map) {
+        super::go::go_to_map(ctx, map)?;
+    }
+    let pose = ctx
+        .pose()
+        .ok_or_else(|| ToolError::Failed("not located for the boulder".into()))?;
+    let world = Arc::clone(&ctx.world);
+    let m = world
+        .map(map)
+        .ok_or_else(|| ToolError::Failed(format!("unknown map {map}")))?;
+    let boulders: Vec<(i32, i32)> = m
+        .objects
+        .iter()
+        .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_PUSHABLE_BOULDER"))
+        .filter(|o| !ctx.gone.contains(&(map.to_owned(), o.local_id)))
+        .filter_map(|o| Some((o.x?, o.y?)))
+        .collect();
+    let mut blocked = crate::nav::object_obstacles(m, &ctx.gone);
+    for b in &boulders {
+        blocked.remove(b);
+    }
+    blocked.extend(ctx.gate_tiles().closed_on(map));
+    let (boulder, pushes) =
+        super::field::boulder_pushes(m, &boulders, &blocked, (pose.x, pose.y), switch).ok_or_else(
+            || {
+                ToolError::Failed(format!(
+                    "no boulder of {map} can be pushed onto the switch at {switch:?}"
+                ))
+            },
+        )?;
+    ctx.info(format!(
+        "{map}: the boulder at {boulder:?} pushed {} times onto the switch at {switch:?}",
+        pushes.len()
+    ));
+    super::field::strength(ctx, map, boulder, &pushes)?;
+    let path = path.unwrap_or(0);
+    record_path(ctx, script, path)
+}
+
 /// Finishes a conversation: saves an unrecognised one, and records the
 /// path that ran with its effects. What was recognised, for the log.
 pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<(), ToolError> {
@@ -1836,6 +1885,18 @@ fn run_script(
         }
         Start::Trigger { map, tiles } => {
             let (x, y) = tiles[0];
+            // A floor switch: a boulder pushed onto it fires it, not the
+            // player (Switch, Victory Road 1F: walked onto, nothing ran,
+            // the path was recorded all the same, and every walk met the
+            // barrier it opens shut).
+            let button = ctx
+                .world
+                .map(&map)
+                .and_then(|m| m.tile(x, y))
+                .is_some_and(|t| t.behavior == pokebot_world::behavior::STRENGTH_BUTTON);
+            if button {
+                return push_onto_switch(ctx, script, path, &map, (x, y));
+            }
             let go = GoStep::with(
                 &NavParts::of(ctx),
                 Destination::Tile {

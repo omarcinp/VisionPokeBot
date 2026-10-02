@@ -439,10 +439,31 @@ impl<'a> ToolContext<'a> {
                 let belief = crate::belief_view::StateBelief(self.runtime.state());
                 wrong_gate_flags(&gates, &blocked, &belief)
             };
+            let retract = {
+                let belief = crate::belief_view::StateBelief(self.runtime.state());
+                wrong_gate_paths(
+                    &self.world,
+                    &gates,
+                    &blocked,
+                    &belief,
+                    &self.runtime.state().world.paths_run,
+                )
+            };
             self.learn(event);
             for (flag, is) in wrong {
                 self.info(format!("{map} ({x}, {y}) is drawn shut: {flag} isn't {is}"));
                 self.emit(GameEvent::FlagObserved { flag, value: !is })?;
+            }
+            for (script, path, var) in retract {
+                self.info(format!(
+                    "{map} ({x}, {y}) is drawn shut: {script}[{path}] did not run ({var})"
+                ));
+                self.emit(GameEvent::ScriptPathRetracted {
+                    script,
+                    path,
+                    flags: Vec::new(),
+                    vars: vec![var],
+                })?;
             }
             return Ok(());
         }
@@ -1343,6 +1364,67 @@ fn screen_fingerprint(o: &Observation) -> String {
 /// those that hold (fleet, Rocket Hideout B4F: the barrier needs both
 /// door grunts beaten, GRUNT_16 was held beaten unfought, and GIOVANNI
 /// was walked to 418 times).
+/// The recorded script paths a drawn gate found blocked says didn't run:
+/// those that set the var a way it was believed open by holds on (Switch,
+/// Victory Road 1F: the floor switch's path recorded when the player, not
+/// a boulder, stood on it; its var at 100 held the barrier open, and every
+/// walk met it shut). With the var a way's only unproven part.
+pub fn wrong_gate_paths(
+    world: &pokebot_world::World,
+    gates: &pokebot_world::gates::Gates,
+    blocked: &std::collections::BTreeMap<String, Vec<(i32, i32)>>,
+    belief: &dyn pokebot_world::predicate::BeliefView,
+    paths_run: &[(String, usize)],
+) -> Vec<(String, usize, String)> {
+    use pokebot_world::events::Effect;
+    use pokebot_world::gates::{gate_truth, GateKind};
+    use pokebot_world::predicate::{check, CmpOp, Predicate, Truth};
+    let Some(events) = world.events() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, usize, String)> = Vec::new();
+    for (map, tiles) in blocked {
+        let Some(on) = gates.get(map) else { continue };
+        for gate in tiles.iter().filter_map(|t| on.get(t)) {
+            if gate.kind != GateKind::Metatile || gate_truth(gate, belief) == Truth::False {
+                continue;
+            }
+            for way in &gate.ways {
+                let c = check(belief, way);
+                if way.is_empty() || !c.failed.is_empty() || !c.unknown.is_empty() {
+                    continue;
+                }
+                for p in way {
+                    let Predicate::Var {
+                        name,
+                        op: CmpOp::Eq,
+                        value,
+                    } = p
+                    else {
+                        continue;
+                    };
+                    for (script, path) in paths_run {
+                        let sets = events
+                            .script(script)
+                            .and_then(|s| s.paths.get(*path))
+                            .is_some_and(|p| {
+                                p.does.iter().any(|e| {
+                                    matches!(e, Effect::Var { var, change } if var == name
+                                        && change.eq.as_ref().and_then(|v| v.as_int()) == Some(*value))
+                                })
+                            });
+                        let entry = (script.clone(), *path, name.clone());
+                        if sets && !out.contains(&entry) {
+                            out.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn wrong_gate_flags(
     gates: &pokebot_world::gates::Gates,
     blocked: &std::collections::BTreeMap<String, Vec<(i32, i32)>>,
@@ -1473,6 +1555,49 @@ mod tests {
         if let Some(guard) = guard {
             assert!(local_trigger_tiles(&world, &guard).is_empty(), "{guard:?}");
         }
+    }
+
+    /// Switch, Victory Road 1F: the floor switch's path recorded with no
+    /// boulder on it, its var at 100 holding the barrier at (12, 14) open;
+    /// met shut, the path is retracted (its var with it).
+    #[test]
+    fn a_barrier_met_shut_retracts_the_path_its_var_came_from() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        let gates = pokebot_world::gates::derive(&world);
+        let blocked =
+            std::collections::BTreeMap::from([("VictoryRoad_1F".to_owned(), vec![(12, 14)])]);
+        let script = "VictoryRoad_1F_EventScript_FloorSwitch";
+        let var = "VAR_MAP_SCENE_VICTORY_ROAD_1F";
+        let mut state = GameState::default();
+        state
+            .world
+            .vars
+            .insert(var.into(), pokebot_state::Knowledge::tracked(100, None));
+        state.world.paths_run.push((script.into(), 1));
+        let paths = state.world.paths_run.clone();
+        assert_eq!(
+            wrong_gate_paths(
+                &world,
+                &gates,
+                &blocked,
+                &crate::belief_view::StateBelief(&state),
+                &paths
+            ),
+            vec![(script.to_owned(), 1, var.to_owned())]
+        );
+        // Not believed open: nothing to retract.
+        let unknown = GameState::default();
+        assert!(wrong_gate_paths(
+            &world,
+            &gates,
+            &blocked,
+            &crate::belief_view::StateBelief(&unknown),
+            &paths
+        )
+        .is_empty());
     }
 
     /// Fleet continue-2: turned back by Route 8's thirsty guard (his

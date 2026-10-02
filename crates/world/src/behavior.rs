@@ -16,6 +16,9 @@ pub const WARP_DOOR: u16 = 0x69;
 pub const COUNTER: u16 = 0x80;
 /// The Pokémon Center PC (`MB_PC`): A facing it runs `EventScript_PC`.
 pub const PC: u16 = 0x83;
+/// A floor switch a Strength boulder presses (`MB_STRENGTH_BUTTON`): the
+/// game runs the tile's coord event when a boulder lands on it.
+pub const STRENGTH_BUTTON: u16 = 0x20;
 
 /// Whether a warp on a tile of this behaviour ever fires (`field_control_
 /// avatar.c`): walked onto (cave door, ladder, hole, warp pad, escalator,
