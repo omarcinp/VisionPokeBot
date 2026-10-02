@@ -852,6 +852,43 @@ struct Push {
     world: std::sync::Arc<pokebot_world::World>,
     done: bool,
     tries: u32,
+    /// The tap was sent: the boulder is judged once the screen settles.
+    tapped: bool,
+}
+
+/// Whether the screen shows the boulder pushed from `old` one tile `dir`:
+/// its sprite on the new tile, or the old tile bare floor again and the
+/// new one not (or, a hole there, the boulder fallen through). The player
+/// walks in place while the boulder moves (`DoBoulderDust`: the player's
+/// WALK_IN_PLACE, the boulder's WALK_SLOWER). With nothing to tell by, the
+/// tap is taken to have pushed: a second tap would push it again.
+fn pushed(
+    world: &pokebot_world::World,
+    o: &Observation,
+    frame: Option<&pokebot_core::NormalizedFrame>,
+    old: (i32, i32),
+    dir: Direction,
+) -> bool {
+    let (dx, dy) = dir.delta();
+    let new = (old.0 + dx, old.1 + dy);
+    if let Some(seen) = boulder_moved(o, old, new) {
+        return seen;
+    }
+    let falls = o
+        .player
+        .as_ref()
+        .and_then(|p| world.map(&p.pose.map))
+        .and_then(|m| m.tile(new.0, new.1))
+        .is_some_and(|t| t.behavior == pokebot_world::boulders::FALL_WARP);
+    match (
+        bare_floor(world, o, frame, old),
+        bare_floor(world, o, frame, new),
+    ) {
+        (Some(true), _) if falls => true,
+        (Some(true), Some(false)) => true,
+        (Some(false), _) | (_, Some(true)) => false,
+        _ => true,
+    }
 }
 
 /// Whether the tile `at` looks like the map's own floor there (nothing
@@ -886,6 +923,33 @@ impl ToolStep for Push {
         if self.done {
             return Decision::Done("pushed".into());
         }
+        if self.tapped {
+            // The boulder slides for a while after the tap: judged once
+            // the screen is still.
+            if ctx.quiet_frames < 20 {
+                return Decision::Wait("the boulder moving".into());
+            }
+            self.tapped = false;
+            // A push never moves the player: a step is a walk, not a push.
+            let walked = ctx
+                .observation
+                .player
+                .as_ref()
+                .is_some_and(|p| p.pose != self.from);
+            if !walked
+                && pushed(
+                    &self.world,
+                    ctx.observation,
+                    ctx.frame,
+                    self.boulder,
+                    self.dir,
+                )
+            {
+                self.done = true;
+                return Decision::Done("pushed".into());
+            }
+            self.tries += 1;
+        }
         if self.tries >= 3 {
             return Decision::Fail(format!("the boulder did not move {:?}", self.dir));
         }
@@ -896,44 +960,23 @@ impl ToolStep for Push {
         // push or a step astray (Switch, Victory Road 1F: 400 ms held, the
         // player went on into the boulder's new tile 15 frames after the
         // push). A tap that only turns the player toward the boulder makes
-        // no move: the next try pushes.
+        // no move: the next try pushes. The player stays where it is
+        // (fleet continue-3/6, Victory Road: a push judged by the player's
+        // step never was one, the next tap pushed again or walked into the
+        // gap, and the boulder ended up two tiles off).
         Decision::Act(
             Action::new(
                 format!("push the boulder {:?}", self.dir),
                 vec![ControllerCommand::Press(direction_button(self.dir))],
-                Expectation::PlayerMovedFrom(self.from.clone()),
+                Expectation::InputsDone,
                 90,
             )
             .timed(crate::motion::InputKind::WalkTile, 1),
         )
     }
 
-    fn on_outcome(&mut self, _: &Action, outcome: Outcome, ctx: &mut StepContext<'_>) {
-        // The player's move alone isn't the boulder's (Switch, Victory Road
-        // 1F: a wild battle cut the push short, the reckoned pose took the
-        // player into the boulder's tile, and the pushes went on with the
-        // boulder unmoved, until the walk left the cave). The boulder's
-        // sprite says, when it shows.
-        let (dx, dy) = self.dir.delta();
-        let new = (self.boulder.0 + dx, self.boulder.1 + dy);
-        let moved = boulder_moved(ctx.observation, self.boulder, new);
-        // The sensor rarely reads a moved boulder: its new tile still the
-        // map's bare floor means nothing landed there (Switch, Victory Road
-        // 1F: a push that didn't happen counted, the player having stepped
-        // all the same, and the pushes after it went astray).
-        let empty = bare_floor(&self.world, ctx.observation, ctx.frame, new);
-        // Into a hole it falls through: the tile shows bare floor after.
-        let falls = self
-            .world
-            .map(&self.from.map)
-            .and_then(|m| m.tile(new.0, new.1))
-            .is_some_and(|t| t.behavior == pokebot_world::boulders::FALL_WARP);
-        let empty = empty.filter(|_| !falls);
-        if outcome == Outcome::Confirmed && moved != Some(false) && empty != Some(true) {
-            self.done = true;
-        } else {
-            self.tries += 1;
-        }
+    fn on_outcome(&mut self, _: &Action, _: Outcome, _: &mut StepContext<'_>) {
+        self.tapped = true;
     }
 }
 
@@ -1098,6 +1141,7 @@ pub fn strength(
             world: std::sync::Arc::clone(&ctx.world),
             done: false,
             tries: 0,
+            tapped: false,
         };
         ctx.drive(&mut push)?;
         // The boulder's old tile is free, its new one blocks.
@@ -1797,6 +1841,7 @@ mod tests {
             world,
             done: false,
             tries: 0,
+            tapped: false,
         };
         let state = GameState::default();
         let mut events = Vec::new();
@@ -1805,6 +1850,37 @@ mod tests {
             panic!("expected the push")
         };
         assert_eq!(a.commands, vec![ControllerCommand::Press(Button::Right)]);
+    }
+
+    /// Fleet continue-6, Victory Road 3F: the player at (5, 7), the boulder
+    /// pushed from (6, 7) onto the switch at (7, 7). The player walks in
+    /// place; the old tile shows bare floor, the new one the boulder: the
+    /// push happened (judged by the player's step, it "did not move").
+    #[test]
+    fn a_push_is_judged_by_the_boulder_not_the_player() {
+        let Some(world) = world() else { return };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(image) = pokebot_video::png::load(
+            root.join("captures/fixtures/emu-vr3f-boulder-pushed-onto-switch.png"),
+        ) else {
+            return;
+        };
+        let Ok(frame) = pokebot_core::NormalizedFrame::new(1, std::time::Instant::now(), image)
+        else {
+            return;
+        };
+        let mut o = bare(1);
+        o.player = Some(pokebot_state::PoseObservation {
+            pose: pokebot_state::PlayerPose {
+                map: "VictoryRoad_3F".into(),
+                x: 5,
+                y: 7,
+            },
+            score: 1000,
+        });
+        assert!(pushed(&world, &o, Some(&frame), (6, 7), Direction::Right));
+        // Not from (7, 7) on: nothing went to (8, 7).
+        assert!(!pushed(&world, &o, Some(&frame), (7, 7), Direction::Right));
     }
 
     /// Switch, Victory Road 1F, after the first push down: the player at
