@@ -390,13 +390,23 @@ impl Run<'_, '_> {
             let (knowledge, pose) = self.snapshot(ctx)?;
             let belief = StateBelief::new(&knowledge, &ctx.data, pose.clone());
             let now = Owned::of(&knowledge);
-            if let Some(why) = caught_on_the_side(&step.intent, &start, &now)
+            let earlier = catches_before(&plan.intents[..i], &step.intent);
+            if let Some(why) = caught_on_the_side_after(&step.intent, &start, &now, earlier)
                 .or_else(|| grass_unneeded(step, &plan.intents[k..], &start, &now))
             {
                 self.report.steps_skipped += 1;
                 let why = format!("{}: skipped, {why}", step.intent);
                 ctx.emit(progress(GOAL, why.clone()))?;
                 self.set_status("skipped", why, k, Some(step), ctx);
+                // Skipped, it still falls short: readiness is judged again
+                // (fleet emu worker 5: the second PIDGEY's catch, planned
+                // at an expected 0% against Brock, was skipped for the
+                // first one caught; the plan went on to the gym and
+                // whited out, every cycle).
+                if let Some(why) = short_of(step, self.planner.confidence()) {
+                    self.set_status("rejudge", why.clone(), k, Some(step), ctx);
+                    return Ok(Executed::Rejudge(why));
+                }
                 continue;
             }
             // "Buy balls if needed": settled by a probe earlier in the plan.
@@ -414,6 +424,10 @@ impl Run<'_, '_> {
                 );
                 ctx.emit(progress(GOAL, why.clone()))?;
                 self.set_status("skipped", why, k, Some(step), ctx);
+                if let Some(why) = short_of(step, self.planner.confidence()) {
+                    self.set_status("rejudge", why.clone(), k, Some(step), ctx);
+                    return Ok(Executed::Rejudge(why));
+                }
                 continue;
             }
             // Contradiction: what the step assumed is now known false.
@@ -1225,6 +1239,40 @@ fn caught_on_the_side(
         .then(|| format!("{species} caught into the party on the side since the plan began"))
 }
 
+/// The `Catch`es of `intent`'s species among `before` (the plan's steps
+/// ahead of it).
+fn catches_before(before: &[PlannedIntent], intent: &pokebot_planner::Intent) -> usize {
+    let pokebot_planner::Intent::Catch { species, .. } = intent else {
+        return 0;
+    };
+    before
+        .iter()
+        .filter(|s| matches!(&s.intent, pokebot_planner::Intent::Catch { species: o, .. } if o == species))
+        .count()
+}
+
+/// [`caught_on_the_side`] for a plan's `Catch` with `earlier` catches of
+/// its species ahead of it: done on the side only once the party holds
+/// more of it than those earlier catches added (fleet emu worker 5: two
+/// PIDGEY catches, the second for readiness against Brock, skipped for
+/// the first one caught, and Brock fought at 0%).
+fn caught_on_the_side_after(
+    intent: &pokebot_planner::Intent,
+    start: &Owned,
+    now: &Owned,
+    earlier: usize,
+) -> Option<String> {
+    if earlier == 0 {
+        return caught_on_the_side(intent, start, now);
+    }
+    let pokebot_planner::Intent::Catch { species, .. } = intent else {
+        return None;
+    };
+    let held = |o: &Owned| o.party.get(species).copied().unwrap_or(0);
+    (held(now) > held(start) + earlier)
+        .then(|| format!("{species} caught into the party on the side since the plan began"))
+}
+
 /// Why a catch's walk to the grass needn't run: the `Catch`es it leads
 /// to (those right after it, on its map) were all caught on the side.
 fn grass_unneeded(
@@ -1484,6 +1532,33 @@ mod health_tests {
     /// skipped: for the Pokédex once ODDISH is marked caught, for the
     /// party (PIDGEY marked long before, fleet worker 2) once the party
     /// holds one more. What is still wanted goes to the hunt.
+    /// Fleet emu worker 5: a plan with two PIDGEY catches, the second
+    /// for readiness against Brock; the first one caught made the second
+    /// look done, and Brock was fought at 0%. The second is done only once
+    /// a second PIDGEY is in the party.
+    #[test]
+    fn a_second_catch_of_a_species_wants_a_second_one() {
+        let first = catch("SPECIES_PIDGEY", "Route1");
+        let second = catch("SPECIES_PIDGEY", "Route1");
+        let plan = [first.clone(), second.clone()];
+        assert_eq!(catches_before(&plan[..1], &second.intent), 1);
+        let start = owned(&[], &["SPECIES_CHARMANDER"]);
+        let one = owned(
+            &["SPECIES_PIDGEY"],
+            &["SPECIES_CHARMANDER", "SPECIES_PIDGEY"],
+        );
+        assert!(caught_on_the_side_after(&first.intent, &start, &one, 0).is_some());
+        assert_eq!(
+            caught_on_the_side_after(&second.intent, &start, &one, 1),
+            None
+        );
+        let two = owned(
+            &["SPECIES_PIDGEY"],
+            &["SPECIES_CHARMANDER", "SPECIES_PIDGEY", "SPECIES_PIDGEY"],
+        );
+        assert!(caught_on_the_side_after(&second.intent, &start, &two, 1).is_some());
+    }
+
     #[test]
     fn a_catch_made_on_the_side_skips_the_later_catch() {
         let oddish = catch("SPECIES_ODDISH", "Route24");
