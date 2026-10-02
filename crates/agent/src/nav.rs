@@ -213,6 +213,9 @@ pub struct Navigator {
     /// Objects maybe gone (their hide flag unknown), tried only when the
     /// known ones leave no way on.
     maybe_gone: Gone,
+    /// Any tile of the destination's map will do: the route ends where
+    /// the walk first reaches it.
+    any_tile: bool,
     /// Water is walkable: the player is surfing (or about to).
     surf: bool,
     /// Story passages as the belief stands (closed triggers, opened doors),
@@ -346,6 +349,7 @@ impl Navigator {
             hop: None,
             gone: Gone::new(),
             maybe_gone: Gone::new(),
+            any_tile: false,
             surf: false,
             gates: Arc::new(GateTiles::default()),
             entries: MapEntries::default(),
@@ -413,6 +417,15 @@ impl Navigator {
         self
     }
 
+    /// Any tile of the destination's map will do: its tile only steers
+    /// the walk once there (fleet continue-6: Go(Route13) aimed at a tile
+    /// in its middle that the fences shut off from Route 12, the way in,
+    /// and failed "no known route from Route16 to Route13" every replan).
+    pub fn with_any_tile(mut self) -> Self {
+        self.any_tile = true;
+        self
+    }
+
     /// Learns blocked tiles into (and routes around those in) the
     /// session's store instead of a private one.
     pub fn with_blocked(mut self, blocked: Blocked) -> Self {
@@ -471,16 +484,26 @@ impl Navigator {
         let (hop, via) = match &self.hop {
             Some((map, route)) if *map == pose.map => *route,
             _ => {
-                let mut route =
-                    plan_route_with(&world, &pose, &self.destination, &self.gone, &self.gates);
+                let plan = |gone: &Gone| {
+                    let to = self.destination.map();
+                    self.any_tile
+                        .then(|| pose.map != to)
+                        .filter(|off| *off)
+                        .and_then(|_| {
+                            route_search_via(&world, &pose, to, |_| true, gone, &self.gates)
+                        })
+                        .unwrap_or_else(|| {
+                            plan_route_with(&world, &pose, &self.destination, gone, &self.gates)
+                        })
+                };
+                let mut route = plan(&self.gone);
                 if route.0.is_none()
                     && pose.map != self.destination.map()
                     && !self.maybe_gone.is_subset(&self.gone)
                 {
                     let mut maybe = self.gone.clone();
                     maybe.extend(self.maybe_gone.iter().cloned());
-                    let tried =
-                        plan_route_with(&world, &pose, &self.destination, &maybe, &self.gates);
+                    let tried = plan(&maybe);
                     if tried.0.is_some() {
                         self.gone = maybe;
                         route = tried;
@@ -2014,6 +2037,56 @@ mod tests {
             .with_gone(gone)
             .with_maybe_gone(unknown_gone(&world, &state));
         assert!(matches!(trying.next(&o), NavStatus::Act(_)));
+    }
+
+    /// Fleet continue-6, Route 16 (47, 12) bound for Route 13, SNORLAX's
+    /// flag unknown: the walk aimed at a tile in Route 13's middle, which
+    /// its fences shut off from Route 12, and found "no known route" every
+    /// replan. A walk to any tile of a map routes to where it first gets
+    /// onto the map.
+    #[test]
+    fn a_walk_to_a_map_ends_where_it_first_reaches_it() {
+        use pokebot_state::{Observed, PoseObservation, ScreenState};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let world = Arc::new(world);
+        let mut state = pokebot_state::GameState::default();
+        state.world.flags.insert(
+            "FLAG_HIDE_ROUTE_16_SNORLAX".into(),
+            pokebot_state::Knowledge::observed(false, 1),
+        );
+        let pose = PlayerPose {
+            map: "Route16".into(),
+            x: 47,
+            y: 12,
+        };
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: ScreenState::Unknown,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.player = Some(PoseObservation { pose, score: 1000 });
+        // Where Go(Route13) aims: its middle.
+        let middle = Destination::Tile {
+            map: "Route13".into(),
+            x: 30,
+            y: 8,
+        };
+        let nav = || {
+            Navigator::new(Arc::clone(&world), middle.clone())
+                .with_gone(belief_gone(&world, &state))
+                .with_maybe_gone(unknown_gone(&world, &state))
+        };
+        match nav().next(&o) {
+            NavStatus::Fail(why) => assert!(why.contains("no known route"), "{why}"),
+            _ => panic!("the middle is shut off from Route 12"),
+        }
+        assert!(matches!(nav().with_any_tile().next(&o), NavStatus::Act(_)));
     }
 
     /// Fleet continue-6, Route 16's east half (47, 12) bound for Route 13:

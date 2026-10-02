@@ -138,6 +138,11 @@ impl GoStep {
             },
         );
         step.any_tile = true;
+        step.nav = std::mem::replace(
+            &mut step.nav,
+            Navigator::new(Arc::clone(&parts.world), step.dest.clone()),
+        )
+        .with_any_tile();
         step
     }
 
