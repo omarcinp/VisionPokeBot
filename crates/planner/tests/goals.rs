@@ -1949,3 +1949,38 @@ fn a_trigger_past_its_var_is_no_one_on_the_way() {
     print(&plan, 20);
     assert!(plan.blocked().is_empty(), "{:?}", plan.blocked());
 }
+
+/// Switch, Victory Road 2F: the floor switch at (14, 19) takes the one
+/// boulder that can land on it, hidden until its twin on 3F falls through
+/// the hole at (34, 18). The plan pushes that boulder in first (the bot
+/// had tried the boulder at (6, 17), which the platform's rim stops).
+#[test]
+fn victory_road_drops_the_boulder_before_the_switch_below() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 120.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, _) = checkpoint("switch_victory_road_2f_state.json");
+    let pose = Some(PlayerPose {
+        map: "VictoryRoad_2F".into(),
+        x: 3,
+        y: 19,
+    });
+    let plan = planner
+        .plan(
+            &parse_goal("at IndigoPlateau_Exterior").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .unwrap();
+    print(&plan, 10);
+    let at = |label: &str| {
+        plan.intents
+            .iter()
+            .position(|s| matches!(&s.intent, Intent::RunScript { script, .. } if script == label))
+    };
+    let hole = at("VictoryRoad_3F_BoulderHole_8").expect("the boulder pushed into the hole");
+    let switch = at("VictoryRoad_2F_EventScript_FloorSwitch2").expect("the switch below");
+    assert!(hole < switch);
+}

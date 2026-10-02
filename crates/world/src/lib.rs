@@ -3,6 +3,7 @@
 //! pathfinding over it.
 
 pub mod behavior;
+pub mod boulders;
 pub mod dialogue;
 pub mod escape;
 pub mod events;
@@ -298,7 +299,10 @@ impl World {
                 maps_dir.display()
             )));
         }
-        let events: Option<Events> = events::load_optional(&dir.join("events.json"))?;
+        let mut events: Option<Events> = events::load_optional(&dir.join("events.json"))?;
+        if let Some(e) = events.as_mut() {
+            boulders::add_hole_scripts(e, maps.values());
+        }
         let mut rewritten: HashMap<String, std::collections::HashSet<(i32, i32)>> = HashMap::new();
         for script in events.iter().flat_map(|e| e.scripts.values()) {
             let Some(map) = &script.map else { continue };

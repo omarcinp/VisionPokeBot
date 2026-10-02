@@ -922,6 +922,13 @@ impl ToolStep for Push {
         // 1F: a push that didn't happen counted, the player having stepped
         // all the same, and the pushes after it went astray).
         let empty = bare_floor(&self.world, ctx.observation, ctx.frame, new);
+        // Into a hole it falls through: the tile shows bare floor after.
+        let falls = self
+            .world
+            .map(&self.from.map)
+            .and_then(|m| m.tile(new.0, new.1))
+            .is_some_and(|t| t.behavior == pokebot_world::boulders::FALL_WARP);
+        let empty = empty.filter(|_| !falls);
         if outcome == Outcome::Confirmed && moved != Some(false) && empty != Some(true) {
             self.done = true;
         } else {
@@ -1036,16 +1043,9 @@ fn boulder_walled(mut nav: NavParts, map: &str, tile: (i32, i32)) -> NavParts {
     nav
 }
 
-/// A push search's state: the boulder, the player, the pushes so far.
-type PushState = ((i32, i32), (i32, i32), Vec<Direction>);
-
 /// Pushes that take one of `boulders` onto `target` on `map` from the
-/// player at `player`: the boulder, and its pushes in order. A push moves
-/// the boulder a tile onto walkable floor (not water, a ledge or anything
-/// standing there) and the player into its old tile; between pushes the
-/// player walks round everything, the boulders included. Breadth-first
-/// over (boulder, player) for each boulder in turn, the others left
-/// where they stand.
+/// player at `player`: the boulder, and its pushes in order
+/// ([`pokebot_world::boulders::pushes`]).
 pub fn boulder_pushes(
     map: &pokebot_world::MapData,
     boulders: &[(i32, i32)],
@@ -1053,67 +1053,7 @@ pub fn boulder_pushes(
     player: (i32, i32),
     target: (i32, i32),
 ) -> Option<((i32, i32), Vec<Direction>)> {
-    use pokebot_world::behavior::{is_water, ledge};
-    use pokebot_world::path::walkable_elevation;
-    use std::collections::{HashSet, VecDeque};
-    const MAX_STATES: usize = 200_000;
-    for &start in boulders {
-        let others: HashSet<(i32, i32)> =
-            boulders.iter().copied().filter(|b| *b != start).collect();
-        let floor = |t: (i32, i32)| {
-            map.tile(t.0, t.1).is_some_and(|tile| {
-                tile.collision == 0 && !is_water(tile.behavior) && ledge(tile.behavior).is_none()
-            }) && !blocked.contains(&t)
-                && !others.contains(&t)
-        };
-        let mut seen: HashSet<((i32, i32), (i32, i32))> = HashSet::from([(start, player)]);
-        let mut queue: VecDeque<PushState> = VecDeque::from([(start, player, Vec::new())]);
-        while let Some((b, p, pushes)) = queue.pop_front() {
-            if b == target {
-                return Some((start, pushes));
-            }
-            if seen.len() > MAX_STATES {
-                break;
-            }
-            let mut obstacles: pokebot_world::path::Obstacles = blocked.clone();
-            obstacles.extend(others.iter().copied());
-            obstacles.insert(b);
-            let walk = pokebot_world::path::Walk {
-                obstacles: &obstacles,
-                surf: false,
-                opened: None,
-            };
-            let reach = pokebot_world::path::reach(map, p, &walk, |_| 0);
-            for dir in Direction::ALL {
-                let (dx, dy) = dir.delta();
-                let behind = (b.0 - dx, b.1 - dy);
-                let next = (b.0 + dx, b.1 + dy);
-                // Both moves keep to one elevation: the player's into the
-                // boulder (a mismatch stops the step before the boulder is
-                // tried) and the boulder's onward (Switch, Victory Road 2F:
-                // a boulder on the platform's rim, the player on the cave
-                // floor below it, pushed Down three times and didn't move).
-                let level = |from: (i32, i32), to: (i32, i32)| {
-                    map.tile(from.0, from.1)
-                        .zip(map.tile(to.0, to.1))
-                        .is_some_and(|(a, b)| walkable_elevation(a.elevation, b.elevation))
-                };
-                if (behind != p && reach.cost(behind).is_none())
-                    || !floor(next)
-                    || !level(behind, b)
-                    || !level(b, next)
-                {
-                    continue;
-                }
-                if seen.insert((next, b)) {
-                    let mut more = pushes.clone();
-                    more.push(dir);
-                    queue.push_back((next, b, more));
-                }
-            }
-        }
-    }
-    None
+    pokebot_world::boulders::pushes(map, boulders, blocked, player, &[target])
 }
 
 /// Activates Strength on the boulder at `(x, y)` of `map`, then pushes it

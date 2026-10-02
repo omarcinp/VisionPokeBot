@@ -511,6 +511,9 @@ pub struct Planner<'a> {
     frames: BTreeMap<String, (String, i64)>,
     /// Map → what pushing its boulders takes (Strength and its badge).
     boulders: BTreeMap<String, Vec<GoalPredicate>>,
+    /// Floor-switch trigger → what shows the boulders able to land on it,
+    /// when all are hidden at first (worked out on first use: a search).
+    switch_reveals: std::cell::RefCell<BTreeMap<String, Vec<GoalPredicate>>>,
     /// What the story can do, for the reachability pass.
     achievers: Vec<Achiever>,
     /// Map → encounter tiles to route to (two per cluster, largest first).
@@ -828,6 +831,7 @@ impl<'a> Planner<'a> {
             triggers,
             frames,
             boulders,
+            switch_reveals: Default::default(),
             achievers: Vec::new(),
             grass,
         };
@@ -1090,6 +1094,10 @@ impl<'a> Planner<'a> {
                 if let Some(flag) = hidden {
                     out.push(GoalPredicate::flag(&flag, false));
                 }
+                // A boulder's fall through a hole takes Strength to push.
+                if pokebot_world::boulders::hole_of(label).is_some() {
+                    out.extend(self.boulders.get(map)?.iter().cloned());
+                }
             }
             "sign" => {}
             "trigger" => {
@@ -1106,6 +1114,7 @@ impl<'a> Planner<'a> {
                         // No script moves the var there: the game fires it
                         // for a boulder pushed onto the tile.
                         out.extend(self.boulders.get(map)?.iter().cloned());
+                        out.extend(self.switch_reveal(label, map));
                     }
                 }
             }
@@ -1117,6 +1126,45 @@ impl<'a> Planner<'a> {
             _ => return None,
         }
         Some(out)
+    }
+
+    /// What shows a boulder able to land on the floor switch `label` of
+    /// `map`, when every such boulder is hidden at first (Victory Road 2F:
+    /// the switch at (14, 19) takes the boulder its 3F twin's fall through
+    /// the hole reveals). Empty when one is there from the start.
+    fn switch_reveal(&self, label: &str, map: &str) -> Vec<GoalPredicate> {
+        if let Some(found) = self.switch_reveals.borrow().get(label) {
+            return found.clone();
+        }
+        let tiles: Vec<(i32, i32)> = self
+            .world
+            .events()
+            .map(|e| {
+                e.triggers
+                    .iter()
+                    .filter(|t| t.map == map && t.script.as_deref() == Some(label))
+                    .map(|t| (t.x, t.y))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut found = Vec::new();
+        if let Some(m) = self.world.map(map) {
+            let solvers: Vec<_> = tiles
+                .iter()
+                .flat_map(|&t| pokebot_world::boulders::solvers(m, t))
+                .collect();
+            let hidden: Vec<&str> = solvers
+                .iter()
+                .filter_map(|o| pokebot_world::boulders::hide_flag(o))
+                .collect();
+            if !solvers.is_empty() && hidden.len() == solvers.len() {
+                found.push(GoalPredicate::flag(hidden[0], false));
+            }
+        }
+        self.switch_reveals
+            .borrow_mut()
+            .insert(label.to_owned(), found.clone());
+        found
     }
 
     /// Where the player stands to start a script: next to its object or

@@ -742,8 +742,8 @@ impl ToolStep for Conversation {
 }
 
 /// Pushes a boulder of `map` onto the floor switch at `switch` (Strength,
-/// [`super::field::boulder_pushes`]), then records the switch's path: the
-/// boulder landing is what runs it.
+/// [`pokebot_world::boulders::pushes`]), then records the switch's path:
+/// the boulder landing is what runs it.
 fn push_onto_switch(
     ctx: &mut ToolContext<'_>,
     script: &str,
@@ -751,38 +751,127 @@ fn push_onto_switch(
     map: &str,
     switch: (i32, i32),
 ) -> Result<(), ToolError> {
-    if ctx.pose().is_none_or(|p| p.map != map) {
-        super::go::go_to_map(ctx, map)?;
-    }
-    let pose = ctx
-        .pose()
-        .ok_or_else(|| ToolError::Failed("not located for the boulder".into()))?;
+    push_boulder(ctx, script, path, map, &[switch], None)
+}
+
+/// Pushes the boulder `local_id` of `map` through one of its map's holes:
+/// it falls, and the one it reveals on the floor below shows. Records the
+/// fall's script (`pokebot_world::boulders::hole_label`).
+fn push_into_hole(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    map: &str,
+    local_id: u32,
+) -> Result<(), ToolError> {
+    let holes = ctx
+        .world
+        .map(map)
+        .map(pokebot_world::boulders::holes)
+        .unwrap_or_default();
+    push_boulder(ctx, script, Some(0), map, &holes, Some(local_id))
+}
+
+/// Pushes a boulder of `map` (only `local_id`, when given) onto one of
+/// `targets`, walking behind it before each push, then records `script`'s
+/// `path`. Boulders known hidden are left out (Switch, Victory Road 2F:
+/// the one boulder that reaches the switch at (14, 19) shows only once its
+/// twin on 3F falls through the hole).
+fn push_boulder(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: Option<usize>,
+    map: &str,
+    targets: &[(i32, i32)],
+    local_id: Option<u32>,
+) -> Result<(), ToolError> {
+    let target = targets
+        .first()
+        .copied()
+        .ok_or_else(|| ToolError::Failed(format!("{map}: nowhere to push a boulder")))?;
     let world = Arc::clone(&ctx.world);
     let m = world
         .map(map)
         .ok_or_else(|| ToolError::Failed(format!("unknown map {map}")))?;
-    let boulders: Vec<(i32, i32)> = m
+    let present: Vec<&pokebot_world::ObjectEvent> = m
         .objects
         .iter()
-        .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_PUSHABLE_BOULDER"))
+        .filter(|o| pokebot_world::boulders::is_boulder(o))
         .filter(|o| !ctx.gone.contains(&(map.to_owned(), o.local_id)))
+        .filter(|o| object_shown(&world, ctx.state(), map, o.local_id) != Some(false))
+        .collect();
+    let boulders: Vec<(i32, i32)> = present
+        .iter()
+        .filter(|o| local_id.is_none_or(|id| o.local_id == id))
         .filter_map(|o| Some((o.x?, o.y?)))
         .collect();
     let mut blocked = crate::nav::object_obstacles(m, &ctx.gone);
-    for b in &boulders {
-        blocked.remove(b);
+    for o in m
+        .objects
+        .iter()
+        .filter(|o| pokebot_world::boulders::is_boulder(o))
+    {
+        if let (Some(x), Some(y)) = (o.x, o.y) {
+            blocked.remove(&(x, y));
+        }
     }
+    // The other boulders there stand where they spawned.
+    blocked.extend(
+        present
+            .iter()
+            .filter(|o| local_id.is_some_and(|id| o.local_id != id))
+            .filter_map(|o| Some((o.x?, o.y?))),
+    );
     blocked.extend(ctx.gate_tiles().closed_on(map));
-    let (boulder, pushes) =
-        super::field::boulder_pushes(m, &boulders, &blocked, (pose.x, pose.y), switch).ok_or_else(
-            || {
-                ToolError::Failed(format!(
-                    "no boulder of {map} can be pushed onto the switch at {switch:?}"
-                ))
+    let solve =
+        |from: (i32, i32)| pokebot_world::boulders::pushes(m, &boulders, &blocked, from, targets);
+    let here = ctx.pose().filter(|p| p.map == map).map(|p| (p.x, p.y));
+    if here.and_then(solve).is_none() {
+        // From where the player stands no boulder goes there: to a tile
+        // beside one from which it does, through other floors when this
+        // one's part doesn't reach it (Switch, Victory Road 2F: the
+        // boulder for the switch at (14, 19) is pushed from (34, 19), where
+        // the hole on 3F drops the player).
+        let spot = boulders
+            .iter()
+            .flat_map(|&(x, y)| {
+                pokebot_state::Direction::ALL.map(|d| {
+                    let (dx, dy) = d.delta();
+                    (x + dx, y + dy)
+                })
+            })
+            .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| t.collision == 0))
+            .filter(|t| !blocked.contains(t) && !boulders.contains(t))
+            .filter(|&t| solve(t).is_some())
+            .min_by_key(|&(x, y)| here.map_or(0, |h| (h.0 - x).abs() + (h.1 - y).abs()))
+            .ok_or_else(|| {
+                ToolError::Failed(format!("no boulder of {map} can be pushed onto {target:?}"))
+            })?;
+        let mut walk = GoStep::with(
+            &NavParts::of(ctx),
+            Destination::Tile {
+                map: map.to_owned(),
+                x: spot.0,
+                y: spot.1,
             },
-        )?;
+        );
+        ctx.drive(&mut walk)?;
+    }
+    let pose = ctx
+        .pose()
+        .filter(|p| p.map == map)
+        .ok_or_else(|| ToolError::Failed(format!("not on {map} for the boulder")))?;
+    let (boulder, pushes) = solve((pose.x, pose.y)).ok_or_else(|| {
+        ToolError::Failed(format!(
+            "no boulder of {map} can be pushed onto {target:?} from ({}, {})",
+            pose.x, pose.y
+        ))
+    })?;
+    let end = pushes.iter().fold(boulder, |(x, y), d| {
+        let (dx, dy) = d.delta();
+        (x + dx, y + dy)
+    });
     ctx.info(format!(
-        "{map}: the boulder at {boulder:?} pushed {} times onto the switch at {switch:?}",
+        "{map}: the boulder at {boulder:?} pushed {} times onto {end:?}",
         pushes.len()
     ));
     if let Err(e) = super::field::strength(ctx, map, boulder, &pushes) {
@@ -1834,6 +1923,10 @@ fn run_script(
     }
     match start.expect("checked above") {
         Start::Object { map, object } => {
+            // A boulder's fall through a hole: pushed in, nothing said.
+            if pokebot_world::boulders::hole_of(script).is_some() {
+                return push_into_hole(ctx, script, &map, object);
+            }
             if let Some(at) = super::lookup::object_tile(&ctx.world, &map, object) {
                 super::go::reach_facing(ctx, &map, at)?;
             }
