@@ -16,6 +16,36 @@ pub struct StateBelief<'a>(pub &'a GameState);
 pub struct Inferred {
     pub flags: std::collections::BTreeMap<String, bool>,
     pub floors: std::collections::BTreeMap<String, i64>,
+    /// Vars at a value the step being run assumes (`PlannedIntent::assumes`).
+    pub values: std::collections::BTreeMap<String, i64>,
+}
+
+impl Inferred {
+    /// These, with what a plan step assumes: its walk reads the belief as
+    /// the plan priced it (fleet continue-2/3/6, Cinnabar Island bound for
+    /// the Viridian Gym: its door's scene var unknown, assumed 0 so that
+    /// entering the city unlocks it with seven badges; the walk took the
+    /// var as unmet, had "no known route", and stalled at the shore).
+    pub fn with_assumed(&self, assumed: &[pokebot_planner::GoalPredicate]) -> Inferred {
+        use pokebot_world::predicate::CmpOp;
+        let mut out = self.clone();
+        for a in assumed {
+            match a {
+                pokebot_planner::GoalPredicate::World(Predicate::Flag { name, is }) => {
+                    out.flags.entry(name.clone()).or_insert(*is);
+                }
+                pokebot_planner::GoalPredicate::World(Predicate::Var {
+                    name,
+                    op: CmpOp::Eq,
+                    value,
+                }) => {
+                    out.values.entry(name.clone()).or_insert(*value);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
 }
 
 /// `base` with the gaps [`Inferred`] fills: the walk reads the belief as
@@ -42,6 +72,17 @@ impl BeliefView for InferredBelief<'_> {
                 .map_or(Truth::Unknown, |v| known(Some(v == is))),
             Predicate::Var { name, op, value } => {
                 use pokebot_world::predicate::CmpOp;
+                if let Some(v) = self.inferred.values.get(name) {
+                    let holds = match op {
+                        CmpOp::Eq => v == value,
+                        CmpOp::Ne => v != value,
+                        CmpOp::Lt => v < value,
+                        CmpOp::Le => v <= value,
+                        CmpOp::Gt => v > value,
+                        CmpOp::Ge => v >= value,
+                    };
+                    return known(Some(holds));
+                }
                 match (self.inferred.floors.get(name), op) {
                     (Some(floor), CmpOp::Ge) if floor >= value => Truth::True,
                     (Some(floor), CmpOp::Gt) if floor > value => Truth::True,

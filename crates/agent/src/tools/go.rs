@@ -569,18 +569,12 @@ pub fn ride_path(
 pub fn field_route(ctx: &mut ToolContext<'_>, dest: &Dest) -> Option<Vec<Leg>> {
     let pose = ctx.pose()?;
     let world = Arc::clone(&ctx.world);
+    let inferred = ctx.inferred.with_assumed(&ctx.scheduler.assumptions);
     let graph = ctx
         .scheduler
         .graph
         .get_or_insert_with(|| crate::scheduler::graph(&world));
-    plan_field_route_with(
-        &world,
-        graph,
-        ctx.runtime.state(),
-        &ctx.inferred,
-        &pose,
-        dest,
-    )
+    plan_field_route_with(&world, graph, ctx.runtime.state(), &inferred, &pose, dest)
 }
 
 /// [`field_route`] without a context.
@@ -2046,6 +2040,52 @@ mod tests {
             learned: &[],
         };
         assert!(matches!(step.next(&mut ctx), Decision::Done(_)));
+    }
+
+    /// Fleet continue-6, Cinnabar Island bound for the Viridian Gym: the
+    /// door's scene var unknown, the plan assumed it 0 (entering the city
+    /// with seven badges unlocks it). The walk read the var as unmet, had
+    /// no route that needed field moves, and stalled at the shore. With
+    /// the step's assumption the way is flown or surfed.
+    #[test]
+    fn the_walk_reads_what_the_step_assumes() {
+        let Some(world) = world() else { return };
+        let graph = crate::scheduler::graph(&world);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cont6_cinnabar_state.json");
+        let Ok(Some(c)) = crate::checkpoint::load(&path) else {
+            return;
+        };
+        use pokebot_state::StateReducer;
+        let state = pokebot_state::DefaultReducer.reduce(
+            &pokebot_state::GameState::default(),
+            &[pokebot_state::EventRecord {
+                frame_id: 0,
+                event: pokebot_state::GameEvent::CheckpointRestored {
+                    knowledge: Box::new(c.knowledge),
+                },
+            }],
+        );
+        let pose = PlayerPose {
+            map: "CinnabarIsland".into(),
+            x: 14,
+            y: 4,
+        };
+        let dest = Dest::Map {
+            map: "ViridianCity_Gym".into(),
+        };
+        assert!(plan_field_route(&world, &graph, &state, &pose, &dest).is_none());
+        let assumed = [pokebot_planner::GoalPredicate::World(
+            pokebot_world::predicate::Predicate::Var {
+                name: "VAR_MAP_SCENE_VIRIDIAN_CITY_GYM_DOOR".into(),
+                op: pokebot_world::predicate::CmpOp::Eq,
+                value: 0,
+            },
+        )];
+        let inferred = crate::belief_view::Inferred::default().with_assumed(&assumed);
+        let legs = plan_field_route_with(&world, &graph, &state, &inferred, &pose, &dest)
+            .expect("a way to the gym");
+        assert!(legs.iter().any(|l| l.to.map == "ViridianCity"), "{legs:?}");
     }
 
     /// Fleet continue-2, Celadon City bound for the Pokémon Mansion: the
