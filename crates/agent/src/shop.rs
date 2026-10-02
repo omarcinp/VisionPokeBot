@@ -755,9 +755,40 @@ pub fn nearest_clerk(
     }
     let map = nearest_reachable(world, pose, &goals, gone)
         .into_iter()
-        .next()?;
+        .next()
+        .or_else(|| nearest_by_maps(world, &pose.map, &clerks))?;
     let id = clerks[&map];
     Some((map, id))
+}
+
+/// Of `marts`, the one fewest maps away from `from` over warps and
+/// connections, when none is a walk away: the trip there takes field
+/// moves, which the walk to the mart's map plans (Switch, Seafoam Islands
+/// B3F: out of balls for a catch, "no mart selling ITEM_POKE_BALL found",
+/// every mart being a Surf or a Fly away).
+fn nearest_by_maps<T>(world: &World, from: &str, marts: &BTreeMap<String, T>) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::from([from.to_owned()]);
+    let mut queue = std::collections::VecDeque::from([from.to_owned()]);
+    while let Some(name) = queue.pop_front() {
+        if marts.contains_key(&name) {
+            return Some(name);
+        }
+        let Some(map) = world.map(&name) else {
+            continue;
+        };
+        let next: std::collections::BTreeSet<&str> = map
+            .warps
+            .iter()
+            .filter_map(|w| world.name_of(&w.dest_map))
+            .chain(map.connections.iter().filter_map(|c| world.name_of(&c.map)))
+            .collect();
+        for n in next {
+            if seen.insert(n.to_owned()) {
+                queue.push_back(n.to_owned());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -940,6 +971,26 @@ mod tests {
             x,
             y,
         }
+    }
+
+    #[test]
+    fn a_mart_a_surf_away_is_still_the_nearest() {
+        let (Ok(world), Some(data)) = (World::load(root().join("data/world")), data()) else {
+            return;
+        };
+        // Switch, Seafoam Islands B3F: no mart is a walk away.
+        let pose = PlayerPose {
+            map: "SeafoamIslands_B3F".into(),
+            x: 27,
+            y: 11,
+        };
+        let found = nearest_mart(&world, &data, &pose, "ITEM_POKE_BALL", &Gone::new());
+        assert!(
+            found
+                .as_ref()
+                .is_some_and(|(map, _)| map.ends_with("_Mart")),
+            "{found:?}"
+        );
     }
 
     #[test]
