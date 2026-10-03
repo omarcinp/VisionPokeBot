@@ -56,6 +56,9 @@ pub struct BattleStep {
     shift_row: Option<u8>,
     /// Action windows opened for the SHIFT (bounded: [`MAX_SHIFT_OPENS`]).
     shift_opens: u8,
+    /// The party screen was up on the last frame: a new one starts the
+    /// SHIFT's row and tries afresh.
+    in_party_menu: bool,
     /// Members the game refused to send out ("ZUBAT has no energy left to
     /// battle!"): never chosen again this battle.
     no_energy: BTreeSet<String>,
@@ -112,6 +115,7 @@ impl BattleStep {
             shifted: false,
             shift_row: None,
             shift_opens: 0,
+            in_party_menu: false,
             no_energy: BTreeSet::new(),
             fainted: None,
             last_hud: None,
@@ -523,6 +527,16 @@ impl BattleStep {
 impl ToolStep for BattleStep {
     fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
         let o = ctx.observation;
+        // Each send-out's party screen counts its own tries (fleet
+        // continue-6, LORELEI: the tries spent on an earlier send-out the
+        // same battle left none for the last one, PIDGEY's, which gave up
+        // at once and pressed B on a screen that can't be left).
+        let in_party_menu = o.party_menu.is_some();
+        if in_party_menu && !self.in_party_menu {
+            self.shift_row = None;
+            self.shift_opens = 0;
+        }
+        self.in_party_menu = in_party_menu;
         // The Pokémon out is the policy's lead: after a faint it is
         // another member (fleet worker 2: BUBBLE, the fainted SQUIRTLE's
         // move, chosen for RATTATA, whose menu has two moves).
@@ -2074,6 +2088,39 @@ mod tests {
             &mut events,
         ));
         assert!(label.contains("POKéMON"), "{label}");
+    }
+
+    /// Fleet continue-6, LORELEI: the tries spent on one send-out's party
+    /// screen left none for the next one's. A party screen that opens anew
+    /// counts its own.
+    #[test]
+    fn each_party_screen_counts_its_own_tries() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(5);
+        step.shift_opens = MAX_SHIFT_OPENS + 1;
+        step.shift_row = Some(3);
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: pokebot_state::ScreenState::PartyMenu,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.party_menu = Some(pokebot_state::PartyMenuObservation {
+            count: 6,
+            selected: Some(5),
+            ..Default::default()
+        });
+        let state = pokebot_state::GameState::default();
+        let mut events = Vec::new();
+        let _ = step_next(&mut step, &o, &state, &mut events);
+        assert!(step.shift_opens <= 1, "{}", step.shift_opens);
+        assert_ne!(step.shift_row, Some(3));
     }
 
     fn step_next(
