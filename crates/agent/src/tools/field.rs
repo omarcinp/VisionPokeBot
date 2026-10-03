@@ -1127,6 +1127,32 @@ fn boulder_walled(mut nav: NavParts, map: &str, tile: (i32, i32)) -> NavParts {
     nav
 }
 
+/// [`boulder_walled`], the boulder's map object set aside: it isn't on the
+/// tile it spawned on once pushed (fleet continue-1, Victory Road 3F: the
+/// walk to the next push needed the boulder's first tile, (32, 5), and
+/// failed "no path to (32, 5)", the object still held there).
+fn pushed_boulder_walled(
+    nav: NavParts,
+    map: &str,
+    spawn: (i32, i32),
+    tile: (i32, i32),
+) -> NavParts {
+    let mut nav = boulder_walled(nav, map, tile);
+    let id = nav.world.map(map).and_then(|m| {
+        m.objects
+            .iter()
+            .find(|o| {
+                pokebot_world::boulders::is_boulder(o)
+                    && (o.x, o.y) == (Some(spawn.0), Some(spawn.1))
+            })
+            .map(|o| o.local_id)
+    });
+    if let Some(id) = id {
+        nav.gone.insert((map.to_owned(), id));
+    }
+    nav
+}
+
 /// Pushes that take one of `boulders` onto `target` on `map` from the
 /// player at `player`: the boulder, and its pushes in order
 /// ([`pokebot_world::boulders::pushes`]).
@@ -1162,7 +1188,7 @@ pub fn strength(
         // on, a step into it pushes it (Switch, Victory Road 1F: the walk
         // round to the next push went through the boulder's tile, pushed
         // it off the planned line, and the pushes after met nothing).
-        let nav = boulder_walled(NavParts::of(ctx), map, boulder);
+        let nav = pushed_boulder_walled(NavParts::of(ctx), map, (x, y), boulder);
         let mut walk = GoStep::with(
             &nav,
             Destination::Tile {
@@ -2118,6 +2144,34 @@ mod tests {
             .path((10, 18))
             .expect("a way round");
         assert!(path.iter().all(|s| s.to != (11, 18)), "{path:?}");
+    }
+
+    /// Fleet continue-1, Victory Road 3F: once pushed off (32, 5), the
+    /// boulder's map object no longer stands there; the walk to the next
+    /// push may cross its first tile, and goes round where it is now.
+    #[test]
+    fn a_pushed_boulders_first_tile_is_free() {
+        let Some(world) = world() else { return };
+        let nav = NavParts {
+            story: None,
+            world: std::sync::Arc::clone(&world),
+            gone: Default::default(),
+            maybe_gone: Default::default(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+            data: None,
+        };
+        let map = world.map("VictoryRoad_3F").unwrap();
+        let held = crate::nav::object_obstacles(map, &nav.gone);
+        assert!(held.contains(&(32, 5)), "the object holds its spawn");
+        let walled = pushed_boulder_walled(nav, "VictoryRoad_3F", (32, 5), (31, 5));
+        let free = crate::nav::object_obstacles(map, &walled.gone);
+        assert!(!free.contains(&(32, 5)));
+        assert!(walled
+            .gates
+            .closed_on("VictoryRoad_3F")
+            .any(|t| t == (31, 5)));
     }
 
     /// Switch, Victory Road 1F: a wild battle cut a push short and the
