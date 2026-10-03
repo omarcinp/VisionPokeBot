@@ -340,6 +340,21 @@ impl BattleStep {
             }
         }
         let slot = self.shift_row.or(by_name).unwrap_or(slot);
+        // A target that fainted can't come out: the first able row does
+        // (fleet continue-6, LORELEI: five fainted, PIDGEY left, the shift
+        // aimed at a fainted member, gave up, and pressed B on a send-out
+        // that can't be left, 40 times).
+        let fainted = |r: &pokebot_state::PartyRowObservation| {
+            r.status == Some(pokebot_state::Status::Fainted) || r.hp.is_some_and(|(hp, _)| hp == 0)
+        };
+        let slot = match party.members.get(slot as usize) {
+            Some(r) if fainted(r) && !party.actions => party
+                .members
+                .iter()
+                .position(|r| r.nickname.is_some() && !fainted(r))
+                .map_or(slot, |row| row as u8),
+            _ => slot,
+        };
         let press = |label: String, button: Button, expect: Expectation| {
             Decision::Act(Action::new(
                 label,
@@ -1141,6 +1156,46 @@ mod tests {
         match step.shift_in_party_menu(&menu, 4, Some("DUGTRIO")) {
             Decision::Act(a) => assert_eq!(a.label, "shift: Down toward slot 4"),
             _ => panic!("expected a move toward the able DUGTRIO"),
+        }
+    }
+
+    /// Fleet continue-6, LORELEI: five members fainted, PIDGEY left in the
+    /// last row; the send-out aimed at a fainted member. The able one is
+    /// chosen instead: the ▶ already on it, its actions are opened.
+    #[test]
+    fn a_fainted_target_gives_way_to_the_one_able() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let row = |name: &str, hp: u16| pokebot_state::PartyRowObservation {
+            nickname: Some(name.into()),
+            level: None,
+            hp: Some((hp, 60)),
+            status: Some(if hp == 0 {
+                pokebot_state::Status::Fainted
+            } else {
+                pokebot_state::Status::Healthy
+            }),
+        };
+        let menu = pokebot_state::PartyMenuObservation {
+            count: 6,
+            selected: Some(5),
+            members: vec![
+                row("DUGTRIO", 0),
+                row("DUGTRIO", 0),
+                row("RATTATA", 0),
+                row("BLASTOISE", 0),
+                row("SPEAROW", 0),
+                row("PIDGEY", 60),
+            ],
+            ..Default::default()
+        };
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(3);
+        match step.shift_in_party_menu(&menu, 3, Some("BLASTOISE")) {
+            Decision::Act(a) => assert_eq!(a.label, "shift: open the member's actions"),
+            _ => panic!("expected the able member chosen"),
         }
     }
 
