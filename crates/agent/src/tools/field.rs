@@ -854,6 +854,16 @@ struct Push {
     tries: u32,
     /// The tap was sent: the boulder is judged once the screen settles.
     tapped: bool,
+    /// Battles begun by the time of the tap.
+    battles: usize,
+}
+
+/// The battles in `learned`: one begun after a tap ate it.
+fn battles_in(learned: &[GameEvent]) -> usize {
+    learned
+        .iter()
+        .filter(|e| matches!(e, GameEvent::BattleStarted))
+        .count()
 }
 
 /// Whether the screen shows the boulder pushed from `old` one tile `dir`:
@@ -943,6 +953,12 @@ impl ToolStep for Push {
                 return Decision::Wait("the boulder moving".into());
             }
             self.tapped = false;
+            // A wild battle after the tap: the tap is lost to it, tried again
+            // without counting (fleet continue-1, Victory Road 1F: battles
+            // between taps spent the tries, the boulder never pushed).
+            if battles_in(ctx.learned) > self.battles {
+                return Decision::Wait("a battle came between: pushing again".into());
+            }
             // A push never moves the player: a step is a walk, not a push.
             let walked = ctx
                 .observation
@@ -988,8 +1004,9 @@ impl ToolStep for Push {
         )
     }
 
-    fn on_outcome(&mut self, _: &Action, _: Outcome, _: &mut StepContext<'_>) {
+    fn on_outcome(&mut self, _: &Action, _: Outcome, ctx: &mut StepContext<'_>) {
         self.tapped = true;
+        self.battles = battles_in(ctx.learned);
     }
 }
 
@@ -1155,6 +1172,7 @@ pub fn strength(
             done: false,
             tries: 0,
             tapped: false,
+            battles: 0,
         };
         ctx.drive(&mut push)?;
         // The boulder's old tile is free, its new one blocks.
@@ -1855,6 +1873,7 @@ mod tests {
             done: false,
             tries: 0,
             tapped: false,
+            battles: 0,
         };
         let state = GameState::default();
         let mut events = Vec::new();
@@ -1916,6 +1935,56 @@ mod tests {
         });
         assert!(pushed(&world, &o, Some(&frame), (6, 17), Direction::Down));
         assert!(!pushed(&world, &o, Some(&frame), (6, 18), Direction::Down));
+    }
+
+    /// Fleet continue-1, Victory Road 1F: wild battles came between the
+    /// taps and the judging, each counted as a push that failed, and the
+    /// boulder was never pushed. A tap a battle came after is sent again,
+    /// not counted.
+    #[test]
+    fn a_tap_lost_to_a_battle_is_not_a_try() {
+        let Some(world) = world() else { return };
+        let mut push = Push {
+            dir: Direction::Down,
+            from: pokebot_state::PlayerPose {
+                map: "VictoryRoad_1F".into(),
+                x: 7,
+                y: 17,
+            },
+            boulder: (7, 18),
+            world,
+            done: false,
+            tries: 0,
+            tapped: false,
+            battles: 0,
+        };
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let o = bare(1);
+        let a = match push.next(&mut step_ctx(&o, &state, &mut events, 60)) {
+            Decision::Act(a) => a,
+            _ => panic!("expected the tap"),
+        };
+        push.on_outcome(
+            &a,
+            Outcome::Confirmed,
+            &mut step_ctx(&o, &state, &mut events, 60),
+        );
+        let learned = [GameEvent::BattleStarted];
+        let mut ctx = StepContext {
+            observation: &o,
+            state: &state,
+            events: &mut events,
+            quiet_frames: 60,
+            frame: None,
+            learned: &learned,
+        };
+        assert!(matches!(push.next(&mut ctx), Decision::Wait(_)));
+        assert_eq!(push.tries, 0);
+        assert!(
+            matches!(push.next(&mut ctx), Decision::Act(_)),
+            "tapped again"
+        );
     }
 
     /// Switch, Victory Road 1F, after the first push down: the player at
