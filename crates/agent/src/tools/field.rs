@@ -856,7 +856,13 @@ struct Push {
     tapped: bool,
     /// Battles begun by the time of the tap.
     battles: usize,
+    /// The frame of the tap.
+    tapped_at: u64,
 }
+
+/// Frames a pushed boulder takes to stop: it slides at half walking speed
+/// (WALK_SLOWER, 32 frames), and the dust after it.
+const PUSH_SLIDE_FRAMES: u64 = 60;
 
 /// The battles in `learned`: one begun after a tap ate it.
 fn battles_in(learned: &[GameEvent]) -> usize {
@@ -947,18 +953,22 @@ impl ToolStep for Push {
             return Decision::Done("pushed".into());
         }
         if self.tapped {
-            // The boulder slides for a while after the tap: judged once
-            // the screen is still.
-            if ctx.quiet_frames < 20 {
-                return Decision::Wait("the boulder moving".into());
-            }
-            self.tapped = false;
             // A wild battle after the tap: the tap is lost to it, tried again
             // without counting (fleet continue-1, Victory Road 1F: battles
             // between taps spent the tries, the boulder never pushed).
             if battles_in(ctx.learned) > self.battles {
+                self.tapped = false;
                 return Decision::Wait("a battle came between: pushing again".into());
             }
+            // The boulder slides for a while after the tap: judged once it
+            // has stopped (fleet continue-1, Victory Road 1F: judged mid
+            // slide, the boulder half on the tile it left, every push Right
+            // "did not move").
+            let since = ctx.observation.frame_id.saturating_sub(self.tapped_at);
+            if ctx.quiet_frames < 20 || since < PUSH_SLIDE_FRAMES {
+                return Decision::Wait("the boulder moving".into());
+            }
+            self.tapped = false;
             // A push never moves the player: a step is a walk, not a push.
             let walked = ctx
                 .observation
@@ -1007,6 +1017,7 @@ impl ToolStep for Push {
     fn on_outcome(&mut self, _: &Action, _: Outcome, ctx: &mut StepContext<'_>) {
         self.tapped = true;
         self.battles = battles_in(ctx.learned);
+        self.tapped_at = ctx.observation.frame_id;
     }
 }
 
@@ -1173,6 +1184,7 @@ pub fn strength(
             tries: 0,
             tapped: false,
             battles: 0,
+            tapped_at: 0,
         };
         ctx.drive(&mut push)?;
         // The boulder's old tile is free, its new one blocks.
@@ -1874,6 +1886,7 @@ mod tests {
             tries: 0,
             tapped: false,
             battles: 0,
+            tapped_at: 0,
         };
         let state = GameState::default();
         let mut events = Vec::new();
@@ -1957,6 +1970,7 @@ mod tests {
             tries: 0,
             tapped: false,
             battles: 0,
+            tapped_at: 0,
         };
         let state = GameState::default();
         let mut events = Vec::new();
@@ -1985,6 +1999,52 @@ mod tests {
             matches!(push.next(&mut ctx), Decision::Act(_)),
             "tapped again"
         );
+    }
+
+    /// Fleet continue-1, Victory Road 1F: a push Right judged mid-slide,
+    /// the boulder still half over the tile it left. The judging waits for
+    /// the slide to end.
+    #[test]
+    fn a_push_is_judged_once_the_boulder_stops() {
+        let Some(world) = world() else { return };
+        let mut push = Push {
+            dir: Direction::Right,
+            from: pokebot_state::PlayerPose {
+                map: "VictoryRoad_1F".into(),
+                x: 6,
+                y: 19,
+            },
+            boulder: (7, 19),
+            world,
+            done: false,
+            tries: 0,
+            tapped: false,
+            battles: 0,
+            tapped_at: 0,
+        };
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let o = bare(100);
+        let a = match push.next(&mut step_ctx(&o, &state, &mut events, 60)) {
+            Decision::Act(a) => a,
+            _ => panic!("expected the tap"),
+        };
+        push.on_outcome(
+            &a,
+            Outcome::Confirmed,
+            &mut step_ctx(&o, &state, &mut events, 60),
+        );
+        let o = bare(130);
+        assert!(matches!(
+            push.next(&mut step_ctx(&o, &state, &mut events, 60)),
+            Decision::Wait(_)
+        ));
+        // Stopped, nothing to judge by: the tap counts.
+        let o = bare(170);
+        assert!(matches!(
+            push.next(&mut step_ctx(&o, &state, &mut events, 60)),
+            Decision::Done(_)
+        ));
     }
 
     /// Switch, Victory Road 1F, after the first push down: the player at
