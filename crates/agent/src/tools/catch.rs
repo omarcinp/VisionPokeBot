@@ -262,6 +262,17 @@ impl ToolStep for HuntStep {
                 // 5: SQUIRTLE at 12/23 ran from eight Route 22 battles in a
                 // row, twice, and the plan gave up).
                 let lead_hp = self.fighter(&party).and_then(|l| l.hp);
+                // Or with no attack left to use: a Pokémon Center restores
+                // the PP (fleet continue-4, Route 21: HYPNO's PSYCHIC at
+                // 0/10, "no attacking move", eight battles run from, and
+                // the training planned again and again).
+                if fled
+                    && self
+                        .fighter(&party)
+                        .is_some_and(|f| no_attack_left(&self.data, f))
+                {
+                    return Decision::Fail(format!("{HEAL_FIRST}: no attacking move with PP left"));
+                }
                 if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp) {
                     let (hp, max) = lead_hp.unwrap_or_default();
                     return Decision::Fail(format!(
@@ -551,6 +562,24 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
         .collect();
     let goals = std::collections::BTreeMap::from([(pose.map.clone(), tiles)]);
     !nearest_reachable(&nav.world, pose, &goals, &nav.gone).is_empty()
+}
+
+/// Whether `member` has no attack the battle would choose (none with PP
+/// left, or only moves that fail as a rule): the battle's own reason to
+/// run, "no attacking move".
+fn no_attack_left(data: &pokebot_gamedata::GameData, member: &crate::party::Member) -> bool {
+    let alone = Party {
+        members: vec![member.clone()],
+    };
+    !member.moves.is_empty()
+        && crate::battle::choose_move(
+            data,
+            &alone,
+            None,
+            &crate::battle::BattleMemory::default(),
+            &crate::battle::BattlePolicy::default(),
+        )
+        .is_none()
 }
 
 /// Whether a battle the hunt ran from calls for a heal: one it is for (any
@@ -1152,5 +1181,32 @@ mod tests {
         // Route 2 has grass south of Viridian Forest's gate.
         assert!(encounter_tiles_reachable(&nav, &at("Route2", 8, 60)));
         assert!(encounter_tiles_reachable(&nav, &at("Route1", 8, 20)));
+    }
+
+    /// Fleet continue-4, Route 21: HYPNO with PSYCHIC 0/10 and CONFUSION
+    /// 0/25 (FLASH, FUTURE SIGHT left) ran from eight battles for want of
+    /// an attack, and the training was planned again and again. No attack
+    /// left is a reason to heal; one with PP isn't.
+    #[test]
+    fn a_trainee_without_attacks_left_heals() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let mut hypno = crate::party::Member::new(&data, "SPECIES_HYPNO", 62);
+        hypno.moves = [
+            "MOVE_FLASH",
+            "MOVE_PSYCHIC",
+            "MOVE_FUTURE_SIGHT",
+            "MOVE_CONFUSION",
+        ]
+        .map(String::from)
+        .to_vec();
+        hypno.pp_used.insert("MOVE_PSYCHIC".into(), 10);
+        hypno.pp_used.insert("MOVE_CONFUSION".into(), 25);
+        assert!(no_attack_left(&data, &hypno));
+        hypno.pp_used.insert("MOVE_PSYCHIC".into(), 9);
+        assert!(!no_attack_left(&data, &hypno));
     }
 }
