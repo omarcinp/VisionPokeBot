@@ -388,6 +388,27 @@ fn trainer_heal(items: &mut [Option<&str>], left: usize, max_hp: u32) -> Option<
 /// lost only when all have fainted (the user's rule: one Pokémon fainting
 /// is not the end). So a team is worth its coverage: a VENUSAUR whose
 /// GRASS moves ERIKA's team resists needs a member that hits it.
+/// PP our member spends winning `m`: a use of its move each turn. A move
+/// spent out is no longer chosen against the trainer's next ones (fleet
+/// continue-4, Route 22's rival: HYPNO's PSYCHIC, 10 PP, beat five of six
+/// at 100% each in the estimate; in the battle the PP ran out before
+/// ALAKAZAM, HYPNO used FLASH and fainted, and the party whited out).
+fn spend_pp(
+    data: &GameData,
+    pp: &mut std::collections::HashMap<String, u32>,
+    us: &mut Combatant,
+    m: &Matchup,
+) {
+    let Some(mv) = &m.our_move else { return };
+    let left = pp
+        .entry(mv.clone())
+        .or_insert_with(|| data.move_(mv).map_or(0, |x| u32::from(x.pp)));
+    *left = left.saturating_sub(m.turns.ceil().max(1.0) as u32);
+    if *left == 0 {
+        us.moves.retain(|x| x != mv);
+    }
+}
+
 pub fn team_vs_trainer(
     data: &GameData,
     party: &[Combatant],
@@ -397,6 +418,7 @@ pub fn team_vs_trainer(
     // The trainer's healing items, each used once (`ShouldUseItem`).
     let mut items: Vec<Option<&str>> = t.items.iter().map(|i| Some(i.as_str())).collect();
     let mut ours: Vec<Combatant> = party.to_vec();
+    let mut pp = vec![std::collections::HashMap::new(); ours.len()];
     let mut p_total = 1.0;
     let mut lead = None;
     let mut opponents = Vec::new();
@@ -436,6 +458,7 @@ pub fn team_vs_trainer(
             p_lose_all *= 1.0 - m.p_win;
             if m.p_win >= 0.5 {
                 ours[i].hp = m.our_hp_after;
+                spend_pp(data, &mut pp[i], &mut ours[i], &m);
                 break;
             }
             // Expected path: our member faints; the opponent is worn down.
@@ -487,6 +510,7 @@ pub fn battle_vs_trainer(
     // The trainer's healing items, each used once (`ShouldUseItem`).
     let mut items: Vec<Option<&str>> = t.items.iter().map(|i| Some(i.as_str())).collect();
     let mut ours: Vec<Combatant> = party.to_vec();
+    let mut pp = vec![std::collections::HashMap::new(); ours.len()];
     let mut active = 0;
     let mut p_total = 1.0;
     let mut opponents = Vec::new();
@@ -517,6 +541,7 @@ pub fn battle_vs_trainer(
             p_lose_all *= 1.0 - m.p_win;
             if m.p_win >= 0.5 {
                 ours[active].hp = m.our_hp_after;
+                spend_pp(data, &mut pp[active], &mut ours[active], &m);
                 break;
             }
             // Expected path: our member faints; the opponent is worn down.
@@ -545,6 +570,48 @@ pub fn battle_vs_trainer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet continue-4, Route 22's rival: a Lv70 HYPNO whose one strong
+    /// attack, PSYCHIC, has 10 PP, and a weak rest. Counted turn by turn it
+    /// runs out before the sixth; the estimate was 94% and the party
+    /// whited out twice.
+    #[test]
+    fn a_team_estimate_spends_pp() {
+        let Ok(data) = GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let mon = |species: &str, level: u8, moves: &[&str]| {
+            Combatant::new(
+                &data,
+                species,
+                level,
+                moves.iter().map(|m| m.to_string()).collect(),
+                15,
+            )
+            .unwrap()
+        };
+        let party = [
+            mon(
+                "SPECIES_HYPNO",
+                70,
+                &[
+                    "MOVE_FLASH",
+                    "MOVE_PSYCHIC",
+                    "MOVE_FUTURE_SIGHT",
+                    "MOVE_CONFUSION",
+                ],
+            ),
+            mon("SPECIES_RATTATA", 8, &["MOVE_TACKLE", "MOVE_QUICK_ATTACK"]),
+            mon("SPECIES_SPEAROW", 13, &["MOVE_PECK", "MOVE_FLY"]),
+            mon("SPECIES_LAPRAS", 25, &["MOVE_SURF", "MOVE_BODY_SLAM"]),
+            mon("SPECIES_GOLDUCK", 34, &["MOVE_DISABLE", "MOVE_CONFUSION"]),
+        ];
+        let rival = "TRAINER_RIVAL_ROUTE22_LATE_CHARMANDER";
+        let estimate = team_vs_trainer(&data, &party, rival).unwrap();
+        assert!(estimate.p_win < 0.5, "{:.2}", estimate.p_win);
+    }
 
     /// Fleet continue-1: HAUNTER (LICK, DREAM EATER, CURSE, NIGHT SHADE)
     /// against Route 18's DODUO: its GHOST moves don't touch a NORMAL
