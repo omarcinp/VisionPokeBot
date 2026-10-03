@@ -266,11 +266,12 @@ impl ToolStep for HuntStep {
                 // the PP (fleet continue-4, Route 21: HYPNO's PSYCHIC at
                 // 0/10, "no attacking move", eight battles run from, and
                 // the training planned again and again).
-                if fled
-                    && self
-                        .fighter(&party)
-                        .is_some_and(|f| no_attack_left(&self.data, f))
-                {
+                // The lead's too: the battle runs for the one out, whoever
+                // the hunt counts on for the fight.
+                let spent = |m: Option<&crate::party::Member>| {
+                    m.is_some_and(|f| no_attack_left(&self.data, f))
+                };
+                if fled && (spent(self.fighter(&party)) || spent(party.lead())) {
                     return Decision::Fail(format!("{HEAL_FIRST}: no attacking move with PP left"));
                 }
                 if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp) {
