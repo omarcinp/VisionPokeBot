@@ -1984,3 +1984,32 @@ fn victory_road_drops_the_boulder_before_the_switch_below() {
     let switch = at("VictoryRoad_2F_EventScript_FloorSwitch2").expect("the switch below");
     assert!(hole < switch);
 }
+
+/// Fleet continue-6 in LORELEI's room: the Elite Four's rooms lock behind
+/// the player, so no healer can be reached and "Healed" has no plan; the
+/// run gave up there. The goal itself still plans from the room (the goal
+/// session plans it as the party stands when healing has no plan).
+#[test]
+fn inside_the_elite_four_healing_has_no_plan_but_the_goal_does() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 120.0,
+        ..PlanOptions::default()
+    });
+    let (knowledge, _) = checkpoint("cont6_loreleis_room_state.json");
+    let pose = Some(PlayerPose {
+        map: "PokemonLeague_LoreleisRoom".into(),
+        x: 6,
+        y: 7,
+    });
+    let healed = GoalPredicate::Healed { healed: true };
+    assert!(planner.plan(&healed, &knowledge, pose.clone()).is_err());
+    let plan = planner
+        .plan(
+            &parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .unwrap();
+    assert!(!plan.intents.is_empty());
+}

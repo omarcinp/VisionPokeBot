@@ -2056,7 +2056,18 @@ fn run_script(
                 "Dialogue",
                 format!("healing before {trainer}: {why}"),
             ))?;
-            ctx.invoke(&Intent::Heal { center: None }).result?;
+            match ctx.invoke(&Intent::Heal { center: None }).result {
+                // No healer to reach (fleet continue-6, the Elite Four:
+                // the rooms lock behind the player, "no known safe route
+                // to a healer", and the run gave up before LORELEI): the
+                // battle is fought as the party stands.
+                Err(ToolError::Failed(e)) if e.contains("no known safe route to a healer") => {
+                    ctx.info(format!(
+                        "{trainer}: no healer to reach ({e}); fighting as we are"
+                    ));
+                }
+                r => r?,
+            }
         }
     }
     let pose = ctx.pose();

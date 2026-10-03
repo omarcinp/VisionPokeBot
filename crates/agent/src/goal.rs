@@ -298,7 +298,19 @@ impl Run<'_, '_> {
             // Set when the plan is for a stepping stone, not the goal.
             let mut stone = None;
             self.set_status("planning", plan_reason.clone(), 0, None, ctx);
-            let plan = match self.planner.plan(goal, &knowledge, pose.clone()) {
+            // No way to heal (fleet continue-6, the Elite Four: the rooms
+            // lock behind, "no plan establishes Healed", and the run gave up
+            // in LORELEI's room): the goal is planned as the party stands.
+            let mut healing = urgent;
+            let planned = match self.planner.plan(goal, &knowledge, pose.clone()) {
+                Err(e) if urgent => {
+                    plan_reason = format!("{reason}; no way to heal ({e})");
+                    healing = false;
+                    self.planner.plan(self.goal, &knowledge, pose.clone())
+                }
+                r => r,
+            };
+            let plan = match planned {
                 Ok(plan) => plan,
                 Err(e) => {
                     let stepping = (!urgent && matches!(e, PlanError::Budget { .. }))
@@ -366,7 +378,7 @@ impl Run<'_, '_> {
                         plan_no = 0;
                         continue;
                     }
-                    if urgent {
+                    if healing {
                         if urgent_health(&knowledge) {
                             self.report.outcome =
                                 "healed, but party health is still unsafe or unreadable".into();
