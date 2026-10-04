@@ -7,6 +7,7 @@
 
 pub mod belief_adapter;
 pub mod evaluate;
+pub mod gauntlet;
 pub mod goals;
 pub mod intents;
 pub mod levels;

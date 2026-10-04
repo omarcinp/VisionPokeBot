@@ -2013,3 +2013,50 @@ fn inside_the_elite_four_healing_has_no_plan_but_the_goal_does() {
         .unwrap();
     assert!(!plan.intents.is_empty());
 }
+
+/// Fleet continue-6 went into the Elite Four ready for LORELEI alone (98%)
+/// with LANCE and the Champion at 0%, saved in her room, and lost there
+/// on every reload. A white-out undoes the Elite Four's wins and its rooms
+/// lock behind the player: being ready for one of its battles is being
+/// ready for every one still ahead in it, and its rooms are no place to
+/// save.
+#[test]
+fn the_elite_four_is_judged_whole_before_its_first_room() {
+    use pokebot_planner::{GoalBelief, StateBelief};
+    use pokebot_world::predicate::Truth;
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let g = &planner.gauntlet;
+    assert_eq!(g.stages.len(), 5, "{:?}", g.stages);
+    let (knowledge, _) = checkpoint("cont6_loreleis_room_state.json");
+    let at = |map: &str| {
+        Some(PlayerPose {
+            map: map.into(),
+            x: 6,
+            y: 7,
+        })
+    };
+    let mut belief = StateBelief::new(&knowledge, &f.data, at("IndigoPlateau_PokemonCenter_1F"));
+    let lorelei = GoalPredicate::can_beat("TRAINER_ELITE_FOUR_LORELEI");
+    assert_eq!(belief.eval_goal(&lorelei), Truth::True, "alone");
+    belief.gauntlet = Some(g);
+    let all = g.with("TRAINER_ELITE_FOUR_LORELEI", &belief);
+    assert_eq!(all[0], "TRAINER_ELITE_FOUR_LORELEI");
+    assert!(
+        all.iter().any(|t| t == "TRAINER_ELITE_FOUR_LANCE"),
+        "{all:?}"
+    );
+    assert!(
+        all.iter().any(|t| t.starts_with("TRAINER_CHAMPION_FIRST")),
+        "{all:?}"
+    );
+    assert!(
+        !all.iter()
+            .any(|t| t.contains("REMATCH") || t.ends_with("_2")),
+        "{all:?}"
+    );
+    assert_eq!(belief.eval_goal(&lorelei), Truth::False, "with LANCE ahead");
+    assert!(!g.in_progress(&belief));
+    belief.pose = at("PokemonLeague_LoreleisRoom");
+    assert!(g.in_progress(&belief));
+}

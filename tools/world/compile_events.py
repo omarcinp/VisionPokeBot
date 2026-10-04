@@ -62,6 +62,9 @@ WATER_BEHAVIORS = set(range(0x10, 0x16)) | set(range(0x19, 0x1C))
 
 # Run by new_game.c when a game starts: the flags set at the start.
 NEW_GAME_SCRIPT = "EventScript_ResetAllMapFlags"
+# The C function a white-out runs: the script it runs is what a white-out
+# undoes (the Elite Four's wins, so a loss there starts it over).
+WHITE_OUT_FUNCTION = ("src/overworld.c", "DoWhiteOut")
 
 MAP_SCRIPT_KINDS = {
     "MAP_SCRIPT_ON_LOAD": "on_load",
@@ -1160,9 +1163,33 @@ def compile_events(world):
         "rom": ROM, "sha1": world.sha1,
         "scripts": scripts, "map_scripts": map_scripts, "triggers": triggers, "objects": objects,
         "initial": {"set": initial_set},
+        "whiteout": compile_white_out(compiler, world.pret),
     }
     typing = {"typed": compiler.typed_sites, "untyped_specials": compiler.untyped_specials}
     return events, compiler.unmodelled, typing
+
+
+def white_out_script(pret):
+    """The script `DoWhiteOut` runs (`RunScriptImmediately`)."""
+    path, function = WHITE_OUT_FUNCTION
+    text = (Path(pret) / path).read_text()
+    body = re.search(r"\b" + function + r"\(void\)\s*\{(.*?)\n\}", text, re.S)
+    if body is None:
+        raise SystemExit(f"{function} not found in {path}")
+    run = re.search(r"RunScriptImmediately\((\w+)\)", body.group(1))
+    if run is None:
+        raise SystemExit(f"{function} runs no script")
+    return run.group(1)
+
+
+def compile_white_out(compiler, pret):
+    """What a white-out does to flags and vars: the effects of the one
+    unconditional path through the script `DoWhiteOut` runs."""
+    label = white_out_script(pret)
+    paths = compiler.compile(label)["paths"]
+    if len(paths) != 1 or paths[0]["when"]:
+        raise SystemExit(f"{label}: expected one unconditional path")
+    return {"script": label, "does": paths[0]["does"]}
 
 
 def compile_dialogue(world):

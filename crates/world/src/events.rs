@@ -360,6 +360,26 @@ pub struct Initial {
     pub set: Vec<String>,
 }
 
+/// What a white-out undoes (`DoWhiteOut` in `src/overworld.c` runs
+/// `EventScript_ResetEliteFourEnd`): the Elite Four's wins, so a loss
+/// anywhere in it starts it over.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WhiteOut {
+    pub script: String,
+    #[serde(default)]
+    pub does: Vec<Effect>,
+}
+
+impl WhiteOut {
+    /// The flags a white-out clears.
+    pub fn cleared_flags(&self) -> impl Iterator<Item = &str> {
+        self.does.iter().filter_map(|e| match e {
+            Effect::Clear { clear } => Some(clear.as_str()),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Events {
     pub rom: String,
@@ -371,6 +391,8 @@ pub struct Events {
     pub objects: Vec<ObjectRef>,
     #[serde(default)]
     pub initial: Initial,
+    #[serde(default)]
+    pub whiteout: WhiteOut,
 }
 
 impl Events {

@@ -61,6 +61,8 @@ use pokebot_world::gates::{is_local_flag, is_local_var};
 use pokebot_world::obstacles::{blockers, sight_line, static_obstacles, Passage};
 use pokebot_world::path::{find_path_with, reach, Obstacles, Reach, Walk};
 use pokebot_world::predicate::{BeliefView, CmpOp, Predicate, Truth};
+
+use crate::gauntlet::Gauntlet;
 use pokebot_world::route::{
     open_costs_to_maps, open_route_to_any_map, open_route_to_tiles, EdgeKind, PlaceGraph,
     RouteParams, RouteResult, UnknownPolicy,
@@ -518,6 +520,8 @@ pub struct Planner<'a> {
     achievers: Vec<Achiever>,
     /// Map → encounter tiles to route to (two per cluster, largest first).
     grass: BTreeMap<String, Vec<(i32, i32)>>,
+    /// The battles a white-out undoes together (the Elite Four).
+    pub gauntlet: Gauntlet,
 }
 
 impl<'a> Planner<'a> {
@@ -834,6 +838,10 @@ impl<'a> Planner<'a> {
             switch_reveals: Default::default(),
             achievers: Vec::new(),
             grass,
+            gauntlet: world
+                .events()
+                .map(Gauntlet::from_events)
+                .unwrap_or_default(),
         };
         planner.achievers = planner.build_achievers();
         planner
@@ -928,6 +936,7 @@ impl<'a> Planner<'a> {
         let mut base = StateBelief::new(knowledge, self.data, pose.cloned());
         base.floors = self.var_floors(knowledge);
         base.confidence = self.options.confidence;
+        base.gauntlet = Some(&self.gauntlet);
         let mut session = Session {
             planner: self,
             base,
@@ -5974,7 +5983,9 @@ impl<'p, 'a> Session<'p, 'a> {
         let areas = self.training_areas(belief, &party);
         let request = Request {
             party,
-            targets: vec![trainer.to_string()],
+            // In a gauntlet, its battles still ahead: the rooms lock
+            // behind, so the party is made ready for all before the first.
+            targets: self.planner.gauntlet.with(trainer, belief),
             areas,
             confidence: self.planner.options.confidence,
             // What a catch may spend on the balls it throws, by the tools'

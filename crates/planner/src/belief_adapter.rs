@@ -17,6 +17,7 @@ use pokebot_world::predicate::{BeliefView, Predicate, Truth};
 use serde::Deserialize;
 
 use crate::evaluate::{team_vs_trainer, Combatant};
+use crate::gauntlet::Gauntlet;
 use crate::intents::{pocket_of, GoalBelief, GoalPredicate};
 use crate::prepare::{PartyMember, OUR_IV};
 
@@ -70,6 +71,8 @@ pub struct StateBelief<'a> {
     /// Lower bounds on vars whose value is unknown (story vars only move
     /// on: the flag a scene set shows the var it set is at least that).
     pub floors: BTreeMap<String, i64>,
+    /// Battles won in one go: `CanBeat` one of them is beating them all.
+    pub gauntlet: Option<&'a Gauntlet>,
 }
 
 impl<'a> StateBelief<'a> {
@@ -85,6 +88,7 @@ impl<'a> StateBelief<'a> {
             established: BTreeSet::new(),
             confidence: 0.9,
             floors: BTreeMap::new(),
+            gauntlet: None,
         }
     }
 
@@ -96,6 +100,7 @@ impl<'a> StateBelief<'a> {
             established,
             confidence: self.confidence,
             floors: self.floors.clone(),
+            gauntlet: self.gauntlet,
         }
     }
 
@@ -432,7 +437,21 @@ impl GoalBelief for StateBelief<'_> {
                 if !self.data.trainers.contains_key(can_beat) {
                     return Truth::Unknown;
                 }
-                known(self.p_win(can_beat).map(|p| p >= self.confidence))
+                // In a gauntlet, every battle still ahead in it (no heal
+                // between them; a loss starts it over).
+                let all = match self.gauntlet {
+                    Some(g) => g.with(can_beat, self),
+                    None => vec![can_beat.clone()],
+                };
+                let mut ready = Some(true);
+                for t in &all {
+                    match self.p_win(t) {
+                        Some(p) if p < self.confidence => return Truth::False,
+                        Some(_) => {}
+                        None => ready = None,
+                    }
+                }
+                known(ready)
             }
             GoalPredicate::Money { money } => {
                 known(self.knowledge.money.value.map(|have| have >= *money))
