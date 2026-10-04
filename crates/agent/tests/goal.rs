@@ -24,6 +24,7 @@ use pokebot_core::{
     CapturedFrame, Controller, ControllerCommand, ControllerReceipt, RgbImage, VideoSource,
 };
 use pokebot_gamedata::GameData;
+use pokebot_planner::gauntlet::Gauntlet;
 use pokebot_planner::{
     GoalPredicate, Intent as Planned, Plan, PlanError, PlanOptions, PlannedIntent, Planner,
     ProbeFact as PlannedFact,
@@ -291,6 +292,7 @@ impl Tool for FakeTools {
 struct FakePlanner {
     plans: Vec<Plan>,
     alternative: Option<Plan>,
+    gauntlet: Option<Gauntlet>,
     calls: Mutex<usize>,
     infeasible_seen: Mutex<Vec<BTreeSet<String>>>,
 }
@@ -300,6 +302,7 @@ impl FakePlanner {
         FakePlanner {
             plans,
             alternative: None,
+            gauntlet: None,
             calls: Mutex::new(0),
             infeasible_seen: Mutex::new(Vec::new()),
         }
@@ -330,6 +333,10 @@ impl GoalPlanner for FakePlanner {
             }
         }
         Ok(self.plans[i.min(self.plans.len() - 1)].clone())
+    }
+
+    fn gauntlet(&self) -> Option<&Gauntlet> {
+        self.gauntlet.as_ref()
     }
 }
 
@@ -1036,6 +1043,124 @@ fn a_white_out_ends_the_run_for_the_session_to_reload() {
     assert!(infeasible.is_empty());
     assert_eq!(h.seen_names(), vec!["Go"]);
     assert_eq!(planner.calls(), 1);
+}
+
+/// In LORELEI's room: where a run starts, and so where its save is.
+fn in_loreleis_room() -> GameEvent {
+    GameEvent::PlayerLocated {
+        pose: PlayerPose {
+            map: "PokemonLeague_LoreleisRoom".into(),
+            x: 6,
+            y: 7,
+        },
+    }
+}
+
+/// Fleet continue-6 had saved in LORELEI's room and lost there with LANCE
+/// at 0%: every reload lost again, with no way out to train. A white-out
+/// whose save is inside the Elite Four isn't reloaded: the game started it
+/// over and put the player at the Center, and the goal goes on from there.
+#[test]
+fn a_white_out_whose_save_is_inside_the_elite_four_goes_on_from_the_center() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut planner = FakePlanner::new(vec![
+        plan(vec![step(go("Route4")), step(catch())]),
+        plan(vec![step(catch())]),
+    ]);
+    planner.gauntlet = d.world.events().map(Gauntlet::from_events);
+    let h = Harness::new(vec![
+        (
+            "Go",
+            vec![Err(
+                "whited out: our last Pokémon fainted (BULBASAUR)".into()
+            )],
+        ),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, _) = h.run(
+        &d,
+        frame,
+        &planner,
+        GoalOptions::default(),
+        vec![in_loreleis_room()],
+    );
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(planner.calls(), 2);
+}
+
+/// Nothing is saved inside the Elite Four: a reload there could only lose
+/// again. Outside it, a step that learnt something is saved.
+#[test]
+fn no_save_is_written_inside_the_elite_four() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let saves = |before: Vec<GameEvent>| {
+        let mut planner = FakePlanner::new(vec![plan(vec![step(go("Route4")), step(catch())])]);
+        planner.gauntlet = d.world.events().map(Gauntlet::from_events);
+        let h = Harness::new(vec![("Catch", vec![Ok(vec![caught()])])]);
+        let opts = GoalOptions {
+            save_game: true,
+            ..GoalOptions::default()
+        };
+        let (report, _) = h.run(&d, frame.clone(), &planner, opts, before);
+        assert!(report.satisfied, "{report:?}");
+        h.seen_names().iter().filter(|n| **n == "Save").count()
+    };
+    assert_eq!(saves(vec![in_loreleis_room()]), 0);
+    assert_eq!(saves(Vec::new()), 1);
+}
+
+/// Fleet continue-6 beat LORELEI wounded: no healer is in reach inside
+/// the Elite Four, and every walk to BRUNO's room failed "urgent recovery:
+/// no known safe route to a healer" until the replans ran out. Once the
+/// goal loop has found no way to heal, the walk goes on as the party
+/// stands.
+#[test]
+fn an_urgent_need_with_no_healer_in_reach_lets_the_walk_go_on() {
+    use pokebot_state::{Knowledge, Status};
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut mon = pokebot_agent::party::starter_mon(&d.data, "SPECIES_BLASTOISE", 82);
+    mon.hp = Knowledge::observed((10, 228), 0);
+    mon.status = Knowledge::observed(Status::Healthy, 0);
+    let serve = |no_healer: bool| {
+        let mut rt = runtime(&d, frame.clone());
+        let executor = Executor::default();
+        let stop = AtomicBool::new(false);
+        let mut ctx = ToolContext::new(
+            &mut rt,
+            &executor,
+            Arc::clone(&d.world),
+            Arc::clone(&d.data),
+            &stop,
+        );
+        ctx.scheduler.enabled = true;
+        ctx.scheduler.no_healer = no_healer;
+        ctx.emit(GameEvent::PlayerLocated {
+            pose: PlayerPose {
+                map: "PokemonLeague_BrunosRoom".into(),
+                x: 6,
+                y: 12,
+            },
+        })
+        .unwrap();
+        ctx.emit(GameEvent::PartyAudited {
+            members: vec![mon.clone()],
+        })
+        .unwrap();
+        assert!(!ctx.scheduler.queue.is_empty(), "the wound is urgent");
+        let served = ctx.service_needs();
+        (served, ctx.scheduler.queue.is_empty())
+    };
+    let (served, _) = serve(false);
+    assert!(served.is_err(), "{served:?}");
+    let (served, cleared) = serve(true);
+    assert!(matches!(served, Ok(false)), "{served:?}");
+    assert!(cleared);
 }
 
 /// One Pokémon fainting is not the end (the user's rule: the game

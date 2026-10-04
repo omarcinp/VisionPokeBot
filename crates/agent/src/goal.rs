@@ -21,6 +21,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use pokebot_planner::gauntlet::Gauntlet;
 use pokebot_planner::{
     GoalBelief, GoalPredicate, Plan, PlanError, PlannedIntent, Planner, ProbeFact, StateBelief,
 };
@@ -60,6 +61,11 @@ pub trait GoalPlanner {
     fn confidence(&self) -> f64 {
         pokebot_planner::PlanOptions::default().confidence
     }
+
+    /// The battles a white-out undoes together, when known.
+    fn gauntlet(&self) -> Option<&Gauntlet> {
+        None
+    }
 }
 
 impl GoalPlanner for Planner<'_> {
@@ -74,6 +80,10 @@ impl GoalPlanner for Planner<'_> {
 
     fn confidence(&self) -> f64 {
         self.options.confidence
+    }
+
+    fn gauntlet(&self) -> Option<&Gauntlet> {
+        Some(&self.gauntlet)
     }
 }
 
@@ -201,6 +211,9 @@ struct Run<'g, 'p> {
     probed: BTreeSet<ProbeFact>,
     /// Times readiness was judged again after a step that fell short.
     rejudges: u32,
+    /// The save a white-out reloads is inside a gauntlet (the run started
+    /// there, and nothing was saved since).
+    saved_in_gauntlet: bool,
 }
 
 /// Runs `goal` to completion or until the replans run out (spec §8).
@@ -242,6 +255,7 @@ pub fn run(
         recourses_run: 0,
         probed: BTreeSet::new(),
         rejudges: 0,
+        saved_in_gauntlet: false,
     };
     let outcome = run.main(ctx);
     let stopped = matches!(outcome, Err(ToolError::Stopped));
@@ -254,6 +268,7 @@ impl Run<'_, '_> {
     fn main(&mut self, ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
         let mut reason = "start".to_string();
         let mut plan_no = 0u32;
+        self.saved_in_gauntlet = self.in_gauntlet(ctx)?;
         loop {
             if plan_no > self.opts.max_replans && self.recover(ctx)? {
                 // What the map showed is worth one more plan.
@@ -310,6 +325,10 @@ impl Run<'_, '_> {
                 }
                 r => r,
             };
+            // Nor do the steps stop to look for a healer (fleet continue-6,
+            // after LORELEI: every walk to BRUNO's room failed "urgent
+            // recovery: no known safe route to a healer").
+            ctx.scheduler.no_healer = urgent && !healing;
             let plan = match planned {
                 Ok(plan) => plan,
                 Err(e) => {
@@ -359,6 +378,25 @@ impl Run<'_, '_> {
                     }
                 }
                 Executed::Fainted(why) => {
+                    // The save is inside a gauntlet (fleet continue-6, in
+                    // LORELEI's room with LANCE at 0%): a reload loses
+                    // there again, with no way out to train. The game has
+                    // started the gauntlet over itself and put the player
+                    // at the Center: the goal goes on from there.
+                    if self.saved_in_gauntlet {
+                        if let Some(g) = self.planner.gauntlet() {
+                            for e in &g.undo {
+                                ctx.emit(e.clone())?;
+                            }
+                        }
+                        self.saved_in_gauntlet = false;
+                        reason = format!(
+                            "{why}; the save is inside the gauntlet, where a reload loses again: on from the white-out"
+                        );
+                        ctx.emit(progress(GOAL, reason.clone()))?;
+                        plan_no = 0;
+                        continue;
+                    }
                     self.report.outcome = why;
                     return Ok(());
                 }
@@ -530,10 +568,16 @@ impl Run<'_, '_> {
                     self.last_failure = None;
                     self.last_reason = None;
                     self.failed_at.clear();
-                    if self.opts.save_game && outcome.learned.iter().any(changes_save) {
+                    // Not inside a gauntlet: a reload there could only
+                    // lose again.
+                    if self.opts.save_game
+                        && outcome.learned.iter().any(changes_save)
+                        && !self.in_gauntlet(ctx)?
+                    {
                         let saved = ctx.invoke(&Intent::Save);
                         self.report.learned.extend(saved.learned.iter().cloned());
                         self.report.saved_at_end = saved.result.is_ok();
+                        self.saved_in_gauntlet &= saved.result.is_err();
                         if let Err(e) = saved.result {
                             if matches!(e, ToolError::Stopped | ToolError::Device(_)) {
                                 return Err(e);
@@ -971,6 +1015,16 @@ impl Run<'_, '_> {
 
     /// The knowledge to plan from (the session's infeasible intents kept)
     /// and the pose, observing a frame when none is known yet.
+    /// Whether a gauntlet is under way (in one of its rooms, a battle of it
+    /// won): no save then.
+    fn in_gauntlet(&self, ctx: &mut ToolContext<'_>) -> Result<bool, ToolError> {
+        let Some(g) = self.planner.gauntlet() else {
+            return Ok(false);
+        };
+        let (knowledge, pose) = self.snapshot(ctx)?;
+        Ok(g.in_progress(&StateBelief::new(&knowledge, &ctx.data, pose)))
+    }
+
     fn snapshot(
         &self,
         ctx: &mut ToolContext<'_>,

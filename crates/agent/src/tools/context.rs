@@ -813,6 +813,13 @@ impl<'a> ToolContext<'a> {
                 urgent,
             );
             let Some(candidate) = candidate else {
+                if urgent && self.scheduler.no_healer {
+                    self.scheduler.queue.retain(|n| *n != Need::HealUrgent);
+                    self.info(
+                        "scheduler: no healer in reach; the task goes on as the party stands",
+                    );
+                    return Ok(false);
+                }
                 return if urgent {
                     Err(ToolError::Failed(
                         "urgent recovery: no known safe route to a healer".into(),

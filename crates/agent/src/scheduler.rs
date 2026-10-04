@@ -187,6 +187,10 @@ pub struct Scheduler {
     /// What later steps of the plan in force want caught, set by the goal
     /// loop for the step running: a hunt catches it on the way.
     pub side_catch: crate::catch::SideCatch,
+    /// The goal loop found no way to heal (the Elite Four's rooms lock
+    /// behind): an urgent need with no healer in reach lets the task go
+    /// on as the party stands.
+    pub no_healer: bool,
 }
 impl Scheduler {
     pub fn event(&mut self, event: &GameEvent, state: &GameState, data: &GameData) -> bool {
