@@ -982,15 +982,185 @@ pub fn walk_legs(
     dest: &Dest,
 ) -> Result<Option<PlayerPose>, ToolError> {
     let world = Arc::clone(&ctx.world);
+    // On the destination's map already: a recovery on the way (an urgent
+    // heal) brought the player there (fleet continue-3: healed at Pewter
+    // from Route 23, flown on to Cerulean's Center, the Go's destination;
+    // the warp leg it was on then walked for Victory Road 2F, "no known
+    // route from Route4"). The last stretch is the destination's own.
+    // Not where the leg begins, though: a route may leave the map and come
+    // back to another part of it.
+    let arrived = |ctx: &ToolContext<'_>, leg: &Leg| {
+        ctx.pose()
+            .is_some_and(|p| arrived_off_route(&p, dest.map(), leg))
+    };
     for (i, leg) in legs.iter().enumerate() {
-        if !special(&world, leg) {
-            // A warp of the route: taken where the route takes it.
-            if leg.kind == EdgeKind::Warp {
-                if let Some(warp) = world.map(&leg.from.map).and_then(|m| {
-                    m.warps
+        if i > 0 && arrived(ctx, leg) {
+            break;
+        }
+        match walk_leg(ctx, &world, legs, i) {
+            Err(ToolError::Failed(_)) if arrived(ctx, leg) => break,
+            r => r?,
+        }
+    }
+    match dest {
+        Dest::Map { map } => go_to_map(ctx, map),
+        other => go(ctx, Destination::from(other)),
+    }
+}
+
+/// On `dest`'s map, and not on the map `leg` begins on (a route may leave
+/// the map and come back to another part of it): the rest of the legs is
+/// done with.
+fn arrived_off_route(pose: &PlayerPose, dest: &str, leg: &Leg) -> bool {
+    pose.map == dest && pose.map != leg.from.map
+}
+
+/// Leg `i` of [`walk_legs`].
+fn walk_leg(
+    ctx: &mut ToolContext<'_>,
+    world: &Arc<pokebot_world::World>,
+    legs: &[Leg],
+    i: usize,
+) -> Result<(), ToolError> {
+    let world = Arc::clone(world);
+    let leg = &legs[i];
+    if !special(&world, leg) {
+        // A warp of the route: taken where the route takes it.
+        if leg.kind == EdgeKind::Warp {
+            if let Some(warp) = world.map(&leg.from.map).and_then(|m| {
+                m.warps
+                    .iter()
+                    .position(|w| (w.x, w.y) == (leg.from.x, leg.from.y))
+            }) {
+                go(
+                    ctx,
+                    Destination::Warp {
+                        map: leg.from.map.clone(),
+                        warp,
+                    },
+                )?;
+            }
+        }
+        return Ok(());
+    }
+    match &leg.kind {
+        EdgeKind::Gate { kind } => {
+            walk_to(ctx, &leg.from)?;
+            let (gx, gy) = ((leg.from.x + leg.to.x) / 2, (leg.from.y + leg.to.y) / 2);
+            let gate = world
+                .places()
+                .and_then(|p| {
+                    p.gates
                         .iter()
-                        .position(|w| (w.x, w.y) == (leg.from.x, leg.from.y))
-                }) {
+                        .find(|g| g.map == leg.from.map && (g.x, g.y) == (gx, gy))
+                })
+                .ok_or_else(|| {
+                    ToolError::Failed(format!("no {kind} at {} ({gx}, {gy})", leg.from.map))
+                })?;
+            let mv = FieldMove::from_move(&gate.requires.r#move).ok_or_else(|| {
+                ToolError::Failed(format!("{} is not a field move", gate.requires.r#move))
+            })?;
+            use_move(
+                ctx,
+                mv,
+                Some(Dest::Facing {
+                    map: gate.map.clone(),
+                    x: gx,
+                    y: gy,
+                }),
+            )?;
+            // The tool marked it gone until the map loads again.
+            walk_to(ctx, &leg.to)?;
+        }
+        EdgeKind::Walk { surf: true, .. } => {
+            // A sandbar on the way lands the surfer, who surfs again
+            // from it (Switch, Route 21: landed on the islet at (9, 31),
+            // the walk pressed into the water, learnt it "blocked" tile
+            // by tile and failed "looping").
+            let mut landings = 0;
+            // The water begins across a map edge (fleet continue-1,
+            // Cinnabar Island's north shore at (15, 0), Route 21's sea
+            // beyond it): SURF facing over the edge, from the party
+            // menu; the edge's own leg can't be walked.
+            if let Some(over) = i
+                .checked_sub(1)
+                .and_then(|j| legs.get(j))
+                .filter(|_| landings == 0 && !on_water(ctx))
+                .and_then(|prev| surf_across_edge(&world, prev, leg))
+            {
+                go(ctx, over)?;
+                use_move(ctx, FieldMove::Surf, None)?;
+            }
+            loop {
+                if !on_water(ctx) {
+                    let start = ctx
+                        .pose()
+                        .filter(|p| p.map == leg.from.map && landings > 0)
+                        .map_or((leg.from.x, leg.from.y), |p| (p.x, p.y));
+                    // The leg's shortest way may have no water on it
+                    // (fleet continue-2, Route 12: from (0, 70) the
+                    // bridge leads to (14, 119) dry, and the leg failed
+                    // "no water on the surf leg" every plan): walked.
+                    let Some((shore, water)) = surf_entry_from(&world, leg, start) else {
+                        walk_to(ctx, &leg.to)?;
+                        break;
+                    };
+                    walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
+                    use_move(
+                        ctx,
+                        FieldMove::Surf,
+                        Some(Dest::Facing {
+                            map: leg.from.map.clone(),
+                            x: water.0,
+                            y: water.1,
+                        }),
+                    )?;
+                }
+                let to = Destination::Tile {
+                    map: leg.to.map.clone(),
+                    x: leg.to.x,
+                    y: leg.to.y,
+                };
+                let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
+                match ctx.drive(&mut step) {
+                    Ok(_) => break,
+                    Err(ToolError::Failed(_)) if landings < MAX_LANDINGS && !on_water(ctx) => {
+                        landings += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        EdgeKind::ScriptWarp { script } => {
+            // Switch, Rocket Hideout B4F: the stairs from B3F land west
+            // of a wall, Giovanni's side is the lift's; every Beat of
+            // the grunts there failed "no path next to (19, 14)". The
+            // panel is read, the floor chosen, and the door walked out.
+            walk_to(ctx, &leg.from)?;
+            let (path, answers) = {
+                let belief = StateBelief(ctx.state());
+                ride_path(&world, script, &leg.to.map, &belief)
+            }
+            .ok_or_else(|| {
+                ToolError::Failed(format!(
+                    "{script}: no path takes the lift to {}",
+                    leg.to.map
+                ))
+            })?;
+            // Within a RunScript (its walk to the script's map), the
+            // tool is busy: the panel is run in place.
+            if ctx.running().contains(&"RunScript") {
+                super::dialogue::run_nested(ctx, script, Some(path), &answers)?;
+            } else {
+                ctx.invoke(&Intent::RunScript {
+                    script: script.clone(),
+                    path: Some(path),
+                    answers,
+                })
+                .result?;
+            }
+            if ctx.pose().is_some_and(|p| p.map == leg.from.map) {
+                if let Some(warp) = dynamic_door(&world, &leg.from.map) {
                     go(
                         ctx,
                         Destination::Warp {
@@ -1000,184 +1170,51 @@ pub fn walk_legs(
                     )?;
                 }
             }
-            continue;
+            if let Some(p) = ctx.pose().filter(|p| p.map != leg.to.map) {
+                return Err(ToolError::Failed(format!(
+                    "the lift left the player on {}, not {}",
+                    p.map, leg.to.map
+                )));
+            }
         }
-        match &leg.kind {
-            EdgeKind::Gate { kind } => {
-                walk_to(ctx, &leg.from)?;
-                let (gx, gy) = ((leg.from.x + leg.to.x) / 2, (leg.from.y + leg.to.y) / 2);
-                let gate = world
-                    .places()
-                    .and_then(|p| {
-                        p.gates
-                            .iter()
-                            .find(|g| g.map == leg.from.map && (g.x, g.y) == (gx, gy))
-                    })
-                    .ok_or_else(|| {
-                        ToolError::Failed(format!("no {kind} at {} ({gx}, {gy})", leg.from.map))
-                    })?;
-                let mv = FieldMove::from_move(&gate.requires.r#move).ok_or_else(|| {
-                    ToolError::Failed(format!("{} is not a field move", gate.requires.r#move))
-                })?;
-                use_move(
-                    ctx,
-                    mv,
-                    Some(Dest::Facing {
-                        map: gate.map.clone(),
-                        x: gx,
-                        y: gy,
-                    }),
-                )?;
-                // The tool marked it gone until the map loads again.
-                walk_to(ctx, &leg.to)?;
+        EdgeKind::Fly => {
+            // Flown from where the route prices it: FLY works only
+            // outdoors (fleet worker 5 in the Route 16 house, handed
+            // HM02 there: "Can't use that here." 783 times).
+            if let Some(start) = fly_start(ctx.pose().as_ref(), leg) {
+                walk_to(ctx, start)?;
             }
-            EdgeKind::Walk { surf: true, .. } => {
-                // A sandbar on the way lands the surfer, who surfs again
-                // from it (Switch, Route 21: landed on the islet at (9, 31),
-                // the walk pressed into the water, learnt it "blocked" tile
-                // by tile and failed "looping").
-                let mut landings = 0;
-                // The water begins across a map edge (fleet continue-1,
-                // Cinnabar Island's north shore at (15, 0), Route 21's sea
-                // beyond it): SURF facing over the edge, from the party
-                // menu; the edge's own leg can't be walked.
-                if let Some(over) = i
-                    .checked_sub(1)
-                    .and_then(|j| legs.get(j))
-                    .filter(|_| landings == 0 && !on_water(ctx))
-                    .and_then(|prev| surf_across_edge(&world, prev, leg))
-                {
-                    go(ctx, over)?;
-                    use_move(ctx, FieldMove::Surf, None)?;
-                }
-                loop {
-                    if !on_water(ctx) {
-                        let start = ctx
-                            .pose()
-                            .filter(|p| p.map == leg.from.map && landings > 0)
-                            .map_or((leg.from.x, leg.from.y), |p| (p.x, p.y));
-                        // The leg's shortest way may have no water on it
-                        // (fleet continue-2, Route 12: from (0, 70) the
-                        // bridge leads to (14, 119) dry, and the leg failed
-                        // "no water on the surf leg" every plan): walked.
-                        let Some((shore, water)) = surf_entry_from(&world, leg, start) else {
-                            walk_to(ctx, &leg.to)?;
-                            break;
-                        };
-                        walk_to(ctx, &Place::tile(&leg.from.map, shore.0, shore.1))?;
-                        use_move(
-                            ctx,
-                            FieldMove::Surf,
-                            Some(Dest::Facing {
-                                map: leg.from.map.clone(),
-                                x: water.0,
-                                y: water.1,
-                            }),
-                        )?;
-                    }
-                    let to = Destination::Tile {
-                        map: leg.to.map.clone(),
-                        x: leg.to.x,
-                        y: leg.to.y,
-                    };
-                    let mut step = GoStep::with_surf(&NavParts::of(ctx), to, true);
-                    match ctx.drive(&mut step) {
-                        Ok(_) => break,
-                        Err(ToolError::Failed(_)) if landings < MAX_LANDINGS && !on_water(ctx) => {
-                            landings += 1;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            EdgeKind::ScriptWarp { script } => {
-                // Switch, Rocket Hideout B4F: the stairs from B3F land west
-                // of a wall, Giovanni's side is the lift's; every Beat of
-                // the grunts there failed "no path next to (19, 14)". The
-                // panel is read, the floor chosen, and the door walked out.
-                walk_to(ctx, &leg.from)?;
-                let (path, answers) = {
-                    let belief = StateBelief(ctx.state());
-                    ride_path(&world, script, &leg.to.map, &belief)
-                }
-                .ok_or_else(|| {
-                    ToolError::Failed(format!(
-                        "{script}: no path takes the lift to {}",
-                        leg.to.map
-                    ))
-                })?;
-                // Within a RunScript (its walk to the script's map), the
-                // tool is busy: the panel is run in place.
-                if ctx.running().contains(&"RunScript") {
-                    super::dialogue::run_nested(ctx, script, Some(path), &answers)?;
-                } else {
-                    ctx.invoke(&Intent::RunScript {
-                        script: script.clone(),
-                        path: Some(path),
-                        answers,
-                    })
-                    .result?;
-                }
-                if ctx.pose().is_some_and(|p| p.map == leg.from.map) {
-                    if let Some(warp) = dynamic_door(&world, &leg.from.map) {
-                        go(
-                            ctx,
-                            Destination::Warp {
-                                map: leg.from.map.clone(),
-                                warp,
-                            },
-                        )?;
-                    }
-                }
-                if let Some(p) = ctx.pose().filter(|p| p.map != leg.to.map) {
-                    return Err(ToolError::Failed(format!(
-                        "the lift left the player on {}, not {}",
-                        p.map, leg.to.map
-                    )));
-                }
-            }
-            EdgeKind::Fly => {
-                // Flown from where the route prices it: FLY works only
-                // outdoors (fleet worker 5 in the Route 16 house, handed
-                // HM02 there: "Can't use that here." 783 times).
-                if let Some(start) = fly_start(ctx.pose().as_ref(), leg) {
-                    walk_to(ctx, start)?;
-                }
-                use_move(
-                    ctx,
-                    FieldMove::Fly,
-                    Some(Dest::Map {
-                        map: leg.to.map.clone(),
-                    }),
-                )?
-            }
-            EdgeKind::Dig | EdgeKind::EscapeRope => {
-                // From anywhere on the cave's maps: the route prices it
-                // from where the player stands, often right there.
-                if ctx.pose().is_none_or(|p| p.map != leg.from.map) {
-                    walk_to(ctx, &leg.from)?;
-                }
-                let to = PlayerPose {
+            use_move(
+                ctx,
+                FieldMove::Fly,
+                Some(Dest::Map {
                     map: leg.to.map.clone(),
-                    x: leg.to.x,
-                    y: leg.to.y,
-                };
-                super::escape::escape(ctx, &leg.kind, &to)?;
+                }),
+            )?
+        }
+        EdgeKind::Dig | EdgeKind::EscapeRope => {
+            // From anywhere on the cave's maps: the route prices it
+            // from where the player stands, often right there.
+            if ctx.pose().is_none_or(|p| p.map != leg.from.map) {
+                walk_to(ctx, &leg.from)?;
             }
-            _ => {
-                // Into a dark map: light it up on arrival when someone
-                // knows Flash.
-                go_to_map(ctx, &leg.to.map)?;
-                if field::carrier(ctx.state(), FieldMove::Flash.move_id()).is_some() {
-                    use_move(ctx, FieldMove::Flash, None)?;
-                }
+            let to = PlayerPose {
+                map: leg.to.map.clone(),
+                x: leg.to.x,
+                y: leg.to.y,
+            };
+            super::escape::escape(ctx, &leg.kind, &to)?;
+        }
+        _ => {
+            // Into a dark map: light it up on arrival when someone
+            // knows Flash.
+            go_to_map(ctx, &leg.to.map)?;
+            if field::carrier(ctx.state(), FieldMove::Flash.move_id()).is_some() {
+                use_move(ctx, FieldMove::Flash, None)?;
             }
         }
     }
-    match dest {
-        Dest::Map { map } => go_to_map(ctx, map),
-        other => go(ctx, Destination::from(other)),
-    }
+    Ok(())
 }
 
 /// Sandbars a surf leg lands on before it gives up.
@@ -1261,6 +1298,38 @@ mod tests {
     /// Fleet worker 5 was handed HM02 in the Route 16 house and used FLY
     /// there ("Can't use that here.", 783 times): a FLY leg is flown from
     /// its start, outdoors; from anywhere on that map as it is.
+    /// Fleet continue-3: Go(CeruleanCity_PokemonCenter_1F) from Victory
+    /// Road 2F; on its warp leg out an urgent heal flew to Pewter and on to
+    /// Cerulean's Center, and the leg then walked for Victory Road 2F, "no
+    /// known route from Route4". On the destination's map, off the leg's,
+    /// the legs are done; a route out and back into one map isn't.
+    #[test]
+    fn a_recovery_that_lands_on_the_destination_ends_the_legs() {
+        let warp_out = Leg {
+            from: Place::tile("VictoryRoad_2F", 48, 12),
+            to: Place::tile("Route23", 18, 28),
+            kind: EdgeKind::Warp,
+            cost_s: 1.5,
+            requires: Default::default(),
+        };
+        let at = |map: &str| PlayerPose {
+            map: map.into(),
+            x: 7,
+            y: 8,
+        };
+        let center = "CeruleanCity_PokemonCenter_1F";
+        assert!(arrived_off_route(&at(center), center, &warp_out));
+        assert!(!arrived_off_route(&at("Route4"), center, &warp_out));
+        let round = Leg {
+            from: Place::tile("Route23", 18, 28),
+            to: Place::tile("VictoryRoad_2F", 48, 12),
+            kind: EdgeKind::Warp,
+            cost_s: 1.5,
+            requires: Default::default(),
+        };
+        assert!(!arrived_off_route(&at("Route23"), "Route23", &round));
+    }
+
     #[test]
     fn a_fly_leg_is_flown_from_outdoors() {
         let leg = Leg {
