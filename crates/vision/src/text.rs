@@ -166,6 +166,35 @@ impl Font {
         best.map(|(_, lines)| lines).unwrap_or_default()
     }
 
+    /// Text in a known `ink` (within `spread` per channel), for text a
+    /// palette may merge into its background: a PC box title's white
+    /// letters on the pale band of some wallpapers (Switch, BOX2: white and
+    /// (220, 249, 245) one cluster, the title read as nothing, and the
+    /// withdraw failed "no progress in box").
+    pub fn read_in(
+        &self,
+        image: &RgbImage,
+        region: Region,
+        exclude: &[Region],
+        ink: Rgb,
+        spread: u8,
+    ) -> Vec<String> {
+        let bits = (region.y..region.y + region.height)
+            .flat_map(|y| {
+                (region.x..region.x + region.width).map(move |x| {
+                    !exclude.iter().any(|r| r.contains(x, y))
+                        && near(image.pixel(x, y), ink, spread)
+                })
+            })
+            .collect();
+        self.read_mask(&Mask {
+            width: region.width as usize,
+            height: region.height as usize,
+            bits,
+        })
+        .1
+    }
+
     /// Dark numeric ink on a known pale menu panel. Fixed contrast avoids
     /// capture-noise clusters splitting one glyph between several inks.
     /// Callers must limit this to a field with no dark decorative pixels.

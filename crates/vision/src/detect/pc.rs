@@ -53,6 +53,10 @@ const SPECIES: Region = Region::new(2, 100, 76, 15);
 const LEVEL: Region = Region::new(14, 114, 64, 15);
 /// The box title between the scroll arrows.
 const BOX_TITLE: Region = Region::new(128, 20, 64, 16);
+/// The box title's letters, and how far a capture strays from them: less
+/// than the pale band some wallpapers put behind them (220, 249, 245).
+const TITLE_WHITE: [u8; 3] = [255, 255, 255];
+const TITLE_SPREAD: u8 = 16;
 const PICKER: Region = Region::new(124, 66, 72, 40);
 const PICKER_TEXT: Region = Region::new(126, 68, 68, 36);
 const MESSAGE: Region = Region::new(86, 133, 148, 21);
@@ -130,11 +134,20 @@ pub fn detect(
                 .map(|(_, (cx, cy))| {
                     Region::new((cx - 12).max(0) as u32, (cy - 16).max(0) as u32, 24, 28)
                 });
-            let text = font
+            let mut text = font
                 .read(image, BOX_TITLE, hand.as_slice())
                 .join(" ")
                 .trim()
                 .to_owned();
+            // The title's letters are white; on a pale wallpaper band the
+            // palette merges them into the background.
+            if text.is_empty() {
+                text = font
+                    .read_in(image, BOX_TITLE, hand.as_slice(), TITLE_WHITE, TITLE_SPREAD)
+                    .join(" ")
+                    .trim()
+                    .to_owned();
+            }
             (!text.is_empty()).then_some(text)
         }
         PcMode::Party => None,
@@ -274,6 +287,19 @@ mod tests {
         assert_eq!(o.picker, Some(("BOX1".to_owned(), Some(0))));
         assert_eq!(o.message, ["Deposit in which BOX?"]);
         assert_eq!(o.cursor, Some(PcCursor::Party(1)));
+    }
+
+    /// Switch, Cinnabar: BOX2 scrolled in for WEEZING, its wallpaper's
+    /// pale band behind the title's white letters, the hand on cell 8. The
+    /// title read as nothing, and the withdraw failed "no progress in box".
+    #[test]
+    fn a_box_title_on_a_pale_wallpaper_band_is_read() {
+        let Some(o) = read("switch-pc-box2-title.png") else {
+            return;
+        };
+        let o = o.expect("box");
+        assert_eq!(o.mode, PcMode::Box);
+        assert_eq!(o.box_title.as_deref(), Some("BOX2"));
     }
 
     /// WITHDRAW POKéMON: box 1 with CLEFAIRY in cell 0, the hand on it and
