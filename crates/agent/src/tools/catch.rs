@@ -751,9 +751,15 @@ fn hunt_for(
                 ctx.emit(progress(step.phase(), format!("{reason}: to the mart")))?;
                 // Count 0: restock to the stock policy's target, keeping
                 // the Potion money.
+                // The cheapest ball a mart in reach sells (beyond Victory
+                // Road, the Indigo Plateau's GREAT BALLs).
+                let ball = ctx
+                    .pose()
+                    .and_then(|p| crate::shop::ball_in_reach(&ctx.world, &ctx.data, &p, &ctx.gone))
+                    .unwrap_or("ITEM_POKE_BALL");
                 let bought = ctx
                     .invoke(&Intent::Buy {
-                        item: "ITEM_POKE_BALL".into(),
+                        item: ball.into(),
                         count: 0,
                     })
                     .result;

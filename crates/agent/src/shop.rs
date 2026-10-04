@@ -727,6 +727,19 @@ pub fn nearest_clerk(
     gone: &Gone,
     stocks: impl Fn(&[String]) -> bool,
 ) -> Option<(String, u32)> {
+    clerk_among(world, data, pose, gone, false, stocks)
+}
+
+/// [`nearest_clerk`]; `walked_only` drops the guess by maps crossed when
+/// no clerk is walked to.
+fn clerk_among(
+    world: &World,
+    data: &GameData,
+    pose: &PlayerPose,
+    gone: &Gone,
+    walked_only: bool,
+    stocks: impl Fn(&[String]) -> bool,
+) -> Option<(String, u32)> {
     let clerk = |name: &str| {
         world
             .map(name)?
@@ -756,9 +769,35 @@ pub fn nearest_clerk(
     let map = nearest_reachable(world, pose, &goals, gone)
         .into_iter()
         .next()
-        .or_else(|| nearest_by_maps(world, &pose.map, &clerks))?;
+        .or_else(|| {
+            (!walked_only)
+                .then(|| nearest_by_maps(world, &pose.map, &clerks))
+                .flatten()
+        })?;
     let id = clerks[&map];
     Some((map, id))
+}
+
+/// Balls a restock buys, cheapest first.
+const BALLS: [&str; 3] = ["ITEM_POKE_BALL", "ITEM_GREAT_BALL", "ITEM_ULTRA_BALL"];
+
+/// The cheapest ball a mart walked to from `pose` sells: the Indigo
+/// Plateau's sells GREAT and ULTRA BALLs, no POKé BALL (fleet continue-2
+/// beyond Victory Road without FLY: every restock went for Viridian's
+/// mart, "no known route", and the catch went infeasible). `None` when no
+/// mart selling a ball is walked to.
+pub fn ball_in_reach(
+    world: &World,
+    data: &GameData,
+    pose: &PlayerPose,
+    gone: &Gone,
+) -> Option<&'static str> {
+    BALLS.into_iter().find(|ball| {
+        clerk_among(world, data, pose, gone, true, |items| {
+            items.iter().any(|i| i == ball)
+        })
+        .is_some()
+    })
 }
 
 /// Of `marts`, the one fewest maps away from `from` over warps and
@@ -971,6 +1010,30 @@ mod tests {
             x,
             y,
         }
+    }
+
+    /// Fleet continue-2, beyond Victory Road without FLY: every restock
+    /// went for Viridian's POKé BALLs, "no known route", and the catch went
+    /// infeasible. The Indigo Plateau's mart, walked to, sells GREAT BALLs.
+    #[test]
+    fn a_restock_buys_the_cheapest_ball_a_mart_in_reach_sells() {
+        let (Ok(world), Some(data)) = (World::load(root().join("data/world")), data()) else {
+            return;
+        };
+        let at = |map: &str, x, y| PlayerPose {
+            map: map.into(),
+            x,
+            y,
+        };
+        let gone = Gone::new();
+        assert_eq!(
+            ball_in_reach(&world, &data, &at("VictoryRoad_3F", 37, 10), &gone),
+            Some("ITEM_GREAT_BALL")
+        );
+        assert_eq!(
+            ball_in_reach(&world, &data, &at("ViridianCity", 20, 20), &gone),
+            Some("ITEM_POKE_BALL")
+        );
     }
 
     #[test]
