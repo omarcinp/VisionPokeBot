@@ -39,6 +39,7 @@ pub mod stock;
 pub mod story;
 pub mod tools;
 pub mod track;
+pub mod whiteout;
 
 pub use action::{Action, Expectation};
 pub use belief_view::StateBelief;

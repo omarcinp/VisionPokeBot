@@ -384,6 +384,10 @@ impl Run<'_, '_> {
                     // started the gauntlet over itself and put the player
                     // at the Center: the goal goes on from there.
                     if self.saved_in_gauntlet {
+                        // Past the white-out pages and the nurse first
+                        // (the next walk began on "RED scurried to a
+                        // POKéMON CENTER" and failed "whited out").
+                        ctx.drive(&mut crate::whiteout::AfterWhiteOut::default())?;
                         if let Some(g) = self.planner.gauntlet() {
                             for e in &g.undo {
                                 ctx.emit(e.clone())?;

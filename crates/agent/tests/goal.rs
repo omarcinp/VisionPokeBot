@@ -1124,6 +1124,51 @@ fn a_white_out_at_the_indigo_plateau_respawns_in_front_of_the_counter() {
     );
 }
 
+/// Fleet continue-6 went on from a white-out in LORELEI's room, but its
+/// walk began on this page ("RED scurried to a POKéMON CENTER"), failed
+/// "whited out", and the run ended for a reload after all. The white-out
+/// pages are pressed through first.
+#[test]
+fn the_white_out_pages_are_pressed_through_before_going_on() {
+    use pokebot_agent::tools::{StepContext, ToolStep};
+    use pokebot_agent::whiteout::AfterWhiteOut;
+    use pokebot_agent::Decision;
+    use pokebot_state::ScreenState;
+    let Some(d) = data() else { return };
+    let path = root().join("captures/fixtures/emu-whiteout-scurried-to-center.png");
+    let Ok(frame) = pokebot_video::png::load(&path) else {
+        eprintln!("skipping: no fixture {}", path.display());
+        return;
+    };
+    let mut rt = runtime(&d, frame);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut rt,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    );
+    let o = ctx.observe().unwrap();
+    assert_eq!(o.screen.value, ScreenState::Whiteout);
+    let state = ctx.state().clone();
+    let mut events = Vec::new();
+    let mut step = AfterWhiteOut::default();
+    let decision = step.next(&mut StepContext {
+        observation: &o,
+        state: &state,
+        events: &mut events,
+        quiet_frames: 100,
+        frame: None,
+        learned: &[],
+    });
+    assert!(
+        matches!(decision, Decision::Act(_)),
+        "presses A on the page"
+    );
+}
+
 /// Nothing is saved inside the Elite Four: a reload there could only lose
 /// again. Outside it, a step that learnt something is saved.
 #[test]
