@@ -788,8 +788,12 @@ fn search_levels(
             .collect();
         let judged = handicapped(data, &prepared, request.handicap);
         let conf = confidence(data, &judged, &request.targets);
-        // Worth knowing only when nothing wins.
-        let progress = if conf.iter().all(|(_, p)| *p < request.confidence) {
+        // Worth knowing only when the plan falls short: some target below
+        // the confidence (the Elite Four judged whole: BRUNO and AGATHA
+        // won, LORELEI and LANCE not, and every plan's progress was 0, so
+        // the best effort was to train nobody; fleet continue-2 walked in
+        // at 0% and lost).
+        let progress = if conf.iter().any(|(_, p)| *p < request.confidence) {
             progress(data, &judged, &request.targets)
         } else {
             0.0
@@ -1019,6 +1023,52 @@ mod tests {
         };
         assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_ZUBAT"]);
         assert!(trained("TRAINER_ELITE_FOUR_LORELEI").is_empty());
+    }
+
+    /// Fleet continue-2 judged against the Elite Four whole: BRUNO and
+    /// AGATHA already won, LORELEI and LANCE at 0%. A best effort scored
+    /// no progress once any target was won, so the cheapest plan (training
+    /// nobody) won, and it walked in at 0% and lost every time. Training
+    /// that gets further against the targets still short is planned.
+    #[test]
+    fn a_best_effort_counts_progress_while_any_target_falls_short() {
+        let Some(data) = data() else { return };
+        let mut charizard = member("SPECIES_CHARIZARD", 84);
+        charizard.moves = [
+            "MOVE_WING_ATTACK",
+            "MOVE_FLAMETHROWER",
+            "MOVE_EMBER",
+            "MOVE_SLASH",
+        ]
+        .map(String::from)
+        .to_vec();
+        let request = Request {
+            party: vec![
+                charizard,
+                member("SPECIES_PRIMEAPE", 42),
+                member("SPECIES_LAPRAS", 25),
+                member("SPECIES_ZUBAT", 11),
+                member("SPECIES_PARAS", 9),
+                member("SPECIES_GEODUDE", 8),
+            ],
+            targets: [
+                "TRAINER_ELITE_FOUR_LORELEI",
+                "TRAINER_ELITE_FOUR_BRUNO",
+                "TRAINER_ELITE_FOUR_AGATHA",
+                "TRAINER_ELITE_FOUR_LANCE",
+            ]
+            .map(String::from)
+            .to_vec(),
+            areas: vec![area("VictoryRoad_2F")],
+            confidence: 0.9,
+            money: 0,
+            data: &data,
+            handicap: 0,
+        };
+        let plan = plan_training(&request, 1).remove(0);
+        assert!(!plan.steps.is_empty(), "{plan:?}");
+        let lorelei = |p: &PreparationPlan| p.confidence[0].1;
+        assert!(lorelei(&plan) > 0.5, "{:?}", plan.confidence);
     }
 
     /// Fighting alone earns all the experience; a carrier's win half, a
