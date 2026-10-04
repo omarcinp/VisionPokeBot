@@ -751,11 +751,27 @@ fn hunt_for(
                 ctx.emit(progress(step.phase(), format!("{reason}: to the mart")))?;
                 // Count 0: restock to the stock policy's target, keeping
                 // the Potion money.
-                ctx.invoke(&Intent::Buy {
-                    item: "ITEM_POKE_BALL".into(),
-                    count: 0,
-                })
-                .result?;
+                let bought = ctx
+                    .invoke(&Intent::Buy {
+                        item: "ITEM_POKE_BALL".into(),
+                        count: 0,
+                    })
+                    .result;
+                match bought {
+                    // No mart in reach (fleet continue-3, Victory Road's
+                    // far side without FLY: "no known route from
+                    // VictoryRoad_3F to ViridianCity_Mart", and the catch
+                    // was given up with balls in the bag): hunt on with
+                    // what is held.
+                    Err(e) if hunts_on_without_a_mart(&e, before) => {
+                        ctx.info(format!(
+                            "{reason}; no mart in reach ({e}): hunting on with {before:?} balls"
+                        ));
+                        restock = false;
+                        continue;
+                    }
+                    r => r?,
+                }
                 let after = ball_count(ctx.state());
                 if after <= before && after.is_some_and(|n| n > 0) {
                     // The hunted species throws the reserve too: hunt on
@@ -773,6 +789,13 @@ fn hunt_for(
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Whether a restock that found no mart in reach leaves balls to hunt on
+/// with.
+fn hunts_on_without_a_mart<N: Copy + Into<u32>>(e: &ToolError, before: Option<N>) -> bool {
+    matches!(e, ToolError::Failed(why) if why.starts_with("no known route"))
+        && before.is_some_and(|n| n.into() > 0)
 }
 
 pub fn catch(ctx: &mut ToolContext<'_>, species: &str, map: Option<&str>) -> Result<(), ToolError> {
@@ -1029,6 +1052,20 @@ mod tests {
         assert_eq!(c.species, "SPECIES_IVYSAUR");
         assert!(carrier_in(&party, Some(2)).is_none());
         assert!(carrier_in(&party, None).is_none());
+    }
+
+    /// Fleet continue-3 on Victory Road's far side without FLY: the
+    /// restock found "no known route from VictoryRoad_3F to
+    /// ViridianCity_Mart", and the catch was given up with balls held.
+    #[test]
+    fn a_hunt_goes_on_with_its_balls_when_no_mart_is_in_reach() {
+        let unreachable =
+            ToolError::Failed("no known route from VictoryRoad_3F to ViridianCity_Mart".into());
+        assert!(hunts_on_without_a_mart(&unreachable, Some(3u8)));
+        assert!(!hunts_on_without_a_mart(&unreachable, Some(0u8)));
+        assert!(!hunts_on_without_a_mart(&unreachable, None::<u8>));
+        let other = ToolError::Failed("the clerk's menu didn't open".into());
+        assert!(!hunts_on_without_a_mart(&other, Some(3u8)));
     }
 
     #[test]
