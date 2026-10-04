@@ -202,6 +202,28 @@
   .vs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .vs .who { font-weight: 700; } .vs .hp { margin-top: 2px; }
 
+  /* PC boxes: drawn at the game's resolution (160x144 box), scaled by --px. */
+  .pcbox { --px: 3px; position: relative; overflow: hidden; border-radius: 8px; padding: calc(8 * var(--px));
+           background: #f8d8c8 url(world/pc_backdrop.png) 0 0 / calc(256 * var(--px)) repeat;
+           image-rendering: pixelated; animation: pc-scroll 8.5s linear infinite; }
+  @keyframes pc-scroll { to { background-position: calc(-256 * var(--px)) calc(-256 * var(--px)); } }
+  .pc-stage { position: relative; width: 100%; max-width: 480px; margin: 0 auto; }
+  #pc-canvas { display: block; width: 100%; aspect-ratio: 160 / 144;
+    image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; }
+  .pc-arrow { position: absolute; top: 0; width: calc(24 * var(--px)); height: calc(24 * var(--px)); padding: 0;
+              border: 0; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .pc-arrow.left { left: 0; } .pc-arrow.right { right: 0; }
+  .pc-arrow i { display: block; width: calc(8 * var(--px)); height: calc(16 * var(--px));
+                background: url(world/pc_arrow.png) 0 0 / 100% 200%; image-rendering: pixelated; }
+  .pc-arrow.right i { background-position: 0 100%; }
+  .pc-arrow:hover i, .pc-arrow:focus-visible i { animation: pc-bob-left .4s steps(6) infinite; }
+  .pc-arrow.right:hover i, .pc-arrow.right:focus-visible i { animation-name: pc-bob-right; }
+  .pc-arrow:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; border-radius: 4px; }
+  @keyframes pc-bob-left { to { transform: translateX(calc(-6 * var(--px))); } }
+  @keyframes pc-bob-right { to { transform: translateX(calc(6 * var(--px))); } }
+  @media (prefers-reduced-motion: reduce) { .pcbox, .pc-arrow i { animation: none !important; } }
+  #pc-canvas.pick { cursor: pointer; }
+
   /* Bag */
   .bag { display: grid; gap: 6px; }
   .bag .pocket { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
@@ -392,6 +414,18 @@
     <section class="card">
       <h2>Party <span class="right" id="party-src"></span></h2>
       <div class="party" id="party"></div>
+    </section>
+
+    <section class="card">
+      <h2>PC boxes <span class="right" id="pc-src"></span></h2>
+      <div class="pcbox" id="pcbox">
+        <div class="pc-stage" id="pc-stage">
+          <canvas id="pc-canvas" width="160" height="144"></canvas>
+          <button class="pc-arrow left" id="pc-prev" title="Previous box" aria-label="Previous box"><i></i></button>
+          <button class="pc-arrow right" id="pc-next" title="Next box" aria-label="Next box"><i></i></button>
+        </div>
+      </div>
+      <div class="map-caption"><span id="pc-where">–</span><span id="pc-note"></span></div>
     </section>
 
     <section class="card">
@@ -744,6 +778,157 @@ function renderBag(bag) {
   setHtml($('bag'), html || '–');
 }
 
+// ---------------------------------------------------------------- PC boxes
+
+/// The PC's box screen as FireRed draws it: the box's wallpaper and title,
+/// each Pokémon's menu icon in its cell, and the scroll arrows to change box
+/// (pokemon_storage_system_graphics.c). Box names and wallpapers are the
+/// game's defaults (BOX1…BOX14, Forest/City/Desert/Savanna in turn): the
+/// bot doesn't read them.
+const pcBox = {
+  BOXES: 14, W: 160, H: 144, COLS: 6,
+  boxes: [], at: null, drawn: null, slide: null, hover: null,
+  sheet: null, font: null, icons: new Map(),
+  init() {
+    this.ctx = $('pc-canvas').getContext('2d');
+    this.sheet = new Image();
+    this.sheet.onload = () => this.draw(true);
+    this.sheet.onerror = () => setText('pc-note', 'PC graphics not built: run tools/world/build.sh');
+    this.sheet.src = 'world/pc_wallpapers.png';
+    fetch('world/font_normal.json').then(r => r.ok ? r.json() : null).then(f => {
+      if (!f) return;
+      this.font = new Map(f.glyphs.map(g => [g.text, g]));
+      this.draw(true);
+    }).catch(() => {});
+    const saved = parseInt(localStorage.getItem('pokebot.pcbox'), 10);
+    if (saved >= 0 && saved < this.BOXES) this.at = saved;
+    $('pc-prev').addEventListener('click', () => this.go(-1));
+    $('pc-next').addEventListener('click', () => this.go(1));
+    const canvas = $('pc-canvas');
+    canvas.addEventListener('mousemove', (e) => this.pick(e, false));
+    canvas.addEventListener('mouseleave', () => { this.hover = null; this.caption(); });
+    canvas.addEventListener('click', (e) => this.pick(e, true));
+    const box = $('pcbox');
+    new ResizeObserver(() => box.style.setProperty('--px', `${$('pc-stage').offsetWidth / this.W}px`)).observe(box);
+  },
+  update(pc) {
+    this.boxes = (pc && pc.boxes) || [];
+    if (this.at == null) {
+      const first = this.boxes.findIndex(k => k.value && k.value.length);
+      if (first < 0 && !this.boxes.some(k => k.value)) { this.caption(); return this.draw(); }
+      this.at = Math.max(0, first);
+    }
+    this.caption();
+    this.draw();
+  },
+  go(dir) {
+    const from = this.at ?? 0;
+    this.at = (from + dir + this.BOXES) % this.BOXES;
+    localStorage.setItem('pokebot.pcbox', String(this.at));
+    this.hover = null;
+    this.startSlide(dir);
+    this.caption();
+  },
+  mons(i) { return (this.boxes[i] && this.boxes[i].value) || null; },
+  label(m) {
+    const species = prettyConst(val(m.species) || '?');
+    const nick = val(m.nickname);
+    const lv = val(m.level);
+    return `${nick && nick !== species.toUpperCase() ? `${nick} (${species})` : species}${lv != null ? ` Lv${lv}` : ''}`;
+  },
+  caption() {
+    const i = this.at ?? 0;
+    const k = this.boxes[i];
+    const mons = this.mons(i);
+    const known = this.boxes.filter(b => b.value).length;
+    const total = this.boxes.reduce((n, b) => n + ((b.value && b.value.length) || 0), 0);
+    setHtml($('pc-where'), `${dot(k)} BOX${i + 1} · ${mons ? `${mons.length}/30` : 'not looked at yet'}`);
+    setHtml($('pc-src'), `${total} stored · ${known}/${this.BOXES} boxes read`);
+    setText('pc-note', this.hover ? this.label(this.hover) : '');
+  },
+  pick(e, click) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) * this.W / r.width, y = (e.clientY - r.top) * this.H / r.height;
+    const col = Math.floor((x - 8) / 24), row = Math.floor((y - 16) / 24);
+    const ok = col >= 0 && col < this.COLS && row >= 0 && row < 5;
+    const m = ok ? (this.mons(this.at ?? 0) || []).find(m => m.slot === row * this.COLS + col) : null;
+    e.currentTarget.classList.toggle('pick', !!m);
+    if (m || click || this.hover) { this.hover = m || null; this.caption(); }
+  },
+  icon(species) {
+    let img = this.icons.get(species);
+    if (!img) {
+      img = new Image();
+      img.onload = () => this.draw(true);
+      img.src = `sprite/${encodeURIComponent(species)}?icon=1`;
+      this.icons.set(species, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  },
+  /// Text in the game's font (dark ink, white shadow), centred on `cx`.
+  text(ctx, str, cx, y) {
+    if (!this.font) return;
+    const glyphs = [...str].map(c => this.font.get(c) || this.font.get(' '));
+    let x = Math.round(cx - glyphs.reduce((w, g) => w + g.width, 0) / 2);
+    for (const g of glyphs) {
+      g.rows.forEach((row, gy) => [...row].forEach((c, gx) => {
+        if (c === '.') return;
+        ctx.fillStyle = c === '#' ? '#393939' : '#ffffff';
+        ctx.fillRect(x + gx, y + gy, 1, 1);
+      }));
+      x += g.width;
+    }
+  },
+  /// One box at x offset `dx` of the canvas.
+  paint(ctx, i, dx) {
+    const { W, H } = this;
+    ctx.save();
+    ctx.translate(dx, 0);
+    if (this.sheet.complete && this.sheet.naturalWidth) ctx.drawImage(this.sheet, 0, (i % 4) * H, W, H, 0, 0, W, H);
+    else { ctx.fillStyle = '#9ccf6a'; ctx.fillRect(8, 24, W - 16, H - 28); }
+    this.text(ctx, `BOX${i + 1}`, W / 2, 4);
+    const mons = this.mons(i);
+    if (!mons) this.text(ctx, '? ? ?', W / 2, 68);
+    for (const m of mons || []) {
+      const species = val(m.species);
+      const img = species && this.icon(species);
+      // Icon sprites are centred at (100 + 24 col, 44 + 24 row) on screen;
+      // the wallpaper's top left is at (80, 16).
+      const x = 4 + 24 * (m.slot % this.COLS), y = 12 + 24 * Math.floor(m.slot / this.COLS);
+      if (img) ctx.drawImage(img, 0, 0, 32, 32, x, y, 32, 32);
+      else { ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(x + 8, y + 12, 16, 16); }
+    }
+    ctx.restore();
+  },
+  draw(force) {
+    if (this.slide) return;
+    const i = this.at ?? 0;
+    const key = JSON.stringify([i, this.boxes[i] && this.boxes[i].value]);
+    if (!force && key === this.drawn) return;
+    this.drawn = key;
+    this.ctx.clearRect(0, 0, this.W, this.H);
+    this.paint(this.ctx, i, 0);
+  },
+  /// The new box scrolls in from the side as in the game.
+  startSlide(dir) {
+    const from = (this.at - dir + this.BOXES) % this.BOXES, to = this.at;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.slide = null; return this.draw(true); }
+    const start = performance.now(), ms = 220;
+    this.slide = { from, to, dir, start };
+    const step = (now) => {
+      if (this.slide?.start !== start) return;
+      const t = Math.min(1, (now - start) / ms), off = Math.round(this.W * (1 - (1 - t) * (1 - t)));
+      this.ctx.clearRect(0, 0, this.W, this.H);
+      this.paint(this.ctx, from, -dir * off);
+      this.paint(this.ctx, to, dir * (this.W - off));
+      if (t < 1) requestAnimationFrame(step);
+      else { this.slide = null; this.draw(true); }
+    };
+    requestAnimationFrame(step);
+  },
+};
+pcBox.init();
+
 function renderBattle(ob) {
   const b = ob && ob.battle;
   $('battle-card').classList.toggle('on', !!b);
@@ -941,6 +1126,7 @@ function setStatus(status) {
   world.update(st.player && st.player.pose);
   renderParty(st.party);
   renderBag(st.bag);
+  pcBox.update(st.pc);
   renderBattle(ob);
 
   if (ob.screen) {

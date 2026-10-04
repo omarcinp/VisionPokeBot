@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fetches the pret/pokefirered decompilation (map, tileset, script and font
-# data) and builds data/world/ (map renders, world model, gamedata.json, the
-# compiled events/dialogue/places/obtain tables; local, gitignored). Safe to
-# re-run.
+# Fetches the pret/pokefirered decompilation (map, tileset, script, font and
+# PC box data) and builds data/world/ (map renders, PC box graphics, world
+# model, gamedata.json, the compiled events/dialogue/places/obtain tables;
+# local, gitignored). Safe to re-run.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRET="${ROOT}/data/pret-pokefirered"
@@ -11,7 +11,8 @@ if [ ! -d "${PRET}/.git" ]; then
     git -C "${PRET}" sparse-checkout set data/maps data/layouts data/tilesets src include
 fi
 # Paths added after the first clone (no-op when already present).
-git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts graphics/pokemon graphics/region_map
+git -C "${PRET}" sparse-checkout add graphics/fonts data/scripts graphics/pokemon graphics/region_map \
+    graphics/pokemon_storage
 VENV="${ROOT}/.venv"
 if [ ! -x "${VENV}/bin/python" ]; then
     python3 -m venv "${VENV}"
@@ -20,6 +21,7 @@ fi
 cd "${ROOT}"
 "${VENV}/bin/python" tools/world/extract_world.py "$@"
 "${VENV}/bin/python" tools/world/extract_region_map.py
+"${VENV}/bin/python" tools/world/extract_pc_box.py
 "${VENV}/bin/python" tools/gamedata/extract_gamedata.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py
 "${VENV}/bin/python" tools/gamedata/extract_font.py --font small

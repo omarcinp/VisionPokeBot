@@ -36,14 +36,20 @@ const MJPEG_MAX_FPS: u32 = 30;
 const STREAM_HEARTBEAT: Duration = Duration::from_secs(1);
 /// The page reconnects when it hears nothing for a few of these.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
-/// Species folders (`front.png`, `shiny.pal`) from the decompilation.
+/// Species folders (`front.png`, `shiny.pal`, `icon.png`) from the
+/// decompilation.
 const SPRITE_DIR: &str = "data/pret-pokefirered/graphics/pokemon";
-/// Map views built by `tools/world/extract_region_map.py`.
+/// Map views built by `tools/world/extract_region_map.py`, PC box graphics
+/// by `extract_pc_box.py`.
 const WORLD_DIR: &str = "data/world";
-const WORLD_FILES: [(&str, &str); 3] = [
+const WORLD_FILES: [(&str, &str); 7] = [
     ("region_map.png", "image/png"),
     ("overworld.png", "image/png"),
     ("region_map.json", "application/json"),
+    ("pc_wallpapers.png", "image/png"),
+    ("pc_backdrop.png", "image/png"),
+    ("pc_arrow.png", "image/png"),
+    ("font_normal.json", "application/json"),
 ];
 
 /// A running web UI. Dropping it does not stop the server; it runs until the
@@ -119,8 +125,16 @@ pub fn serve(telemetry: Telemetry, addr: SocketAddr, instance_label: &str) -> Re
     Ok(WebServer { addr })
 }
 
-/// (folder, shiny) → PNG, or `None` if the species has no sprite.
-type SpriteCache = HashMap<(String, bool), Option<Bytes>>;
+/// (folder, kind) → PNG, or `None` if the species has no sprite.
+type SpriteCache = HashMap<(String, SpriteKind), Option<Bytes>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SpriteKind {
+    Front,
+    Shiny,
+    /// The 32x64 two-frame menu icon (party menu, PC boxes).
+    Icon,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -400,10 +414,12 @@ async fn sse(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event
 struct SpriteQuery {
     /// `1` or `true`.
     shiny: Option<String>,
+    /// `1` or `true`: the menu icon instead (no shiny variant).
+    icon: Option<String>,
 }
 
 /// Front sprite of a species (`SPECIES_PIDGEY` or `pidgey`), transparent
-/// background, optionally in its shiny palette.
+/// background, optionally in its shiny palette or as its menu icon.
 async fn sprite(
     State(app): State<AppState>,
     UrlPath(species): UrlPath<String>,
@@ -420,8 +436,15 @@ async fn sprite(
     {
         return (StatusCode::BAD_REQUEST, "bad species").into_response();
     }
-    let shiny = matches!(query.shiny.as_deref(), Some("1" | "true"));
-    let key = (folder, shiny);
+    let set = |flag: &Option<String>| matches!(flag.as_deref(), Some("1" | "true"));
+    let kind = if set(&query.icon) {
+        SpriteKind::Icon
+    } else if set(&query.shiny) {
+        SpriteKind::Shiny
+    } else {
+        SpriteKind::Front
+    };
+    let key = (folder, kind);
     let cached = app
         .sprites
         .lock()
@@ -487,14 +510,18 @@ fn data_dir(relative: &str) -> Option<PathBuf> {
     .find(|p| p.is_dir())
 }
 
-fn load_sprite(folder: &str, shiny: bool) -> Option<Vec<u8>> {
+fn load_sprite(folder: &str, kind: SpriteKind) -> Option<Vec<u8>> {
     let mut dir = data_dir(SPRITE_DIR)?.join(folder);
     // Forms (Unown) keep their sprites one level down.
     if !dir.join("front.png").is_file() {
         dir = dir.join("a");
     }
-    let png = std::fs::read(dir.join("front.png")).ok()?;
-    if !shiny {
+    let file = match kind {
+        SpriteKind::Icon => "icon.png",
+        SpriteKind::Front | SpriteKind::Shiny => "front.png",
+    };
+    let png = std::fs::read(dir.join(file)).ok()?;
+    if kind != SpriteKind::Shiny {
         return Some(png);
     }
     let palette = std::fs::read_to_string(dir.join("shiny.pal")).ok()?;
@@ -694,15 +721,25 @@ mod tests {
 
     #[test]
     fn shiny_sprite_is_a_valid_png_with_new_colours() {
-        let (Some(normal), Some(shiny)) =
-            (load_sprite("pidgey", false), load_sprite("pidgey", true))
-        else {
+        let (Some(normal), Some(shiny)) = (
+            load_sprite("pidgey", SpriteKind::Front),
+            load_sprite("pidgey", SpriteKind::Shiny),
+        ) else {
             return; // decompilation graphics not checked out
         };
         assert_ne!(normal, shiny);
         let decoded = image::load_from_memory(&shiny).expect("valid png");
         assert_eq!((decoded.width(), decoded.height()), (64, 64));
-        assert!(load_sprite("unown", false).is_some());
-        assert!(load_sprite("nidoran_f", false).is_some());
+        assert!(load_sprite("unown", SpriteKind::Front).is_some());
+        assert!(load_sprite("nidoran_f", SpriteKind::Front).is_some());
+    }
+
+    #[test]
+    fn icon_is_the_two_frame_menu_icon() {
+        let Some(icon) = load_sprite("unown", SpriteKind::Icon) else {
+            return; // decompilation graphics not checked out
+        };
+        let decoded = image::load_from_memory(&icon).expect("valid png");
+        assert_eq!((decoded.width(), decoded.height()), (32, 64));
     }
 }
