@@ -1661,12 +1661,14 @@ fn training_goes_where_it_pays_and_heals_at_the_areas_own_center() {
         .iter()
         .find(|a| a.map == "Route7")
         .expect("Route 7, next door");
-    // Each area's heal is its own Center's round trip: Route 7's (Celadon
-    // next door) is the cheapest, not the one every area shares.
+    // Each area's heal is its own Center's round trip, not the one every
+    // area shares: Route 7's is Celadon next door, Route 10's its own
+    // Center (routed to grass beside it since tiles are spread over each
+    // patch), the others' further.
     assert!(areas
         .iter()
         .any(|a| a.heal_minutes > route7.heal_minutes + 0.1));
-    assert!(areas.iter().all(|a| a.heal_minutes >= route7.heal_minutes));
+    assert!(route7.heal_minutes < 1.0, "{route7:?}");
     let goal = parse_goal("badge 5").unwrap();
     let plan = planner.plan(&goal, &knowledge, pose.clone()).unwrap();
     print(&plan, 10);
@@ -2059,4 +2061,27 @@ fn the_elite_four_is_judged_whole_before_its_first_room() {
     assert!(!g.in_progress(&belief));
     belief.pose = at("PokemonLeague_LoreleisRoom");
     assert!(g.in_progress(&belief));
+}
+
+/// Fleet continue-2 came out of Victory Road onto Route 23 without FLY:
+/// Route23_OnTransition resets the rock barriers, so it can walk back no
+/// further than Victory Road 2F's east end and 3F above it. A cave floor is
+/// one encounter cluster, and its one routed tile lay in the west half:
+/// readiness found nowhere to train and walked into the Elite Four at 0%,
+/// every cycle. Tiles spread over the cluster find the part it reaches.
+#[test]
+fn a_cave_part_cut_off_from_the_rest_is_still_trained_in() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, _) = checkpoint("cont2_victory_road_pocket_state.json");
+    let pose = PlayerPose {
+        map: "VictoryRoad_2F".into(),
+        x: 47,
+        y: 11,
+    };
+    let areas = planner.training_areas(&knowledge, Some(pose));
+    assert!(
+        areas.iter().any(|a| a.map.starts_with("VictoryRoad_")),
+        "{areas:?}"
+    );
 }

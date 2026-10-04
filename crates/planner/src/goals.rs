@@ -104,8 +104,13 @@ const PROGRESS_FLAG_PRIOR: f64 = 0.25;
 /// Seconds taken off an encounter area's travel when the area lies on the
 /// way to where the plan goes anyway (§4.5 locality).
 const LOCALITY_BONUS_S: f64 = 30.0;
-/// Encounter tile clusters routed to per map (largest first), one tile each.
+/// Encounter tile clusters routed to per map (largest first).
 const GRASS_CLUSTERS: usize = 4;
+/// Tiles routed to per cluster, spread over it: a cave's floor is one
+/// cluster across parts a walk can't join (fleet continue-2, Victory Road
+/// 2F's east end: its one tile, in the west half, was out of reach, and
+/// readiness found nowhere to train).
+const TILES_PER_CLUSTER: usize = 64;
 /// Slack, in tiles, when deciding whether a trigger tile lies on a walk.
 const ON_THE_WAY_SLACK: i32 = 2;
 
@@ -2118,7 +2123,14 @@ fn encounter_tiles(map: &MapData) -> Vec<(i32, i32)> {
         }
     }
     clusters.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a[0].cmp(&b[0])));
-    clusters.iter().take(GRASS_CLUSTERS).map(|c| c[0]).collect()
+    clusters
+        .iter()
+        .take(GRASS_CLUSTERS)
+        .flat_map(|c| {
+            let stride = c.len().div_ceil(TILES_PER_CLUSTER).max(1);
+            c.iter().step_by(stride).copied()
+        })
+        .collect()
 }
 
 /// One planned step with the facts it establishes.
