@@ -243,6 +243,7 @@ impl ToolStep for HuntStep {
                 let caught = battle.caught().map(str::to_owned);
                 let fled = battle.ran() && caught.is_none();
                 let foe = battle.memory.catch.foe.as_ref().map(|(s, _)| s.clone());
+                let declined = battle.memory.catch.declined_for_risk;
                 self.fled_in_a_row = if fled { self.fled_in_a_row + 1 } else { 0 };
                 ctx.events.push(progress(
                     self.phase(),
@@ -274,7 +275,7 @@ impl ToolStep for HuntStep {
                 if fled && (spent(self.fighter(&party)) || spent(party.lead())) {
                     return Decision::Fail(format!("{HEAL_FIRST}: no attacking move with PP left"));
                 }
-                if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp) {
+                if heal_after_flight(&self.hunt, fled, foe.as_deref(), lead_hp, declined) {
                     let (hp, max) = lead_hp.unwrap_or_default();
                     return Decision::Fail(format!(
                         "{HEAL_FIRST}: ran from a {} battle at {hp}/{max} HP",
@@ -607,19 +608,28 @@ fn no_attack_left(data: &pokebot_gamedata::GameData, member: &crate::party::Memb
 /// is how a catch hunt goes on), with the lead hurt below
 /// [`FLIGHT_HEAL_PCT`] %. Nearly full, the flight is the matchup's, and a
 /// heal changes nothing (fleet worker 4: a Lv7 CATERPIE at 47/50 ran from
-/// Route 3's Pokémon, healed three times and gave the training up).
+/// Route 3's Pokémon, healed three times and gave the training up). A
+/// catch declined for the lead's risk heals at any wound: the risk is the
+/// wound's (fleet emu4: BULBASAUR alone at 16/19 HP ran from every
+/// PIDGEY it hunted, risk 0.025 over the 0.02 limit, 0.013 at full HP).
 fn heal_after_flight(
     hunt: &Hunt,
     fled: bool,
     foe: Option<&str>,
     lead_hp: Option<(u16, u16)>,
+    declined_for_risk: bool,
 ) -> bool {
     let for_the_hunt = match hunt {
         Hunt::Level(_) => true,
         Hunt::Species(s) => foe == Some(s.as_str()),
     };
+    let bar = if declined_for_risk {
+        100
+    } else {
+        FLIGHT_HEAL_PCT
+    };
     fled && for_the_hunt
-        && lead_hp.is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * FLIGHT_HEAL_PCT)
+        && lead_hp.is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * bar)
 }
 
 /// Whether a hunt for `species` is over: one `caught` in the battle just
@@ -1030,13 +1040,15 @@ mod tests {
             &train,
             true,
             Some("SPECIES_RATTATA"),
-            Some((12, 23))
+            Some((12, 23)),
+            false,
         ));
         assert!(!heal_after_flight(
             &train,
             true,
             Some("SPECIES_RATTATA"),
-            Some((23, 23))
+            Some((23, 23)),
+            false,
         ));
         // Fleet worker 4: a Lv7 CATERPIE at 47/50 runs from Route 3's
         // Pokémon for the matchup; a heal changes nothing.
@@ -1044,26 +1056,54 @@ mod tests {
             &train,
             true,
             Some("SPECIES_SPEAROW"),
-            Some((47, 50))
+            Some((47, 50)),
+            false,
         ));
         assert!(!heal_after_flight(
             &train,
             false,
             Some("SPECIES_RATTATA"),
-            Some((12, 23))
+            Some((12, 23)),
+            false,
         ));
         // A catch hunt runs from other species as it goes.
         assert!(!heal_after_flight(
             &mankey,
             true,
             Some("SPECIES_RATTATA"),
-            Some((12, 23))
+            Some((12, 23)),
+            false,
         ));
         assert!(heal_after_flight(
             &mankey,
             true,
             Some("SPECIES_MANKEY"),
-            Some((12, 23))
+            Some((12, 23)),
+            false,
+        ));
+        // Fleet emu4: BULBASAUR alone at 16/19 declined every PIDGEY for
+        // the risk (0.025 over 0.02; 0.013 at full HP): heal.
+        let pidgey = Hunt::Species("SPECIES_PIDGEY".into());
+        assert!(heal_after_flight(
+            &pidgey,
+            true,
+            Some("SPECIES_PIDGEY"),
+            Some((16, 19)),
+            true,
+        ));
+        assert!(!heal_after_flight(
+            &pidgey,
+            true,
+            Some("SPECIES_PIDGEY"),
+            Some((16, 19)),
+            false,
+        ));
+        assert!(!heal_after_flight(
+            &pidgey,
+            true,
+            Some("SPECIES_PIDGEY"),
+            Some((19, 19)),
+            true,
         ));
     }
 

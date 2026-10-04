@@ -477,6 +477,9 @@ pub struct CatchMemory {
     pub box_index: Option<u8>,
     /// An attempt was abandoned for its risk: RUN.
     pub flee: bool,
+    /// The catch was declined for the lead's risk (as the lead stands: a
+    /// heal lowers it).
+    pub declined_for_risk: bool,
     /// The species the hunt is after: caught unless our lead is at risk.
     pub wanted: Option<String>,
     /// What later steps of the plan want caught, taken on the side as the
@@ -785,7 +788,11 @@ pub fn identify(
                 asleep_turns: 0,
             });
         }
-        Err(reason) => events.push(log(format!("not catching {species} Lv{level}: {reason}"))),
+        Err(reason) => {
+            c.declined_for_risk =
+                reason.starts_with("risk ") || reason.starts_with("the odds say RUN");
+            events.push(log(format!("not catching {species} Lv{level}: {reason}")));
+        }
     }
 }
 
