@@ -102,6 +102,13 @@ impl Retries {
         self.count += 1;
     }
 
+    /// The phase got further (a cell read, a box reached): the misses
+    /// before it don't count against what comes next.
+    pub fn progressed(&mut self) {
+        self.count = 0;
+        self.waiting_since = None;
+    }
+
     pub fn exhausted(&self) -> bool {
         self.count > MAX_RETRIES
     }

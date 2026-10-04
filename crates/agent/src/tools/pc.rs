@@ -542,6 +542,9 @@ impl PcSwapStep {
         // the hand hides it, and a box scrolling in shows the old one.
         if matches!(cur, PcCursor::Cell(_)) {
             if let Some(b) = pc.box_title.as_deref().and_then(box_number) {
+                if self.current_box != Some(b) {
+                    self.retries.progressed();
+                }
                 self.current_box = Some(b);
             }
         }
@@ -575,6 +578,11 @@ impl PcSwapStep {
                 };
                 let reading = reading.species.is_some().then_some(reading);
                 self.cells.insert((b, c), reading);
+                // Each cell read is progress: a full box's thirty moves
+                // add up misses that aren't the search stalling (fleet
+                // continue-1: BOX1, full, read in full, then "PC: no
+                // progress in box" on the way to BOX2, where GOLBAT was).
+                self.retries.progressed();
             }
         }
         let read = |c: u8| self.cells.contains_key(&(b, c));
@@ -1437,6 +1445,35 @@ mod tests {
             step.ops.front(),
             Some(&Op::Withdraw("SPECIES_PARAS".into()))
         );
+    }
+
+    /// Fleet continue-1: BOX1, full, read cell by cell for GOLBAT, then
+    /// "PC: no progress in box" on the way to BOX2, where it was: the
+    /// misses of thirty moves added up. Each cell read clears them.
+    #[test]
+    fn reading_a_new_cell_clears_the_misses_before_it() {
+        let Some(data) = data() else { return };
+        let mut run = Run {
+            state: state(&["SPECIES_IVYSAUR", "SPECIES_PIDGEY"], None),
+            events: Vec::new(),
+        };
+        let mut step = PcSwapStep::new(
+            Arc::clone(&data),
+            None,
+            "SPECIES_PIDGEY",
+            "SPECIES_PARAS",
+            &run.state,
+        );
+        step.ops.pop_front();
+        let o = storage(1, PcMode::Box, PcCursor::Cell(0), Some("RATTATA"));
+        run.settled(&mut step, &o);
+        for _ in 0..crate::tools::menu::MAX_RETRIES {
+            step.retries.failed();
+        }
+        let o = storage(100, PcMode::Box, PcCursor::Cell(1), Some("ZUBAT"));
+        run.settled(&mut step, &o);
+        step.retries.failed();
+        assert!(!step.retries.exhausted());
     }
 
     /// Switch, Celadon: BOX1 searched, the next box (BOX2, empty) scrolled
