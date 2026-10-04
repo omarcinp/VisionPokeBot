@@ -1511,6 +1511,32 @@ pub fn route_search_via(
     None
 }
 
+/// The tiles of `pose`'s map walked to from it without leaving the map
+/// (the rules of [`nearest_reachable`]). A map in parts (Route 23: the
+/// Indigo Plateau's approach and the stretch south of Victory Road) keeps
+/// the other part out.
+pub fn walkable_on_map(world: &World, pose: &PlayerPose, gone: &Gone) -> HashSet<(i32, i32)> {
+    let Some(map) = world.map(&pose.map) else {
+        return HashSet::new();
+    };
+    let obstacles = object_obstacles(map, gone);
+    let walk = Walk {
+        obstacles: &obstacles,
+        surf: false,
+        opened: None,
+    };
+    let mut seen = HashSet::from([(pose.x, pose.y)]);
+    let mut queue = VecDeque::from([(pose.x, pose.y)]);
+    while let Some(tile) = queue.pop_front() {
+        for ((name, x, y), _) in neighbours(world, map, tile, &walk) {
+            if name == pose.map && seen.insert((x, y)) {
+                queue.push_back((x, y));
+            }
+        }
+    }
+    seen
+}
+
 /// The maps among `goals` (map → tiles to reach) that can be walked to
 /// from `pose` in the fewest moves (a warp or an edge counts as one), in
 /// name order; empty when none is reachable.
@@ -1642,6 +1668,29 @@ mod tests {
         let world = World::load(root.join("data/world")).ok()?;
         world.events()?;
         Some(Arc::new(world))
+    }
+
+    /// Fleet continue-6 trained on Route 23 from the Indigo Plateau's
+    /// approach: its grass all lies south of Victory Road, and the walk
+    /// failed "no path to (14, 43)" 26 times. The tiles walked to on the map
+    /// from there hold no grass, so no spin tile is chosen among them.
+    #[test]
+    fn route_23_below_the_plateau_walks_to_no_grass() {
+        let Some(world) = world_with_events() else {
+            return;
+        };
+        let pose = PlayerPose {
+            map: "Route23".into(),
+            x: 11,
+            y: 0,
+        };
+        let reached = walkable_on_map(&world, &pose, &Gone::new());
+        assert!(reached.len() > 100, "{}", reached.len());
+        assert!(!reached.contains(&(14, 43)));
+        let m = world.map("Route23").unwrap();
+        assert!(!reached.iter().any(|&(x, y)| m
+            .tile(x, y)
+            .is_some_and(|t| crate::tools::lookup::encounter_tile(&t))));
     }
 
     /// Switch goal run (2026-09-27, 800 crossings in 2 h): Route 5's

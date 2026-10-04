@@ -633,6 +633,40 @@ fn the_same_failure_twice_marks_the_intent_infeasible_and_the_planner_avoids_it(
     assert_eq!(h.seen_names(), vec!["Buy", "Buy", "Explore", "Catch"]);
 }
 
+/// Fleet continue-6: every plan walked to Route 23 (which succeeded) and
+/// then failed its training there "no path to (14, 43)", 26 times; the
+/// walk's success cleared the failure each time, so it never counted as
+/// twice in a row. A walk succeeding in between doesn't.
+#[test]
+fn the_same_failure_twice_counts_across_a_walk_that_succeeds_between() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut planner = FakePlanner::new(vec![plan(vec![
+        step(go("Route4")),
+        step(buy()),
+        step(catch()),
+    ])]);
+    planner.alternative = Some(plan(vec![step(catch())]));
+    let h = Harness::new(vec![
+        (
+            "Buy",
+            vec![
+                Err("no mart selling ITEM_POKE_BALL found".into()),
+                Err("no mart selling ITEM_POKE_BALL found".into()),
+            ],
+        ),
+        ("Catch", vec![Ok(vec![caught()])]),
+    ]);
+    let (report, _) = h.run(&d, frame, &planner, GoalOptions::default(), vec![]);
+    assert!(report.satisfied, "{report:?}");
+    assert_eq!(report.infeasible, vec![buy().to_string()]);
+    assert_eq!(
+        h.seen_names(),
+        vec!["Go", "Buy", "Go", "Buy", "Explore", "Catch"]
+    );
+}
+
 #[test]
 fn a_contradicted_assumption_replans_before_the_step_runs() {
     let (Some(d), Some(frame)) = (data(), overworld()) else {

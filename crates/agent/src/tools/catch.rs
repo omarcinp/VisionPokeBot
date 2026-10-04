@@ -416,7 +416,13 @@ impl ToolStep for HuntStep {
         let target = match self.spin_at {
             Some(t) => t,
             None => {
-                let Some(t) = grass_spot(&self.nav.world, &pose.map, (pose.x, pose.y)) else {
+                // Grass walked to on this map first: the nearest by
+                // distance may lie in a part it doesn't reach (fleet
+                // continue-6 on Route 23 below the Indigo Plateau: "no
+                // path to (14, 43)", south of Victory Road, 26 times).
+                let Some(t) = reachable_grass_spot(&self.nav, &pose)
+                    .or_else(|| grass_spot(&self.nav.world, &pose.map, (pose.x, pose.y)))
+                else {
                     return Decision::Fail(format!("no encounter tiles on {}", pose.map));
                 };
                 // A map split in parts (Route 4 around Mt. Moon) may keep
@@ -552,6 +558,19 @@ fn grass_across(ctx: &mut ToolContext<'_>, pose: &pokebot_state::PlayerPose) -> 
 
 /// Encounter tiles tried for a field route, nearest first.
 const GRASS_TRIED: usize = 8;
+
+/// Where to spin among the encounter tiles walked to on the player's map.
+pub fn reachable_grass_spot(
+    nav: &NavParts,
+    pose: &pokebot_state::PlayerPose,
+) -> Option<(i32, i32)> {
+    let m = nav.world.map(&pose.map)?;
+    let reached = crate::nav::walkable_on_map(&nav.world, pose, &nav.gone);
+    let grass = |x: i32, y: i32| {
+        reached.contains(&(x, y)) && m.tile(x, y).is_some_and(|t| encounter_tile(&t))
+    };
+    crate::story::spin_tile(&grass, m.width, m.height, (pose.x, pose.y))
+}
 
 fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -> bool {
     let Some(m) = nav.world.map(&pose.map) else {

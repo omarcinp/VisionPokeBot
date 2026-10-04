@@ -569,7 +569,18 @@ impl Run<'_, '_> {
             match outcome.result {
                 Ok(()) => {
                     self.report.steps_run += 1;
-                    self.last_failure = None;
+                    // Only this intent succeeding clears its failure: the
+                    // walk there succeeding in between doesn't (fleet
+                    // continue-6: Go(Route23), then Train on Route 23
+                    // failing "no path to (14, 43)", 26 times, never
+                    // "twice in a row").
+                    if self
+                        .last_failure
+                        .as_ref()
+                        .is_some_and(|(k, _)| *k == step.intent.to_string())
+                    {
+                        self.last_failure = None;
+                    }
                     self.last_reason = None;
                     self.failed_at.clear();
                     // Not inside a gauntlet: a reload there could only
