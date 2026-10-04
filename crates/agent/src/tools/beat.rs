@@ -84,8 +84,17 @@ impl Tool for BeatTool {
                 return e.into();
             }
             let healed = ctx.invoke(&Intent::Heal { center: None });
-            if let Err(e) = healed.result {
-                return e.into();
+            match healed.result {
+                // No healer in reach (fleet continue-2, the Elite Four:
+                // every Beat failed "no known safe route to recovery"
+                // until the replans ran out): fought as the party stands.
+                Err(e) if super::heal::no_healer_in_reach(&e) => {
+                    ctx.info(format!(
+                        "{trainer}: no healer to reach ({e}); fighting as we are"
+                    ));
+                }
+                Err(e) => return e.into(),
+                Ok(()) => {}
             }
         }
         let talked = ctx.invoke(&Intent::Talk {

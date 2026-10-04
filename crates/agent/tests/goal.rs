@@ -1197,6 +1197,71 @@ fn an_urgent_need_with_no_healer_in_reach_lets_the_walk_go_on() {
     assert!(cleared);
 }
 
+/// Fleet continue-2 reached BRUNO wounded: the Beat's heal failed "no
+/// known safe route to recovery" (the Elite Four's rooms lock behind),
+/// and so did every Beat until the replans ran out. With no healer in
+/// reach the battle is fought as the party stands.
+#[test]
+fn a_beat_with_no_healer_in_reach_is_fought_as_the_party_stands() {
+    use pokebot_state::{Knowledge, Status};
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut mon = pokebot_agent::party::starter_mon(&d.data, "SPECIES_CHARIZARD", 84);
+    mon.hp = Knowledge::observed((20, 260), 0);
+    mon.status = Knowledge::observed(Status::Healthy, 0);
+    /// The battle, won.
+    struct Talk(Arc<Mutex<Vec<Intent>>>);
+    impl Tool for Talk {
+        fn name(&self) -> &str {
+            "Talk"
+        }
+        fn serves(&self, i: &Intent) -> bool {
+            matches!(i, Intent::Talk { .. })
+        }
+        fn run(&mut self, i: &Intent, _: &mut ToolContext<'_>) -> ToolOutcome {
+            self.0.lock().unwrap().push(i.clone());
+            ToolOutcome {
+                result: Ok(()),
+                learned: vec![GameEvent::BattleEnded],
+                pose: None,
+            }
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut toolbox = Toolbox::default();
+    toolbox.prepend(Box::new(Talk(Arc::clone(&seen))));
+    let mut rt = runtime(&d, frame);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut rt,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(toolbox);
+    ctx.emit(GameEvent::PlayerLocated {
+        pose: PlayerPose {
+            map: "PokemonLeague_BrunosRoom".into(),
+            x: 6,
+            y: 12,
+        },
+    })
+    .unwrap();
+    ctx.emit(GameEvent::PartyAudited { members: vec![mon] })
+        .unwrap();
+    let beat = ctx.invoke(&Intent::Beat {
+        trainer: "TRAINER_ELITE_FOUR_BRUNO".into(),
+        map: "PokemonLeague_BrunosRoom".into(),
+        object: 1,
+    });
+    assert!(beat.result.is_ok(), "{:?}", beat.result);
+    let names: Vec<_> = seen.lock().unwrap().iter().map(Intent::name).collect();
+    assert_eq!(names, vec!["Talk"]);
+}
+
 /// One Pokémon fainting is not the end (the user's rule: the game
 /// restarts only when all have fainted): the step failed, and the plan
 /// goes on.

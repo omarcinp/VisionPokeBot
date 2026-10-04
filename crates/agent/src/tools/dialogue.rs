@@ -2061,7 +2061,9 @@ fn run_script(
                 // the rooms lock behind the player, "no known safe route
                 // to a healer", and the run gave up before LORELEI): the
                 // battle is fought as the party stands.
-                Err(ToolError::Failed(e)) if e.contains("no known safe route to a healer") => {
+                // (fleet continue-2 and -6 failed every battle there "no
+                // known safe route to recovery", the same want).
+                Err(e) if super::heal::no_healer_in_reach(&e) => {
                     ctx.info(format!(
                         "{trainer}: no healer to reach ({e}); fighting as we are"
                     ));

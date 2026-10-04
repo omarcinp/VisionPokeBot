@@ -10,6 +10,13 @@ use super::{progress, Answer, Intent, Tool, ToolContext, ToolError, ToolOutcome}
 
 pub struct HealTool;
 
+/// Whether a heal failed for want of any healer in reach (the Elite
+/// Four's rooms lock behind the player): a battle that wanted it is
+/// fought as the party stands.
+pub fn no_healer_in_reach(e: &ToolError) -> bool {
+    matches!(e, ToolError::Failed(why) if why.contains("no known safe route to"))
+}
+
 /// The healer to talk to for `center` (a map), or the nearest nurse.
 pub fn nurse_for(
     ctx: &mut ToolContext<'_>,
