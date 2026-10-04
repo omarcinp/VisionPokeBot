@@ -1207,6 +1207,16 @@ pub fn respawn_pose(ctx: &ToolContext<'_>) -> Option<PlayerPose> {
                 .find(|h| h.map == r.map && h.x == r.x && h.y == r.y)
         })
         .or_else(|| places.heal_spot("HEAL_LOCATION_PALLET_TOWN"))?;
+    // The decomp's tile (Switch-era guess: the open tile nearest the
+    // middle, which at the Indigo Plateau is the nurse's, behind the
+    // counter; fleet continue-6 found no way out from there).
+    if let Some((x, y)) = spot.respawn {
+        return Some(PlayerPose {
+            map: spot.respawn_map.clone(),
+            x,
+            y,
+        });
+    }
     let map = ctx.world.map(&spot.respawn_map)?;
     let (cx, cy) = (map.width / 2, map.height / 2);
     let mut best: Option<(i32, (i32, i32))> = None;

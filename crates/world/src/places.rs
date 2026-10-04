@@ -18,6 +18,10 @@ pub struct HealSpot {
     pub y: i32,
     /// The Pokémon Center (or home) the player wakes up in after a white-out.
     pub respawn_map: String,
+    /// Where on `respawn_map` (heal_location.c
+    /// `SetWhiteoutRespawnWarpAndHealerNpc`): in front of the nurse.
+    #[serde(default)]
+    pub respawn: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

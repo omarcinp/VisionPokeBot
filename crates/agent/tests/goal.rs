@@ -1090,6 +1090,40 @@ fn a_white_out_whose_save_is_inside_the_elite_four_goes_on_from_the_center() {
     assert_eq!(planner.calls(), 2);
 }
 
+/// A white-out puts the player where the decomp says
+/// (`SetWhiteoutRespawnWarpAndHealerNpc`): at the Indigo Plateau, in front
+/// of the counter. Fleet continue-6 was placed on the nurse's tile behind
+/// it (the open tile nearest the map's middle), found no route out ("no
+/// plan establishes FLAG_SYS_GAME_CLEAR"), and the session reloaded its
+/// save inside the Elite Four.
+#[test]
+fn a_white_out_at_the_indigo_plateau_respawns_in_front_of_the_counter() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    let mut rt = runtime(&d, frame);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut rt,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    );
+    ctx.emit(GameEvent::RespawnSet {
+        map: "IndigoPlateau_Exterior".into(),
+        x: 11,
+        y: 7,
+    })
+    .unwrap();
+    let pose = goal::respawn_pose(&ctx).expect("a respawn");
+    assert_eq!(
+        (pose.map.as_str(), pose.x, pose.y),
+        ("IndigoPlateau_PokemonCenter_1F", 13, 12)
+    );
+}
+
 /// Nothing is saved inside the Elite Four: a reload there could only lose
 /// again. Outside it, a step that learnt something is saved.
 #[test]

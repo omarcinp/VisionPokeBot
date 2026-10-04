@@ -1208,11 +1208,25 @@ def compile_dialogue(world):
 # --------------------------------------------------------------------------
 
 
+def respawn_tiles(pret):
+    """Where a white-out puts the player on each respawn map
+    (heal_location.c `SetWhiteoutRespawnWarpAndHealerNpc`): {map id: (x, y)}
+    for the maps it names, and the tile of every other one."""
+    text = (Path(pret) / "src/heal_location.c").read_text()
+    body = re.search(r"void SetWhiteoutRespawnWarpAndHealerNpc\(.*?\n\}", text, re.S).group(0)
+    named = {m: (int(x), int(y)) for m, x, y in re.findall(
+        r"MAP_NUM\((MAP_\w+)\)\)\s*\{\s*warp->x = (\d+);\s*warp->y = (\d+);", body)}
+    default = re.search(r"else\s*\{\s*warp->x = (\d+);\s*warp->y = (\d+);", body)
+    return named, (int(default.group(1)), int(default.group(2)))
+
+
 def compile_places(world, events, world_dir=None):
     heal_json = json.loads((world.pret / "src/data/heal_locations.json").read_text())["heal_locations"]
+    respawns, respawn_default = respawn_tiles(world.pret)
     heal_spots = [
         {"id": h["id"], "map": world.map_names.get(h["map"], h["map"]), "x": h["x"], "y": h["y"],
-         "respawn_map": world.map_names.get(h["respawn_map"], h["respawn_map"])}
+         "respawn_map": world.map_names.get(h["respawn_map"], h["respawn_map"]),
+         "respawn": list(respawns.get(h["respawn_map"], respawn_default))}
         for h in heal_json
     ]
     # Fly lands on the heal spot of the town (region_map.c sMapFlyDestinations);
