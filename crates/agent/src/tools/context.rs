@@ -184,6 +184,9 @@ pub struct ToolContext<'a> {
     next_pickup_check: u64,
     /// The tools running, outermost first (their intents' names).
     running: Vec<&'static str>,
+    /// Trainers the running intents fight (a Beat's, a script's battle):
+    /// a loss to one of them is booked by the intent.
+    fighting: Vec<String>,
     toolbox: Toolbox,
     expects: Expects,
     depth: usize,
@@ -267,6 +270,7 @@ impl<'a> ToolContext<'a> {
             next_need_check: 0,
             next_pickup_check: 0,
             running: Vec::new(),
+            fighting: Vec::new(),
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,
@@ -361,6 +365,11 @@ impl<'a> ToolContext<'a> {
     /// The tools running, outermost first (their intents' names).
     pub fn running(&self) -> &[&'static str] {
         &self.running
+    }
+
+    /// Trainers the running intents fight themselves.
+    pub fn fighting(&self) -> &[String] {
+        &self.fighting
     }
 
     /// What the running tool has learned so far.
@@ -1048,7 +1057,13 @@ impl<'a> ToolContext<'a> {
         let learned = std::mem::take(&mut self.learned);
         self.depth += 1;
         self.running.push(intent.name());
+        if let Some(t) = &fights {
+            self.fighting.push(t.clone());
+        }
         let mut outcome = tool.run(intent, self);
+        if fights.is_some() {
+            self.fighting.pop();
+        }
         self.running.pop();
         self.depth -= 1;
         self.scheduler.recovering = recovering;

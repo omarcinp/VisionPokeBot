@@ -1061,22 +1061,19 @@ impl Tool for BattleTool {
         let mut step =
             BattleStep::new(Arc::clone(&ctx.data), *policy, ctx.after_dialogue()).loss_ok(loss_ok);
         let result = ctx.drive(&mut step).map(|_| ());
-        // A trainer met on the way (a sight line crossed on a walk) is
-        // booked as a Beat's is: the next plan asks for more (fleet emu4:
-        // lost to YOUNGSTER BEN on Route 3 walking to Mt. Moon, cycle after
-        // cycle, the ledger empty). A Beat or a script books its own.
-        let booked = ctx
-            .running()
-            .iter()
-            .any(|n| matches!(*n, "Beat" | "RunScript"));
-        if let (Err(super::ToolError::Failed(why)), Some(name), false, false) = (
-            &result,
-            step.memory.trainer_name.as_deref(),
-            loss_ok,
-            booked,
-        ) {
+        // A trainer met on the way (a sight line crossed on a walk, or in
+        // a script that fights none: fleet continue-4, COOLTRAINER COLBY
+        // during a boulder hole's script) is booked as a Beat's is: the
+        // next plan asks for more (fleet emu4: lost to YOUNGSTER BEN on
+        // Route 3 walking to Mt. Moon, cycle after cycle, the ledger
+        // empty). A Beat or a script fighting that trainer books its own.
+        if let (Err(super::ToolError::Failed(why)), Some(name), false) =
+            (&result, step.memory.trainer_name.as_deref(), loss_ok)
+        {
             if why.contains("whited out") {
-                if let Some(trainer) = trainer_named(ctx, name) {
+                if let Some(trainer) =
+                    trainer_named(ctx, name).filter(|t| !ctx.fighting().contains(t))
+                {
                     ctx.ledger.lost_to(&trainer);
                     ctx.info(format!("lost to {trainer}: the next plan asks for more"));
                     if let Err(e) = ctx.ledger.store() {

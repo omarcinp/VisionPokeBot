@@ -1341,6 +1341,56 @@ fn a_beat_with_no_healer_in_reach_is_fought_as_the_party_stands() {
     assert_eq!(names, vec!["Talk"]);
 }
 
+/// Fleet continue-4 lost to COOLTRAINER COLBY, met during a boulder
+/// hole's script, and the loss wasn't booked: only a Beat's or a script's
+/// own trainer is booked by the intent, the rest by the battle. The
+/// context says which trainers the running intents fight.
+#[test]
+fn the_trainers_an_intent_fights_are_known_to_its_tools() {
+    let (Some(d), Some(frame)) = (data(), overworld()) else {
+        return;
+    };
+    struct Record(Arc<Mutex<Vec<Vec<String>>>>);
+    impl Tool for Record {
+        fn name(&self) -> &str {
+            "Record"
+        }
+        fn serves(&self, i: &Intent) -> bool {
+            matches!(i, Intent::Beat { .. } | Intent::RunScript { .. })
+        }
+        fn run(&mut self, _: &Intent, ctx: &mut ToolContext<'_>) -> ToolOutcome {
+            self.0.lock().unwrap().push(ctx.fighting().to_vec());
+            ToolOutcome::ok()
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut rt = runtime(&d, frame);
+    let executor = Executor::default();
+    let stop = AtomicBool::new(false);
+    let mut ctx = ToolContext::new(
+        &mut rt,
+        &executor,
+        Arc::clone(&d.world),
+        Arc::clone(&d.data),
+        &stop,
+    )
+    .with_toolbox(Toolbox::new(vec![Box::new(Record(Arc::clone(&seen)))]));
+    ctx.invoke(&Intent::Beat {
+        trainer: "TRAINER_COOLTRAINER_COLBY".into(),
+        map: "VictoryRoad_3F".into(),
+        object: 1,
+    });
+    ctx.invoke(&Intent::RunScript {
+        script: "VictoryRoad_3F_BoulderHole_8".into(),
+        path: Some(0),
+        answers: Vec::new(),
+    });
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0], vec!["TRAINER_COOLTRAINER_COLBY".to_string()]);
+    assert!(seen[1].is_empty(), "{:?}", seen[1]);
+    assert!(ctx.fighting().is_empty());
+}
+
 /// One Pokémon fainting is not the end (the user's rule: the game
 /// restarts only when all have fainted): the step failed, and the plan
 /// goes on.
