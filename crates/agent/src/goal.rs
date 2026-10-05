@@ -597,8 +597,14 @@ impl Run<'_, '_> {
                             if matches!(e, ToolError::Stopped | ToolError::Device(_)) {
                                 return Err(e);
                             }
-                            let why = self.failed(ctx, plan, step, &format!("save: {e}"))?;
-                            return Ok(Executed::Replan(why));
+                            // No saving here (the Safari Zone): the step
+                            // stands, saved once the player is out.
+                            if e.to_string().contains(crate::save::NO_SAVE_HERE) {
+                                ctx.info(format!("save after {}: {e}", step.intent));
+                            } else {
+                                let why = self.failed(ctx, plan, step, &format!("save: {e}"))?;
+                                return Ok(Executed::Replan(why));
+                            }
                         }
                     }
                     let (knowledge, pose) = self.snapshot(ctx)?;

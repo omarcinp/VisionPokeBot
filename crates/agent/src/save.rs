@@ -12,6 +12,10 @@ use crate::{Action, Decision, Expectation, Outcome, Task, TaskContext};
 /// Quiet frames in the overworld after the save messages before finishing.
 const SETTLED: u32 = 60;
 
+/// How a save fails where the game offers none: the Start menu has no
+/// SAVE row (the Safari Zone's menu has RETIRE first and no SAVE).
+pub const NO_SAVE_HERE: &str = "the Start menu has no SAVE here";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SavePhase {
     OpenMenu,
@@ -30,6 +34,8 @@ pub struct SaveGameTask {
     answered: u32,
     quiet: u32,
     attempts: u32,
+    /// The menu, read whole, has no SAVE: closed, then the task fails.
+    no_save: bool,
 }
 
 impl Default for SaveGameTask {
@@ -40,6 +46,7 @@ impl Default for SaveGameTask {
             answered: 0,
             quiet: 0,
             attempts: 0,
+            no_save: false,
         }
     }
 }
@@ -59,9 +66,32 @@ impl Task for SaveGameTask {
         if self.attempts > 8 {
             return Decision::Fail("could not save".into());
         }
+        if self.no_save {
+            return match o.menu {
+                Some(_) => Decision::Act(Action::new(
+                    "close the Start menu",
+                    vec![ControllerCommand::Press(Button::B)],
+                    Expectation::MenuClosed,
+                    45,
+                )),
+                None => Decision::Fail(NO_SAVE_HERE.into()),
+            };
+        }
         match self.phase {
             SavePhase::OpenMenu => match (&o.menu, &o.dialogue) {
                 (Some(menu), None) => {
+                    // Read whole, the menu has no SAVE: SAVE's place from
+                    // the bottom is the Trainer Card there (fleet
+                    // continue-5, the Safari Zone: RETIRE, POKéDEX, …,
+                    // the card opened eight times and "could not save").
+                    let lines = &o.menu_lines;
+                    if lines.len() == usize::from(menu.rows)
+                        && !lines.is_empty()
+                        && !lines.iter().any(|l| crate::bag::fits("SAVE", l))
+                    {
+                        self.no_save = true;
+                        return self.next(ctx);
+                    }
                     let up = |label: &str| {
                         Decision::Act(Action::new(
                             label,
@@ -366,6 +396,50 @@ mod tests {
         };
         assert_eq!(action.label, "choose CONTINUE");
         assert_eq!(task.phase, ContinuePhase::MainMenu);
+    }
+
+    /// Fleet continue-5, the Safari Zone: its Start menu has RETIRE first
+    /// and no SAVE, and SAVE's place from the bottom opened the Trainer
+    /// Card, eight times. Read whole without a SAVE, the menu is closed and
+    /// the save fails as one the game doesn't offer; with SAVE it goes on.
+    #[test]
+    fn a_start_menu_without_save_is_closed_and_reported() {
+        let menu_of = |rows: &[&str]| {
+            let mut o = observe(ScreenState::Menu);
+            o.menu = Some(pokebot_state::MenuObservation {
+                window: pokebot_state::Region::new(150, 0, 90, 120),
+                rows: rows.len() as u8,
+                cursor_row: 0,
+                cursor_y: 4,
+            });
+            o.menu_lines = rows.iter().map(|r| r.to_string()).collect();
+            o
+        };
+        let next = |task: &mut SaveGameTask, o: &Observation| {
+            task.next(&mut TaskContext {
+                observation: o,
+                state: &GameState::default(),
+                events: &mut Vec::new(),
+            })
+        };
+        let safari = menu_of(&[
+            "RETIRE", "POKéDEX", "POKéMON", "BAG", "JADE", "OPTION", "EXIT",
+        ]);
+        let mut task = SaveGameTask::default();
+        let Decision::Act(close) = next(&mut task, &safari) else {
+            panic!("expected the menu closed");
+        };
+        assert_eq!(close.label, "close the Start menu");
+        let closed = observe(ScreenState::Unknown);
+        assert!(matches!(next(&mut task, &closed), Decision::Fail(why) if why == NO_SAVE_HERE));
+        let field = menu_of(&[
+            "POKéDEX", "POKéMON", "BAG", "JADE", "SAVE", "OPTION", "EXIT",
+        ]);
+        let mut task = SaveGameTask::default();
+        let Decision::Act(first) = next(&mut task, &field) else {
+            panic!("expected a move toward SAVE");
+        };
+        assert_eq!(first.label, "wrap to EXIT");
     }
 
     #[test]
