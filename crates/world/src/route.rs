@@ -431,6 +431,9 @@ pub struct PlaceGraph {
     by_map: BTreeMap<String, Vec<Place>>,
     edges: BTreeMap<PlaceKey, Vec<Edge>>,
     fly_spots: Vec<Place>,
+    /// Each fly spot's map → the flag that lights it on the Fly map (set
+    /// on entering the place: Route 10's is its Pokémon Center's).
+    fly_flags: BTreeMap<String, String>,
     maps: BTreeMap<String, MapInfo>,
     floods: RefCell<HashMap<FloodKey, Rc<Reach>>>,
     /// Walk edges from a place to the other places of its map, per flood.
@@ -457,6 +460,36 @@ pub struct PlaceGraph {
 }
 
 impl PlaceGraph {
+    /// What lights `dest` on the Fly map: its spot's flag (fleet
+    /// continue-5 flew for Route 10, walked but its Pokémon Center never
+    /// entered: "Route10 is not lit on the fly map", every replan), or a
+    /// visit where no spot names one.
+    pub fn fly_lit(&self, dest: &str) -> Predicate {
+        match self.fly_flags.get(dest) {
+            Some(flag) => Predicate::Flag {
+                name: flag.clone(),
+                is: true,
+            },
+            None => Predicate::Visited {
+                map: dest.to_string(),
+            },
+        }
+    }
+
+    /// [`fly_requirement`] with the spot's own flag for the visit.
+    pub fn fly_requirement_of(&self, dest: &str) -> Requirement {
+        let mut r = fly_requirement(dest);
+        if let Some(last) = r.last_mut() {
+            *last = self.fly_lit(dest);
+        }
+        r
+    }
+
+    /// The flag lighting `dest` on the Fly map, when a spot names one.
+    pub fn fly_flag(&self, dest: &str) -> Option<&str> {
+        self.fly_flags.get(dest).map(String::as_str)
+    }
+
     pub fn build(world: &World, params: RouteParams) -> PlaceGraph {
         let mut g = PlaceGraph {
             params,
@@ -464,6 +497,7 @@ impl PlaceGraph {
             by_map: BTreeMap::new(),
             edges: BTreeMap::new(),
             fly_spots: Vec::new(),
+            fly_flags: BTreeMap::new(),
             maps: BTreeMap::new(),
             floods: RefCell::new(HashMap::new()),
             walks: RefCell::new(HashMap::new()),
@@ -599,6 +633,22 @@ impl PlaceGraph {
                 if world.map(&f.map).is_some() {
                     let p = g.add_place(&f.map, f.x, f.y, PlaceKind::Fly);
                     g.fly_spots.push(p);
+                    // A flag the spot's own map sets on entry is its visit;
+                    // one another map sets (Route 10's, its Pokémon
+                    // Center's) is a fact of its own.
+                    let own = world.events().is_none_or(|e| {
+                        e.scripts.values().any(|s| {
+                            s.map.as_deref() == Some(f.map.as_str())
+                                && s.paths.iter().any(|p| {
+                                    p.does.iter().any(|d| {
+                                        matches!(d, crate::events::Effect::Set { set } if *set == f.flag)
+                                    })
+                                })
+                        })
+                    });
+                    if !own {
+                        g.fly_flags.insert(f.map.clone(), f.flag.clone());
+                    }
                 }
             }
             g.fly_spots.sort();
@@ -663,7 +713,7 @@ impl PlaceGraph {
         relevant.extend(dig_requirement());
         relevant.extend(escape_rope_requirement());
         for spot in &g.fly_spots {
-            relevant.extend(fly_requirement(&spot.map));
+            relevant.extend(g.fly_requirement_of(&spot.map));
         }
         for edges in g.edges.values() {
             for e in edges {
@@ -2037,9 +2087,7 @@ fn search(
                         // the belief can't tell stays a blocked
                         // alternative under the pessimistic policy: a look
                         // at the fly map settles it.
-                        let visited = Predicate::Visited {
-                            map: spot.map.clone(),
-                        };
+                        let visited = graph.fly_lit(&spot.map);
                         let never = match belief.eval(&visited) {
                             Truth::False => true,
                             Truth::Unknown => match policy {
@@ -2050,14 +2098,14 @@ fn search(
                             },
                             Truth::True => false,
                         };
-                        let requires = fly_requirement(&spot.map);
+                        let requires = graph.fly_requirement_of(&spot.map);
                         !never && pass.allows(&unmet_of(&check(belief, &requires), policy))
                     })
                     .map(|spot| Edge {
                         to: spot.clone(),
                         kind: EdgeKind::Fly,
                         cost_s: graph.params.fly_s,
-                        requires: fly_requirement(&spot.map),
+                        requires: graph.fly_requirement_of(&spot.map),
                     })
                     .collect()
             });

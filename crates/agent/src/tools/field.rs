@@ -1095,15 +1095,29 @@ pub fn use_from_party(ctx: &mut ToolContext<'_>, mv: FieldMove) -> Result<(), To
     Ok(())
 }
 
+/// Closes what is open, back to the overworld.
+struct CloseScreens(super::menu::Closer);
+
+impl ToolStep for CloseScreens {
+    fn expects(&self) -> Expects {
+        Expects::MENUS
+    }
+
+    fn next(&mut self, ctx: &mut StepContext<'_>) -> Decision {
+        self.0.next(ctx.observation, "closed")
+    }
+}
+
 /// Flies to `map` (a lit fly spot).
 pub fn fly(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
     let mut to = FlyTo::new(map)
         .ok_or_else(|| ToolError::Failed(format!("{map} is not a fly spot on the region map")))?;
-    if let Some(spot) = ctx
+    let spot = ctx
         .world
         .places()
         .and_then(|p| p.fly_spots.iter().find(|f| f.map == map))
-    {
+        .cloned();
+    if let Some(spot) = &spot {
         to = to.landing_at(pokebot_state::PlayerPose {
             map: spot.map.clone(),
             x: spot.x,
@@ -1111,7 +1125,26 @@ pub fn fly(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
         });
     }
     use_from_party(ctx, FieldMove::Fly)?;
-    ctx.drive(&mut to)?;
+    match ctx.drive(&mut to) {
+        // Not lit, watched past its blinking: the spot's flag is clear (a
+        // walk through Route 10 is no visit of its Center, which lights
+        // it). The map is closed, or the next try opens on it (fleet
+        // continue-5: "FLY from the party menu: no progress in open",
+        // every replan).
+        Err(ToolError::Failed(e)) if e.contains("is not lit on the fly map") => {
+            if let Some(spot) = &spot {
+                ctx.emit(GameEvent::FlagObserved {
+                    flag: spot.flag.clone(),
+                    value: false,
+                })?;
+            }
+            let _ = ctx.drive(&mut CloseScreens(super::menu::Closer::to(
+                super::menu::Leave::Overworld,
+            )));
+            return Err(ToolError::Failed(e));
+        }
+        r => r?,
+    };
     ctx.emit(GameEvent::MapVisited {
         map: map.to_owned(),
     })?;

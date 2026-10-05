@@ -1096,3 +1096,46 @@ fn seafoams_water_is_surfed_once_its_current_stops() {
     print("current stopped", &r);
     assert!(r.found() && needs_flag(&r));
 }
+
+/// Fleet continue-5 flew for Route 10, walked through but its Pokémon
+/// Center never entered: the Fly map left it dark, "Route10 is not lit",
+/// every replan. A route's fly spot is lit by its Center's flag, not by the
+/// route's visit; a town's by visiting it.
+#[test]
+fn a_route_fly_spot_needs_its_centers_flag() {
+    let Some(world) = world() else { return };
+    let graph = PlaceGraph::build(&world, RouteParams::default());
+    assert_eq!(
+        graph.fly_requirement_of("PalletTown"),
+        fly_requirement("PalletTown")
+    );
+    assert!(graph
+        .fly_requirement_of("Route10")
+        .contains(&flag("FLAG_WORLD_MAP_ROUTE10_POKEMON_CENTER_1F")));
+    let walked = traveller().visited("Route10", true);
+    let r = route(
+        &world,
+        &graph,
+        &walked,
+        &pose("CinnabarIsland", 14, 12),
+        &Place::tile("Route10", 13, 21),
+        UnknownPolicy::Pessimistic,
+    );
+    assert!(
+        !r.legs
+            .iter()
+            .any(|l| l.kind == EdgeKind::Fly && l.to.map == "Route10"),
+        "{:?}",
+        r.legs
+    );
+    let lit = walked.flag("FLAG_WORLD_MAP_ROUTE10_POKEMON_CENTER_1F", true);
+    let r = route(
+        &world,
+        &graph,
+        &lit,
+        &pose("CinnabarIsland", 14, 12),
+        &Place::tile("Route10", 13, 21),
+        UnknownPolicy::Pessimistic,
+    );
+    assert_eq!(r.legs[0].kind, EdgeKind::Fly);
+}

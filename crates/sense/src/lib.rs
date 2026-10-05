@@ -312,6 +312,18 @@ impl Sensor {
                     .iter()
                     .map(|map| GameEvent::MapVisited { map: map.clone() }),
             );
+            // A lit icon is its spot's flag set (a dark one proves nothing
+            // on one frame: the icons blink).
+            if let Some(places) = self.world.as_ref().and_then(|w| w.places()) {
+                for lit in &map.lit {
+                    if let Some(spot) = places.fly_spots.iter().find(|s| &s.map == lit) {
+                        events.push(GameEvent::FlagObserved {
+                            flag: spot.flag.clone(),
+                            value: true,
+                        });
+                    }
+                }
+            }
         }
         // A path just recorded (or a checkpoint restored): what was seen
         // absent before it counts again only once seen after it (the Cell
