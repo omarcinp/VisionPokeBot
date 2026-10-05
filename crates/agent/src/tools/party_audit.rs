@@ -134,8 +134,19 @@ impl PartyAudit {
 /// the wait for two equal readings ran out ("party audit: screen or field
 /// stayed unreadable", twice a cycle).
 fn same_panels(a: &PartyMenuObservation, b: &PartyMenuObservation) -> bool {
+    // A trailing lone `?` is the highlighted member's bobbing icon, not
+    // the name (fleet continue-3: "MEOWTH ?" on one frame, "MEOWTH" on the
+    // next, never two readings alike, three cycles in a row).
+    let bare = |n: &str| -> String {
+        let mut n = n.trim_end();
+        while let Some(rest) = n.strip_suffix('?').filter(|r| r.ends_with(' ')) {
+            n = rest.trim_end();
+        }
+        n.to_owned()
+    };
     let names = |x: &Option<String>, y: &Option<String>| match (x, y) {
         (Some(x), Some(y)) => {
+            let (x, y) = (bare(x), bare(y));
             x.chars().count() == y.chars().count()
                 && x.chars()
                     .zip(y.chars())
@@ -354,6 +365,10 @@ mod tests {
         assert!(same_panels(&menu("FEAROW", 25), &menu("?EAROW", 25)));
         assert!(!same_panels(&menu("FEAROW", 25), &menu("SPEAROW", 25)));
         assert!(!same_panels(&menu("FEAROW", 25), &menu("?EAROW", 26)));
+        // Fleet continue-3: the lead's bobbing icon read as a trailing `?`
+        // on every other frame.
+        assert!(same_panels(&menu("MEOWTH ?", 15), &menu("MEOWTH", 15)));
+        assert!(!same_panels(&menu("MEOWTH ?", 15), &menu("MEOWTHX", 15)));
     }
 
     /// Switch, a new game before Oak gives the starter: the Start menu has
