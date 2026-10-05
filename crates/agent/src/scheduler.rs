@@ -115,6 +115,9 @@ pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
     }) {
         return Some(Need::AuditParty);
     }
+    // Attacks a battle counts on: not FUTURE SIGHT and the like (fleet
+    // continue-4: HYPNO's PSYCHIC and CONFUSION spent, FUTURE SIGHT left;
+    // no heal was due, and against RAY & TYRA it used FLASH and fainted).
     let attacks = |m: &PartyMon| {
         m.moves
             .iter()
@@ -123,7 +126,12 @@ pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
                 s.mv.value
                     .as_deref()
                     .and_then(|mv| data.move_(mv))
-                    .is_some_and(|mv| mv.power > 0)
+                    .is_some_and(|mv| {
+                        mv.power > 0
+                            && !mv.effect.as_deref().is_some_and(|e| {
+                                pokebot_planner::evaluate::UNRELIABLE_EFFECTS.contains(&e)
+                            })
+                    })
             })
             .fold((0u32, 0u32), |(cur, max), s| {
                 let pp = s.pp.value.unwrap_or_default();
@@ -513,6 +521,36 @@ mod tests {
         unknown.hp = Knowledge::unknown();
         assert_eq!(health(Some(&[unknown]), &d), Some(Need::AuditParty));
     }
+    /// Fleet continue-4: HYPNO's PSYCHIC and CONFUSION spent, FUTURE SIGHT
+    /// full; no heal was due, and against RAY & TYRA it used FLASH and
+    /// fainted. FUTURE SIGHT is no attack to count on: heal.
+    #[test]
+    fn an_unreliable_attack_left_is_no_attack_left() {
+        let d: GameData = serde_json::from_value(serde_json::json!({"species":{},"moves":{
+            "MOVE_PSYCHIC":{"name":"PSYCHIC","effect":null,"power":90,"type":null,"accuracy":100,"pp":10,"priority":0,"secondary_chance":0},
+            "MOVE_FUTURE_SIGHT":{"name":"FUTURE SIGHT","effect":"EFFECT_FUTURE_SIGHT","power":80,"type":null,"accuracy":90,"pp":15,"priority":0,"secondary_chance":0}
+        },"items":{},"type_chart":[],"trainers":{},"wild":{},"map_trainers":{},"marts":{}})).unwrap();
+        let slot = |mv: &str, pp: (u8, u8)| {
+            Some(MoveSlot {
+                mv: Knowledge::observed(mv.into(), 1),
+                pp: Knowledge::observed(pp, 1),
+            })
+        };
+        let mut hypno = mon(100);
+        hypno.moves = [
+            slot("MOVE_PSYCHIC", (0, 10)),
+            slot("MOVE_FUTURE_SIGHT", (15, 15)),
+            None,
+            None,
+        ];
+        assert_eq!(
+            health(Some(&[hypno.clone(), mon(100)]), &d),
+            Some(Need::HealUrgent)
+        );
+        hypno.moves[0] = slot("MOVE_PSYCHIC", (10, 10));
+        assert_eq!(health(Some(&[hypno, mon(100)]), &d), None);
+    }
+
     /// A catch joins with the HP and status its battle showed (derived,
     /// not read on a summary): no menu audit after the battle for it.
     #[test]
