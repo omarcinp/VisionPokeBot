@@ -287,32 +287,37 @@ fn map_tile(world: &World, map: &str) -> Option<(i32, i32)> {
 }
 
 impl GoStep {
-    /// The sight of the trainers on `map` not believed beaten, while the
-    /// lead is under [`LEAD_HP_MIN`] % HP (walking to heal, typically): a
-    /// trainer's battle can't be fled, so the walk goes round them when
-    /// it can. Empty otherwise.
     fn trainer_sight(
         &self,
         state: &pokebot_state::GameState,
         map: &str,
     ) -> pokebot_world::path::Obstacles {
-        use pokebot_planner::intents::LEAD_HP_MIN;
-        let worn = state
-            .party
-            .value
-            .as_ref()
-            .and_then(|p| p.first())
-            .and_then(|m| m.hp.value)
-            .is_some_and(|(hp, max)| u32::from(hp) * 100 < u32::from(max) * u32::from(LEAD_HP_MIN));
-        let (Some(data), Some(m)) = (self.data.as_ref().filter(|_| worn), self.world.map(map))
-        else {
-            return Default::default();
-        };
-        let trainers = data.map_trainers.get(map).map_or(&[][..], |t| t.as_slice());
-        crate::nav::sight_tiles(m, trainers, |t| {
-            state.world.flags.get(t).and_then(|k| k.value) == Some(true)
-        })
+        match self.data.as_ref() {
+            Some(data) => unbeaten_sight(&self.world, data, state, map),
+            None => Default::default(),
+        }
     }
+}
+
+/// The sight of the trainers on `map` not believed beaten: a trainer's
+/// battle can't be fled, so the walk goes round them when it can, as the
+/// planner counts on (it plans for the sightings no way round avoids).
+/// Only when the lead was worn did the walk avoid them: fleet continue-4,
+/// its lead fit, walked through COOLTRAINER COLBY's sight on Victory Road
+/// 3F, a battle no plan prepared for, three losses.
+fn unbeaten_sight(
+    world: &pokebot_world::World,
+    data: &pokebot_gamedata::GameData,
+    state: &pokebot_state::GameState,
+    map: &str,
+) -> pokebot_world::path::Obstacles {
+    let Some(m) = world.map(map) else {
+        return Default::default();
+    };
+    let trainers = data.map_trainers.get(map).map_or(&[][..], |t| t.as_slice());
+    crate::nav::sight_tiles(m, trainers, |t| {
+        state.world.flags.get(t).and_then(|k| k.value) == Some(true)
+    })
 }
 
 impl ToolStep for GoStep {
@@ -1303,6 +1308,37 @@ mod tests {
     /// Cerulean's Center, and the leg then walked for Victory Road 2F, "no
     /// known route from Route4". On the destination's map, off the leg's,
     /// the legs are done; a route out and back into one map isn't.
+    /// Fleet continue-4: a fit lead walked through COOLTRAINER COLBY's
+    /// sight on Victory Road 3F (the walk avoided sight only for a worn
+    /// lead), a battle no plan prepared for. Unbeaten trainers' sight is
+    /// avoided whatever the lead's HP; beaten, it is free.
+    #[test]
+    fn an_unbeaten_trainers_sight_is_avoided_by_a_fit_lead() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(data)) = (
+            pokebot_world::World::load(root.join("data/world")),
+            pokebot_gamedata::GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let mut state = pokebot_state::GameState::default();
+        let fresh = unbeaten_sight(&world, &data, &state, "VictoryRoad_3F");
+        assert!(!fresh.is_empty());
+        for t in [
+            "TRAINER_COOLTRAINER_COLBY",
+            "TRAINER_COOLTRAINER_CAROLINE",
+            "TRAINER_COOLTRAINER_GEORGE",
+            "TRAINER_COOLTRAINER_ALEXA",
+            "TRAINER_COOL_COUPLE_RAY_TYRA",
+        ] {
+            state
+                .world
+                .flags
+                .insert(t.into(), pokebot_state::Knowledge::observed(true, 1));
+        }
+        assert!(unbeaten_sight(&world, &data, &state, "VictoryRoad_3F").is_empty());
+    }
+
     #[test]
     fn a_recovery_that_lands_on_the_destination_ends_the_legs() {
         let warp_out = Leg {
