@@ -559,15 +559,23 @@ pub fn run(ctx: &mut ToolContext<'_>, config: &FarmConfig) -> Result<String, Too
         match file.phase {
             FarmPhase::Prepare => {
                 prepare(ctx, &mut file)?;
-                // Saved in front of the grunt.
-                ctx.invoke(&Intent::Go {
-                    dest: Dest::Tile {
-                        map: MAP.into(),
-                        x: stand.0,
-                        y: stand.1,
-                    },
-                })
-                .result?;
+                // Saved in front of the grunt. The keeper walks there
+                // alone, and may have no attack at all (fleet continue-3:
+                // KAKUNA, HARDEN only): the scheduler's heals would ask
+                // for a party able to fight, which no heal gives ("recovery
+                // did not establish safe party health", every plan).
+                let scheduling = std::mem::replace(&mut ctx.scheduler.enabled, false);
+                let walked = ctx
+                    .invoke(&Intent::Go {
+                        dest: Dest::Tile {
+                            map: MAP.into(),
+                            x: stand.0,
+                            y: stand.1,
+                        },
+                    })
+                    .result;
+                ctx.scheduler.enabled = scheduling;
+                walked?;
                 file.phase = FarmPhase::Farm;
                 save(ctx, &file, path)?;
             }
@@ -742,6 +750,69 @@ mod tests {
             members: vec![member(&d, 0, "SPECIES_IVYSAUR", 40, &["MOVE_RAZOR_LEAF"])],
         };
         assert_eq!(keeper(&d, &strong), None);
+    }
+
+    /// Fleet continue-3's party at the bridge: KAKUNA Lv4, HARDEN only, is
+    /// the keeper, and walks to the grunt alone with no attack at all. The
+    /// scheduler's heals are off for that walk: a party with no attack
+    /// reads as in urgent need, which no heal mends.
+    #[test]
+    fn a_keeper_with_no_attack_walks_to_the_grunt() {
+        let Some(d) = data() else { return };
+        let party = Party {
+            members: vec![
+                member(
+                    &d,
+                    0,
+                    "SPECIES_SPEAROW",
+                    14,
+                    &["MOVE_PECK", "MOVE_GROWL", "MOVE_LEER", "MOVE_FURY_ATTACK"],
+                ),
+                member(&d, 1, "SPECIES_KAKUNA", 4, &["MOVE_HARDEN"]),
+                member(
+                    &d,
+                    2,
+                    "SPECIES_WARTORTLE",
+                    25,
+                    &["MOVE_TACKLE", "MOVE_BITE", "MOVE_BUBBLE", "MOVE_WATER_GUN"],
+                ),
+                member(
+                    &d,
+                    3,
+                    "SPECIES_MANKEY",
+                    7,
+                    &["MOVE_SCRATCH", "MOVE_LEER", "MOVE_LOW_KICK"],
+                ),
+                member(&d, 4, "SPECIES_EKANS", 6, &["MOVE_WRAP", "MOVE_LEER"]),
+                member(
+                    &d,
+                    5,
+                    "SPECIES_RATTATA",
+                    10,
+                    &["MOVE_TACKLE", "MOVE_TAIL_WHIP", "MOVE_QUICK_ATTACK"],
+                ),
+            ],
+        };
+        let (slot, _) = keeper(&d, &party).expect("a keeper");
+        assert_eq!(party.members[usize::from(slot)].species, "SPECIES_KAKUNA");
+        let alone = pokebot_state::PartyMon {
+            hp: pokebot_state::Knowledge::observed((17, 17), 1),
+            status: pokebot_state::Knowledge::observed(pokebot_state::Status::Healthy, 1),
+            moves: [
+                Some(pokebot_state::MoveSlot {
+                    mv: pokebot_state::Knowledge::observed("MOVE_HARDEN".into(), 1),
+                    pp: pokebot_state::Knowledge::observed((30, 30), 1),
+                }),
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::scheduler::health(Some(&[alone]), &d),
+            Some(crate::scheduler::Need::HealUrgent)
+        );
     }
 
     #[test]
