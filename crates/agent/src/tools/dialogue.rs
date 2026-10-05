@@ -1035,6 +1035,13 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
             })?;
         }
     }
+    if let Some(trainer) = battle_not_won(events, &script, path, conversation) {
+        ctx.emit(progress(
+            "Dialogue",
+            format!("{script}[{path}]: {trainer} not beaten yet; what follows isn't recorded"),
+        ))?;
+        return Ok(());
+    }
     record_path(ctx, &script, path)?;
     match diverged {
         Some(planned) => Err(ToolError::Replan(format!(
@@ -1042,6 +1049,42 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
         ))),
         _ => Ok(()),
     }
+}
+
+/// The trainer `script`'s `path` must beat when nothing read shows the
+/// battle won: no trainer battle won during the conversation, and none of
+/// the text the path prints from the trainer's defeat on was read. What
+/// the path does after the battle hasn't happened yet (fleet continue-2:
+/// the Champion's room scene, read up to his intro, was recorded whole,
+/// FLAG_DEFEATED_CHAMP and the warp to the Hall of Fame with it; the loss
+/// that followed was looked for on the Hall of Fame and went unbooked).
+fn battle_not_won(
+    events: &pokebot_world::events::Events,
+    script: &str,
+    path: usize,
+    conversation: &Conversation,
+) -> Option<String> {
+    use pokebot_world::events::Effect;
+    if conversation.battled {
+        return None;
+    }
+    let does = &events.script(script)?.paths.get(path)?.does;
+    let (at, trainer, defeat) = does.iter().enumerate().find_map(|(i, e)| match e {
+        Effect::Battle {
+            battle,
+            victory: None,
+            rematch: false,
+            defeat,
+            ..
+        } => Some((i, battle.clone(), defeat.clone())),
+        _ => None,
+    })?;
+    let after = super::effects::path_labels(&does[at + 1..]);
+    let shown = conversation
+        .recognised
+        .iter()
+        .any(|l| defeat.as_deref() == Some(l.as_str()) || after.contains(&l.as_str()));
+    (!shown).then_some(trainer)
 }
 
 /// The planned path of an item ball (`finditem`) when the conversation
@@ -2936,6 +2979,54 @@ mod tests {
     /// ("There's only trash here.") and nothing was recognised; the plan's
     /// "second lock opened" path (the beams off) must not be recorded on
     /// its word. A path that only prints still is.
+    /// Fleet continue-2: the Champion's room scene, read up to his intro,
+    /// was recorded whole (FLAG_DEFEATED_CHAMP, the warp to the Hall of
+    /// Fame) before the battle, which was lost. Until the battle shows won
+    /// (a trainer's prize, his defeat text, the words after it) the path
+    /// isn't recorded.
+    #[test]
+    fn a_path_is_not_recorded_past_a_battle_not_yet_won() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let script = "PokemonLeague_ChampionsRoom_EventScript_EnterRoom";
+        let events = world.events().unwrap();
+        let s = events.script(script).unwrap();
+        let fights = (0..s.paths.len())
+            .find(|&i| {
+                s.paths[i].does.iter().any(|e| {
+                    matches!(e, Effect::Battle { battle, .. } if battle == "TRAINER_CHAMPION_FIRST_SQUIRTLE")
+                })
+            })
+            .unwrap();
+        let read = |labels: &[&str], battled: bool| {
+            let mut c = Conversation::new(
+                Arc::clone(&world),
+                Arc::clone(&data),
+                None,
+                None,
+                Vec::new(),
+            );
+            c.recognised = labels.iter().map(|l| l.to_string()).collect();
+            c.battled = battled;
+            battle_not_won(events, script, fights, &c)
+        };
+        let intro = "PokemonLeague_ChampionsRoom_Text_Intro";
+        assert_eq!(
+            read(&[intro], false).as_deref(),
+            Some("TRAINER_CHAMPION_FIRST_SQUIRTLE")
+        );
+        assert_eq!(read(&[intro], true), None, "the prize money");
+        assert_eq!(
+            read(&["PokemonLeague_ChampionsRoom_Text_Defeat"], false),
+            None
+        );
+        assert_eq!(
+            read(&["PokemonLeague_ChampionsRoom_Text_OakPlayer"], false),
+            None
+        );
+    }
+
     #[test]
     fn unrecognised_text_does_not_prove_a_planned_path_that_changes_things() {
         let Some((world, data)) = world_and_data() else {
