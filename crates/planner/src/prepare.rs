@@ -902,11 +902,14 @@ fn search_levels(
         }
     }
     // No member gets further within the window: each is swept on toward
-    // Lv100, to the first level that does (fleet continue-1, the Elite
-    // Four after two losses to LANCE: no fourteen levels on anyone beat
-    // one more of his, so the best effort trained nobody and walked in at
-    // 0%, again and again).
+    // Lv100, to the first level that does, and the cheapest of those is
+    // the step (the party is judged again after it). Fleet continue-1,
+    // the Elite Four after two losses to LANCE: no fourteen levels on
+    // anyone beat one more of his, so the best effort trained nobody and
+    // walked in at 0%, again and again; swept, the plan that got furthest
+    // trained RATTATA from Lv8 to Lv87, a day of battles.
     if found == 0 && !useful.contains(&true) {
+        let mut cheapest: Option<(usize, PreparationPlan)> = None;
         for k in 0..party.len() {
             let far = usize::from(100 - party[k].level);
             for off in usize::from(window(&party[k])) + 1..=far {
@@ -916,12 +919,20 @@ fn search_levels(
                     continue;
                 };
                 if worth(&plan) > base_worth + 1e-6 {
-                    useful[k] = true;
-                    found += usize::from(meets(&plan));
-                    plans.push(plan);
+                    if cheapest
+                        .as_ref()
+                        .is_none_or(|(_, c)| plan.minutes < c.minutes)
+                    {
+                        cheapest = Some((k, plan));
+                    }
                     break;
                 }
             }
+        }
+        if let Some((k, plan)) = cheapest {
+            useful[k] = true;
+            found += usize::from(meets(&plan));
+            plans.push(plan);
         }
     }
     if found >= wanted {
@@ -1128,8 +1139,8 @@ mod tests {
     /// adding the most levels, wherever they went. It now trains the one
     /// member that wins (ZUBAT to GOLBAT, WING ATTACK against ERIKA's
     /// grass; each member's levels are swept on their own). Against
-    /// LORELEI no one gets further within the window: the one that does
-    /// further on is trained (GEODUDE, ROCK against her ICE).
+    /// LORELEI no one gets further within the window: the cheapest step
+    /// that does further on is trained.
     #[test]
     fn a_best_effort_trains_only_who_gets_further() {
         let Some(data) = data() else { return };
@@ -1167,7 +1178,7 @@ mod tests {
         assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_ZUBAT"]);
         assert_eq!(
             trained("TRAINER_ELITE_FOUR_LORELEI"),
-            vec!["SPECIES_GEODUDE"]
+            vec!["SPECIES_VENUSAUR"]
         );
     }
 
@@ -1220,8 +1231,9 @@ mod tests {
 
     /// Fleet continue-1 after two losses each to AGATHA and LANCE: no
     /// fourteen levels on anyone beat one more of LANCE's, so the best
-    /// effort trained nobody and walked in at 0%. A member is swept on to
-    /// the level that gets further.
+    /// effort trained nobody and walked in at 0%. Members are swept on to
+    /// the level that gets further, and the cheapest such step is taken
+    /// (not RATTATA from Lv8 to Lv87, the furthest, a day of battles).
     #[test]
     fn a_best_effort_looks_past_the_window_when_nothing_in_it_helps() {
         let Some(data) = data() else { return };
@@ -1307,6 +1319,8 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        assert_eq!(trained.len(), 1, "{trained:?}");
+        assert_eq!(trained[0].0, "SPECIES_ONIX", "{trained:?}");
         assert!(
             trained.iter().any(|(_, from, to)| to - from > LEVEL_WINDOW),
             "{trained:?} {:?} progress {}",
