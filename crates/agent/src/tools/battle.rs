@@ -998,7 +998,12 @@ impl ToolStep for BattleStep {
                             .find(|m| m.slot == slot)
                             .map(|m| m.display_name())
                     });
-                return self.shift_in_party_menu(party, slot, name.as_deref());
+                // Refused (already out, or no energy): the shift is over.
+                if name.as_ref().is_some_and(|n| self.no_energy.contains(n)) {
+                    self.shifted = true;
+                } else {
+                    return self.shift_in_party_menu(party, slot, name.as_deref());
+                }
             }
             if o.bag.is_some() || self.memory.catch.thrower.is_some() {
                 return catch::in_bag(o, &data, &mut self.memory.catch, ctx.events);
@@ -1262,8 +1267,13 @@ pub fn loss_allowed(ctx: &ToolContext<'_>) -> bool {
 
 /// The member the party screen refused to send out: "ZUBAT has no energy
 /// left to battle!" (`gText_PkmnHasNoEnergy`).
+/// The member the game refused to send out: "ZUBAT has no energy left to
+/// battle!", or "GOLDUCK is already in battle!" (it is the one out: fleet
+/// continue-4 chose GOLDUCK's SHIFT again and again, 812 refusals).
 fn no_energy(text: &str) -> Option<String> {
-    let (name, _) = text.split_once(" has no energy")?;
+    let (name, _) = text
+        .split_once(" has no energy")
+        .or_else(|| text.split_once(" is already in battle"))?;
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_owned())
 }
@@ -1526,6 +1536,22 @@ mod tests {
         step.begin(&mut events);
         assert!(!step.memory.catch.decided && step.memory.catch.only_wanted);
         assert_eq!(step.memory.catch.side, side);
+    }
+
+    /// Fleet continue-4: the shift chose GOLDUCK, the one out, and the game
+    /// refused, "GOLDUCK is already in battle!", 812 times. A refusal of
+    /// either kind names the member never chosen again this battle.
+    #[test]
+    fn a_member_already_in_battle_is_refused_like_one_with_no_energy() {
+        assert_eq!(
+            no_energy("GOLDUCK is already in battle!").as_deref(),
+            Some("GOLDUCK")
+        );
+        assert_eq!(
+            no_energy("ZUBAT has no energy left to battle!").as_deref(),
+            Some("ZUBAT")
+        );
+        assert_eq!(no_energy("GOLDUCK used CONFUSION!"), None);
     }
 
     /// Fleet continue-1 lost to the Champion, his "would like to battle"
