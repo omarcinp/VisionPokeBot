@@ -1067,13 +1067,21 @@ impl Tool for BattleTool {
         // next plan asks for more (fleet emu4: lost to YOUNGSTER BEN on
         // Route 3 walking to Mt. Moon, cycle after cycle, the ledger
         // empty). A Beat or a script fighting that trainer books its own.
-        if let (Err(super::ToolError::Failed(why)), Some(name), false) =
-            (&result, step.memory.trainer_name.as_deref(), loss_ok)
-        {
+        // The name may have shown before the battle was handed over (fleet
+        // continue-1: "CHAMPION GREEN would like to battle!" read by the
+        // walk's Unstick): a trainer's battle with no name read is the
+        // map's scripted one.
+        if let (Err(super::ToolError::Failed(why)), false) = (&result, loss_ok) {
             if why.contains("whited out") {
-                if let Some(trainer) =
-                    trainer_named(ctx, name).filter(|t| !ctx.fighting().contains(t))
-                {
+                let named = lost_to(
+                    &step.memory,
+                    |name| trainer_named(ctx, name),
+                    || {
+                        let map = ctx.pose()?.map;
+                        scripted_trainer(ctx.world.events()?, ctx.state(), &map)
+                    },
+                );
+                if let Some(trainer) = named.filter(|t| !ctx.fighting().contains(t)) {
                     ctx.ledger.lost_to(&trainer);
                     ctx.info(format!("lost to {trainer}: the next plan asks for more"));
                     if let Err(e) = ctx.ledger.store() {
@@ -1083,6 +1091,21 @@ impl Tool for BattleTool {
             }
         }
         result.into()
+    }
+}
+
+/// The trainer a lost battle was against: the one its name names, or,
+/// with none read (it showed before the battle was handed over), the
+/// map's scripted battle. None for a wild battle.
+fn lost_to(
+    memory: &BattleMemory,
+    named: impl Fn(&str) -> Option<String>,
+    scripted: impl Fn() -> Option<String>,
+) -> Option<String> {
+    match memory.trainer_name.as_deref() {
+        Some(name) => named(name),
+        None if memory.trainer => scripted(),
+        None => None,
     }
 }
 
@@ -1503,6 +1526,27 @@ mod tests {
         step.begin(&mut events);
         assert!(!step.memory.catch.decided && step.memory.catch.only_wanted);
         assert_eq!(step.memory.catch.side, side);
+    }
+
+    /// Fleet continue-1 lost to the Champion, his "would like to battle"
+    /// read by the walk's Unstick before the battle was handed over: no
+    /// name, but a trainer's battle, booked to the room's scripted one.
+    #[test]
+    fn a_trainer_battle_with_no_name_read_is_the_scripted_one() {
+        let named = |n: &str| Some(format!("by name {n}"));
+        let scripted = || Some("TRAINER_CHAMPION_FIRST_CHARMANDER".to_string());
+        let mut memory = BattleMemory::default();
+        assert_eq!(lost_to(&memory, named, scripted), None, "a wild battle");
+        memory.trainer = true;
+        assert_eq!(
+            lost_to(&memory, named, scripted).as_deref(),
+            Some("TRAINER_CHAMPION_FIRST_CHARMANDER")
+        );
+        memory.trainer_name = Some("YOUNGSTER BEN".into());
+        assert_eq!(
+            lost_to(&memory, named, scripted).as_deref(),
+            Some("by name YOUNGSTER BEN")
+        );
     }
 
     /// Fleet continue-6 lost to "CHAMPION GREEN" walking into his room:
