@@ -64,11 +64,15 @@ impl Combatant {
 /// the user is asleep (DREAM EATER, SNORE), faint the user (EXPLOSION),
 /// need a setup first (SPIT UP), only return damage taken (BIDE, COUNTER,
 /// MIRROR COAT), land two turns later (FUTURE SIGHT), or fail against a
-/// higher level (the OHKO moves, whose power is nominal). Neither the
-/// battle tool nor a matchup counts on them (fleet continue-1: HAUNTER's
-/// DREAM EATER made Route 18's DODUO and SPEAROW, immune to its GHOST
-/// moves, a win on paper; in battle it had no attack and fled them all).
-pub const UNRELIABLE_EFFECTS: [&str; 9] = [
+/// higher level (the OHKO moves, whose power is nominal), or never faint
+/// the foe (FALSE SWIPE leaves it 1 HP: fleet continue-3's MAROWAK used it
+/// on a TANGELA four turns running, poisoned, and fled at 16/120). Neither
+/// the battle tool nor a matchup counts on them (fleet continue-1:
+/// HAUNTER's DREAM EATER made Route 18's DODUO and SPEAROW, immune to its
+/// GHOST moves, a win on paper; in battle it had no attack and fled them
+/// all).
+pub const UNRELIABLE_EFFECTS: [&str; 10] = [
+    "EFFECT_FALSE_SWIPE",
     "EFFECT_DREAM_EATER",
     "EFFECT_SNORE",
     "EFFECT_EXPLOSION",
@@ -642,5 +646,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(best_move(&data, &haunter, &doduo).map(|(m, _)| m), None);
+    }
+
+    /// Fleet continue-3: MAROWAK trained on Route 21 with FALSE SWIPE as
+    /// its best move against TANGELA; it never faints the foe, and the
+    /// battle went on until MAROWAK, poisoned, fled. Another move wins it.
+    #[test]
+    fn false_swipe_is_no_way_to_faint_a_foe() {
+        let Ok(data) = GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let moves = ["MOVE_FALSE_SWIPE", "MOVE_BONE_CLUB"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let marowak = Combatant::new(&data, "SPECIES_MAROWAK", 44, moves, 15).unwrap();
+        let tangela = Combatant::new(
+            &data,
+            "SPECIES_TANGELA",
+            30,
+            data.default_moves("SPECIES_TANGELA", 30),
+            15,
+        )
+        .unwrap();
+        assert_eq!(
+            best_move(&data, &marowak, &tangela)
+                .map(|(m, _)| m)
+                .as_deref(),
+            Some("MOVE_BONE_CLUB")
+        );
     }
 }
