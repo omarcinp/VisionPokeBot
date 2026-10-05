@@ -154,9 +154,13 @@ pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
     let pct = u32::from(hp) * 100 / u32::from(max);
     let (pp, total) = attacks(lead);
     let lead_sick = !matches!(lead.status.value, Some(Status::Healthy));
+    // A lead with no attack at all (a switch-trained METAPOD, HARDEN only)
+    // isn't spent: a heal gives it none (fleet continue-3: every walk to
+    // Victory Road healed, then failed "recovery did not establish safe
+    // party health"). The others fight for it.
     if usable == 0
         || hp == 0
-        || pp == 0
+        || (pp == 0 && total > 0)
         || pct < if usable <= 1 { 50 } else { 35 }
         || (usable <= 1 && lead_sick)
     {
@@ -549,6 +553,27 @@ mod tests {
         );
         hypno.moves[0] = slot("MOVE_PSYCHIC", (10, 10));
         assert_eq!(health(Some(&[hypno, mon(100)]), &d), None);
+    }
+
+    /// Fleet continue-3: METAPOD, HARDEN only, led to be switch-trained;
+    /// every walk healed for it and failed "recovery did not establish
+    /// safe party health". A lead with no attack at all isn't spent: the
+    /// others fight for it. Alone, it can't fight at all.
+    #[test]
+    fn a_lead_with_no_attack_at_all_is_not_healed_for() {
+        let d = data();
+        let mut metapod = mon(100);
+        metapod.moves = [
+            Some(MoveSlot {
+                mv: Knowledge::observed("MOVE_HARDEN".into(), 1),
+                pp: Knowledge::observed((30, 30), 1),
+            }),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(health(Some(&[metapod.clone(), mon(100)]), &d), None);
+        assert_eq!(health(Some(&[metapod]), &d), Some(Need::HealUrgent));
     }
 
     /// A catch joins with the HP and status its battle showed (derived,
