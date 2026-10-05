@@ -269,6 +269,19 @@ impl Run<'_, '_> {
         let mut reason = "start".to_string();
         let mut plan_no = 0u32;
         self.saved_in_gauntlet = self.in_gauntlet(ctx)?;
+        if let Some(config) = &self.opts.nugget_farm {
+            match nugget_farm::resume(ctx, config) {
+                Ok(Some(done)) => {
+                    ctx.emit(progress(GOAL, format!("nugget farm resumed: {done}")))?
+                }
+                Ok(None) => {}
+                Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                Err(e) => {
+                    reason = format!("nugget farm resumed and failed: {e}");
+                    ctx.emit(progress(GOAL, reason.clone()))?;
+                }
+            }
+        }
         loop {
             if plan_no > self.opts.max_replans && self.recover(ctx)? {
                 // What the map showed is worth one more plan.

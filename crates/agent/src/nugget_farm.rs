@@ -525,6 +525,27 @@ pub fn before_the_grunt(
     run(ctx, config).map(Some)
 }
 
+/// A farm left partway (the team in the PC, the keeper alone in the
+/// party) is taken up again before anything is planned: the party the
+/// planner would see is the keeper alone. Fleet continue-6, relaunched
+/// at NUGGET 20: the plan sent a Lv3 RATTATA to catch MANKEY on Route 4,
+/// and it whited out. `None` when no farm is under way.
+pub fn resume(ctx: &mut ToolContext<'_>, config: &FarmConfig) -> Result<Option<String>, ToolError> {
+    let file = FarmFile::load(&config.file)?;
+    if !under_way(&file) {
+        return Ok(None);
+    }
+    run(ctx, config).map(Some)
+}
+
+/// Started and not finished: past preparing, short of done.
+fn under_way(file: &FarmFile) -> bool {
+    matches!(
+        file.phase,
+        FarmPhase::Farm | FarmPhase::Sell | FarmPhase::Restore
+    )
+}
+
 /// Runs the farm from the phase its file is at. What it did, when done.
 pub fn run(ctx: &mut ToolContext<'_>, config: &FarmConfig) -> Result<String, ToolError> {
     let path = config.file.as_path();
@@ -645,6 +666,22 @@ fn farm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet continue-6 relaunched at NUGGET 20, its team in the PC: a
+    /// farm farming, selling or restoring is taken up before planning;
+    /// one not started or done is not.
+    #[test]
+    fn a_farm_left_partway_is_under_way() {
+        let at = |phase| FarmFile {
+            phase,
+            ..FarmFile::default()
+        };
+        assert!(under_way(&at(FarmPhase::Farm)));
+        assert!(under_way(&at(FarmPhase::Sell)));
+        assert!(under_way(&at(FarmPhase::Restore)));
+        assert!(!under_way(&at(FarmPhase::Prepare)));
+        assert!(!under_way(&at(FarmPhase::Done)));
+    }
     use crate::party::Member;
 
     fn data() -> Option<GameData> {
