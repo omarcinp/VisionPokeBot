@@ -1063,6 +1063,11 @@ impl Tool for BattleTool {
         if loss_ok {
             ctx.info("battle: the script goes on if it is lost");
         }
+        // Where the battle began: a script's effects may move the belief on
+        // before it is over (fleet continue-6: the Champion's room script
+        // warps to the Hall of Fame after the battle, and the loss was
+        // looked for there).
+        let began_on = battle_map(ctx);
         let mut step =
             BattleStep::new(Arc::clone(&ctx.data), *policy, ctx.after_dialogue()).loss_ok(loss_ok);
         let result = ctx.drive(&mut step).map(|_| ());
@@ -1078,12 +1083,16 @@ impl Tool for BattleTool {
         // map's scripted one.
         if let (Err(super::ToolError::Failed(why)), false) = (&result, loss_ok) {
             if why.contains("whited out") {
+                let maps: Vec<String> = began_on.iter().cloned().chain(battle_map(ctx)).collect();
                 let named = lost_to(
                     &step.memory,
-                    |name| trainer_named(ctx, name),
+                    |name| maps.iter().find_map(|m| trainer_named_on(ctx, m, name)),
                     || {
-                        let map = battle_map(ctx)?;
-                        scripted_trainer(ctx.world.events()?, ctx.state(), &map)
+                        let events = ctx.world.events()?;
+                        last_path_battle(events, ctx.state()).or_else(|| {
+                            maps.iter()
+                                .find_map(|m| scripted_trainer(events, ctx.state(), m))
+                        })
                     },
                 );
                 match named {
@@ -1099,8 +1108,7 @@ impl Tool for BattleTool {
                     None if step.memory.trainer || step.memory.trainer_name.is_some() => {
                         ctx.info(format!(
                             "lost a trainer battle not booked: named {:?} on {:?}",
-                            step.memory.trainer_name,
-                            battle_map(ctx)
+                            step.memory.trainer_name, maps
                         ));
                     }
                     None => {}
@@ -1120,7 +1128,9 @@ fn lost_to(
     scripted: impl Fn() -> Option<String>,
 ) -> Option<String> {
     match memory.trainer_name.as_deref() {
-        Some(name) => named(name),
+        // A name no trainer of the map has (the rival's, the player's own
+        // naming): the scripted battle.
+        Some(name) => named(name).or_else(scripted),
         None if memory.trainer => scripted(),
         None => None,
     }
@@ -1137,12 +1147,28 @@ fn battle_map(ctx: &ToolContext<'_>) -> Option<String> {
         .map(|p| p.map)
 }
 
-fn trainer_named(ctx: &ToolContext<'_>, shown: &str) -> Option<String> {
-    let map = battle_map(ctx)?;
+fn trainer_named_on(ctx: &ToolContext<'_>, map: &str, shown: &str) -> Option<String> {
+    let map = map.to_owned();
     let state = ctx.state();
     let beaten = |t: &str| state.world.flags.get(t).and_then(|k| k.value) == Some(true);
     trainer_on(&ctx.data, &map, shown, beaten)
         .or_else(|| scripted_trainer(ctx.world.events()?, state, &map))
+}
+
+/// The battle of the script path the belief last recorded run: the
+/// battle that path started (fleet continue-6: the Champion's room script,
+/// recorded run as it began, warp to the Hall of Fame and all, so the map
+/// was already elsewhere when the battle was lost).
+fn last_path_battle(
+    events: &pokebot_world::Events,
+    state: &pokebot_state::GameState,
+) -> Option<String> {
+    let (label, i) = state.world.paths_run.last()?;
+    let path = events.script(label)?.paths.get(*i)?;
+    let trainer = pokebot_planner::intents::first_battle(path)?;
+    // Not one beaten since: an older path's battle, long won.
+    let beaten = state.world.flags.get(trainer).and_then(|k| k.value) == Some(true);
+    (!beaten).then(|| trainer.to_owned())
 }
 
 /// The one battle the scripts of `map` can start as the game stands: a
@@ -1575,6 +1601,28 @@ mod tests {
         assert_eq!(no_energy("GOLDUCK used CONFUSION!"), None);
     }
 
+    /// Fleet continue-6 lost to the Champion with the belief already in the
+    /// Hall of Fame: his room's script, recorded run as it began. That
+    /// path's battle is the one lost.
+    #[test]
+    fn the_last_path_run_names_its_battle() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = pokebot_world::World::load(root.join("data/world")) else {
+            return;
+        };
+        let Some(events) = world.events() else { return };
+        let mut state = pokebot_state::GameState::default();
+        assert_eq!(last_path_battle(events, &state), None);
+        state.world.paths_run.push((
+            "PokemonLeague_ChampionsRoom_EventScript_EnterRoom".into(),
+            2,
+        ));
+        assert_eq!(
+            last_path_battle(events, &state).as_deref(),
+            Some("TRAINER_CHAMPION_FIRST_BULBASAUR")
+        );
+    }
+
     /// Fleet continue-1 lost to the Champion, his "would like to battle"
     /// read by the walk's Unstick before the battle was handed over: no
     /// name, but a trainer's battle, booked to the room's scripted one.
@@ -1593,6 +1641,11 @@ mod tests {
         assert_eq!(
             lost_to(&memory, named, scripted).as_deref(),
             Some("by name YOUNGSTER BEN")
+        );
+        // A name no trainer of the map has ("CHAMPION GREEN"): scripted.
+        assert_eq!(
+            lost_to(&memory, |_| None, scripted).as_deref(),
+            Some("TRAINER_CHAMPION_FIRST_CHARMANDER")
         );
     }
 
