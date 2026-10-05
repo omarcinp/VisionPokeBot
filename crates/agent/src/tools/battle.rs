@@ -1093,6 +1093,66 @@ fn trainer_named(ctx: &ToolContext<'_>, shown: &str) -> Option<String> {
     let state = ctx.state();
     let beaten = |t: &str| state.world.flags.get(t).and_then(|k| k.value) == Some(true);
     trainer_on(&ctx.data, &map, shown, beaten)
+        .or_else(|| scripted_trainer(ctx.world.events()?, state, &map))
+}
+
+/// The one battle the scripts of `map` can start as the game stands: a
+/// trainer no object stands for, named as the player named the rival
+/// (fleet continue-6 lost to "CHAMPION GREEN", the room's own script,
+/// walking in; the data names him TERRY, and the loss wasn't booked). A
+/// flag the belief doesn't know is as a new game left it.
+fn scripted_trainer(
+    events: &pokebot_world::Events,
+    state: &pokebot_state::GameState,
+    map: &str,
+) -> Option<String> {
+    use pokebot_world::events::Condition;
+    let initial: BTreeSet<&str> = events.initial.set.iter().map(String::as_str).collect();
+    let holds =
+        |c: &Condition| match c {
+            Condition::Flag { flag, is } => {
+                state
+                    .world
+                    .flags
+                    .get(flag)
+                    .and_then(|k| k.value)
+                    .unwrap_or_else(|| initial.contains(flag.as_str()))
+                    == *is
+            }
+            Condition::Var { var, cmp } => state
+                .world
+                .vars
+                .get(var)
+                .and_then(|k| k.value)
+                .is_none_or(|v| {
+                    let v = i64::from(v);
+                    let at = |x: &Option<pokebot_world::events::Val>| {
+                        x.as_ref().and_then(|x| x.as_int())
+                    };
+                    at(&cmp.eq).is_none_or(|x| v == x)
+                        && at(&cmp.ne).is_none_or(|x| v != x)
+                        && at(&cmp.lt).is_none_or(|x| v < x)
+                        && at(&cmp.gt).is_none_or(|x| v > x)
+                        && at(&cmp.le).is_none_or(|x| v <= x)
+                        && at(&cmp.ge).is_none_or(|x| v >= x)
+                }),
+            _ => true,
+        };
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for script in events
+        .scripts
+        .values()
+        .filter(|s| s.map.as_deref() == Some(map))
+    {
+        for path in script.paths.iter().filter(|p| p.when.iter().all(holds)) {
+            if let Some(t) = pokebot_planner::intents::first_battle(path) {
+                found.insert(t.to_owned());
+            }
+        }
+    }
+    let mut found = found.into_iter();
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 /// Of `map`'s trainers not yet beaten, the one whose name is the last word
@@ -1433,6 +1493,34 @@ mod tests {
         step.begin(&mut events);
         assert!(!step.memory.catch.decided && step.memory.catch.only_wanted);
         assert_eq!(step.memory.catch.side, side);
+    }
+
+    /// Fleet continue-6 lost to "CHAMPION GREEN" walking into his room:
+    /// his battle is the room's script (no object stands for him) and the
+    /// data names him TERRY, so the loss wasn't booked. The script's one
+    /// battle for this game is.
+    #[test]
+    fn a_scripted_battle_is_known_by_its_room() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = pokebot_world::World::load(root.join("data/world")) else {
+            return;
+        };
+        let Some(events) = world.events() else { return };
+        let mut state = pokebot_state::GameState::default();
+        let room = "PokemonLeague_ChampionsRoom";
+        assert_eq!(
+            scripted_trainer(events, &state, room),
+            None,
+            "the starter unknown"
+        );
+        state.world.vars.insert(
+            "VAR_STARTER_MON".into(),
+            pokebot_state::Knowledge::observed(1, 1),
+        );
+        assert_eq!(
+            scripted_trainer(events, &state, room).as_deref(),
+            Some("TRAINER_CHAMPION_FIRST_BULBASAUR")
+        );
     }
 
     /// Fleet emu4 lost to YOUNGSTER BEN on Route 3, met on the walk to Mt.
