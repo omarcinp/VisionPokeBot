@@ -112,17 +112,33 @@ impl<'a> StateBelief<'a> {
     }
 
     /// The party as combatants for the evaluator.
+    /// Each member's PP as known: a move spent out isn't counted, one
+    /// partly spent has what is left (fleet continue-4: HYPNO, PSYCHIC 0/10
+    /// and CONFUSION 4/25 after training, judged 100% against COOLTRAINER
+    /// COLBY on full PP; three losses).
     pub fn combatants(&self) -> Option<Vec<Combatant>> {
-        let members = self.party_members()?;
-        let fighters: Vec<Combatant> = members
+        let party = self.knowledge.party.value.as_ref()?;
+        let fighters: Vec<Combatant> = party
             .iter()
-            .filter_map(|m| {
+            .filter_map(|mon| {
+                let m = member_of(mon)?;
                 let moves = if m.moves.is_empty() {
                     self.data.default_moves(&m.species, m.level)
                 } else {
                     m.moves.clone()
                 };
-                Combatant::new(self.data, &m.species, m.level, moves, OUR_IV)
+                let mut c = Combatant::new(self.data, &m.species, m.level, moves, OUR_IV)?;
+                for slot in mon.moves.iter().flatten() {
+                    let (Some(mv), Some((left, max))) = (&slot.mv.value, slot.pp.value) else {
+                        continue;
+                    };
+                    if left == 0 {
+                        c.moves.retain(|x| x != mv);
+                    } else if left < max {
+                        c.pp_left.insert(mv.clone(), u32::from(left));
+                    }
+                }
+                Some(c)
             })
             .collect();
         (!fighters.is_empty()).then_some(fighters)

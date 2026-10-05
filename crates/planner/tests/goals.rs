@@ -2030,7 +2030,15 @@ fn the_elite_four_is_judged_whole_before_its_first_room() {
     let planner = f.planner(PlanOptions::default());
     let g = &planner.gauntlet;
     assert_eq!(g.stages.len(), 5, "{:?}", g.stages);
-    let (knowledge, _) = checkpoint("cont6_loreleis_room_state.json");
+    let (mut knowledge, _) = checkpoint("cont6_loreleis_room_state.json");
+    // At the Center, healed: the fixture's PP was spent in LORELEI's room.
+    for mon in knowledge.party.value.iter_mut().flatten() {
+        for slot in mon.moves.iter_mut().flatten() {
+            if let Some((_, max)) = slot.pp.value {
+                slot.pp.value = Some((max, max));
+            }
+        }
+    }
     let at = |map: &str| {
         Some(PlayerPose {
             map: map.into(),
@@ -2084,4 +2092,28 @@ fn a_cave_part_cut_off_from_the_rest_is_still_trained_in() {
         areas.iter().any(|a| a.map.starts_with("VictoryRoad_")),
         "{areas:?}"
     );
+}
+
+/// Fleet continue-4 trained HYPNO on Route 21 and went on to Victory
+/// Road with its PSYCHIC at 0/10 and CONFUSION at 4/25. The estimate
+/// counted every move at full PP, called COOLTRAINER COLBY 100%, and the
+/// party lost to him three times. Known PP counts: a move spent out isn't
+/// used, one partly spent has what is left.
+#[test]
+fn an_estimate_counts_the_pp_left() {
+    use pokebot_planner::{GoalBelief, StateBelief};
+    let Some(f) = fixture() else { return };
+    let (knowledge, _) = checkpoint("cont4_hypno_spent_pp_state.json");
+    let b = StateBelief::new(&knowledge, &f.data, None);
+    let party = b.combatants().unwrap();
+    let hypno = &party[0];
+    assert_eq!(hypno.species, "SPECIES_HYPNO");
+    assert!(
+        !hypno.moves.iter().any(|m| m == "MOVE_PSYCHIC"),
+        "{:?}",
+        hypno.moves
+    );
+    assert_eq!(hypno.pp_left.get("MOVE_CONFUSION"), Some(&4));
+    let colby = GoalPredicate::can_beat("TRAINER_COOLTRAINER_COLBY");
+    assert_eq!(b.eval_goal(&colby), pokebot_world::predicate::Truth::False);
 }

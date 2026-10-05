@@ -29,6 +29,10 @@ pub struct Combatant {
     /// Accuracy and evasion stages (−6..=6) in the battle; 0 when fresh.
     pub acc_stage: i8,
     pub evasion_stage: i8,
+    /// PP left of the moves whose count is known short of their maximum
+    /// (the rest are full): a team estimate spends from there.
+    #[serde(default)]
+    pub pp_left: std::collections::BTreeMap<String, u32>,
 }
 
 impl Combatant {
@@ -52,6 +56,7 @@ impl Combatant {
             hp: stats.hp(),
             acc_stage: 0,
             evasion_stage: 0,
+            pp_left: Default::default(),
         })
     }
 
@@ -404,9 +409,12 @@ fn spend_pp(
     m: &Matchup,
 ) {
     let Some(mv) = &m.our_move else { return };
-    let left = pp
-        .entry(mv.clone())
-        .or_insert_with(|| data.move_(mv).map_or(0, |x| u32::from(x.pp)));
+    let left = pp.entry(mv.clone()).or_insert_with(|| {
+        us.pp_left
+            .get(mv)
+            .copied()
+            .unwrap_or_else(|| data.move_(mv).map_or(0, |x| u32::from(x.pp)))
+    });
     *left = left.saturating_sub(m.turns.ceil().max(1.0) as u32);
     if *left == 0 {
         us.moves.retain(|x| x != mv);
