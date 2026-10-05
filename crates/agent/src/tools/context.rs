@@ -1139,14 +1139,7 @@ impl ToolContext<'_> {
         // Or a walk going round on one tile (fleet continue-2, surfing
         // Route 21 north: the pose jumped between water tiles, "looping",
         // and no frame said what the localizer saw).
-        let stuck = why.contains("no progress")
-            || why.contains("stuck waiting")
-            || why.contains("unreadable")
-            || why.contains("looping at")
-            // Or a boulder that didn't move (fleet continue-2, Victory
-            // Road 2F: three pushes Down after a wild battle, nothing
-            // moved, and nothing showed why).
-            || why.contains("did not move");
+        let stuck = stalled(why);
         if !stuck || self.evidence.len() >= MAX_EVIDENCE {
             return;
         }
@@ -1532,12 +1525,37 @@ fn script_map(world: &pokebot_world::World, script: &str) -> Option<String> {
     world.events()?.script(script)?.map.clone()
 }
 
+/// Whether a tool's failure is a stall (the screen not what it waited
+/// for) whose frame is worth keeping.
+fn stalled(why: &str) -> bool {
+    why.contains("no progress")
+        || why.contains("stuck waiting")
+        || why.contains("unreadable")
+        || why.contains("looping at")
+        // Or a boulder that didn't move (fleet continue-2, Victory
+        // Road 2F: three pushes Down after a wild battle, nothing
+        // moved, and nothing showed why).
+        || why.contains("did not move")
+        // Or a field that never came back after a menu (fleet emu9 in
+        // Mt. Moon and continue-5 on Victory Road: a POTION used, the
+        // bag closed, the screen read as a fade for twelve B presses
+        // and no frame said what showed).
+        || why.contains("still not in the overworld")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Expectation;
     use pokebot_core::{Button, ControllerCommand};
     use pokebot_state::{Observed, ScreenState};
+
+    #[test]
+    fn a_field_that_never_came_back_keeps_its_frame() {
+        assert!(stalled("still not in the overworld after 12 B presses"));
+        assert!(stalled("PC: no progress in party panel"));
+        assert!(!stalled("whited out"));
+    }
 
     /// Fleet continue-5: a recovery inside a floor switch's script came
     /// back to nowhere. A script's map is where a recovery returns to.
