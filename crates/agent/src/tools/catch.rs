@@ -805,7 +805,56 @@ fn hunts_on_without_a_mart<N: Copy + Into<u32>>(e: &ToolError, before: Option<N>
 }
 
 pub fn catch(ctx: &mut ToolContext<'_>, species: &str, map: Option<&str>) -> Result<(), ToolError> {
+    if let Some(map) = map {
+        if let Some((slot, catcher)) = catcher_for(&ctx.data, &Party::from_state(ctx.state()), map)
+        {
+            ctx.emit(progress(
+                "Party",
+                format!(
+                    "{} leads to catch on {map}",
+                    crate::party::display_name(&catcher)
+                ),
+            ))?;
+            ctx.drive(&mut super::party_order::LeadWith::new(slot, &catcher))?;
+        }
+    }
     hunt(ctx, Hunt::Species(species.to_owned()), map)
+}
+
+/// The member to lead a catch hunt on `map` when the lead would lose its
+/// battles there: the lowest-levelled one that wins them (the gentlest on
+/// the one hunted). Fleet continue-6 hunted MACHOP Lv34 on Victory Road
+/// 2F with a Lv8 RATTATA in front: each MACHOP was run from, the lead's
+/// risk too high to weaken it, and the hunt gave up.
+fn catcher_for(
+    data: &pokebot_gamedata::GameData,
+    party: &Party,
+    map: &str,
+) -> Option<(u8, String)> {
+    let lead = party.lead()?;
+    let wins = |m: &crate::party::Member| {
+        pokebot_planner::prepare::trains_alone(data, &as_planned(m), map)
+    };
+    if wins(lead) != Some(false) {
+        return None;
+    }
+    party
+        .members
+        .iter()
+        .filter(|m| m.slot != lead.slot && !m.fainted())
+        .filter(|m| wins(m) == Some(true))
+        .min_by_key(|m| m.level)
+        .map(|m| (m.slot, m.species.clone()))
+}
+
+/// A party member as the planner takes it (its moves known so far).
+fn as_planned(m: &crate::party::Member) -> pokebot_planner::PartyMember {
+    pokebot_planner::PartyMember {
+        species: m.species.clone(),
+        level: m.level,
+        exp: None,
+        moves: m.moves.iter().filter(|mv| *mv != "?").cloned().collect(),
+    }
 }
 
 /// Trains `species` to `level` on `map`: it leads the battles (the lead
@@ -844,12 +893,6 @@ pub fn train(
     // comes out to win it (fleet worker 4: a Lv2 MANKEY led on Route 1
     // and fainted to a PIDGEY, twice). One that wins has the carrier too,
     // for the battles it would win only slowly (the battle weighs each).
-    let as_planned = |m: &crate::party::Member| pokebot_planner::PartyMember {
-        species: m.species.clone(),
-        level: m.level,
-        exp: None,
-        moves: m.moves.iter().filter(|mv| *mv != "?").cloned().collect(),
-    };
     let trainee = party.members.iter().find(|m| Some(m.slot) == slot);
     let alone =
         trainee.map(|t| pokebot_planner::prepare::trains_alone(&ctx.data, &as_planned(t), map));
@@ -961,6 +1004,113 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    /// Fleet continue-6 hunted MACHOP on Victory Road 2F with RATTATA
+    /// in front and ran from every MACHOP. The lowest-levelled member that
+    /// wins there leads instead; a lead that wins there stays.
+    #[test]
+    fn a_catch_hunt_is_led_by_one_that_wins_there() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json");
+        let Ok(data) = pokebot_gamedata::GameData::load(path) else {
+            return;
+        };
+        let member = |slot: u8, species: &str, level: u8, moves: &[&str]| {
+            let mut m = crate::party::Member::new(&data, species, level);
+            m.slot = slot;
+            m.moves = moves.iter().map(|m| m.to_string()).collect();
+            m
+        };
+        let mut party = Party {
+            members: vec![
+                member(
+                    0,
+                    "SPECIES_RATTATA",
+                    16,
+                    &[
+                        "MOVE_TACKLE",
+                        "MOVE_HYPER_FANG",
+                        "MOVE_QUICK_ATTACK",
+                        "MOVE_CUT",
+                    ],
+                ),
+                member(
+                    1,
+                    "SPECIES_GOLBAT",
+                    79,
+                    &[
+                        "MOVE_WING_ATTACK",
+                        "MOVE_POISON_FANG",
+                        "MOVE_AIR_CUTTER",
+                        "MOVE_MEAN_LOOK",
+                    ],
+                ),
+                member(
+                    2,
+                    "SPECIES_SPEAROW",
+                    10,
+                    &["MOVE_PECK", "MOVE_GROWL", "MOVE_LEER", "MOVE_FLY"],
+                ),
+                member(
+                    3,
+                    "SPECIES_DUGTRIO",
+                    31,
+                    &[
+                        "MOVE_DIG",
+                        "MOVE_FURY_SWIPES",
+                        "MOVE_MUD_SLAP",
+                        "MOVE_SAND_TOMB",
+                    ],
+                ),
+                member(
+                    4,
+                    "SPECIES_BLASTOISE",
+                    100,
+                    &[
+                        "MOVE_SURF",
+                        "MOVE_HYDRO_PUMP",
+                        "MOVE_SKULL_BASH",
+                        "MOVE_STRENGTH",
+                    ],
+                ),
+                member(
+                    5,
+                    "SPECIES_GEODUDE",
+                    32,
+                    &[
+                        "MOVE_MAGNITUDE",
+                        "MOVE_SELF_DESTRUCT",
+                        "MOVE_ROLLOUT",
+                        "MOVE_ROCK_BLAST",
+                    ],
+                ),
+            ],
+        };
+        let chosen = catcher_for(&data, &party, "VictoryRoad_2F");
+        let (slot, species) = chosen.expect("a member that wins on Victory Road 2F");
+        assert!(slot != 0, "{species}");
+        assert!(
+            ["SPECIES_GOLBAT", "SPECIES_BLASTOISE"].contains(&species.as_str()),
+            "{species}"
+        );
+        // The lowest-levelled of those that win.
+        let winners: Vec<u8> = party
+            .members
+            .iter()
+            .filter(|m| {
+                pokebot_planner::prepare::trains_alone(&data, &as_planned(m), "VictoryRoad_2F")
+                    == Some(true)
+            })
+            .map(|m| m.level)
+            .collect();
+        let level = party.members[usize::from(slot)].level;
+        assert_eq!(Some(level), winners.iter().copied().min());
+        // BLASTOISE in front already: it leads on.
+        party.members.swap(0, 4);
+        party.members[0].slot = 0;
+        party.members[4].slot = 4;
+        assert_eq!(catcher_for(&data, &party, "VictoryRoad_2F"), None);
+    }
 
     /// Switch, Route 21 with SURF: from (13, 48) none of the map's grass is
     /// reachable on foot (it lies on islets), and every Train failed; the
