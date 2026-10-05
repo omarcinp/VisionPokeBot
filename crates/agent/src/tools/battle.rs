@@ -1043,8 +1043,62 @@ impl Tool for BattleTool {
         }
         let mut step =
             BattleStep::new(Arc::clone(&ctx.data), *policy, ctx.after_dialogue()).loss_ok(loss_ok);
-        ctx.drive(&mut step).map(|_| ()).into()
+        let result = ctx.drive(&mut step).map(|_| ());
+        // A trainer met on the way (a sight line crossed on a walk) is
+        // booked as a Beat's is: the next plan asks for more (fleet emu4:
+        // lost to YOUNGSTER BEN on Route 3 walking to Mt. Moon, cycle after
+        // cycle, the ledger empty). A Beat or a script books its own.
+        let booked = ctx
+            .running()
+            .iter()
+            .any(|n| matches!(*n, "Beat" | "RunScript"));
+        if let (Err(super::ToolError::Failed(why)), Some(name), false, false) = (
+            &result,
+            step.memory.trainer_name.as_deref(),
+            loss_ok,
+            booked,
+        ) {
+            if why.contains("whited out") {
+                if let Some(trainer) = trainer_named(ctx, name) {
+                    ctx.ledger.lost_to(&trainer);
+                    ctx.info(format!("lost to {trainer}: the next plan asks for more"));
+                    if let Err(e) = ctx.ledger.store() {
+                        ctx.info(format!("ledger: {e}"));
+                    }
+                }
+            }
+        }
+        result.into()
     }
+}
+
+/// The trainer of the player's map the battle named `shown` ("YOUNGSTER
+/// BEN").
+fn trainer_named(ctx: &ToolContext<'_>, shown: &str) -> Option<String> {
+    let map = ctx.pose()?.map;
+    let state = ctx.state();
+    let beaten = |t: &str| state.world.flags.get(t).and_then(|k| k.value) == Some(true);
+    trainer_on(&ctx.data, &map, shown, beaten)
+}
+
+/// Of `map`'s trainers not yet beaten, the one whose name is the last word
+/// of `shown`, when only one is.
+fn trainer_on(
+    data: &pokebot_gamedata::GameData,
+    map: &str,
+    shown: &str,
+    beaten: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let name = shown.split_whitespace().last()?;
+    let mut found = data
+        .map_trainers
+        .get(map)?
+        .iter()
+        .map(|t| &t.trainer)
+        .filter(|t| data.trainers.get(*t).is_some_and(|d| d.name == name))
+        .filter(|t| !beaten(t));
+    let first = found.next()?;
+    found.next().is_none().then(|| first.clone())
 }
 
 /// The hunted species to RUN from: the foe is `spare`, and the catch was
@@ -1319,6 +1373,36 @@ mod tests {
         step.begin(&mut events);
         assert!(!step.memory.catch.decided && step.memory.catch.only_wanted);
         assert_eq!(step.memory.catch.side, side);
+    }
+
+    /// Fleet emu4 lost to YOUNGSTER BEN on Route 3, met on the walk to Mt.
+    /// Moon, cycle after cycle with nothing in the ledger: the battle names
+    /// him, and Route 3's trainer of that name is the one booked.
+    #[test]
+    fn a_trainer_met_on_the_way_is_named_by_the_battle() {
+        let mut memory = crate::battle::BattleMemory::default();
+        let party = Party {
+            members: Vec::new(),
+        };
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        crate::battle::observe_page(
+            &mut memory,
+            "YOUNGSTER BEN would like to battle!",
+            &party,
+            &data,
+        );
+        assert_eq!(memory.trainer_name.as_deref(), Some("YOUNGSTER BEN"));
+        let shown = memory.trainer_name.unwrap();
+        assert_eq!(
+            trainer_on(&data, "Route3", &shown, |_| false).as_deref(),
+            Some("TRAINER_YOUNGSTER_BEN")
+        );
+        assert_eq!(trainer_on(&data, "Route3", &shown, |_| true), None);
+        assert_eq!(trainer_on(&data, "Route1", &shown, |_| false), None);
     }
 
     /// Switch goal run, Route 22: `Train(BULBASAUR to Lv10)` fights with

@@ -42,6 +42,9 @@ pub struct BattleMemory {
     pub run_attempts: u32,
     /// A trainer battle (can't flee; spend PP freely).
     pub trainer: bool,
+    /// The trainer as the battle names them ("YOUNGSTER BEN would like to
+    /// battle!").
+    pub trainer_name: Option<String>,
     /// Last move chosen (for PP accounting).
     pub last_move: Option<String>,
     /// (party slot, move slot) of the last move chosen.
@@ -355,6 +358,9 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
         memory.no_effect.clear();
     } else if page.contains("sent out") || page.contains("would like to battle") {
         memory.trainer = true;
+        if let Some((name, _)) = page.split_once(" would like to battle") {
+            memory.trainer_name = Some(name.trim().to_owned());
+        }
     }
     // Our move did nothing to the foe (Switch, Pokémon Tower: VENUSAUR
     // used TACKLE on a GASTLY twice, "It doesn't affect Wild GASTLY…",
