@@ -1086,7 +1086,9 @@ impl Tool for BattleTool {
                         scripted_trainer(ctx.world.events()?, ctx.state(), &map)
                     },
                 );
-                match named.filter(|t| !ctx.fighting().contains(t)) {
+                match named {
+                    // The running Beat or script books its own trainer.
+                    Some(trainer) if ctx.fighting().contains(&trainer) => {}
                     Some(trainer) => {
                         ctx.ledger.lost_to(&trainer);
                         ctx.info(format!("lost to {trainer}: the next plan asks for more"));
