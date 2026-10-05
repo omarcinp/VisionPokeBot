@@ -1084,6 +1084,19 @@ pub fn use_on_obstacle(
     }
 }
 
+/// Whether `mv` aimed at `at` is used from the party menu, facing where
+/// the player faces: FLASH always, and SURF with no tile named, over a
+/// map edge (fleet continue-5, Cinnabar's north shore: Route 21's water is
+/// across the edge, where no tile of the shore's map lies, and every
+/// SURF failed "needs the obstacle's tile").
+fn from_party(mv: FieldMove, at: Option<&Dest>) -> bool {
+    match mv {
+        FieldMove::Flash => true,
+        FieldMove::Surf => at.is_none(),
+        _ => false,
+    }
+}
+
 /// Uses `mv` from the party menu (Flash; the first half of Fly).
 pub fn use_from_party(ctx: &mut ToolContext<'_>, mv: FieldMove) -> Result<(), ToolError> {
     let slot = carrier(ctx.state(), mv.move_id()).ok_or_else(|| {
@@ -1287,7 +1300,7 @@ impl Tool for FieldMoveTool {
         let result = match (field, at) {
             (FieldMove::Fly, Some(dest)) => fly(ctx, dest.map()),
             (FieldMove::Fly, None) => Err(ToolError::Failed("Fly needs a destination".into())),
-            (FieldMove::Flash, _) => use_from_party(ctx, field),
+            (_, at) if from_party(field, at.as_ref()) => use_from_party(ctx, field),
             (FieldMove::Dig, _) => super::escape::dig(ctx),
             (FieldMove::Strength, Some(Dest::Facing { map, x, y })) => {
                 strength(ctx, map, (*x, *y), push)
@@ -1305,6 +1318,23 @@ impl Tool for FieldMoveTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet continue-5 on Cinnabar's north shore: the route surfs onto
+    /// Route 21's water across the map edge, SURF named no tile, and the
+    /// tool failed "needs the obstacle's tile" every plan. SURF with no
+    /// tile is used from the party menu, facing the water; with one, on it.
+    #[test]
+    fn surf_with_no_tile_is_used_from_the_party_menu() {
+        let shore = Dest::Facing {
+            map: "Route21_South".into(),
+            x: 14,
+            y: 49,
+        };
+        assert!(from_party(FieldMove::Surf, None));
+        assert!(!from_party(FieldMove::Surf, Some(&shore)));
+        assert!(from_party(FieldMove::Flash, None));
+        assert!(!from_party(FieldMove::Cut, None));
+    }
     use pokebot_state::{
         DialogueKind, DialogueObservation, FlyMapObservation, Knowledge, MenuObservation, MoveSlot,
         Observed, PartyMenuObservation, PartyMon, Region, ScreenState,
