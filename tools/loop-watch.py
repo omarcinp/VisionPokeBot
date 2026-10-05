@@ -7,7 +7,7 @@ times in 10 min (a loop inside one step: fleet continue-4 chose a PC cell and
 CANCEL for half an hour, its goal line unchanged), and when a game's log goes
 quiet for 15 min.
 Run it as a Monitor command: `python3 -u tools/loop-watch.py`."""
-import glob, os, re, sys, time
+import glob, json, os, re, sys, time, urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAT = re.compile(r'stuck:|no progress|going in circles|looping at|out of replans|no recourse|'
                  r'restart: cycle|device disconnected|panicked|intent_infeasible|failed twice')
@@ -20,14 +20,28 @@ recent = {}    # (game, key) -> times a goal line was seen in the last REPEAT_S
 seen = {}      # (game, key) -> time
 pos = {}       # path -> offset
 grew = {}      # path -> last growth time
+def alive():
+    """The hub's live workers' save directories (emu-continue-1 →
+    continue-1), or None when the hub doesn't answer: a stopped worker's log
+    is quiet, not hung."""
+    try:
+        with urllib.request.urlopen('http://localhost:8080/api/emulators', timeout=3) as r:
+            workers = json.load(r).get('workers', [])
+    except Exception:
+        return None
+    names = {w.get('name', '') for w in workers if w.get('alive')}
+    return names | {n[len('emu-'):] for n in names if n.startswith('emu-continue-')}
 def logs():
     out = {'switch': '/tmp/pokebot-switch.log'}
+    live = alive()
     # The live fleet: worker logs written in the last two hours. New-game
     # workers are emu-<generation>-<n> (emuN), continuing ones continue-<k>
     # (contK).
     paths = glob.glob(ROOT + '/saves/emulators/emu-*/worker.log') \
         + glob.glob(ROOT + '/saves/emulators/continue-*/worker.log')
     for p in paths:
+        if live is not None and os.path.basename(os.path.dirname(p)) not in live:
+            continue
         try:
             kind = 'cont' if '/continue-' in p else 'emu'
             key = kind + p.split('-')[-1].split('/')[0]
