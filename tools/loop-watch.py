@@ -2,7 +2,10 @@
 """Loop watcher for an agent's monitor: follows the Switch log and the live
 fleet's worker logs, and prints one line per loop/stuck signal (per game,
 deduplicated for 30 min), when the same goal line repeats 20 times in 10 min
-(a loop no bound names), and when a game's log goes quiet for 15 min.
+(a loop no bound names), when any other line (numbers aside) repeats 600
+times in 10 min (a loop inside one step: fleet continue-4 chose a PC cell and
+CANCEL for half an hour, its goal line unchanged), and when a game's log goes
+quiet for 15 min.
 Run it as a Monitor command: `python3 -u tools/loop-watch.py`."""
 import glob, os, re, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,6 +13,9 @@ PAT = re.compile(r'stuck:|no progress|going in circles|looping at|out of replans
                  r'restart: cycle|device disconnected|panicked|intent_infeasible|failed twice')
 QUIET_S = 15 * 60
 REPEAT_N, REPEAT_S = 20, 10 * 60
+CHURN_N = 600
+# Lines that repeat while all is well (NPCs pacing, the player walking).
+CHURN_SKIP = re.compile(r'NPC|Npc|Sprite|Player|Party \d+ seen|Opponent HP')
 recent = {}    # (game, key) -> times a goal line was seen in the last REPEAT_S
 seen = {}      # (game, key) -> time
 pos = {}       # path -> offset
@@ -59,6 +65,13 @@ while True:
                     if len(times) >= REPEAT_N and now - seen.get((game, 'repeat', same), 0) > 1800:
                         seen[(game, 'repeat', same)] = now
                         print(f'[{game}] repeating ({len(times)}x in 10 min): {line[:280]}', flush=True)
+                elif not CHURN_SKIP.search(line):
+                    churn = re.sub(r'\d+', '#', re.sub(r'^\[\d+\] ', '', line))[:160]
+                    times = [t for t in recent.get((game, churn), []) if now - t < REPEAT_S] + [now]
+                    recent[(game, churn)] = times
+                    if len(times) >= CHURN_N and now - seen.get((game, 'churn', churn), 0) > 1800:
+                        seen[(game, 'churn', churn)] = now
+                        print(f'[{game}] churning ({len(times)}x in 10 min): {line[:280]}', flush=True)
                 if PAT.search(line):
                     if now - seen.get((game, key), 0) > 1800:
                         seen[(game, key)] = now
