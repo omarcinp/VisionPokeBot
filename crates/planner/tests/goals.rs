@@ -1694,6 +1694,7 @@ fn training_goes_where_it_pays_and_heals_at_the_areas_own_center() {
         money: 0,
         data: &f.data,
         handicap: 0,
+        handicaps: Default::default(),
     };
     let on_route7: f64 = pokebot_planner::plan_training(&request, 1)[0]
         .steps
@@ -2116,4 +2117,46 @@ fn an_estimate_counts_the_pp_left() {
     assert_eq!(hypno.pp_left.get("MOVE_CONFUSION"), Some(&4));
     let colby = GoalPredicate::can_beat("TRAINER_COOLTRAINER_COLBY");
     assert_eq!(b.eval_goal(&colby), pokebot_world::predicate::Truth::False);
+}
+
+/// Fleet continue-3 lost to LANCE three times. Its plans beat LORELEI,
+/// BRUNO and AGATHA, then trained on Victory Road and Route 21, out of the
+/// locked rooms, before LANCE. Built backwards, the plan held LANCE beaten
+/// when it judged LORELEI, and LANCE's handicap was left out under
+/// LORELEI's. The Elite Four is now judged as the game stands, with each
+/// trainer's own handicap: every preparation comes before the first room.
+#[test]
+fn the_elite_four_is_prepared_for_before_its_first_room() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions {
+        budget_s: 240.0,
+        ..PlanOptions::default()
+    });
+    let (mut knowledge, _) = checkpoint("cont3_before_elite_four_state.json");
+    knowledge
+        .handicaps
+        .insert("TRAINER_ELITE_FOUR_LANCE".into(), 9);
+    let pose = Some(PlayerPose {
+        map: "VictoryRoad_2F".into(),
+        x: 47,
+        y: 11,
+    });
+    let plan = planner
+        .plan(
+            &parse_goal("flag FLAG_SYS_GAME_CLEAR").unwrap(),
+            &knowledge,
+            pose,
+        )
+        .unwrap();
+    print(&plan, 14);
+    let first_room = plan
+        .intents
+        .iter()
+        .position(|s| matches!(&s.intent, Intent::RunScript { script, .. } if script.starts_with("PokemonLeague_")))
+        .expect("the Elite Four");
+    let prepares = |s: &pokebot_planner::PlannedIntent| {
+        matches!(s.intent, Intent::Train { .. } | Intent::Catch { .. })
+    };
+    assert!(plan.intents[..first_room].iter().any(prepares));
+    assert!(!plan.intents[first_room..].iter().any(prepares));
 }

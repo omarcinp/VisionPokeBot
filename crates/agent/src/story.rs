@@ -603,6 +603,7 @@ impl StoryTask {
             money: 0,
             data,
             handicap: 0,
+            handicaps: Default::default(),
         };
         let plans = plan_preparation(&request, 1);
         let plan = plans.first().ok_or("no plan found")?;

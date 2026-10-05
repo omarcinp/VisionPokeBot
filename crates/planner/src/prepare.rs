@@ -72,6 +72,19 @@ pub struct Request<'a> {
     /// battles lost to them since they were last beaten (the estimate
     /// was too kind; see the agent's ledger).
     pub handicap: u8,
+    /// The same per target, on top (a gauntlet's targets each have their
+    /// own: fleet continue-3 lost to LANCE three times, and readiness for
+    /// the Elite Four, judged under LORELEI's handicap of none, called him
+    /// won).
+    pub handicaps: std::collections::BTreeMap<String, u8>,
+}
+
+impl Request<'_> {
+    /// Levels our side is judged below its own against `target`.
+    pub fn handicap_of(&self, target: &str) -> u8 {
+        self.handicap
+            .max(self.handicaps.get(target).copied().unwrap_or(0))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,21 +404,32 @@ pub fn handicapped(data: &GameData, party: &[Combatant], levels: u8) -> Vec<Comb
 
 /// Opponents of `targets` the team is expected to beat, added up over the
 /// targets (see [`team_vs_trainer`]).
-fn progress(data: &GameData, party: &[Combatant], targets: &[String]) -> f64 {
+fn progress(
+    data: &GameData,
+    party: &[Combatant],
+    targets: &[String],
+    handicap_of: &dyn Fn(&str) -> u8,
+) -> f64 {
     targets
         .iter()
-        .filter_map(|t| team_vs_trainer(data, party, t))
+        .filter_map(|t| team_vs_trainer(data, &handicapped(data, party, handicap_of(t)), t))
         .map(|e| e.opponents.iter().map(|(_, _, p, _)| p).sum::<f64>())
         .sum()
 }
 
-fn confidence(data: &GameData, party: &[Combatant], targets: &[String]) -> Vec<(String, f64)> {
+fn confidence(
+    data: &GameData,
+    party: &[Combatant],
+    targets: &[String],
+    handicap_of: &dyn Fn(&str) -> u8,
+) -> Vec<(String, f64)> {
     targets
         .iter()
         .map(|t| {
+            let judged = handicapped(data, party, handicap_of(t));
             (
                 t.clone(),
-                team_vs_trainer(data, party, t).map_or(0.0, |e| e.p_win),
+                team_vs_trainer(data, &judged, t).map_or(0.0, |e| e.p_win),
             )
         })
         .collect()
@@ -462,8 +486,11 @@ pub fn member_values(
             .collect()
     };
     let worth = |team: &[Combatant]| -> f64 {
-        let chance: f64 = confidence(data, team, targets).iter().map(|(_, p)| p).sum();
-        chance + PROGRESS_WEIGHT * progress(data, team, targets)
+        let chance: f64 = confidence(data, team, targets, &|_| 0)
+            .iter()
+            .map(|(_, p)| p)
+            .sum();
+        chance + PROGRESS_WEIGHT * progress(data, team, targets, &|_| 0)
     };
     let all = worth(&fighters(None));
     party
@@ -558,12 +585,12 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 if out < team.len() {
                     team[out] = newcomer;
                 }
-                let team = handicapped(data, &team, request.handicap);
-                let chance: f64 = confidence(data, &team, &request.targets)
+                let by = |t: &str| request.handicap_of(t);
+                let chance: f64 = confidence(data, &team, &request.targets, &by)
                     .iter()
                     .map(|(_, p)| p)
                     .sum();
-                let worth = chance + PROGRESS_WEIGHT * progress(data, &team, &request.targets);
+                let worth = chance + PROGRESS_WEIGHT * progress(data, &team, &request.targets, &by);
                 Some((worth, species))
             })
             .collect();
@@ -786,15 +813,16 @@ fn search_levels(
             .zip(&costs)
             .filter_map(|(m, (to, _, _))| combatant(data, m, *to))
             .collect();
-        let judged = handicapped(data, &prepared, request.handicap);
-        let conf = confidence(data, &judged, &request.targets);
+        let by = |t: &str| request.handicap_of(t);
+        let judged = prepared.clone();
+        let conf = confidence(data, &judged, &request.targets, &by);
         // Worth knowing only when the plan falls short: some target below
         // the confidence (the Elite Four judged whole: BRUNO and AGATHA
         // won, LORELEI and LANCE not, and every plan's progress was 0, so
         // the best effort was to train nobody; fleet continue-2 walked in
         // at 0% and lost).
         let progress = if conf.iter().any(|(_, p)| *p < request.confidence) {
-            progress(data, &judged, &request.targets)
+            progress(data, &judged, &request.targets, &by)
         } else {
             0.0
         };
@@ -1011,6 +1039,7 @@ mod tests {
                 money: 0,
                 data: &data,
                 handicap: 0,
+                handicaps: Default::default(),
             };
             let plan = plan_training(&request, 1).remove(0);
             plan.steps
@@ -1064,6 +1093,7 @@ mod tests {
             money: 0,
             data: &data,
             handicap: 0,
+            handicaps: Default::default(),
         };
         let plan = plan_training(&request, 1).remove(0);
         assert!(!plan.steps.is_empty(), "{plan:?}");
@@ -1130,6 +1160,7 @@ mod tests {
             money: 20_000,
             data: &data,
             handicap: 0,
+            handicaps: Default::default(),
         };
         let plan = plan_preparation(&request, 1).remove(0);
         let swap = plan.steps.iter().find_map(|s| match s {
@@ -1188,6 +1219,7 @@ mod tests {
             money: 5000,
             data: &data,
             handicap,
+            handicaps: Default::default(),
         };
         let plan = plan_preparation(&request(0), 1).remove(0);
         assert!(plan.min_confidence() >= 0.9, "{plan:?}");

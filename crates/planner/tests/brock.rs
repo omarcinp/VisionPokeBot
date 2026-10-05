@@ -41,6 +41,7 @@ fn request<'a>(data: &'a GameData, species: &str, moves: &[&str]) -> Request<'a>
         money: 3000,
         data,
         handicap: 0,
+        handicaps: Default::default(),
     }
 }
 

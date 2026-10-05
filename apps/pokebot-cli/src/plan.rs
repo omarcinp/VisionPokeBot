@@ -179,6 +179,7 @@ pub fn run(args: PlanArgs) -> Result<()> {
         money: args.money,
         data: &data,
         handicap: 0,
+        handicaps: Default::default(),
     };
     let plans = plan_preparation(&request, args.alternatives);
     println!(

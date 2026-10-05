@@ -157,9 +157,14 @@ impl Gauntlet {
         if !self.contains(trainer) {
             return out;
         }
+        // Won as the game stands, not as the plan has it: a plan built
+        // backwards holds the later battles won when it judges the first
+        // (fleet continue-3: LORELEI judged alone, LANCE's training planned
+        // after AGATHA, out of reach, three losses to him).
+        let now = belief.with_established(Default::default());
         for stage in &self.stages {
             if stage.battles.iter().any(|(t, _)| t == trainer)
-                || belief.eval_goal(&GoalPredicate::flag(&stage.flag, true)) == Truth::True
+                || now.eval_goal(&GoalPredicate::flag(&stage.flag, true)) == Truth::True
             {
                 continue;
             }
@@ -175,6 +180,18 @@ impl Gauntlet {
             }
         }
         out
+    }
+
+    /// Whether `trainer` is fought after another battle of the gauntlet
+    /// still to win as the game stands: in the rooms already, with no way
+    /// out to train. Its readiness is the first battle's (judged whole).
+    pub fn fought_inside(&self, trainer: &str, belief: &StateBelief<'_>) -> bool {
+        let now = belief.with_established(Default::default());
+        let first = self
+            .stages
+            .iter()
+            .find(|s| now.eval_goal(&GoalPredicate::flag(&s.flag, true)) != Truth::True);
+        first.is_some_and(|s| s.battles.iter().all(|(t, _)| t != trainer)) && self.contains(trainer)
     }
 
     /// Whether the gauntlet is under way (in one of its rooms, a battle

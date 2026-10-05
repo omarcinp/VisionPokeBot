@@ -5970,6 +5970,19 @@ impl<'p, 'a> Session<'p, 'a> {
         if !self.planner.data.trainers.contains_key(trainer) {
             return None;
         }
+        // A gauntlet's later battle: its readiness was the first's, and
+        // training here would leave the locked rooms (fleet continue-3:
+        // GOLBAT's training planned between AGATHA and LANCE). Fought as
+        // the party stands.
+        if self.planner.gauntlet.fought_inside(trainer, belief) {
+            return Some(Candidate {
+                steps: Vec::new(),
+                lead: Vec::new(),
+                preconditions: Vec::new(),
+                assumes: Vec::new(),
+                cost: 0.0,
+            });
+        }
         // The lead trains and fights the trainers on the way: it starts
         // the preparation that much further on (from the floor of its
         // level, its exact total being unknown).
@@ -6010,13 +6023,10 @@ impl<'p, 'a> Session<'p, 'a> {
                 u16::try_from(belief.item_count("ITEM_POKE_BALL").unwrap_or(0)).unwrap_or(u16::MAX),
             ),
             data: self.planner.data,
-            // Lost to since last beaten: judged that many levels lower.
-            handicap: belief
-                .knowledge
-                .handicaps
-                .get(trainer)
-                .copied()
-                .unwrap_or(0),
+            // Lost to since last beaten: judged that many levels lower,
+            // each target by its own.
+            handicap: 0,
+            handicaps: belief.knowledge.handicaps.clone().into_iter().collect(),
         };
         let plans = plan_preparation(&request, 1);
         // Money short of the balls a better catch needs may be earned
