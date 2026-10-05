@@ -186,23 +186,41 @@ fn places(mode: PcMode) -> Vec<(PcCursor, (i32, i32))> {
     }
 }
 
+/// White pixels around the glove's box that count against it: the glove
+/// is drawn over the panel's colours, while a white icon spills past the
+/// box (fleet continue-4: DEWGONG in party slot 4 out-scored the hand on
+/// slot 1, which the screen's top edge cuts in half, so the hand read
+/// slot 5 and every move toward DEWGONG went "not confirmed").
+const GLOVE_RING: i32 = 3;
+
+fn is_glove(image: &RgbImage, x: i32, y: i32, windows: &[Region]) -> bool {
+    if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+        return false;
+    }
+    let (x, y) = (x as u32, y as u32);
+    !windows.iter().any(|w| w.contains(x, y)) && px(image, x, y).iter().all(|&c| c >= GLOVE_MIN)
+}
+
+/// Glove white in the box around `(cx, cy)`, less the white in the ring
+/// around the box.
 fn glove_pixels(image: &RgbImage, (cx, cy): (i32, i32), windows: &[Region]) -> u32 {
     let (dx, dy, w, h) = GLOVE;
-    let mut n = 0;
-    for y in cy + dy..cy + dy + h as i32 {
-        for x in cx + dx..cx + dx + w as i32 {
-            if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+    let (x0, y0) = (cx + dx, cy + dy);
+    let (x1, y1) = (x0 + w as i32, y0 + h as i32);
+    let (mut inside, mut ring) = (0u32, 0u32);
+    for y in y0 - GLOVE_RING..y1 + GLOVE_RING {
+        for x in x0 - GLOVE_RING..x1 + GLOVE_RING {
+            if !is_glove(image, x, y, windows) {
                 continue;
             }
-            let (x, y) = (x as u32, y as u32);
-            if !windows.iter().any(|w| w.contains(x, y))
-                && px(image, x, y).iter().all(|&c| c >= GLOVE_MIN)
-            {
-                n += 1;
+            if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                inside += 1;
+            } else {
+                ring += 1;
             }
         }
     }
-    n
+    inside.saturating_sub(ring)
 }
 
 /// Where the hand is: the place with the most glove white (first place
@@ -279,6 +297,15 @@ mod tests {
         assert_eq!(
             cursor_and_panel(&o),
             (Some(PcCursor::Party(1)), Some("CLEFAIRY"), Some(8))
+        );
+        // DEWGONG's white in slot 4 spills past the glove's box: the hand
+        // cut in half on slot 1 is still the hand (fleet continue-4).
+        let o = read("emu-pc-deposit-slot1-white-icon-below.png")
+            .unwrap()
+            .expect("slot 1, DEWGONG in slot 4");
+        assert_eq!(
+            cursor_and_panel(&o),
+            (Some(PcCursor::Party(1)), Some("RATTATA"), Some(8))
         );
         let o = read("emu-pc-deposit-store.png").unwrap().expect("STORE");
         assert_eq!(o.cursor, Some(PcCursor::Party(1)));
