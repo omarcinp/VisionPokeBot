@@ -679,6 +679,19 @@ impl ToolStep for PartyFieldMove {
         if o.dialogue.is_some() {
             return crate::new_game::decline_or_advance(o, "reading");
         }
+        // Another screen left up (the bag a medicine came back to): Start
+        // does nothing there; B backs out of it (fleet continue-5,
+        // Victory Road 3F: a HYPER POTION used, the bag still up, then
+        // "STRENGTH from the party menu: no progress in open").
+        if o.bag.is_some() || o.summary.is_some() || o.trainer_card.is_some() {
+            self.retries.enter("back out");
+            return self.retries.act(
+                "back out of the screen left up",
+                Button::B,
+                Expectation::InputsDone,
+                SCREEN_FRAMES,
+            );
+        }
         self.retries.enter("open");
         if self.unlocated_ok && o.player.is_none() && ctx.quiet_frames >= 30 {
             return self.retries.act(
@@ -1628,6 +1641,24 @@ mod tests {
             members: Vec::new(),
             double: false,
         }
+    }
+
+    /// Fleet continue-5: a medicine's bag still up when STRENGTH came to
+    /// the party menu, and Start does nothing there. B backs out first.
+    #[test]
+    fn a_bag_left_up_is_backed_out_of_before_the_start_menu() {
+        let mut step = PartyFieldMove::new(FieldMove::Strength, 0);
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        o.bag = Some(pokebot_state::BagObservation {
+            pocket: "ITEMS".into(),
+            rows: vec![("HYPER POTION".into(), Some(1))],
+            cursor: Some(0),
+            prompt: None,
+        });
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 60));
+        assert_eq!(pressed(&d), Some(Button::B));
     }
 
     /// Party menu path (as recorded: the ▶ on SUMMARY, CUT the second
