@@ -1050,6 +1050,16 @@ impl<'a> ToolContext<'a> {
                 Intent::Catch { map: Some(map), .. } => {
                     self.scheduler.destination = Some(map.clone())
                 }
+                // A script's own map: a recovery on the way comes back to
+                // it (fleet continue-5: healed from Victory Road 2F at
+                // Viridian, then left on Route 2 by the heal; the floor
+                // switch's walk failed "no known route from Route2 to
+                // VictoryRoad_2F", the way back needing SURF).
+                Intent::RunScript { script, .. } => {
+                    if let Some(map) = script_map(&self.world, script) {
+                        self.scheduler.destination = Some(map);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1517,12 +1527,32 @@ pub fn wrong_gate_flags(
     wrong
 }
 
+/// The map `script` runs on, from the compiled events.
+fn script_map(world: &pokebot_world::World, script: &str) -> Option<String> {
+    world.events()?.script(script)?.map.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Expectation;
     use pokebot_core::{Button, ControllerCommand};
     use pokebot_state::{Observed, ScreenState};
+
+    /// Fleet continue-5: a recovery inside a floor switch's script came
+    /// back to nowhere. A script's map is where a recovery returns to.
+    #[test]
+    fn a_scripts_map_is_where_a_recovery_returns() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else {
+            return;
+        };
+        assert_eq!(
+            script_map(&world, "VictoryRoad_2F_EventScript_FloorSwitch2").as_deref(),
+            Some("VictoryRoad_2F")
+        );
+        assert_eq!(script_map(&world, "NoSuchScript"), None);
+    }
 
     /// Fleet (continue-2), Rocket Hideout B4F: the barrier needs both
     /// door grunts beaten; the belief held both, the walk met the barrier.
