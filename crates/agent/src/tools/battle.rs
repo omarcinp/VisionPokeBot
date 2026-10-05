@@ -1155,22 +1155,32 @@ fn scripted_trainer(
     found.next().is_none().then_some(first)
 }
 
-/// Of `map`'s trainers not yet beaten, the one whose name is the last word
-/// of `shown`, when only one is.
+/// Of `map`'s trainers not yet beaten, the one whose name ends `shown`
+/// (after the class: "YOUNGSTER BEN", "COOL COUPLE RAY & TYRA"), when
+/// only one is. A pair is one trainer on two objects (fleet continue-4:
+/// RAY & TYRA's loss went unbooked, their name not its last word).
 fn trainer_on(
     data: &pokebot_gamedata::GameData,
     map: &str,
     shown: &str,
     beaten: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    let name = shown.split_whitespace().last()?;
-    let mut found = data
+    let shown = shown.trim();
+    let named = |name: &str| {
+        !name.is_empty()
+            && shown
+                .strip_suffix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with(' '))
+    };
+    let found: BTreeSet<&String> = data
         .map_trainers
         .get(map)?
         .iter()
         .map(|t| &t.trainer)
-        .filter(|t| data.trainers.get(*t).is_some_and(|d| d.name == name))
-        .filter(|t| !beaten(t));
+        .filter(|t| data.trainers.get(*t).is_some_and(|d| named(&d.name)))
+        .filter(|t| !beaten(t))
+        .collect();
+    let mut found = found.into_iter();
     let first = found.next()?;
     found.next().is_none().then(|| first.clone())
 }
@@ -1551,6 +1561,11 @@ mod tests {
         );
         assert_eq!(trainer_on(&data, "Route3", &shown, |_| true), None);
         assert_eq!(trainer_on(&data, "Route1", &shown, |_| false), None);
+        // Fleet continue-4: a pair, two objects, a name of two words.
+        assert_eq!(
+            trainer_on(&data, "VictoryRoad_3F", "COOL COUPLE RAY & TYRA", |_| false).as_deref(),
+            Some("TRAINER_COOL_COUPLE_RAY_TYRA")
+        );
     }
 
     /// Switch goal run, Route 22: `Train(BULBASAUR to Lv10)` fights with
