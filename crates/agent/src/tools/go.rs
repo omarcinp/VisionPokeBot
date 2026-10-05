@@ -46,6 +46,10 @@ pub struct GoStep {
     data: Option<Arc<pokebot_gamedata::GameData>>,
     /// Done as soon as the player stands on the destination's map.
     any_tile: bool,
+    /// Done as soon as the player stands on this map, unless it is the
+    /// destination's: the end of the route a leg is part of, which a
+    /// recovery on the way (an urgent heal) may bring the player to.
+    route_end: Option<String>,
     /// Arrivals per tile since the leg last got closer to its goal.
     visits: HashMap<(String, i32, i32), u32>,
     /// Closest the leg has been to its goal tiles on the destination map.
@@ -193,6 +197,7 @@ impl GoStep {
             world: Arc::clone(&parts.world),
             data: parts.data.clone(),
             any_tile: false,
+            route_end: None,
             visits: HashMap::new(),
             best: None,
             last_map: None,
@@ -226,6 +231,12 @@ impl GoStep {
         )
         .with_any_tile();
         step
+    }
+
+    /// Also done on `map` (see [`GoStep::route_end`]).
+    pub fn ending_on(mut self, map: &str) -> Self {
+        self.route_end = Some(map.to_owned());
+        self
     }
 
     /// Where the walk ends.
@@ -359,6 +370,11 @@ impl ToolStep for GoStep {
         }
         if self.any_tile && pose.as_ref().is_some_and(|p| p.map == self.dest.map()) {
             return Decision::Done(format!("arrived on {}", self.dest.map()));
+        }
+        if let Some(end) = &self.route_end {
+            if end != self.dest.map() && pose.as_ref().is_some_and(|p| &p.map == end) {
+                return Decision::Done(format!("on {end}, where the route ends"));
+            }
         }
         if self.nav.stalled() >= MAX_STALLED {
             return Decision::Fail(format!("cannot move toward {:?}", self.dest));
@@ -1002,7 +1018,7 @@ pub fn walk_legs(
         if i > 0 && arrived(ctx, leg) {
             break;
         }
-        match walk_leg(ctx, &world, legs, i) {
+        match walk_leg(ctx, &world, legs, i, dest.map()) {
             Err(ToolError::Failed(_)) if arrived(ctx, leg) => break,
             r => r?,
         }
@@ -1026,6 +1042,7 @@ fn walk_leg(
     world: &Arc<pokebot_world::World>,
     legs: &[Leg],
     i: usize,
+    end: &str,
 ) -> Result<(), ToolError> {
     let world = Arc::clone(world);
     let leg = &legs[i];
@@ -1037,13 +1054,17 @@ fn walk_leg(
                     .iter()
                     .position(|w| (w.x, w.y) == (leg.from.x, leg.from.y))
             }) {
-                go(
-                    ctx,
-                    Destination::Warp {
-                        map: leg.from.map.clone(),
-                        warp,
-                    },
-                )?;
+                // A recovery on the way that brings the player to the
+                // route's end ends the leg there (fleet continue-1: healed
+                // at Pewter from Route 23, flown on to Cinnabar's Center,
+                // the Go's destination; the leg then walked out of it for
+                // Victory Road 2F's warp, "cannot move toward" it).
+                let dest = Destination::Warp {
+                    map: leg.from.map.clone(),
+                    warp,
+                };
+                let mut step = GoStep::new(ctx, dest).ending_on(end);
+                ctx.drive(&mut step)?;
             }
         }
         return Ok(());
@@ -2259,6 +2280,76 @@ mod tests {
             learned: &[],
         };
         assert!(matches!(step.next(&mut ctx), Decision::Done(_)));
+    }
+
+    /// Fleet continue-1: a leg for Victory Road 2F's warp to Route 23,
+    /// where a paralysis sent the player to heal at Pewter and on to
+    /// Cinnabar's Center, the route's end; the leg then walked out of the
+    /// Center for the warp and failed "cannot move toward" it. On the
+    /// route's end the leg is done; on its own map it walks on.
+    #[test]
+    fn a_leg_is_done_on_the_map_its_route_ends_on() {
+        use pokebot_state::{GameState, Observation, Observed, PoseObservation, ScreenState};
+        let Some(world) = world() else { return };
+        let parts = NavParts {
+            story: None,
+            world,
+            gone: Gone::new(),
+            maybe_gone: Default::default(),
+            syncer: None,
+            blocked: Blocked::default(),
+            gates: Arc::default(),
+            data: None,
+        };
+        let leg = |end: &str| {
+            GoStep::with(
+                &parts,
+                Destination::Warp {
+                    map: "VictoryRoad_2F".into(),
+                    warp: 6,
+                },
+            )
+            .ending_on(end)
+        };
+        let observed = |map: &str, x, y| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::Unknown,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.player = Some(PoseObservation {
+                pose: PlayerPose {
+                    map: map.into(),
+                    x,
+                    y,
+                },
+                score: 1000,
+            });
+            o
+        };
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut next = |step: &mut GoStep, o: &Observation| {
+            let mut ctx = StepContext {
+                observation: o,
+                state: &state,
+                events: &mut events,
+                quiet_frames: SETTLE_FRAMES,
+                frame: None,
+                learned: &[],
+            };
+            step.next(&mut ctx)
+        };
+        let center = observed("CinnabarIsland_PokemonCenter_1F", 7, 8);
+        let mut step = leg("CinnabarIsland_PokemonCenter_1F");
+        assert!(matches!(next(&mut step, &center), Decision::Done(_)));
+        // The route ending on the leg's own map: the leg walks on.
+        let mut step = leg("VictoryRoad_2F");
+        let on_leg = observed("VictoryRoad_2F", 38, 9);
+        assert!(!matches!(next(&mut step, &on_leg), Decision::Done(_)));
     }
 
     /// Fleet continue-6, Cinnabar Island bound for the Viridian Gym: the
