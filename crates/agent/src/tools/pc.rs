@@ -185,6 +185,11 @@ pub struct PcSwapStep {
     storing: Option<u8>,
     /// The box cell WITHDRAW was chosen for.
     taking: Option<(u8, u8)>,
+    /// Where the hand was when A opened the storage window: the window
+    /// may cover it (fleet continue-4 and -5: MACHOKE and LAPRAS in BOX1's
+    /// last cell, under the window, the hand read nowhere, CANCEL chosen
+    /// and the cell chosen again, for half an hour).
+    chosen: Option<PcCursor>,
     /// Box cells read: (box, cell) → what PKMN DATA showed (`None` empty).
     cells: BTreeMap<(u8, u8), Option<Reading>>,
     /// Boxes emitted as `BoxObserved`, and boxes searched without luck.
@@ -253,6 +258,7 @@ impl PcSwapStep {
             retarget: false,
             storing: None,
             taking: None,
+            chosen: None,
             cells: BTreeMap::new(),
             reported: BTreeSet::new(),
             searched: BTreeSet::new(),
@@ -362,7 +368,7 @@ impl PcSwapStep {
                 return crate::new_game::select(menu, no as u8, "leave the box: NO");
             }
             self.retries.enter("storage window");
-            let wanted = match (self.ops.front(), pc.mode, pc.cursor) {
+            let wanted = match (self.ops.front(), pc.mode, pc.cursor.or(self.chosen)) {
                 (Some(Op::Deposit(s, _)), PcMode::Party, Some(PcCursor::Party(k)))
                     if self.panel_is(pc, s) =>
                 {
@@ -457,6 +463,7 @@ impl PcSwapStep {
             };
             match reading.species.as_deref() {
                 Some(read) if is_species(&self.data, read, species) => {
+                    self.chosen = Some(PcCursor::Party(target));
                     return self.retries.act(
                         format!("choose slot {target} ({read})"),
                         Button::A,
@@ -619,6 +626,7 @@ impl PcSwapStep {
         };
         if let Some(t) = target {
             if cur == PcCursor::Cell(t) && found == Some(t) {
+                self.chosen = Some(cur);
                 return self.retries.act(
                     format!("choose BOX{} cell {t}", b + 1),
                     Button::A,
@@ -1540,6 +1548,16 @@ mod tests {
         let d = run.settled(&mut step, &o);
         assert_eq!(pressed(&d), (Button::A, "choose BOX1 cell 2".into()));
         assert!(run.events.is_empty(), "no box read in full");
+        // The storage window over the hand (fleet continue-4: BOX1's last
+        // cell under it, `emu-pc-withdraw-menu-covers-hand.png`): the hand
+        // reads nowhere, and the cell chosen is the one withdrawn.
+        let mut o = storage(300, PcMode::Box, PcCursor::Cell(2), Some("PARAS"));
+        o.pc_storage.as_mut().unwrap().cursor = None;
+        let o = with_menu(o, &["WITHDRAW", "SUMMARY", "MARK", "RELEASE", "CANCEL"], 0);
+        assert_eq!(
+            pressed(&run.next(&mut step, &o)),
+            (Button::A, "WITHDRAW".into())
+        );
         // Another belief: PARAS in cell 1, which reads empty: read it all.
         let mut run = Run {
             state: state(&["SPECIES_IVYSAUR"], Some(&[(1, "SPECIES_PARAS")])),

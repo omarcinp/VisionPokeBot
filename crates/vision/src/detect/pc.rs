@@ -307,6 +307,12 @@ mod tests {
             cursor_and_panel(&o),
             (Some(PcCursor::Party(1)), Some("RATTATA"), Some(8))
         );
+        // The storage window over BOX1's last cell hides the hand: it
+        // reads nowhere (the message box's white is no glove).
+        let o = read("emu-pc-withdraw-menu-covers-hand.png")
+            .unwrap()
+            .expect("the storage window");
+        assert_eq!(cursor_and_panel(&o), (None, Some("MACHOKE"), Some(44)));
         let o = read("emu-pc-deposit-store.png").unwrap().expect("STORE");
         assert_eq!(o.cursor, Some(PcCursor::Party(1)));
         assert_eq!(o.message, ["CLEFAIRY is selected."]);
