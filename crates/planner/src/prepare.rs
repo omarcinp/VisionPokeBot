@@ -385,9 +385,17 @@ fn catch_cost(data: &GameData, species: &str, area: &Area) -> Option<(f64, u8, u
     Some((seconds / 60.0 + area.travel_minutes, level, balls as u32))
 }
 
-/// `party` judged `levels` below its own levels (its moves kept): how a
-/// team that lost to a trainer the estimate said it beats is judged
-/// against them again.
+/// Handicap levels that also cost each member a turn in every matchup.
+const LEVELS_PER_LOST_TURN: u8 = 3;
+
+/// `party` judged `levels` below its own levels (its moves kept), and a
+/// turn short in each matchup per [`LEVELS_PER_LOST_TURN`]: how a team
+/// that lost to a trainer the estimate said it beats is judged against
+/// them again. Levels alone barely touch a team far above the trainer
+/// (fleet continue-1: PIDGEOT and VENUSAUR at Lv100 against LORELEI's
+/// Lv51–54, judged 100% after two losses; YAWN put each to sleep and
+/// CONFUSE RAY did the rest, which the estimate doesn't model). Turns
+/// lost are what those effects cost, whatever the levels.
 pub fn handicapped(data: &GameData, party: &[Combatant], levels: u8) -> Vec<Combatant> {
     if levels == 0 {
         return party.to_vec();
@@ -396,8 +404,11 @@ pub fn handicapped(data: &GameData, party: &[Combatant], levels: u8) -> Vec<Comb
         .iter()
         .map(|c| {
             let level = c.level.saturating_sub(levels).max(1);
-            Combatant::new(data, &c.species, level, c.moves.clone(), OUR_IV)
-                .unwrap_or_else(|| c.clone())
+            let mut judged = Combatant::new(data, &c.species, level, c.moves.clone(), OUR_IV)
+                .unwrap_or_else(|| c.clone());
+            judged.pp_left = c.pp_left.clone();
+            judged.lost_turns = levels / LEVELS_PER_LOST_TURN;
+            judged
         })
         .collect()
 }
@@ -977,6 +988,85 @@ mod tests {
             travel_minutes: 1.0,
             heal_minutes: 2.0,
         }
+    }
+
+    /// Fleet continue-1 lost to LORELEI with PIDGEOT and VENUSAUR at
+    /// Lv100 (the rest Lv8–44), judged 100% before and after: YAWN slept
+    /// each, LAPRAS's CONFUSE RAY and ICE BEAM did the rest. Two losses
+    /// judge the team short of her, so the next plan trains the others.
+    #[test]
+    fn losses_judge_a_team_far_above_the_trainer_short_of_it() {
+        let Some(data) = data() else { return };
+        let m = |species: &str, level: u8, moves: &[&str]| {
+            let moves = moves.iter().map(|m| m.to_string()).collect();
+            Combatant::new(&data, species, level, moves, OUR_IV).unwrap()
+        };
+        let party = vec![
+            m(
+                "SPECIES_PIDGEOT",
+                100,
+                &[
+                    "MOVE_GUST",
+                    "MOVE_QUICK_ATTACK",
+                    "MOVE_FEATHER_DANCE",
+                    "MOVE_WING_ATTACK",
+                ],
+            ),
+            m(
+                "SPECIES_SPEAROW",
+                8,
+                &["MOVE_PECK", "MOVE_GROWL", "MOVE_LEER", "MOVE_FLY"],
+            ),
+            m(
+                "SPECIES_VENUSAUR",
+                100,
+                &[
+                    "MOVE_TACKLE",
+                    "MOVE_SOLAR_BEAM",
+                    "MOVE_RAZOR_LEAF",
+                    "MOVE_VINE_WHIP",
+                ],
+            ),
+            m(
+                "SPECIES_RATTATA",
+                8,
+                &[
+                    "MOVE_TACKLE",
+                    "MOVE_TAIL_WHIP",
+                    "MOVE_QUICK_ATTACK",
+                    "MOVE_CUT",
+                ],
+            ),
+            m(
+                "SPECIES_LAPRAS",
+                25,
+                &[
+                    "MOVE_SURF",
+                    "MOVE_BODY_SLAM",
+                    "MOVE_STRENGTH",
+                    "MOVE_PERISH_SONG",
+                ],
+            ),
+            m(
+                "SPECIES_ARBOK",
+                44,
+                &["MOVE_BITE", "MOVE_GLARE", "MOVE_SCREECH", "MOVE_ACID"],
+            ),
+        ];
+        let lorelei = ["TRAINER_ELITE_FOUR_LORELEI".to_string()];
+        let p = |levels: u8| confidence(&data, &party, &lorelei, &|_| levels)[0].1;
+        assert!(p(0) > 0.9, "unhandicapped: {}", p(0));
+        assert!(p(6) < 0.9, "after two losses: {}", p(6));
+        // A level handicap alone left it won.
+        let levels_only: Vec<Combatant> = handicapped(&data, &party, 6)
+            .into_iter()
+            .map(|mut c| {
+                c.lost_turns = 0;
+                c
+            })
+            .collect();
+        let alone = crate::evaluate::team_vs_trainer(&data, &levels_only, &lorelei[0]).unwrap();
+        assert!(alone.p_win > 0.9, "levels only: {}", alone.p_win);
     }
 
     /// The Switch switch-trained a Lv5 CATERPIE for a Lv33 VENUSAUR in

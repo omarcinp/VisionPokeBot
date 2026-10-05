@@ -33,6 +33,11 @@ pub struct Combatant {
     /// (the rest are full): a team estimate spends from there.
     #[serde(default)]
     pub pp_left: std::collections::BTreeMap<String, u32>,
+    /// Turns it is judged to lose in each matchup, the opponent attacking
+    /// meanwhile: what a handicap for battles lost asks beyond levels
+    /// (see the planner's `handicapped`).
+    #[serde(default)]
+    pub lost_turns: u8,
 }
 
 impl Combatant {
@@ -57,6 +62,7 @@ impl Combatant {
             acc_stage: 0,
             evasion_stage: 0,
             pp_left: Default::default(),
+            lost_turns: 0,
         })
     }
 
@@ -262,6 +268,8 @@ pub fn matchup(data: &GameData, us: &Combatant, them: &Combatant) -> Matchup {
         .map_or_else(|| vec![0.0; MAX_TURNS], |(_, r)| ko_distribution(r, us.hp));
     // P(they need at least k attacks).
     let their_tail = |k: usize| 1.0 - their_dist.iter().take(k.saturating_sub(1)).sum::<f64>();
+    // Turns we lose, the opponent attacking freely.
+    let lost = usize::from(us.lost_turns);
     let faster = match us.stats.speed().cmp(&them.stats.speed()) {
         std::cmp::Ordering::Greater => 1.0,
         std::cmp::Ordering::Equal => 0.5,
@@ -272,7 +280,7 @@ pub fn matchup(data: &GameData, us: &Combatant, them: &Combatant) -> Matchup {
     for (t, p) in our_dist.iter().enumerate() {
         let k = t + 1;
         // Moving first we win if they need ≥ k attacks; moving second, > k.
-        let survive = faster * their_tail(k) + (1.0 - faster) * their_tail(k + 1);
+        let survive = faster * their_tail(k + lost) + (1.0 - faster) * their_tail(k + lost + 1);
         p_win += p * survive;
         turns_if_win += p * survive * k as f64;
     }
@@ -284,7 +292,7 @@ pub fn matchup(data: &GameData, us: &Combatant, them: &Combatant) -> Matchup {
     } else {
         expected_turns(&their_dist)
     };
-    let taken = (their_mean * (turns - faster).max(0.0)).round() as u32;
+    let taken = (their_mean * (turns + lost as f64 - faster).max(0.0)).round() as u32;
     let dealt = (our_mean * expected_turns(&their_dist).min(MAX_TURNS as f64)).round() as u32;
     Matchup {
         p_win,
@@ -314,6 +322,7 @@ pub fn matchup_cached(data: &GameData, us: &Combatant, them: &Combatant) -> Matc
         Vec<String>,
         u32,
         [u32; 6],
+        u8,
         String,
         u8,
         Vec<String>,
@@ -330,6 +339,7 @@ pub fn matchup_cached(data: &GameData, us: &Combatant, them: &Combatant) -> Matc
         us.moves.clone(),
         us.hp,
         us.stats.0,
+        us.lost_turns,
         them.species.clone(),
         them.level,
         them.moves.clone(),
