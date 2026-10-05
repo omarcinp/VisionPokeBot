@@ -1,6 +1,6 @@
 //! Field party menu and the three summary pages. Regions follow the
 //! game's window templates; numeric fields reject partial OCR.
-use super::share;
+use super::{share, share_any};
 use crate::text::Font;
 use pokebot_core::RgbImage;
 use pokebot_state::{
@@ -109,9 +109,19 @@ pub fn summary(image: &RgbImage, font: &Font) -> Option<SummaryObservation> {
     }
     // The status sprite is 32x8, centred at (16,38).
     let status = ailment_icon(image, Region::new(0, 34, 32, 8), [255, 251, 255]);
-    // Healthy summary background is pale lavender with horizontal lines.
+    // Healthy summary background: pale lavender lines on white, both
+    // counted (the Switch's capture reads the lavender as 630‰ of the
+    // strip: GOLBAT's wing tipped it under the bar, no status was read, and
+    // the party audit failed "screen or field stayed unreadable" every
+    // cycle). Its left 24 columns only: a wide sprite reaches into the
+    // rest; a status badge, 32 wide, covers them too.
     let status = status.or_else(|| {
-        (share(image, Region::new(0, 34, 32, 8), [239, 227, 247], 1) > 650)
+        (share_any(
+            image,
+            Region::new(0, 34, 24, 8),
+            &[[239, 227, 247], [255, 255, 255]],
+            1,
+        ) > 650)
             .then_some(Status::Healthy)
     });
     let shiny = matches!(page, SummaryPage::Info | SummaryPage::Skills).then(|| {
@@ -194,7 +204,7 @@ impl Layout {
     /// emulator worker 2, a double battle on Route 16 stuck on its
     /// "Choose a POKéMON." after a faint).
     fn of(image: &RgbImage) -> Option<Layout> {
-        let teal = |r: Region| super::share_any(image, r, &[[74, 170, 165], [57, 138, 140]], 2);
+        let teal = |r: Region| share_any(image, r, &[[74, 170, 165], [57, 138, 140]], 2);
         if teal(Region::new(16, 80, 70, 28)) >= 850 {
             return Some(Layout::Single);
         }
@@ -505,6 +515,25 @@ mod tests {
         assert_eq!(summary(&moves, &font).unwrap().shiny, None);
     }
 
+    /// Switch: GOLBAT's wing reaches into the status strip of its Info
+    /// page; no status was read, and the party audit failed "screen or
+    /// field stayed unreadable" three cycles in a row.
+    #[test]
+    fn a_wide_sprite_leaves_a_healthy_status_readable() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(font) = Font::load(root.join("data/world/font_normal.json")) else {
+            return;
+        };
+        let Ok(info) =
+            pokebot_video::png::load(root.join("captures/fixtures/switch-summary-golbat-wing.png"))
+        else {
+            return;
+        };
+        let s = summary(&info, &font).unwrap();
+        assert_eq!(s.species.as_deref(), Some("GOLBAT"));
+        assert_eq!(s.status, Some(Status::Healthy));
+    }
+
     #[test]
     fn reads_real_summary_pages_and_rejects_bad_numbers() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -526,6 +555,7 @@ mod tests {
             let s = summary(&info, &font).unwrap();
             assert_eq!(s.level, Some(10));
             assert_eq!(s.details.nature.as_deref(), Some("HASTY"));
+            assert_eq!(s.status, Some(Status::Healthy));
         }
         assert_eq!(s.status, Some(Status::Healthy));
         let s = summary(&load("emu-summary-skills.png").unwrap(), &font).unwrap();
