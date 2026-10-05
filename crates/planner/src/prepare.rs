@@ -901,6 +901,29 @@ fn search_levels(
             }
         }
     }
+    // No member gets further within the window: each is swept on toward
+    // Lv100, to the first level that does (fleet continue-1, the Elite
+    // Four after two losses to LANCE: no fourteen levels on anyone beat
+    // one more of his, so the best effort trained nobody and walked in at
+    // 0%, again and again).
+    if found == 0 && !useful.contains(&true) {
+        for k in 0..party.len() {
+            let far = usize::from(100 - party[k].level);
+            for off in usize::from(window(&party[k])) + 1..=far {
+                let mut index = start.clone();
+                index[k] = off;
+                let Some(plan) = minutes_of(&index).and_then(|m| evaluate(&index, m)) else {
+                    continue;
+                };
+                if worth(&plan) > base_worth + 1e-6 {
+                    useful[k] = true;
+                    found += usize::from(meets(&plan));
+                    plans.push(plan);
+                    break;
+                }
+            }
+        }
+    }
     if found >= wanted {
         *memo_out = memo.into_inner();
         return;
@@ -1104,8 +1127,9 @@ mod tests {
     /// Elite Four, all at 0% before and after: a best effort took the plan
     /// adding the most levels, wherever they went. It now trains the one
     /// member that wins (ZUBAT to GOLBAT, WING ATTACK against ERIKA's
-    /// grass; each member's levels are swept on their own), and no one
-    /// where no one gets further (LORELEI, for now).
+    /// grass; each member's levels are swept on their own). Against
+    /// LORELEI no one gets further within the window: the one that does
+    /// further on is trained (GEODUDE, ROCK against her ICE).
     #[test]
     fn a_best_effort_trains_only_who_gets_further() {
         let Some(data) = data() else { return };
@@ -1141,7 +1165,10 @@ mod tests {
                 .collect()
         };
         assert_eq!(trained("TRAINER_LEADER_ERIKA"), vec!["SPECIES_ZUBAT"]);
-        assert!(trained("TRAINER_ELITE_FOUR_LORELEI").is_empty());
+        assert_eq!(
+            trained("TRAINER_ELITE_FOUR_LORELEI"),
+            vec!["SPECIES_GEODUDE"]
+        );
     }
 
     /// Fleet continue-2 judged against the Elite Four whole: BRUNO and
@@ -1189,6 +1216,103 @@ mod tests {
         assert!(!plan.steps.is_empty(), "{plan:?}");
         let lorelei = |p: &PreparationPlan| p.confidence[0].1;
         assert!(lorelei(&plan) > 0.5, "{:?}", plan.confidence);
+    }
+
+    /// Fleet continue-1 after two losses each to AGATHA and LANCE: no
+    /// fourteen levels on anyone beat one more of LANCE's, so the best
+    /// effort trained nobody and walked in at 0%. A member is swept on to
+    /// the level that gets further.
+    #[test]
+    fn a_best_effort_looks_past_the_window_when_nothing_in_it_helps() {
+        let Some(data) = data() else { return };
+        let with = |species: &str, level: u8, moves: [&str; 4]| {
+            let mut m = member(species, level);
+            m.moves = moves.map(String::from).to_vec();
+            m
+        };
+        let request = Request {
+            party: vec![
+                with(
+                    "SPECIES_ONIX",
+                    45,
+                    [
+                        "MOVE_SLAM",
+                        "MOVE_RAGE",
+                        "MOVE_DRAGON_BREATH",
+                        "MOVE_IRON_TAIL",
+                    ],
+                ),
+                with(
+                    "SPECIES_SPEAROW",
+                    8,
+                    ["MOVE_PECK", "MOVE_GROWL", "MOVE_LEER", "MOVE_FLY"],
+                ),
+                with(
+                    "SPECIES_RATTATA",
+                    8,
+                    [
+                        "MOVE_TACKLE",
+                        "MOVE_TAIL_WHIP",
+                        "MOVE_QUICK_ATTACK",
+                        "MOVE_CUT",
+                    ],
+                ),
+                with(
+                    "SPECIES_LAPRAS",
+                    25,
+                    [
+                        "MOVE_SURF",
+                        "MOVE_BODY_SLAM",
+                        "MOVE_STRENGTH",
+                        "MOVE_PERISH_SONG",
+                    ],
+                ),
+                with(
+                    "SPECIES_PIDGEOT",
+                    100,
+                    [
+                        "MOVE_GUST",
+                        "MOVE_QUICK_ATTACK",
+                        "MOVE_FEATHER_DANCE",
+                        "MOVE_WING_ATTACK",
+                    ],
+                ),
+                with(
+                    "SPECIES_VENUSAUR",
+                    100,
+                    [
+                        "MOVE_TACKLE",
+                        "MOVE_SOLAR_BEAM",
+                        "MOVE_RAZOR_LEAF",
+                        "MOVE_VINE_WHIP",
+                    ],
+                ),
+            ],
+            targets: ["TRAINER_ELITE_FOUR_LANCE"].map(String::from).to_vec(),
+            areas: vec![area("Route21_North"), area("VictoryRoad_3F")],
+            confidence: 0.9,
+            money: 0,
+            data: &data,
+            handicap: 0,
+            handicaps: [("TRAINER_ELITE_FOUR_LANCE".to_string(), 6)].into(),
+        };
+        let plan = plan_training(&request, 1).remove(0);
+        let trained = plan
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::Train {
+                    species, from, to, ..
+                } => Some((species.clone(), *from, *to)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            trained.iter().any(|(_, from, to)| to - from > LEVEL_WINDOW),
+            "{trained:?} {:?} progress {}",
+            plan.confidence,
+            plan.progress
+        );
     }
 
     /// Fighting alone earns all the experience; a carrier's win half, a
