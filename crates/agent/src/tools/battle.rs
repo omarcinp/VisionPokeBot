@@ -194,10 +194,27 @@ impl BattleStep {
                 catch::risk(&self.data, &catch::Lead { member: m, hp }, foe, 3)
             })
         };
+        // One with an attack it can use first: the safest without one only
+        // takes hits (fleet continue-4: HYPNO Lv81, its PSYCHIC and
+        // CONFUSION out of PP from training, came in after GOLDUCK, used
+        // FUTURE SIGHT twice and fainted; LAPRAS, armed, came next).
+        let unarmed = |m: &party::Member| {
+            battle::choose_move(
+                &self.data,
+                &party::Party {
+                    members: vec![(*m).clone()],
+                },
+                None,
+                &BattleMemory::default(),
+                &BattlePolicy::default(),
+            )
+            .is_none()
+        };
         able.into_iter()
             .min_by(|a, b| {
-                risk(a)
-                    .total_cmp(&risk(b))
+                unarmed(a)
+                    .cmp(&unarmed(b))
+                    .then_with(|| risk(a).total_cmp(&risk(b)))
                     .then_with(|| b.level.cmp(&a.level))
             })
             .map(|m| m.slot)
@@ -1230,6 +1247,52 @@ mod tests {
     /// Fleet continue-6, LORELEI: five members fainted, PIDGEY left in the
     /// last row; the send-out aimed at a fainted member. The able one is
     /// chosen instead: the ▶ already on it, its actions are opened.
+    /// Fleet continue-4 against COOLTRAINER COLBY on Victory Road: GOLDUCK
+    /// fainted and HYPNO Lv81 came in, its PSYCHIC and CONFUSION out of PP
+    /// from training; it used FUTURE SIGHT twice and fainted. LAPRAS, with
+    /// BODY SLAM, goes in first.
+    #[test]
+    fn a_replacement_with_an_attack_left_goes_in_first() {
+        let Ok(data) = pokebot_gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"),
+        ) else {
+            return;
+        };
+        let data = Arc::new(data);
+        let member = |slot: u8, species: &str, level: u8, hp: u16, moves: &[&str]| {
+            let mut m = party::Member::new(&data, species, level);
+            m.slot = slot;
+            m.hp = Some((hp, 200));
+            m.moves = moves.iter().map(|s| (*s).to_owned()).collect();
+            m
+        };
+        let mut hypno = member(
+            1,
+            "SPECIES_HYPNO",
+            81,
+            200,
+            &[
+                "MOVE_FLASH",
+                "MOVE_PSYCHIC",
+                "MOVE_FUTURE_SIGHT",
+                "MOVE_CONFUSION",
+            ],
+        );
+        for mv in ["MOVE_FLASH", "MOVE_PSYCHIC", "MOVE_CONFUSION"] {
+            hypno.pp_used.insert(mv.into(), 40);
+        }
+        let mut step = BattleStep::new(Arc::clone(&data), BattlePlan::Fight, false);
+        step.party = Party {
+            members: vec![
+                member(0, "SPECIES_GOLDUCK", 35, 0, &["MOVE_CONFUSION"]),
+                hypno,
+                member(2, "SPECIES_LAPRAS", 25, 100, &["MOVE_BODY_SLAM"]),
+            ],
+        };
+        step.fainted = Some(0);
+        assert_eq!(step.replacement(&[]), Some(2));
+    }
+
     #[test]
     fn a_fainted_target_gives_way_to_the_one_able() {
         let Ok(data) = pokebot_gamedata::GameData::load(
