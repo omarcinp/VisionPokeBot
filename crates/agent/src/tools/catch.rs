@@ -29,8 +29,12 @@ use crate::{Action, Decision, Expectation, Outcome};
 
 /// Direction changes per spin action (~2.4 s; a battle cancels it early).
 const SPIN_TURNS: usize = 24;
-/// Battles before a catch hunt is given up.
+/// Battles before a catch hunt is given up, at least.
 const MAX_CATCH_ENCOUNTERS: u32 = 40;
+/// Battles before a hunt for a rare species is given up, at most.
+const MAX_RARE_CATCH_ENCOUNTERS: u32 = 200;
+/// The chance a catch hunt's battles meet the species at least once.
+const MEET_CHANCE: f64 = 0.95;
 /// Battles before a training hunt is given up.
 const MAX_TRAIN_ENCOUNTERS: u32 = 150;
 /// Battles run from in a row before a hunt counts as making no progress:
@@ -140,8 +144,12 @@ impl HuntStep {
     }
 
     fn max_encounters(&self) -> u32 {
-        match self.hunt {
-            Hunt::Species(_) => MAX_CATCH_ENCOUNTERS,
+        match &self.hunt {
+            Hunt::Species(species) => self
+                .map
+                .as_deref()
+                .and_then(|map| land_share(&self.data, map, species))
+                .map_or(MAX_CATCH_ENCOUNTERS, catch_encounters),
             Hunt::Level(_) => MAX_TRAIN_ENCOUNTERS,
         }
     }
@@ -821,6 +829,32 @@ pub fn catch(ctx: &mut ToolContext<'_>, species: &str, map: Option<&str>) -> Res
     hunt(ctx, Hunt::Species(species.to_owned()), map)
 }
 
+/// `species`' share (percent) of `map`'s land encounters.
+fn land_share(data: &pokebot_gamedata::GameData, map: &str, species: &str) -> Option<u32> {
+    let table = data.wild.get(map)?.get("land")?;
+    let share: u32 = table
+        .slots
+        .iter()
+        .filter(|s| s.species == species)
+        .map(|s| u32::from(s.chance))
+        .sum();
+    (share > 0).then_some(share)
+}
+
+/// Battles a catch hunt gives a species met in `share` percent of them:
+/// enough to meet it with [`MEET_CHANCE`]. Fleet continue-4 hunted
+/// MACHOKE on Victory Road 3F, 5% of its battles (about 20 to meet one):
+/// 40 battles went by without one, which happens one time in eight, and
+/// the plan began again from its first step.
+fn catch_encounters(share: u32) -> u32 {
+    let p = f64::from(share.min(100)) / 100.0;
+    if p >= 1.0 {
+        return MAX_CATCH_ENCOUNTERS;
+    }
+    let n = ((1.0 - MEET_CHANCE).ln() / (1.0 - p).ln()).ceil() as u32;
+    n.clamp(MAX_CATCH_ENCOUNTERS, MAX_RARE_CATCH_ENCOUNTERS)
+}
+
 /// The member to lead a catch hunt on `map` when the lead would lose its
 /// battles there: the lowest-levelled one that wins them (the gentlest on
 /// the one hunted). Fleet continue-6 hunted MACHOP Lv34 on Victory Road
@@ -1004,6 +1038,24 @@ mod tests {
     use crate::nav::Gone;
     use pokebot_state::PlayerPose;
     use pokebot_world::World;
+
+    #[test]
+    fn a_rare_species_gets_the_battles_to_meet_it() {
+        // MACHOKE on Victory Road 3F: 5% of the battles.
+        assert_eq!(catch_encounters(5), 59);
+        assert_eq!(catch_encounters(20), MAX_CATCH_ENCOUNTERS);
+        assert_eq!(catch_encounters(1), MAX_RARE_CATCH_ENCOUNTERS);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json");
+        let Ok(data) = pokebot_gamedata::GameData::load(path) else {
+            return;
+        };
+        assert_eq!(
+            land_share(&data, "VictoryRoad_3F", "SPECIES_MACHOKE"),
+            Some(5)
+        );
+        assert_eq!(land_share(&data, "VictoryRoad_3F", "SPECIES_PIKACHU"), None);
+    }
 
     /// Fleet continue-6 hunted MACHOP on Victory Road 2F with RATTATA
     /// in front and ran from every MACHOP. The lowest-levelled member that
