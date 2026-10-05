@@ -21,7 +21,7 @@ use super::{
     ToolStep, SETTLE_FRAMES,
 };
 use crate::catch::ball_budget;
-use crate::nav::{nearest_reachable, Destination, MapEntries};
+use crate::nav::{nearest_reachable_with, Destination, MapEntries};
 use crate::party::Party;
 use crate::stock::ball_count;
 use crate::story::spin_sequence;
@@ -590,7 +590,10 @@ fn encounter_tiles_reachable(nav: &NavParts, pose: &pokebot_state::PlayerPose) -
         .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| encounter_tile(&t)))
         .collect();
     let goals = std::collections::BTreeMap::from([(pose.map.clone(), tiles)]);
-    !nearest_reachable(&nav.world, pose, &goals, &nav.gone).is_empty()
+    let surfing = m
+        .tile(pose.x, pose.y)
+        .is_some_and(|t| pokebot_world::behavior::is_water(t.behavior));
+    !nearest_reachable_with(&nav.world, pose, &goals, &nav.gone, surfing).is_empty()
 }
 
 /// Whether `member` has no attack the battle would choose (none with PP
@@ -1167,7 +1170,7 @@ mod tests {
 
     /// Switch, Route 21 with SURF: from (13, 48) none of the map's grass is
     /// reachable on foot (it lies on islets), and every Train failed; the
-    /// field route surfs to it.
+    /// field route surfs to it, and a player already surfing reaches it.
     #[test]
     fn grass_on_islets_is_reached_by_surf() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
@@ -1188,7 +1191,32 @@ mod tests {
             gates: Default::default(),
             data: None,
         };
-        assert!(!encounter_tiles_reachable(&nav, &pose));
+        // On foot, none of the islets' grass is reached.
+        let grass: std::collections::HashSet<(i32, i32)> = {
+            let m = world.map("Route21_North").unwrap();
+            (0..m.height)
+                .flat_map(|y| (0..m.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| m.tile(x, y).is_some_and(|t| encounter_tile(&t)))
+                .collect()
+        };
+        let goals = std::collections::BTreeMap::from([("Route21_North".to_owned(), grass)]);
+        assert!(nearest_reachable_with(&world, &pose, &goals, &nav.gone, false).is_empty());
+        // Those tiles are water: the player there surfs, and the islets
+        // are reached (fleet continue-3, come from Pallet Town on the
+        // water at (7, 0): "no encounter tile of Route21_North is
+        // reachable", every plan).
+        for (x, y) in [(13, 48), (7, 0)] {
+            assert!(world
+                .map("Route21_North")
+                .and_then(|m| m.tile(x, y))
+                .is_some_and(|t| pokebot_world::behavior::is_water(t.behavior)));
+            let water = PlayerPose {
+                map: "Route21_North".into(),
+                x,
+                y,
+            };
+            assert!(encounter_tiles_reachable(&nav, &water), "({x}, {y})");
+        }
         let mut state = pokebot_state::GameState::default();
         let mut surfer = pokebot_state::PartyMon::default();
         surfer.moves[0] = Some(pokebot_state::MoveSlot {

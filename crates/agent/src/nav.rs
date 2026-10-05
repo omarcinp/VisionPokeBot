@@ -1546,6 +1546,19 @@ pub fn nearest_reachable(
     goals: &BTreeMap<String, HashSet<(i32, i32)>>,
     gone: &Gone,
 ) -> Vec<String> {
+    nearest_reachable_with(world, pose, goals, gone, false)
+}
+
+/// [`nearest_reachable`], over water too when `surf` (the player is
+/// surfing: fleet continue-3 came onto Route 21 North surfing from Pallet
+/// Town, and its islets' grass read unreachable on foot from the water).
+pub fn nearest_reachable_with(
+    world: &World,
+    pose: &PlayerPose,
+    goals: &BTreeMap<String, HashSet<(i32, i32)>>,
+    gone: &Gone,
+    surf: bool,
+) -> Vec<String> {
     let mut blocked: HashMap<String, Obstacles> = HashMap::new();
     let start: Node = (pose.map.clone(), pose.x, pose.y);
     let mut dist: HashMap<Node, u32> = HashMap::from([(start.clone(), 0)]);
@@ -1574,7 +1587,7 @@ pub fn nearest_reachable(
             .or_insert_with(|| object_obstacles(map, gone));
         let walk = Walk {
             obstacles,
-            surf: false,
+            surf,
             opened: None,
         };
         for (n, _) in neighbours(world, map, (x, y), &walk) {
