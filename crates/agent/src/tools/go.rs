@@ -1002,6 +1002,22 @@ pub fn walk_legs(
     legs: &[Leg],
     dest: &Dest,
 ) -> Result<Option<PlayerPose>, ToolError> {
+    walk_legs_from(ctx, legs, dest, true)
+}
+
+/// [`walk_legs`]; `reroute`: a leg that fails with the player off its
+/// maps (a recovery on the way took them elsewhere) is given up for a
+/// route worked out afresh from where they stand, once. Fleet
+/// continue-5: healed at Viridian from Victory Road 1F, back on Route 23
+/// where SURF is needed, and the leg it was on, a warp inside Victory
+/// Road, walked on foot: "no known route from Route23 to VictoryRoad_1F",
+/// and the floor's switch puzzle was done again after the replan.
+fn walk_legs_from(
+    ctx: &mut ToolContext<'_>,
+    legs: &[Leg],
+    dest: &Dest,
+    reroute: bool,
+) -> Result<Option<PlayerPose>, ToolError> {
     let world = Arc::clone(&ctx.world);
     // On the destination's map already: a recovery on the way (an urgent
     // heal) brought the player there (fleet continue-3: healed at Pewter
@@ -1020,6 +1036,15 @@ pub fn walk_legs(
         }
         match walk_leg(ctx, &world, legs, i, dest.map()) {
             Err(ToolError::Failed(_)) if arrived(ctx, leg) => break,
+            Err(ToolError::Failed(why))
+                if reroute && ctx.pose().is_some_and(|p| off_leg(&p, leg)) =>
+            {
+                ctx.info(format!("{why}, off the route: the way on from here"));
+                match field_route(ctx, dest) {
+                    Some(legs) => return walk_legs_from(ctx, &legs, dest, false),
+                    None => break,
+                }
+            }
             r => r?,
         }
     }
@@ -1027,6 +1052,11 @@ pub fn walk_legs(
         Dest::Map { map } => go_to_map(ctx, map),
         other => go(ctx, Destination::from(other)),
     }
+}
+
+/// Neither where `leg` begins nor where it ends.
+fn off_leg(pose: &PlayerPose, leg: &Leg) -> bool {
+    pose.map != leg.from.map && pose.map != leg.to.map
 }
 
 /// On `dest`'s map, and not on the map `leg` begins on (a route may leave
@@ -1358,6 +1388,29 @@ mod tests {
                 .insert(t.into(), pokebot_state::Knowledge::observed(true, 1));
         }
         assert!(unbeaten_sight(&world, &data, &state, "VictoryRoad_3F").is_empty());
+    }
+
+    /// Fleet continue-5: the leg for Victory Road 1F's warp up, the player
+    /// back from a heal on Route 23 (SURF needed there): off the leg's
+    /// maps, the way on is worked out afresh. Through the warp, on 2F, the
+    /// player is where the leg ends.
+    #[test]
+    fn a_player_off_a_legs_maps_is_rerouted() {
+        let up = Leg {
+            from: Place::tile("VictoryRoad_1F", 3, 2),
+            to: Place::tile("VictoryRoad_2F", 1, 9),
+            kind: EdgeKind::Warp,
+            cost_s: 1.5,
+            requires: Default::default(),
+        };
+        let at = |map: &str| PlayerPose {
+            map: map.into(),
+            x: 8,
+            y: 153,
+        };
+        assert!(off_leg(&at("Route23"), &up));
+        assert!(!off_leg(&at("VictoryRoad_1F"), &up));
+        assert!(!off_leg(&at("VictoryRoad_2F"), &up));
     }
 
     #[test]
