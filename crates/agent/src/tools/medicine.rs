@@ -27,6 +27,15 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
         .and_then(|m| m.hp.value)
         .map(|hp| hp.0)
         .ok_or_else(|| ToolError::Failed("medicine needs observed HP".into()))?;
+    let lead_status = |ctx: &ToolContext<'_>| {
+        ctx.state()
+            .party
+            .value
+            .as_ref()
+            .and_then(|p| p.first())
+            .and_then(|m| m.status.value)
+    };
+    let before_status = lead_status(ctx);
     if before_count == 0 {
         return Err(ToolError::Failed(
             "medicine is not in audited inventory".into(),
@@ -42,14 +51,19 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
     };
     ctx.drive(&mut step)
         .map_err(|e| super::menu::recount_if_missing(ctx, Pocket::Items, e))?;
+    // HP up, or a status cured (an ANTIDOTE gives no HP).
     let improved = |ctx: &ToolContext<'_>| {
-        ctx.state()
-            .party
-            .value
-            .as_ref()
-            .and_then(|p| p.first())
-            .and_then(|m| m.hp.value)
-            .is_some_and(|hp| hp.0 > before_hp)
+        let cured = before_status.is_some_and(|s| s != pokebot_state::Status::Healthy)
+            && lead_status(ctx) == Some(pokebot_state::Status::Healthy);
+        cured
+            || ctx
+                .state()
+                .party
+                .value
+                .as_ref()
+                .and_then(|p| p.first())
+                .and_then(|m| m.hp.value)
+                .is_some_and(|hp| hp.0 > before_hp)
     };
     // The use passes the party menu (the lead's HP after it) and the ITEMS
     // pocket (the count after it) on its way out, and the sensor reads
@@ -70,7 +84,7 @@ pub fn use_item(ctx: &mut ToolContext<'_>, item: &str) -> Result<(), ToolError> 
     }
     if count(ctx) + 1 != before_count || !improved(ctx) {
         return Err(ToolError::Failed(
-            "medicine use was not verified by inventory and HP".into(),
+            "medicine use was not verified by inventory and HP or status".into(),
         ));
     }
     Ok(())

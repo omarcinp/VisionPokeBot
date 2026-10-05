@@ -69,8 +69,129 @@ pub fn nurse_for(
     }
 }
 
+/// HP poison takes in the field: 1 every 4 steps (`DoPoisonFieldEffect`
+/// every fourth step), and in Generation III it faints.
+const STEPS_PER_POISON_HP: u32 = 4;
+/// HP kept above what the walk's poison takes (a step or two more than
+/// the route counts: a bump, a turn).
+const POISON_MARGIN_HP: u32 = 2;
+
+/// Steps the walk to `map` takes on foot (or surfing): its walk legs'
+/// tiles, a step through each warp or edge.
+fn steps_to(ctx: &mut ToolContext<'_>, map: &str) -> Option<u32> {
+    let pose = ctx.pose()?;
+    let graph = ctx
+        .scheduler
+        .graph
+        .get_or_insert_with(|| crate::scheduler::graph(&ctx.world));
+    let belief = crate::belief_view::StateBelief(ctx.runtime.state());
+    let out = pokebot_world::route::route_to_map(
+        &ctx.world,
+        graph,
+        &belief,
+        &pose,
+        map,
+        pokebot_world::route::UnknownPolicy::Pessimistic,
+    );
+    if !out.found() {
+        return None;
+    }
+    Some(walk_steps(&out.legs))
+}
+
+fn walk_steps(legs: &[pokebot_world::route::Leg]) -> u32 {
+    use pokebot_world::route::EdgeKind;
+    legs.iter()
+        .map(|l| match l.kind {
+            EdgeKind::Walk { tiles, .. } => tiles,
+            EdgeKind::Fly | EdgeKind::Dig | EdgeKind::EscapeRope => 0,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// The medicine to use on a poisoned lead at `hp` before a walk of
+/// `steps`, from `items` held: a cure first, else the smallest potion
+/// that sees it through; `None` when it lasts the walk or nothing helps.
+fn poison_medicine(hp: u16, steps: u32, items: &[(String, u16)]) -> Option<&'static str> {
+    let taken = steps / STEPS_PER_POISON_HP + POISON_MARGIN_HP;
+    if u32::from(hp) > taken {
+        return None;
+    }
+    let held = |item: &str| items.iter().any(|(i, n)| i == item && *n > 0);
+    for cure in ["ITEM_ANTIDOTE", "ITEM_FULL_HEAL", "ITEM_FULL_RESTORE"] {
+        if held(cure) {
+            return Some(cure);
+        }
+    }
+    [
+        ("ITEM_POTION", 20u32),
+        ("ITEM_SUPER_POTION", 50),
+        ("ITEM_HYPER_POTION", 200),
+        ("ITEM_MAX_POTION", u32::MAX),
+    ]
+    .into_iter()
+    .filter(|(item, _)| held(item))
+    .find(|(_, heal)| u32::from(hp).saturating_add(*heal) > taken)
+    .map(|(item, _)| item)
+}
+
+/// A poisoned lead that the walk to `map` would faint is cured (or its
+/// HP raised) first. Fleet emu3: SQUIRTLE poisoned at 8/25 in Viridian
+/// Forest walked for Viridian City's Center, and the poison fainted it on
+/// Route 2; the party whited out.
+fn cure_for_the_walk(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
+    let Some((hp, poisoned)) = ctx
+        .state()
+        .party
+        .value
+        .as_ref()
+        .and_then(|p| p.first())
+        .map(|m| {
+            (
+                m.hp.value.map_or(0, |h| h.0),
+                matches!(
+                    m.status.value,
+                    Some(pokebot_state::Status::Poisoned | pokebot_state::Status::BadlyPoisoned)
+                ),
+            )
+        })
+    else {
+        return Ok(());
+    };
+    if !poisoned || hp == 0 {
+        return Ok(());
+    }
+    let Some(steps) = steps_to(ctx, map) else {
+        return Ok(());
+    };
+    let items: Vec<(String, u16)> = ctx
+        .state()
+        .bag
+        .pockets
+        .get(&pokebot_state::Pocket::Items)
+        .and_then(|k| k.value.clone())
+        .unwrap_or_default();
+    let Some(item) = poison_medicine(hp, steps, &items) else {
+        return Ok(());
+    };
+    ctx.emit(progress(
+        "Heal",
+        format!("poisoned at {hp} HP, {steps} steps to {map}: {item} first"),
+    ))?;
+    match super::medicine::use_item(ctx, item) {
+        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
+        Err(e) => ctx.emit(progress(
+            "Heal",
+            format!("{item} not used: {e}; walking on"),
+        )),
+        Ok(()) => Ok(()),
+    }
+}
+
 pub fn heal(ctx: &mut ToolContext<'_>, center: Option<&str>) -> Result<(), ToolError> {
     let (map, nurse) = nurse_for(ctx, center)?;
+    cure_for_the_walk(ctx, &map)?;
     let outcome = ctx.invoke(&Intent::Talk {
         map: map.clone(),
         object: nurse,
@@ -174,6 +295,33 @@ impl Tool for HealTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet emu3: SQUIRTLE poisoned at 8/25 HP in Viridian Forest walked
+    /// for Viridian's Center and fainted to the poison on Route 2. A walk
+    /// the poison would end is preceded by a cure, else a potion that
+    /// sees it through; a short one isn't.
+    #[test]
+    fn a_poisoned_lead_is_cured_before_a_walk_it_would_not_survive() {
+        let items = |list: &[(&str, u16)]| -> Vec<(String, u16)> {
+            list.iter().map(|(i, n)| (i.to_string(), *n)).collect()
+        };
+        let both = items(&[("ITEM_POTION", 2), ("ITEM_ANTIDOTE", 1)]);
+        // 8 HP, 60 steps: 15 HP of poison.
+        assert_eq!(poison_medicine(8, 60, &both), Some("ITEM_ANTIDOTE"));
+        assert_eq!(
+            poison_medicine(8, 60, &items(&[("ITEM_POTION", 2)])),
+            Some("ITEM_POTION")
+        );
+        // A potion that doesn't see it through isn't the answer.
+        assert_eq!(poison_medicine(8, 200, &items(&[("ITEM_POTION", 2)])), None);
+        assert_eq!(
+            poison_medicine(8, 200, &items(&[("ITEM_SUPER_POTION", 1)])),
+            Some("ITEM_SUPER_POTION")
+        );
+        // A short walk: on to the nurse.
+        assert_eq!(poison_medicine(20, 40, &both), None);
+        assert_eq!(poison_medicine(8, 60, &items(&[("ITEM_POTION", 0)])), None);
+    }
 
     /// Pewter's Center has Pewter's mart next door; Route 4's Center has
     /// none (the nearest, Cerulean's, is a trip).
