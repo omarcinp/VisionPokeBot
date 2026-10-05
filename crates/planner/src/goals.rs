@@ -168,6 +168,10 @@ fn is_field_move(mv: &str) -> bool {
 }
 /// Party members at most (a catch past it goes to the PC).
 const PARTY_SIZE: usize = 6;
+/// Battles ahead of the targets readiness weighs the team by, and the
+/// weight of each (the nearer counts more: the team changes on the way).
+const HORIZON_TRAINERS: usize = 2;
+const HORIZON_WEIGHTS: [f64; HORIZON_TRAINERS] = [0.5, 0.25];
 /// A species the walk is expected to catch with at least this probability
 /// is not hunted explicitly (§4.6.2).
 const PASSIVE_LIKELY: f64 = 0.5;
@@ -1038,6 +1042,22 @@ impl<'a> Planner<'a> {
             .unwrap_or_default();
         EDGE_PENALTY.with(|cell| *cell.borrow_mut() = None);
         areas
+    }
+
+    /// The trainers readiness weighs the team's future by when preparing
+    /// for `targets` (see `Session::horizon`), with their weights.
+    pub fn horizon(
+        &self,
+        knowledge: &SavedKnowledge,
+        pose: Option<PlayerPose>,
+        targets: &[String],
+    ) -> Vec<(String, f64)> {
+        let inferred = self.infer_choices(knowledge);
+        let knowledge = inferred.as_ref().unwrap_or(knowledge);
+        let session = self.session(knowledge, pose.as_ref());
+        let out = session.horizon(targets, &session.base);
+        EDGE_PENALTY.with(|cell| *cell.borrow_mut() = None);
+        out
     }
 
     /// The readiness steps to beat `trainer` once `ahead` has run, with
@@ -6027,6 +6047,11 @@ impl<'p, 'a> Session<'p, 'a> {
             // each target by its own.
             handicap: 0,
             handicaps: belief.knowledge.handicaps.clone().into_iter().collect(),
+            horizon: Vec::new(),
+        };
+        let request = Request {
+            horizon: self.horizon(&request.targets, belief),
+            ..request
         };
         let plans = plan_preparation(&request, 1);
         // Money short of the balls a better catch needs may be earned
@@ -6189,6 +6214,53 @@ impl<'p, 'a> Session<'p, 'a> {
         };
         c.add_effect(p.clone());
         Some(c)
+    }
+
+    /// The battles the story holds after `targets` that readiness weighs
+    /// the team's future by (§4.5): the leaders of the badges not held,
+    /// in the order the story reaches them ([`crate::levels`]), the next
+    /// [`HORIZON_TRAINERS`] of them with [`HORIZON_WEIGHTS`]. A leader is
+    /// the battle on the script path that sets the badge's flag, so
+    /// nothing names them. With the last badge held, the gauntlet is the
+    /// targets' own (`Gauntlet::with`), so the horizon is empty.
+    fn horizon(&self, targets: &[String], belief: &StateBelief<'a>) -> Vec<(String, f64)> {
+        let Some(events) = self.planner.world.events() else {
+            return Vec::new();
+        };
+        let now = belief.with_established(Default::default());
+        let mut ahead: Vec<(u32, u8, String)> = Vec::new();
+        for n in 1..=8u8 {
+            let badge = Predicate::Badge { n };
+            if now.eval(&badge) == Truth::True {
+                continue;
+            }
+            let Some(level) = self.levels.level(&badge) else {
+                continue;
+            };
+            let flag = Predicate::badge_flag(n);
+            let leader = events.scripts.values().find_map(|script| {
+                script.paths.iter().find_map(|path| {
+                    let sets = path
+                        .does
+                        .iter()
+                        .any(|e| matches!(e, ScriptEffect::Set { set } if *set == flag));
+                    sets.then(|| first_battle(path)).flatten()
+                })
+            });
+            let Some(leader) = leader else { continue };
+            if targets.iter().any(|t| t == leader)
+                || !self.planner.data.trainers.contains_key(leader)
+            {
+                continue;
+            }
+            ahead.push((level, n, leader.to_string()));
+        }
+        ahead.sort();
+        ahead
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .zip(HORIZON_WEIGHTS)
+            .collect()
     }
 
     /// Whether `route` meets on the way a trainer battle the party isn't

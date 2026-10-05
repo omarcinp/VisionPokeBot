@@ -16,7 +16,7 @@ use pokebot_world::events::DexCount;
 use pokebot_world::predicate::{BeliefView, Predicate, Truth};
 use serde::Deserialize;
 
-use crate::evaluate::{team_vs_trainer, Combatant};
+use crate::evaluate::{team_vs_trainer, Build, Combatant};
 use crate::gauntlet::Gauntlet;
 use crate::intents::{pocket_of, GoalBelief, GoalPredicate};
 use crate::prepare::{PartyMember, OUR_IV};
@@ -127,7 +127,7 @@ impl<'a> StateBelief<'a> {
                 } else {
                     m.moves.clone()
                 };
-                let mut c = Combatant::new(self.data, &m.species, m.level, moves, OUR_IV)?;
+                let mut c = Combatant::of(self.data, &m.species, m.level, moves, OUR_IV, m.build)?;
                 for slot in mon.moves.iter().flatten() {
                     let (Some(mv), Some((left, max))) = (&slot.mv.value, slot.pp.value) else {
                         continue;
@@ -416,7 +416,20 @@ fn member_of(mon: &PartyMon) -> Option<PartyMember> {
         level,
         exp: None,
         moves,
+        build: build_of(mon),
     })
+}
+
+/// The member's build from its stat readings, when they were solved; the
+/// EVs counted from its battles (those not yet in its stats show at its
+/// next level-up, where the plan judges it anyway).
+fn build_of(mon: &PartyMon) -> Option<Build> {
+    let estimate = mon.training.estimate.as_ref()?;
+    let mut e = estimate.clone();
+    if e.nature_read.is_none() {
+        e.nature_read = mon.details.nature.value.clone();
+    }
+    Build::from_estimate(&e, mon.training.evs)
 }
 
 impl BeliefView for StateBelief<'_> {

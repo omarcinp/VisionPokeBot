@@ -11,6 +11,12 @@
 //! every combination of level targets within a window, keeping the cheapest
 //! that reaches the confidence target. Ties break on minutes, then on a
 //! stable description order, so the result is deterministic.
+//!
+//! The team is built for the story, not the next battle only: a member's
+//! own IVs, nature and EVs count when known ([`Build`]), the window
+//! reaches the targets' level, and among plans that ready the party the
+//! one whose team is also further toward the trainers ahead
+//! ([`Request::horizon`]) wins when the extra time is worth it.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -19,7 +25,7 @@ use pokebot_gamedata::mechanics::{catch_probability, exp_for_level, exp_gain, St
 use pokebot_gamedata::{EncounterTable, GameData};
 use serde::Serialize;
 
-use crate::evaluate::{team_vs_trainer, Combatant};
+use crate::evaluate::{team_vs_trainer, Build, Combatant};
 
 /// Seconds per walking step (16 frames at 59.73 Hz).
 const STEP_SECONDS: f64 = 16.0 / 59.7275;
@@ -31,8 +37,13 @@ const TURN_S: f64 = 7.0;
 pub const OUR_IV: u32 = 10;
 /// Wild Pokémon average IV.
 const WILD_IV: u32 = 15;
-/// Levels above the current one considered per member.
+/// Levels above the current one considered per member, at least: a
+/// member below the targets' levels is swept up to them and a margin
+/// ([`WINDOW_MARGIN`]), so a fresh catch is judged at the level it would
+/// fight at, not fourteen levels above the grass it came from.
 const LEVEL_WINDOW: u8 = 14;
+/// Levels above the targets' highest a member's window reaches.
+const WINDOW_MARGIN: u8 = 4;
 /// Level combinations evaluated per party composition before the search
 /// settles for what it found (a four-member party has 15⁴ of them; the
 /// cheapest that meets the target usually comes within the first few).
@@ -47,6 +58,13 @@ pub struct PartyMember {
     pub exp: Option<u64>,
     /// Known moves (empty = assume the level-up default).
     pub moves: Vec<String>,
+    /// Its IVs, nature and EVs when its stat readings tell them
+    /// ([`Build::from_estimate`]); else judged at [`OUR_IV`], neutral.
+    /// A weak individual (low IVs, a nature against its attacking stat)
+    /// is then worth less at every level, and the plan trains or
+    /// replaces it accordingly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
 }
 
 /// A place to train or catch.
@@ -77,7 +95,19 @@ pub struct Request<'a> {
     /// the Elite Four, judged under LORELEI's handicap of none, called him
     /// won).
     pub handicaps: std::collections::BTreeMap<String, u8>,
+    /// Trainers beyond the targets the party will have to beat later
+    /// (the next gym leaders, by story order), each with a weight. They
+    /// don't have to be won by this plan: among plans that ready the
+    /// party for the targets, one whose team is also further toward
+    /// them wins when the extra time is worth it ([`OUTLOOK_MINUTES`]),
+    /// so the team is built for the story, not the next battle only.
+    pub horizon: Vec<(String, f64)>,
 }
+
+/// Minutes a plan may cost more for each (weighted) battle of the
+/// horizon it wins on top: about what a later roster change (a catch,
+/// a swap, the newcomer's first levels) costs.
+pub const OUTLOOK_MINUTES: f64 = 12.0;
 
 impl Request<'_> {
     /// Levels our side is judged below its own against `target`.
@@ -125,12 +155,38 @@ pub struct PreparationPlan {
     /// expected to beat, added up: how far a best effort gets when no plan
     /// wins.
     pub progress: f64,
+    /// P(win) against each of the request's horizon trainers with the
+    /// prepared party, weighted and added up.
+    #[serde(default)]
+    pub outlook: f64,
 }
 
 impl PreparationPlan {
     pub fn min_confidence(&self) -> f64 {
         self.confidence.iter().map(|(_, p)| *p).fold(1.0, f64::min)
     }
+
+    /// Minutes less what the outlook is worth ([`OUTLOOK_MINUTES`]): what
+    /// plans are ranked by.
+    pub fn effective_minutes(&self) -> f64 {
+        self.minutes - OUTLOOK_MINUTES * self.outlook
+    }
+}
+
+/// The weighted P(win) against the horizon's trainers.
+fn outlook(
+    data: &GameData,
+    party: &[Combatant],
+    horizon: &[(String, f64)],
+    handicap_of: &dyn Fn(&str) -> u8,
+) -> f64 {
+    horizon
+        .iter()
+        .filter_map(|(t, w)| {
+            let judged = handicapped(data, party, handicap_of(t));
+            team_vs_trainer(data, &judged, t).map(|e| w * e.p_win)
+        })
+        .sum()
 }
 
 /// Moves a member has at `level`: the known moves plus any learned since,
@@ -158,7 +214,7 @@ fn moves_at(data: &GameData, member: &PartyMember, species: &str, level: u8) -> 
 fn combatant(data: &GameData, member: &PartyMember, level: u8) -> Option<Combatant> {
     let species = data.evolved_at(&member.species, level);
     let moves = moves_at(data, member, &species, level);
-    Combatant::new(data, &species, level, moves, OUR_IV)
+    Combatant::of(data, &species, level, moves, OUR_IV, member.build)
 }
 
 /// Land encounter table of an area, if it has one.
@@ -404,8 +460,9 @@ pub fn handicapped(data: &GameData, party: &[Combatant], levels: u8) -> Vec<Comb
         .iter()
         .map(|c| {
             let level = c.level.saturating_sub(levels).max(1);
-            let mut judged = Combatant::new(data, &c.species, level, c.moves.clone(), OUR_IV)
-                .unwrap_or_else(|| c.clone());
+            let mut judged =
+                Combatant::of(data, &c.species, level, c.moves.clone(), OUR_IV, c.build)
+                    .unwrap_or_else(|| c.clone());
             judged.pp_left = c.pp_left.clone();
             judged.lost_turns = levels / LEVELS_PER_LOST_TURN;
             judged
@@ -444,6 +501,16 @@ fn confidence(
             )
         })
         .collect()
+}
+
+/// The highest level among the targets' Pokémon (0 for none known).
+fn top_level(data: &GameData, targets: &[String]) -> u8 {
+    targets
+        .iter()
+        .filter_map(|t| data.trainers.get(t))
+        .flat_map(|t| t.party.iter().map(|m| m.level))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Party members at most.
@@ -487,6 +554,7 @@ pub fn member_values(
     data: &GameData,
     party: &[PartyMember],
     targets: &[String],
+    horizon: &[(String, f64)],
 ) -> Vec<Option<f64>> {
     let fighters = |skip: Option<usize>| -> Vec<Combatant> {
         party
@@ -501,7 +569,9 @@ pub fn member_values(
             .iter()
             .map(|(_, p)| p)
             .sum();
-        chance + PROGRESS_WEIGHT * progress(data, team, targets, &|_| 0)
+        chance
+            + outlook(data, team, horizon, &|_| 0)
+            + PROGRESS_WEIGHT * progress(data, team, targets, &|_| 0)
     };
     let all = worth(&fighters(None));
     party
@@ -526,8 +596,13 @@ const PROGRESS_WEIGHT: f64 = 0.1;
 
 /// The member worth least to the team (see [`member_values`]); ties to the
 /// lowest level. `None` when every member has a role.
-fn least_valued(data: &GameData, party: &[PartyMember], targets: &[String]) -> Option<usize> {
-    member_values(data, party, targets)
+fn least_valued(
+    data: &GameData,
+    party: &[PartyMember],
+    targets: &[String],
+    horizon: &[(String, f64)],
+) -> Option<usize> {
+    member_values(data, party, targets, horizon)
         .into_iter()
         .enumerate()
         .filter_map(|(i, v)| Some((i, v?)))
@@ -567,7 +642,7 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     // PARAS, ZUBAT, GEODUDE, CLEFAIRY and DIGLETT, the first six caught,
     // and nothing among them that hits ERIKA's grass).
     let spare = (catching && request.party.len() >= PARTY_SIZE)
-        .then(|| least_valued(data, &request.party, &request.targets))
+        .then(|| least_valued(data, &request.party, &request.targets, &request.horizon))
         .flatten();
     if let Some(out) = spare {
         // Only the catches that add most to the team as caught (before any
@@ -577,6 +652,11 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
             .iter()
             .filter_map(|m| combatant(data, m, m.level))
             .collect();
+        // Judged at the level it would fight the targets at (evolved,
+        // with the moves it learns by then), not as caught: a Lv3 catch
+        // beats nothing as it is, and what it grows into is what the
+        // swap is for. The level search prices the training honestly.
+        let potential = top_level(data, &request.targets).saturating_add(WINDOW_MARGIN);
         let mut screened: Vec<(f64, &String)> = catchable
             .iter()
             .filter(|species| !request.party.iter().any(|m| &m.species == *species))
@@ -590,8 +670,9 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                         level,
                         exp: None,
                         moves: Vec::new(),
+                        build: None,
                     },
-                    level,
+                    level.max(potential),
                 )?;
                 if out < team.len() {
                     team[out] = newcomer;
@@ -601,7 +682,9 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                     .iter()
                     .map(|(_, p)| p)
                     .sum();
-                let worth = chance + PROGRESS_WEIGHT * progress(data, &team, &request.targets, &by);
+                let worth = chance
+                    + outlook(data, &team, &request.horizon, &by)
+                    + PROGRESS_WEIGHT * progress(data, &team, &request.targets, &by);
                 Some((worth, species))
             })
             .collect();
@@ -624,6 +707,7 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 level,
                 exp: None,
                 moves: Vec::new(),
+                build: None,
             };
             let steps = vec![
                 PlanStep::Catch {
@@ -656,6 +740,7 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
                 level,
                 exp: None,
                 moves: Vec::new(),
+                build: None,
             });
             let step = PlanStep::Catch {
                 species: species.clone(),
@@ -689,8 +774,8 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     }
     plans.sort_by(|a, b| {
         if ok(a) {
-            a.minutes
-                .total_cmp(&b.minutes)
+            a.effective_minutes()
+                .total_cmp(&b.effective_minutes())
                 .then_with(|| b.min_confidence().total_cmp(&a.min_confidence()))
         } else {
             // Nothing reaches the target: the most confident best effort,
@@ -703,7 +788,7 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
             b.min_confidence()
                 .total_cmp(&a.min_confidence())
                 .then_with(|| b.progress.total_cmp(&a.progress))
-                .then_with(|| a.minutes.total_cmp(&b.minutes))
+                .then_with(|| a.effective_minutes().total_cmp(&b.effective_minutes()))
         }
         .then_with(|| format!("{:?}", a.steps).cmp(&format!("{:?}", b.steps)))
     });
@@ -713,10 +798,10 @@ fn plan(request: &Request<'_>, alternatives: usize, catching: bool) -> Vec<Prepa
     for plan in plans {
         let dominated = kept
             .iter()
-            .any(|k| k.minutes <= plan.minutes + 1e-9 && k.min_confidence() >= plan.min_confidence() - 1e-9)
+            .any(|k| k.effective_minutes() <= plan.effective_minutes() + 1e-9 && k.min_confidence() >= plan.min_confidence() - 1e-9)
             // Among plans that meet the target, extra confidence is only worth
             // listing if it is meaningfully higher.
-            || kept.iter().any(|k| ok(k) && ok(&plan) && k.min_confidence() + 0.02 >= plan.min_confidence() && k.minutes <= plan.minutes);
+            || kept.iter().any(|k| ok(k) && ok(&plan) && k.min_confidence() + 0.02 >= plan.min_confidence() && k.effective_minutes() <= plan.effective_minutes());
         if !dominated {
             kept.push(plan);
         }
@@ -764,7 +849,14 @@ fn search_levels(
             .max_by_key(|(_, c)| c.level)
             .map(|(j, _)| j)
     };
-    let window = |m: &PartyMember| m.level.saturating_add(LEVEL_WINDOW).min(100) - m.level;
+    let top = top_level(data, &request.targets).saturating_add(WINDOW_MARGIN);
+    let window = |m: &PartyMember| {
+        m.level
+            .saturating_add(LEVEL_WINDOW)
+            .max(top)
+            .min(100)
+            .saturating_sub(m.level)
+    };
     let memo = std::cell::RefCell::new(std::mem::take(memo_out));
     // Cheapest training of member `i` to `to`, with `carrier` (party index,
     // level in the combination) to switch-train with.
@@ -837,6 +929,7 @@ fn search_levels(
         } else {
             0.0
         };
+        let outlook = outlook(data, &judged, &request.horizon, &by);
         let mut steps = base_steps.to_vec();
         for (m, c) in party.iter().zip(&costs) {
             if let (to, min, Some((map, battles))) = c {
@@ -859,10 +952,11 @@ fn search_levels(
                 .map(|c| (c.species.clone(), c.level, c.moves.clone()))
                 .collect(),
             progress,
+            outlook,
         })
     };
     let worth = |p: &PreparationPlan| {
-        p.confidence.iter().map(|(_, c)| c).sum::<f64>() + PROGRESS_WEIGHT * p.progress
+        p.confidence.iter().map(|(_, c)| c).sum::<f64>() + p.outlook + PROGRESS_WEIGHT * p.progress
     };
     let meets = |p: &PreparationPlan| p.min_confidence() >= request.confidence;
     let start = vec![0usize; party.len()];
@@ -921,7 +1015,7 @@ fn search_levels(
                 if worth(&plan) > base_worth + 1e-6 {
                     if cheapest
                         .as_ref()
-                        .is_none_or(|(_, c)| plan.minutes < c.minutes)
+                        .is_none_or(|(_, c)| plan.effective_minutes() < c.effective_minutes())
                     {
                         cheapest = Some((k, plan));
                     }
@@ -1013,6 +1107,7 @@ mod tests {
             level,
             exp: None,
             moves: Vec::new(),
+            build: None,
         }
     }
 
@@ -1022,6 +1117,104 @@ mod tests {
             travel_minutes: 1.0,
             heal_minutes: 2.0,
         }
+    }
+
+    /// A member's own IVs and nature count: a CHARMANDER with IVs of 3
+    /// and a QUIET nature (Sp. Atk up, Speed down) against one with IVs
+    /// of 31 and MODEST (Sp. Atk up, Attack down) — same species, level
+    /// and moves, yet the first is slower and frailer, so it wins less
+    /// against BROCK and needs more training to the same confidence.
+    #[test]
+    fn a_members_build_changes_what_it_is_worth() {
+        let Some(data) = data() else { return };
+        let nature = |name: &str| pokebot_gamedata::training::nature_named(name).unwrap();
+        let built = |iv: u8, nature: u8| {
+            let mut m = member("SPECIES_CHARMANDER", 14);
+            m.moves = vec!["MOVE_EMBER".into(), "MOVE_SCRATCH".into()];
+            m.build = Some(Build {
+                ivs: [iv; 6],
+                nature,
+                evs: [0; 6],
+            });
+            m
+        };
+        let strong = built(31, nature("MODEST"));
+        let weak = built(3, nature("QUIET"));
+        let fighter = |m: &PartyMember| combatant(&data, m, m.level).unwrap();
+        let (s, w) = (fighter(&strong), fighter(&weak));
+        assert!(s.stats.speed() > w.stats.speed(), "{s:?} vs {w:?}");
+        assert!(s.stats.sp_attack() > w.stats.sp_attack());
+        assert!(s.max_hp() > w.max_hp());
+        let target = "TRAINER_LEADER_BROCK".to_string();
+        let p = |c: Combatant| team_vs_trainer(&data, &[c], &target).unwrap().p_win;
+        assert!(p(s) > p(w), "the strong one must win more often");
+        // Judged a level lower (a loss), the build is kept.
+        let judged = handicapped(&data, &[fighter(&weak)], 3);
+        assert_eq!(judged[0].build, weak.build);
+        assert_eq!(judged[0].level, 11);
+        // And the plan for the weak one costs more.
+        let plan_for = |m: PartyMember| {
+            let request = Request {
+                party: vec![m],
+                targets: vec![target.clone()],
+                areas: vec![area("Route22"), area("Route2")],
+                confidence: 0.9,
+                money: 3000,
+                data: &data,
+                handicap: 0,
+                handicaps: Default::default(),
+                horizon: Vec::new(),
+            };
+            plan_training(&request, 1).into_iter().next().unwrap()
+        };
+        let (a, b) = (plan_for(strong), plan_for(weak));
+        assert!(
+            a.minutes <= b.minutes,
+            "strong {:.1} min vs weak {:.1} min",
+            a.minutes,
+            b.minutes
+        );
+    }
+
+    /// A member far below the targets is swept up to their level: a Lv8
+    /// SANDSHREW against LT. SURGE (RAICHU Lv24) wins from Lv24 on, and
+    /// fourteen levels up, at Lv22, it is still at 36%. Within the old
+    /// window those levels helped a little, so the past-the-window sweep
+    /// never ran: the best effort trained it to Lv22 and walked in short.
+    /// The window reaches the targets' level and the winning plan is found.
+    #[test]
+    fn the_level_window_reaches_the_targets_level() {
+        let Some(data) = data() else { return };
+        let target = "TRAINER_LEADER_LT_SURGE".to_string();
+        assert_eq!(top_level(&data, std::slice::from_ref(&target)), 24);
+        let sandshrew = member("SPECIES_SANDSHREW", 8);
+        let at = |level: u8| combatant(&data, &sandshrew, level).unwrap();
+        let p = |level: u8| team_vs_trainer(&data, &[at(level)], &target).unwrap().p_win;
+        let old_top = 8 + LEVEL_WINDOW;
+        assert!(p(old_top) < 0.9, "Lv{old_top}: {}", p(old_top));
+        assert!(p(old_top) > 0.0, "Lv{old_top}: {}", p(old_top));
+        let request = Request {
+            party: vec![sandshrew.clone()],
+            targets: vec![target.clone()],
+            areas: vec![area("Route22"), area("Route2"), area("Route1")],
+            confidence: 0.9,
+            money: 0,
+            data: &data,
+            handicap: 0,
+            handicaps: Default::default(),
+            horizon: Vec::new(),
+        };
+        let plan = plan_training(&request, 1).remove(0);
+        let to = plan
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                PlanStep::Train { to, .. } => Some(*to),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("SANDSHREW trains: {:?}", plan.confidence));
+        assert!(to > old_top, "{:?} {:?}", plan.steps, plan.confidence);
+        assert!(plan.min_confidence() >= 0.9, "{:?}", plan.confidence);
     }
 
     /// Fleet continue-1 lost to LORELEI with PIDGEOT and VENUSAUR at
@@ -1165,6 +1358,7 @@ mod tests {
                 data: &data,
                 handicap: 0,
                 handicaps: Default::default(),
+                horizon: Vec::new(),
             };
             let plan = plan_training(&request, 1).remove(0);
             plan.steps
@@ -1222,6 +1416,7 @@ mod tests {
             data: &data,
             handicap: 0,
             handicaps: Default::default(),
+            horizon: Vec::new(),
         };
         let plan = plan_training(&request, 1).remove(0);
         assert!(!plan.steps.is_empty(), "{plan:?}");
@@ -1307,6 +1502,7 @@ mod tests {
             data: &data,
             handicap: 0,
             handicaps: [("TRAINER_ELITE_FOUR_LANCE".to_string(), 6)].into(),
+            horizon: Vec::new(),
         };
         let plan = plan_training(&request, 1).remove(0);
         let trained = plan
@@ -1367,7 +1563,7 @@ mod tests {
         ];
         let targets = vec!["TRAINER_LEADER_ERIKA".to_string()];
         // PARAS alone knows CUT: it keeps its place.
-        let values = member_values(&data, &party, &targets);
+        let values = member_values(&data, &party, &targets, &[]);
         assert_eq!(values[1], None);
         assert!(values[0] > values[2], "{values:?}");
         let request = Request {
@@ -1389,6 +1585,7 @@ mod tests {
             data: &data,
             handicap: 0,
             handicaps: Default::default(),
+            horizon: Vec::new(),
         };
         let plan = plan_preparation(&request, 1).remove(0);
         let swap = plan.steps.iter().find_map(|s| match s {
@@ -1448,6 +1645,7 @@ mod tests {
             data: &data,
             handicap,
             handicaps: Default::default(),
+            horizon: Vec::new(),
         };
         let plan = plan_preparation(&request(0), 1).remove(0);
         assert!(plan.min_confidence() >= 0.9, "{plan:?}");

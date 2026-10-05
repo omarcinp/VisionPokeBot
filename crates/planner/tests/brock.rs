@@ -34,6 +34,7 @@ fn request<'a>(data: &'a GameData, species: &str, moves: &[&str]) -> Request<'a>
             level: 6,
             exp: None,
             moves: moves.iter().map(|m| (*m).to_owned()).collect(),
+            build: None,
         }],
         targets: vec!["TRAINER_LEADER_BROCK".into()],
         areas: areas(),
@@ -42,6 +43,7 @@ fn request<'a>(data: &'a GameData, species: &str, moves: &[&str]) -> Request<'a>
         data,
         handicap: 0,
         handicaps: Default::default(),
+        horizon: Vec::new(),
     }
 }
 

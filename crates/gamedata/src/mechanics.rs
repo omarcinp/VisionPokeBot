@@ -34,6 +34,23 @@ impl Stats {
         Stats(s)
     }
 
+    /// One individual's stats: its IVs, EVs and nature per stat (HP, Atk,
+    /// Def, Spe, SpA, SpD), as the game computes them
+    /// ([`crate::training::stat`]).
+    pub fn of_individual(
+        base: &[u16; 6],
+        level: u8,
+        ivs: [u8; 6],
+        evs: [u16; 6],
+        nature: u8,
+    ) -> Stats {
+        Stats(std::array::from_fn(|i| {
+            u32::from(crate::training::stat(
+                base[i], i, level, ivs[i], evs[i], nature,
+            ))
+        }))
+    }
+
     pub fn hp(&self) -> u32 {
         self.0[0]
     }

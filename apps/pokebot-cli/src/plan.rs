@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use pokebot_gamedata::training::nature_named;
 use pokebot_gamedata::GameData;
 use pokebot_planner::{
-    battle_vs_trainer, plan_preparation, Area, Combatant, PartyMember, PlanStep, Request,
+    battle_vs_trainer, plan_preparation, Area, Build, Combatant, PartyMember, PlanStep, Request,
 };
 use pokebot_world::World;
 
@@ -18,7 +19,8 @@ pub struct PlanArgs {
     /// Trainer(s) to beat, e.g. TRAINER_LEADER_BROCK (repeatable)
     #[arg(long = "against", required = true)]
     pub targets: Vec<String>,
-    /// Party member as SPECIES:LEVEL[:MOVE,MOVE...], e.g. BULBASAUR:6:TACKLE,GROWL (repeatable, lead first)
+    /// Party member as SPECIES:LEVEL[:MOVE,MOVE...[:NATURE[/IV]]], e.g. BULBASAUR:6:TACKLE,GROWL
+    /// or CHARMANDER:12:EMBER:QUIET/3 (repeatable, lead first)
     #[arg(long = "party", required = true)]
     pub party: Vec<String>,
     /// Maps reachable now for training/catching
@@ -37,6 +39,10 @@ pub struct PlanArgs {
     /// Required win probability per battle
     #[arg(long, default_value_t = 0.9)]
     pub confidence: f64,
+    /// Trainer(s) further on the party is built toward, as TRAINER[=WEIGHT]
+    /// (repeatable; weights default to 0.5, then 0.25, ...)
+    #[arg(long = "horizon")]
+    pub horizon: Vec<String>,
     #[arg(long, default_value_t = 4)]
     pub alternatives: usize,
     #[arg(long, default_value = "data/world")]
@@ -64,8 +70,33 @@ fn parse_member(spec: &str) -> Result<PartyMember> {
             .with_context(|| format!("level in {spec:?}"))?,
         exp: None,
         moves: parts.get(2).map_or(Vec::new(), |m| {
-            m.split(',').map(|x| constant("MOVE_", x)).collect()
+            m.split(',')
+                .filter(|x| !x.is_empty())
+                .map(|x| constant("MOVE_", x))
+                .collect()
         }),
+        build: parts.get(3).map(|b| parse_build(b)).transpose()?,
+    })
+}
+
+/// `NATURE[/IV]`: the individual's nature and the IV it has in every stat
+/// (15 when left out).
+fn parse_build(spec: &str) -> Result<Build> {
+    let (nature, iv) = spec.split_once('/').unwrap_or((spec, "15"));
+    let nature = if nature.is_empty() {
+        0
+    } else {
+        nature_named(&nature.trim().to_ascii_uppercase())
+            .with_context(|| format!("unknown nature {nature:?}"))?
+    };
+    let iv: u8 = iv.parse().with_context(|| format!("IV in {spec:?}"))?;
+    if iv > 31 {
+        bail!("IV {iv} is above 31");
+    }
+    Ok(Build {
+        ivs: [iv; 6],
+        nature,
+        evs: [0; 6],
     })
 }
 
@@ -114,6 +145,24 @@ pub fn run(args: PlanArgs) -> Result<()> {
             bail!("unknown trainer {t}");
         }
     }
+    let horizon: Vec<(String, f64)> = args
+        .horizon
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let (name, weight) = h.split_once('=').unwrap_or((h, ""));
+            let weight = if weight.is_empty() {
+                0.5f64.powi(i as i32 + 1)
+            } else {
+                weight.parse().with_context(|| format!("weight in {h:?}"))?
+            };
+            let t = constant("TRAINER_", name);
+            if !data.trainers.contains_key(&t) {
+                bail!("unknown trainer {t}");
+            }
+            Ok((t, weight))
+        })
+        .collect::<Result<_>>()?;
     let from_here = hops(&world, &args.from);
     let areas: Vec<Area> = args
         .areas
@@ -143,7 +192,7 @@ pub fn run(args: PlanArgs) -> Result<()> {
             } else {
                 m.moves.clone()
             };
-            Combatant::new(&data, &m.species, m.level, moves, 10)
+            Combatant::of(&data, &m.species, m.level, moves, 10, m.build)
         })
         .collect();
     println!("Current party:");
@@ -180,6 +229,7 @@ pub fn run(args: PlanArgs) -> Result<()> {
         data: &data,
         handicap: 0,
         handicaps: Default::default(),
+        horizon,
     };
     let plans = plan_preparation(&request, args.alternatives);
     println!(
@@ -188,14 +238,19 @@ pub fn run(args: PlanArgs) -> Result<()> {
     );
     for (i, plan) in plans.iter().enumerate() {
         println!(
-            "{}. ~{:.1} min, confidence {}",
+            "{}. ~{:.1} min, confidence {}{}",
             i + 1,
             plan.minutes,
             plan.confidence
                 .iter()
                 .map(|(t, p)| format!("{t} {:.1}%", p * 100.0))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            if request.horizon.is_empty() {
+                String::new()
+            } else {
+                format!(", outlook {:.2}", plan.outlook)
+            }
         );
         for step in &plan.steps {
             match step {

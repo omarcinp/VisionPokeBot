@@ -9,11 +9,69 @@
 //! expected values (an approximation, documented as such).
 
 use pokebot_gamedata::mechanics::{damage, DamageRolls, Stats};
+use pokebot_gamedata::training::nature_named;
 use pokebot_gamedata::GameData;
-use serde::Serialize;
+use pokebot_state::IvEstimate;
+use serde::{Deserialize, Serialize};
 
 /// Turns considered before calling a fight a stalemate.
 const MAX_TURNS: usize = 40;
+
+/// What makes one Pokémon of a species stronger or weaker than another:
+/// its IVs, its nature and the EVs it has gained (the game's stat formula,
+/// [`Stats::of_individual`]). Known for our own members from their stat
+/// readings ([`IvEstimate`]); a wild one to be caught, or a member never
+/// looked at, has none and is judged at the planner's prior IV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Build {
+    /// Per stat (HP, Atk, Def, Spe, SpA, SpD).
+    pub ivs: [u8; 6],
+    /// Nature index (`NATURE_HARDY` = 0 is neutral).
+    pub nature: u8,
+    pub evs: [u16; 6],
+}
+
+/// The neutral nature, when the stats don't tell which one.
+const NEUTRAL_NATURE: u8 = 0;
+
+impl Build {
+    /// The build an estimate gives: each IV in the middle of its range,
+    /// the nature read on the summary (or the one the stats leave, or
+    /// neutral while several fit), and the EVs counted. `None` for an
+    /// estimate no IVs explain (a misread), which says nothing.
+    pub fn from_estimate(e: &IvEstimate, evs: [u16; 6]) -> Option<Build> {
+        if !e.consistent {
+            return None;
+        }
+        let nature = e
+            .nature_read
+            .as_deref()
+            .and_then(nature_named)
+            .or_else(|| match e.natures.as_slice() {
+                [one] => nature_named(one),
+                _ => None,
+            })
+            .unwrap_or(NEUTRAL_NATURE);
+        Some(Build {
+            ivs: std::array::from_fn(|i| {
+                let (lo, hi) = e.ivs[i];
+                (lo + hi) / 2
+            }),
+            nature,
+            evs,
+        })
+    }
+
+    /// An individual with `iv` in every stat, a neutral nature and no
+    /// EVs: what [`Combatant::new`] assumes.
+    pub fn flat(iv: u8) -> Build {
+        Build {
+            ivs: [iv; 6],
+            nature: NEUTRAL_NATURE,
+            evs: [0; 6],
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Combatant {
@@ -22,6 +80,11 @@ pub struct Combatant {
     pub moves: Vec<String>,
     #[serde(skip)]
     pub stats: Stats,
+    /// The individual the stats were computed for (`None`: `iv` in every
+    /// stat, neutral, no EVs), kept so it is judged the same at another
+    /// level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
     pub types: Vec<String>,
     /// The abilities it may have (a species with two: either).
     pub abilities: Vec<String>,
@@ -49,13 +112,29 @@ impl Combatant {
         moves: Vec<String>,
         iv: u32,
     ) -> Option<Combatant> {
+        Combatant::of(data, species, level, moves, iv, None)
+    }
+
+    /// With the individual's `build` when known; else as [`Combatant::new`].
+    pub fn of(
+        data: &GameData,
+        species: &str,
+        level: u8,
+        moves: Vec<String>,
+        iv: u32,
+        build: Option<Build>,
+    ) -> Option<Combatant> {
         let s = data.species(species)?;
-        let stats = Stats::compute(&s.base, level, iv);
+        let stats = match build {
+            Some(b) => Stats::of_individual(&s.base, level, b.ivs, b.evs, b.nature),
+            None => Stats::compute(&s.base, level, iv),
+        };
         Some(Combatant {
             species: species.to_owned(),
             level,
             moves,
             stats,
+            build,
             types: s.types.clone(),
             abilities: s.abilities.clone(),
             hp: stats.hp(),

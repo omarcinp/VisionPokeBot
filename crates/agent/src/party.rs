@@ -113,6 +113,13 @@ impl Member {
         Some(Stats(s))
     }
 
+    /// Its IVs, nature and EVs as the planner judges it, when its stat
+    /// readings were solved ([`pokebot_planner::Build::from_estimate`]).
+    pub fn build(&self) -> Option<pokebot_planner::Build> {
+        let e = self.ivs.as_ref()?;
+        pokebot_planner::Build::from_estimate(e, self.stats_evs)
+    }
+
     /// Name as the game prints it (`SPECIES_BULBASAUR` → `BULBASAUR`).
     pub fn display_name(&self) -> String {
         display_name(&self.species)

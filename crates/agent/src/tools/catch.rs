@@ -888,6 +888,7 @@ fn as_planned(m: &crate::party::Member) -> pokebot_planner::PartyMember {
         level: m.level,
         exp: None,
         moves: m.moves.iter().filter(|mv| *mv != "?").cloned().collect(),
+        build: m.build(),
     }
 }
 

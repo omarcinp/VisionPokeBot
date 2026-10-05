@@ -209,6 +209,25 @@ fn catch_rattata_probes_the_bag_then_goes_to_the_cheapest_area() {
     assert_eq!(plan, again);
 }
 
+/// Readiness weighs the team by the gym leaders still ahead, in story
+/// order, the next two: with the Boulder Badge held, preparing for a
+/// route trainer looks on to MISTY and LT. SURGE; preparing for MISTY, to
+/// LT. SURGE and ERIKA. The leaders come from the scripts that set the
+/// badge flags, not from a list.
+#[test]
+fn readiness_looks_on_to_the_next_gym_leaders() {
+    let Some(f) = fixture() else { return };
+    let planner = f.planner(PlanOptions::default());
+    let (knowledge, pose) = pewter();
+    let horizon = planner.horizon(&knowledge, pose.clone(), &["TRAINER_LEADER_BROCK".into()]);
+    let names: Vec<&str> = horizon.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(names, ["TRAINER_LEADER_MISTY", "TRAINER_LEADER_LT_SURGE"]);
+    assert!(horizon[0].1 > horizon[1].1, "{horizon:?}");
+    let horizon = planner.horizon(&knowledge, pose, &["TRAINER_LEADER_MISTY".into()]);
+    let names: Vec<&str> = horizon.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(names, ["TRAINER_LEADER_LT_SURGE", "TRAINER_LEADER_ERIKA"]);
+}
+
 #[test]
 fn game_clear_expands_into_the_eight_gyms_in_order() {
     let Some(f) = fixture() else { return };
@@ -1695,6 +1714,7 @@ fn training_goes_where_it_pays_and_heals_at_the_areas_own_center() {
         data: &f.data,
         handicap: 0,
         handicaps: Default::default(),
+        horizon: Vec::new(),
     };
     let on_route7: f64 = pokebot_planner::plan_training(&request, 1)[0]
         .steps

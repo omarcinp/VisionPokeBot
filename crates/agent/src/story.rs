@@ -583,6 +583,7 @@ impl StoryTask {
                 level: m.level,
                 exp: None,
                 moves: m.moves.clone(),
+                build: m.build(),
             })
             .collect();
         if party.is_empty() {
@@ -604,6 +605,7 @@ impl StoryTask {
             data,
             handicap: 0,
             handicaps: Default::default(),
+            horizon: Vec::new(),
         };
         let plans = plan_preparation(&request, 1);
         let plan = plans.first().ok_or("no plan found")?;
