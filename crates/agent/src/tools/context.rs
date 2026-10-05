@@ -1199,6 +1199,14 @@ fn count_interrupt(
     if learned.iter().any(|e| matches!(e, GameEvent::BattleEnded)) {
         return None;
     }
+    // A heal on the way (the scheduler's recovery, a Center trip and back)
+    // is no turning back: training comes back to its grass by the same
+    // tile each time (fleet continue-2, Victory Road 2F from Route 23:
+    // ONIX's training failed "interrupted at (47, 11) 3 times" after its
+    // third heal).
+    if learned.iter().any(|e| matches!(e, GameEvent::Healed)) {
+        return None;
+    }
     let n = interrupted.entry(pose.clone()).or_default();
     *n += 1;
     (*n >= MAX_SAME_INTERRUPTS)
@@ -1744,6 +1752,15 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(
                 count_interrupt(&mut grass, at(), &[GameEvent::BattleEnded]),
+                None
+            );
+        }
+        // Fleet continue-2: training's heal trips, back by one tile each
+        // time, are no turning back.
+        let mut heals = std::collections::HashMap::new();
+        for _ in 0..10 {
+            assert_eq!(
+                count_interrupt(&mut heals, at(), &[GameEvent::Healed]),
                 None
             );
         }
