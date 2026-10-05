@@ -31,7 +31,17 @@ pub struct LeadWith {
     switching: bool,
     swapped: bool,
     reordered: bool,
+    /// The action window open is the one the step opened on `slot`: the
+    /// window covers the last slots' panels, whose highlight then reads
+    /// as another (fleet continue-4: HYPNO in slot 5, its actions opened,
+    /// closed as "another member's" and opened again for 18 minutes).
+    opened: bool,
+    /// Times the member's actions were opened.
+    opens: u32,
 }
+
+/// Openings of the member's actions before the step gives up.
+const MAX_OPENS: u32 = 6;
 
 impl LeadWith {
     pub fn new(slot: u8, species: &str) -> Self {
@@ -43,6 +53,8 @@ impl LeadWith {
             switching: false,
             swapped: false,
             reordered: false,
+            opened: false,
+            opens: 0,
         }
     }
 
@@ -67,8 +79,14 @@ impl ToolStep for LeadWith {
             self.retries.failed();
         } else if action.label == "choose SWITCH" {
             self.switching = true;
+            self.opened = false;
         } else if action.label == "swap into the first slot" {
             self.swapped = true;
+        } else if action.label == "open the member's actions" {
+            self.opened = true;
+            self.opens += 1;
+        } else if action.label == "close another member's actions" {
+            self.opened = false;
         }
     }
 
@@ -124,7 +142,7 @@ impl ToolStep for LeadWith {
             }
             if party.actions {
                 self.retries.enter("actions");
-                if party.selected != Some(self.slot) {
+                if !self.opened && party.selected != Some(self.slot) {
                     return self.retries.act(
                         "close another member's actions",
                         Button::B,
@@ -160,6 +178,7 @@ impl ToolStep for LeadWith {
                 );
             }
             self.retries.enter("party");
+            self.opened = false;
             if self.slot >= party.count {
                 return Decision::Fail(format!(
                     "slot {} is not in the party ({} members)",
@@ -170,6 +189,12 @@ impl ToolStep for LeadWith {
                 return self.retries.wait(o, "reading the selected member");
             };
             if at == self.slot {
+                if self.opens >= MAX_OPENS {
+                    return Decision::Fail(format!(
+                        "leading with slot {}: its actions opened {MAX_OPENS} times, SWITCH never chosen",
+                        self.slot
+                    ));
+                }
                 return self.retries.act(
                     "open the member's actions",
                     Button::A,
@@ -337,5 +362,67 @@ mod tests {
             members: vec![pidgey],
         };
         assert_eq!(fighter_for(&d, &alone, "TRAINER_LEADER_BROCK"), None);
+    }
+
+    /// Fleet continue-4: HYPNO in slot 5, its actions opened; the window
+    /// covers the last panels and the highlight read as another member's,
+    /// so the actions were closed and opened again, for 18 minutes. The
+    /// window the step opened is taken for the member's: Down to SWITCH.
+    #[test]
+    fn the_actions_opened_on_the_last_slot_are_its_own() {
+        use pokebot_state::{Observation, Observed, PartyMenuObservation, ScreenState};
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let menu = |actions: bool, selected: u8| {
+            let mut o = Observation::bare(
+                1,
+                Observed {
+                    value: ScreenState::PartyMenu,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            );
+            o.party_menu = Some(PartyMenuObservation {
+                count: 6,
+                selected: Some(selected),
+                actions,
+                options: if actions {
+                    ["SUMMARY", "SWITCH", "ITEM", "CANCEL"]
+                        .map(String::from)
+                        .to_vec()
+                } else {
+                    Vec::new()
+                },
+                option_cursor: actions.then_some(0),
+                ..Default::default()
+            });
+            o
+        };
+        let mut step = LeadWith::new(5, "SPECIES_HYPNO");
+        let mut ctx = |o: &Observation, events: &mut Vec<GameEvent>| -> Option<String> {
+            let mut c = StepContext {
+                observation: o,
+                state: &state,
+                events,
+                quiet_frames: 100,
+                frame: None,
+                learned: &[],
+            };
+            let d = step.next(&mut c);
+            let Decision::Act(a) = d else { return None };
+            step.on_outcome(&a, Outcome::Confirmed, &mut c);
+            Some(a.label)
+        };
+        let list = menu(false, 5);
+        assert_eq!(
+            ctx(&list, &mut events).as_deref(),
+            Some("open the member's actions")
+        );
+        // The window over slot 5: its highlight reads as slot 3.
+        let actions = menu(true, 3);
+        assert_eq!(
+            ctx(&actions, &mut events).as_deref(),
+            Some("actions: Down toward SWITCH")
+        );
     }
 }
