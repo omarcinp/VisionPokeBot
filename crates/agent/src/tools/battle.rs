@@ -1082,16 +1082,26 @@ impl Tool for BattleTool {
                     &step.memory,
                     |name| trainer_named(ctx, name),
                     || {
-                        let map = ctx.pose()?.map;
+                        let map = battle_map(ctx)?;
                         scripted_trainer(ctx.world.events()?, ctx.state(), &map)
                     },
                 );
-                if let Some(trainer) = named.filter(|t| !ctx.fighting().contains(t)) {
-                    ctx.ledger.lost_to(&trainer);
-                    ctx.info(format!("lost to {trainer}: the next plan asks for more"));
-                    if let Err(e) = ctx.ledger.store() {
-                        ctx.info(format!("ledger: {e}"));
+                match named.filter(|t| !ctx.fighting().contains(t)) {
+                    Some(trainer) => {
+                        ctx.ledger.lost_to(&trainer);
+                        ctx.info(format!("lost to {trainer}: the next plan asks for more"));
+                        if let Err(e) = ctx.ledger.store() {
+                            ctx.info(format!("ledger: {e}"));
+                        }
                     }
+                    None if step.memory.trainer || step.memory.trainer_name.is_some() => {
+                        ctx.info(format!(
+                            "lost a trainer battle not booked: named {:?} on {:?}",
+                            step.memory.trainer_name,
+                            battle_map(ctx)
+                        ));
+                    }
+                    None => {}
                 }
             }
         }
@@ -1116,8 +1126,17 @@ fn lost_to(
 
 /// The trainer of the player's map the battle named `shown` ("YOUNGSTER
 /// BEN").
+/// The map the battle is on: where the player is, or, unseen in battle,
+/// where the belief last had them (fleet continue-2 lost to the Champion
+/// and nothing was booked).
+fn battle_map(ctx: &ToolContext<'_>) -> Option<String> {
+    ctx.pose()
+        .or_else(|| ctx.state().player.pose.value.clone())
+        .map(|p| p.map)
+}
+
 fn trainer_named(ctx: &ToolContext<'_>, shown: &str) -> Option<String> {
-    let map = ctx.pose()?.map;
+    let map = battle_map(ctx)?;
     let state = ctx.state();
     let beaten = |t: &str| state.world.flags.get(t).and_then(|k| k.value) == Some(true);
     trainer_on(&ctx.data, &map, shown, beaten)
