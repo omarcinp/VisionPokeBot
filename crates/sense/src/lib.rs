@@ -332,7 +332,7 @@ impl Sensor {
         let marker = Some((paths.len(), paths.last().cloned()));
         if self.paths_run != marker {
             self.paths_run = marker;
-            self.field.forget_absence();
+            self.field.forget_unseen();
         }
         // Text or a menu on screen: a script is running (it adds its
         // objects when it ends) or a window hides sprites, so the evidence

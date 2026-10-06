@@ -88,6 +88,20 @@ impl Track {
     }
 }
 
+/// Time an object's reach was watched empty, over runs of plain field
+/// frames (text or a menu adds none: a script adds its objects as its
+/// text closes).
+#[derive(Debug, Clone, Copy, Default)]
+struct Unseen {
+    frames: u64,
+    /// The last frame of the run going on.
+    last: Option<u64>,
+}
+
+/// Longest gap between two frames of one run of absence (the Switch
+/// processes about one frame in five).
+const RUN_GAP_FRAMES: u64 = 30;
+
 /// An object's reach seen empty since `since`.
 #[derive(Debug, Clone, Copy)]
 struct Empty {
@@ -100,6 +114,10 @@ pub struct Field {
     map: Option<String>,
     tracks: Vec<Track>,
     empty: BTreeMap<u32, Empty>,
+    /// Objects seen absent and not seen since, through frames that showed
+    /// their reach or didn't (walking about, a passer-by mid-step, text):
+    /// only a sighting, a battle, another map or a path recorded clears it.
+    unseen: BTreeMap<u32, Unseen>,
     /// The last located frame.
     last: Option<u64>,
 }
@@ -112,6 +130,7 @@ impl Field {
             // The field is gone; whoever is there is seen again after.
             self.tracks.clear();
             self.empty.clear();
+            self.unseen.clear();
             return events;
         }
         let Some(player) = &o.player else {
@@ -123,6 +142,7 @@ impl Field {
             self.map = Some(map.clone());
             self.tracks.clear();
             self.empty.clear();
+            self.unseen.clear();
         }
         self.last = Some(f);
         let (px, py) = (player.pose.x, player.pose.y);
@@ -203,6 +223,26 @@ impl Field {
                 });
             }
         }
+        for s in &o.sprites {
+            if let Some(id) = s.local_id {
+                self.unseen.remove(&id);
+            }
+        }
+        let plain = o.dialogue.is_none() && o.menu.is_none();
+        for (id, u) in self.unseen.iter_mut() {
+            if !plain || !o.objects_absent.contains(id) {
+                u.last = None;
+            }
+        }
+        if plain {
+            for &id in &o.objects_absent {
+                let u = self.unseen.entry(id).or_default();
+                if let Some(l) = u.last.filter(|&l| f - l <= RUN_GAP_FRAMES) {
+                    u.frames += f - l;
+                }
+                u.last = Some(f);
+            }
+        }
         self.empty.retain(|id, _| o.objects_absent.contains(id));
         for &id in &o.objects_absent {
             let e = self.empty.entry(id).or_insert(Empty {
@@ -222,22 +262,37 @@ impl Field {
         events
     }
 
-    /// Starts the absence evidence over.
+    /// Breaks the run of absence: it must be seen afresh (a script adds
+    /// its objects as its text closes), though what went unseen before
+    /// still counts.
     pub fn forget_absence(&mut self) {
         self.empty.clear();
     }
 
-    /// The map and the objects whose reach has stayed empty for `frames`
-    /// (at least as long as counts as absent), as of the last located
-    /// frame.
+    /// Starts all the absence evidence over (a path just recorded).
+    pub fn forget_unseen(&mut self) {
+        self.empty.clear();
+        self.unseen.clear();
+    }
+
+    /// The map and the objects watched absent for `frames` in all, not
+    /// seen in between, whose reach is (as counts as absent) seen empty
+    /// now, as of the last located frame. Walking about breaks the view of a reach
+    /// often (fleet continue-1 explored the Game Corner for hours, the
+    /// grunt's tile empty whenever in view, never 20 s on end).
     pub fn absent_for(&self, frames: u64) -> Option<(&str, Vec<u32>)> {
         let frames = frames.max(ABSENT_FRAMES);
         let map = self.map.as_deref()?;
+        let last = self.last?;
         let ids = self
-            .empty
+            .unseen
             .iter()
-            .filter(|(_, e)| e.sightings >= ABSENT_SIGHTINGS)
-            .filter(|(_, e)| self.last.is_some_and(|f| f - e.since >= frames))
+            .filter(|(_, u)| u.frames >= frames)
+            .filter(|(id, _)| {
+                self.empty.get(id).is_some_and(|e| {
+                    e.sightings >= ABSENT_SIGHTINGS && last - e.since >= ABSENT_FRAMES
+                })
+            })
             .map(|(&id, _)| id)
             .collect();
         Some((map, ids))

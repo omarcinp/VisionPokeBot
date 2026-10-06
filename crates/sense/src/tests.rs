@@ -1203,6 +1203,62 @@ fn an_absent_object_overrules_a_stale_sighting() {
     assert_eq!(seen(&state), Some(true));
 }
 
+/// Fleet continue-1 explored the Game Corner for hours: the grunt's tile
+/// empty whenever in view, but out of view or behind a passer-by every few
+/// seconds, never 20 s on end, so his stale sighting stood. Absence
+/// watched in runs adds up; a sighting starts it over.
+#[test]
+fn absence_watched_in_runs_adds_up() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    let map = "CeladonCity_GameCorner";
+    let flag = "FLAG_HIDE_GAME_CORNER_ROCKET";
+    let Some(grunt) = w
+        .map(map)
+        .and_then(|m| m.objects.iter().find(|o| o.flag.as_deref() == Some(flag)))
+        .map(|o| o.local_id)
+    else {
+        return;
+    };
+    let stale = || {
+        let mut state = GameState::default();
+        state
+            .world
+            .flags
+            .insert(flag.into(), Knowledge::observed(false, 1));
+        state
+    };
+    let at = |f: u64, absent: &[u32], sprites: &[(i32, i32, Option<u32>)]| {
+        let mut o = field(f, (15, 2), sprites, absent);
+        o.player.as_mut().unwrap().pose.map = map.into();
+        o
+    };
+    // 200 frames in view of 300, for 2400 frames: 1600 watched.
+    let walking = |f: u64| {
+        if f % 300 < 200 {
+            at(f, &[grunt], &[])
+        } else {
+            at(f, &[], &[])
+        }
+    };
+    let gone = |state: &GameState| state.world.flags.get(flag).and_then(|k| k.value);
+    let mut s = Sensor::new(Arc::clone(&d)).with_world(Arc::clone(&w));
+    let (state, _) = run(&mut s, stale(), (0..2400).map(walking));
+    assert_eq!(gone(&state), Some(true));
+    // Seen standing in between: what was watched before doesn't count.
+    let mut s = Sensor::new(d).with_world(w);
+    let frames = (0..2400).map(|f| {
+        if f == 1000 {
+            at(f, &[], &[(11, 2, Some(grunt))])
+        } else {
+            walking(f)
+        }
+    });
+    let (state, _) = run(&mut s, stale(), frames);
+    assert_eq!(gone(&state), Some(false));
+}
+
 /// The battle end as the Switch showed it (switch-goal run, frames
 /// 2611960–2621240): the foe faints, the member gains its experience (and
 /// EVs), grows a level, and the level-up window shows the new stats,
