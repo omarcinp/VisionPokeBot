@@ -977,6 +977,7 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
                 &conversation.recognised,
                 &conversation.answered,
                 &belief,
+                conversation.battled,
             )
         };
         if let Some(twin) = twin {
@@ -1211,8 +1212,16 @@ pub fn twin_path(
     recognised: &[String],
     answered: &[bool],
     belief: &dyn BeliefView,
+    battled: bool,
 ) -> Option<usize> {
     let s = events.script(script)?;
+    let fights = |i: usize| {
+        s.paths.get(i).is_some_and(|p| {
+            p.does
+                .iter()
+                .any(|e| matches!(e, pokebot_world::events::Effect::Battle { .. }))
+        })
+    };
     // Only flags (a trainer's defeat among them) count: a var the belief
     // can't track tells nothing about the path (fleet continue-1, the
     // Rocket Hideout's lift: its floor panel's paths differ by
@@ -1231,7 +1240,12 @@ pub fn twin_path(
         let prints = path_labels(&p.does);
         let possible = requirement_of(&p.when)
             .is_none_or(|req| !req.iter().any(|q| belief.eval(q) == Truth::False));
+        // A trainer battle won while it ran is no twin of a path without
+        // one (fleet continue-6, S.S. Anne's rival: path 2 fights him,
+        // path 3 is the same scene with him beaten; the battle won, "can't
+        // tell path 2 from 3", and the plan went back to fight him again).
         (i != planned
+            && !(battled && fights(planned) && !fights(i))
             && branches.len() >= answered.len()
             && branches[..answered.len()] == *answered
             && possible
@@ -2353,7 +2367,15 @@ mod tests {
         for planned in 1..s.paths.len() {
             let read: Vec<String> = Vec::new();
             assert_eq!(
-                twin_path(events, script, planned, &read, &[], &StateBelief(&state)),
+                twin_path(
+                    events,
+                    script,
+                    planned,
+                    &read,
+                    &[],
+                    &StateBelief(&state),
+                    false
+                ),
                 None,
                 "path {planned}"
             );
@@ -2382,7 +2404,49 @@ mod tests {
             .collect();
         assert!(toggle_pair(events, script, 1, 2));
         assert_eq!(
-            twin_path(events, script, 2, &read, &[true], &StateBelief(&state)),
+            twin_path(
+                events,
+                script,
+                2,
+                &read,
+                &[true],
+                &StateBelief(&state),
+                false
+            ),
+            None
+        );
+    }
+
+    /// Fleet continue-6, S.S. Anne's rival: path 2 fights him, path 3 is
+    /// the same scene with him beaten, and they print the same words. A
+    /// trainer battle won while it ran tells them apart; without one they
+    /// stay twins.
+    #[test]
+    fn a_battle_won_tells_a_fight_from_its_twin_without_one() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let script = "SSAnne_2F_Corridor_EventScript_RivalTriggerLeft";
+        let s = events.script(script).unwrap();
+        let read: Vec<String> = path_labels(&s.paths[2].does)
+            .into_iter()
+            .filter(|l| path_labels(&s.paths[3].does).contains(l))
+            .map(str::to_owned)
+            .collect();
+        assert!(!read.is_empty());
+        // The starter the run chose (BULBASAUR's rival battle).
+        let mut state = GameState::default();
+        state.world.vars.insert(
+            "VAR_STARTER_MON".into(),
+            pokebot_state::Knowledge::observed(1, 1),
+        );
+        assert_eq!(
+            twin_path(events, script, 2, &read, &[], &StateBelief(&state), false),
+            Some(3)
+        );
+        assert_eq!(
+            twin_path(events, script, 2, &read, &[], &StateBelief(&state), true),
             None
         );
     }
@@ -2425,7 +2489,15 @@ mod tests {
         ];
         let mut state = GameState::default();
         let twin = |state: &GameState, planned| {
-            twin_path(events, script, planned, &read, &[], &StateBelief(state))
+            twin_path(
+                events,
+                script,
+                planned,
+                &read,
+                &[],
+                &StateBelief(state),
+                false,
+            )
         };
         assert_eq!(twin(&state, 0), Some(1));
         state.world.flags.insert(
