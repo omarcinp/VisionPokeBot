@@ -237,12 +237,9 @@ impl ToolStep for LeadWith {
     }
 }
 
-/// The party slot that should lead against `trainer`: the member the team
-/// sends against its first Pokémon, when it isn't the lead and its chance
-/// against that one beats the lead's by [`LEAD_MARGIN`]; with that chance
-/// and the lead's.
-pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8, f64, f64)> {
-    let fighters: Vec<(u8, pokebot_planner::Combatant)> = party
+/// The party's fighters (not fainted) as combatants, by slot.
+fn fighters(data: &GameData, party: &Party) -> Vec<(u8, pokebot_planner::Combatant)> {
+    party
         .members
         .iter()
         .filter(|m| m.hp.is_none_or(|(hp, _)| hp > 0))
@@ -262,7 +259,82 @@ pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8,
             )?;
             Some((m.slot, c))
         })
+        .collect()
+}
+
+/// IVs a wild Pokémon is taken to have (the middle of the range).
+const WILD_IV: u32 = 15;
+
+/// The party slot that should lead on `map`'s land, where wild Pokémon
+/// meet whoever leads: the member with the best chance over its encounters
+/// (each slot at its highest level, weighed by its chance), when it isn't
+/// the lead and beats the lead's by [`LEAD_MARGIN`]; with both chances.
+pub fn fighter_for_wilds(data: &GameData, party: &Party, map: &str) -> Option<(u8, f64, f64)> {
+    let table = data.wild.get(map)?.get("land")?;
+    let foes: Vec<(f64, pokebot_planner::Combatant)> = table
+        .slots
+        .iter()
+        .filter_map(|e| {
+            let moves = data.default_moves(&e.species, e.max_level);
+            let c = pokebot_planner::Combatant::new(data, &e.species, e.max_level, moves, WILD_IV)?;
+            Some((f64::from(e.chance), c))
+        })
         .collect();
+    let weight: f64 = foes.iter().map(|(w, _)| w).sum();
+    if weight <= 0.0 {
+        return None;
+    }
+    let chance = |us: &pokebot_planner::Combatant| {
+        foes.iter()
+            .map(|(w, them)| w * pokebot_planner::matchup(data, us, them).p_win)
+            .sum::<f64>()
+            / weight
+    };
+    let odds: Vec<(u8, f64)> = fighters(data, party)
+        .iter()
+        .map(|(slot, c)| (*slot, chance(c)))
+        .collect();
+    let p_lead = odds.iter().find(|(slot, _)| *slot == 0)?.1;
+    let &(slot, p_best) = odds
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))?;
+    (slot != 0 && p_best > p_lead + LEAD_MARGIN).then_some((slot, p_best, p_lead))
+}
+
+/// Before a long stay on `map` (a boulder puzzle), the member fittest
+/// against its wild Pokémon leads (fleet continue-5, Victory Road 1F: a
+/// GRIMER Lv30 led, CHARIZARD Lv68 last; every wild ONIX fainted it, the
+/// party was flown to Viridian to heal, and the boulders reset each time).
+pub fn lead_for_wilds(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
+    let party = Party::from_state(ctx.state());
+    let Some((slot, p_best, p_lead)) = fighter_for_wilds(&ctx.data, &party, map) else {
+        return Ok(());
+    };
+    let species = party
+        .members
+        .iter()
+        .find(|m| m.slot == slot)
+        .map(|m| m.species.clone())
+        .unwrap_or_default();
+    ctx.emit(progress(
+        "Party",
+        format!(
+            "{} leads on {map} ({:.0} % against its wild Pokémon, the lead {:.0} %)",
+            crate::party::display_name(&species),
+            p_best * 100.0,
+            p_lead * 100.0
+        ),
+    ))?;
+    ctx.drive(&mut LeadWith::new(slot, &species))?;
+    Ok(())
+}
+
+/// The party slot that should lead against `trainer`: the member the team
+/// sends against its first Pokémon, when it isn't the lead and its chance
+/// against that one beats the lead's by [`LEAD_MARGIN`]; with that chance
+/// and the lead's.
+pub fn fighter_for(data: &GameData, party: &Party, trainer: &str) -> Option<(u8, f64, f64)> {
+    let fighters = fighters(data, party);
     let lead = fighters.iter().find(|(slot, _)| *slot == 0)?;
     let first = data.trainers.get(trainer)?.party.first()?;
     let moves = first
@@ -362,6 +434,40 @@ mod tests {
             members: vec![pidgey],
         };
         assert_eq!(fighter_for(&d, &alone, "TRAINER_LEADER_BROCK"), None);
+    }
+
+    /// Fleet continue-5, Victory Road 1F: GRIMER Lv30 led, CHARIZARD Lv68
+    /// last; wild ONIX fainted the lead again and again mid-puzzle. The
+    /// member fittest against the floor's wild Pokémon leads; a lead fit
+    /// already stays, and a map without wild Pokémon changes nothing.
+    #[test]
+    fn the_member_fittest_against_the_wilds_leads() {
+        let Some(d) = data() else { return };
+        let member = |slot: u8, species: &str, level: u8| Member {
+            slot,
+            ..Member::new(&d, species, level)
+        };
+        let party = Party {
+            members: vec![
+                member(0, "SPECIES_GRIMER", 30),
+                member(1, "SPECIES_PIDGEY", 14),
+                member(5, "SPECIES_CHARIZARD", 68),
+            ],
+        };
+        let (slot, p_best, p_lead) = fighter_for_wilds(&d, &party, "VictoryRoad_1F").unwrap();
+        assert_eq!(slot, 5);
+        assert!(p_best > p_lead + LEAD_MARGIN, "{p_best} {p_lead}");
+        let led = Party {
+            members: vec![
+                member(0, "SPECIES_CHARIZARD", 68),
+                member(1, "SPECIES_GRIMER", 30),
+            ],
+        };
+        assert_eq!(fighter_for_wilds(&d, &led, "VictoryRoad_1F"), None);
+        assert_eq!(
+            fighter_for_wilds(&d, &party, "PalletTown_PlayersHouse_1F"),
+            None
+        );
     }
 
     /// Fleet continue-4: HYPNO in slot 5, its actions opened; the window

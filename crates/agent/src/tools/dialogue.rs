@@ -816,6 +816,13 @@ fn push_boulder(
     targets: &[(i32, i32)],
     local_id: Option<u32>,
 ) -> Result<(), ToolError> {
+    // The puzzle takes a while among the floor's wild Pokémon: a lead fit
+    // for them keeps the party on the floor (a faint flies it off to heal,
+    // and the boulders reset).
+    match super::party_order::lead_for_wilds(ctx, map) {
+        Err(ToolError::Failed(why)) => ctx.info(format!("{map}: no lead change ({why})")),
+        r => r?,
+    }
     match push_boulder_once(ctx, script, path, map, targets, local_id) {
         // Left and back part way (a heal): the boulders stand on their own
         // tiles again, the pushes start over from there, once.
