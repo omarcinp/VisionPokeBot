@@ -1054,12 +1054,25 @@ fn contradicted_paths(
         else {
             continue;
         };
-        let shown = state
+        // Shown on the word of a path, or of a sighting: one seen leaving
+        // as its script hid it was taken for staying, saved so, and the
+        // way it blocked was never tried again (fleet continue-1, the Game
+        // Corner: the grunt beaten, seen walking off, and the poster
+        // behind him "no path next to (11, 1)" ever after).
+        let Some(source) = state
             .world
             .flags
             .get(&flag)
-            .is_some_and(|k| k.source == KnowledgeSource::Tracked && k.value == Some(false));
-        if !shown {
+            .filter(|k| k.value == Some(false))
+            .map(|k| k.source)
+        else {
+            continue;
+        };
+        if source == KnowledgeSource::Observed {
+            out.push(GameEvent::FlagObserved { flag, value: true });
+            continue;
+        }
+        if source != KnowledgeSource::Tracked {
             continue;
         }
         // The flag an object effect of `script` touches.

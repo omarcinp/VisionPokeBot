@@ -1167,6 +1167,42 @@ fn an_absent_object_retracts_the_path_that_showed_it() {
     assert!(state.world.paths_run.is_empty());
 }
 
+/// Fleet continue-1, the Game Corner: the grunt was beaten and seen a few
+/// frames later walking off, so his hide flag was observed clear and
+/// saved. The poster behind his tile was "no path next to (11, 1)" ever
+/// after. Staying away from every tile he can stand on puts him gone.
+#[test]
+fn an_absent_object_overrules_a_stale_sighting() {
+    let (Some(d), Some(w)) = (data(), world()) else {
+        return;
+    };
+    let map = "CeladonCity_GameCorner";
+    let flag = "FLAG_HIDE_GAME_CORNER_ROCKET";
+    let Some(grunt) = w
+        .map(map)
+        .and_then(|m| m.objects.iter().find(|o| o.flag.as_deref() == Some(flag)))
+        .map(|o| o.local_id)
+    else {
+        return;
+    };
+    let mut s = Sensor::new(d).with_world(w);
+    let frame = |f: u64| {
+        let mut o = field(f, (15, 2), &[], &[grunt]);
+        o.player.as_mut().unwrap().pose.map = map.into();
+        o
+    };
+    let mut state = GameState::default();
+    state
+        .world
+        .flags
+        .insert(flag.into(), Knowledge::observed(false, 1));
+    let (state, _) = run(&mut s, state, (100..1000).map(frame));
+    let seen = |state: &GameState| state.world.flags.get(flag).and_then(|k| k.value);
+    assert_eq!(seen(&state), Some(false), "not for a scene's time");
+    let (state, _) = run(&mut s, state, (1000..1400).map(frame));
+    assert_eq!(seen(&state), Some(true));
+}
+
 /// The battle end as the Switch showed it (switch-goal run, frames
 /// 2611960–2621240): the foe faints, the member gains its experience (and
 /// EVs), grows a level, and the level-up window shows the new stats,
