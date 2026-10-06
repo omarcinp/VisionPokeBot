@@ -375,8 +375,13 @@ pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: 
     // A GHOST unseen without the SILPH SCOPE: our side is too scared to
     // move every turn (Switch, Pokémon Tower 4F: VENUSAUR chose RAZOR
     // LEAF and was too scared to move, turn after turn for over an hour).
+    // It is no trainer's battle, even when it began right after text (an
+    // item picked up on the way): a GHOST's opens with no "Wild …
+    // appeared!" to say so (Switch, Pokémon Tower 4F: taken for a
+    // trainer's, never run from).
     if page.contains("is too scared to move") || page.starts_with("GHOST: Get out") {
         memory.scared = true;
+        memory.trainer = false;
     }
     if page.starts_with("Wild ") && page.contains("appeared") {
         memory.trainer = false;
@@ -1379,9 +1384,13 @@ mod tests {
         let Some(data) = data() else { return };
         let policy = BattlePolicy::default();
         let party = ivysaur(&data, &[]);
-        let mut memory = BattleMemory::default();
+        // Begun right after an item's text: taken for a trainer's.
+        let mut memory = BattleMemory {
+            trainer: true,
+            ..BattleMemory::default()
+        };
         observe_page(&mut memory, "IVYSAUR is too scared to move!", &party, &data);
-        assert!(memory.scared);
+        assert!(memory.scared && !memory.trainer);
         memory.catch.decided = true;
         let mut o = pokebot_state::Observation::bare(
             1,
