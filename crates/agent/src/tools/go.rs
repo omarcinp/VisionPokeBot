@@ -279,6 +279,34 @@ impl GoStep {
     }
 }
 
+/// A warp a script covers up, gone round and round on: it is shut, so
+/// the one flag that opens it doesn't hold (fleet continue-1, the
+/// Celadon Game Corner: the Rocket Hideout's stairs at (15, 2), shown only
+/// with FLAG_OPENED_ROCKET_HIDEOUT, unknown and taken for open; the
+/// player stood on the floor there, "looping", plan after plan).
+fn shut_warp_facts(
+    story: &pokebot_world::gates::Gates,
+    pose: &PlayerPose,
+) -> Vec<pokebot_state::GameEvent> {
+    use pokebot_world::predicate::Predicate;
+    let Some(gate) = story.get(&pose.map).and_then(|g| g.get(&(pose.x, pose.y))) else {
+        return Vec::new();
+    };
+    let Some(ways) = &gate.warp_ways else {
+        return Vec::new();
+    };
+    match ways.as_slice() {
+        [way] => match way.as_slice() {
+            [Predicate::Flag { name, is }] => vec![pokebot_state::GameEvent::FlagObserved {
+                flag: name.clone(),
+                value: !is,
+            }],
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 /// A walkable tile of `map` near its middle.
 fn map_tile(world: &World, map: &str) -> Option<(i32, i32)> {
     let m = world.map(map)?;
@@ -391,6 +419,9 @@ impl ToolStep for GoStep {
                     .is_some_and(|(kind, _)| kind == InputKind::Turn);
                 if let Some(pose) = pose.filter(|_| !turn) {
                     if self.note_visit(&pose) {
+                        if let Some(story) = self.refresh.as_ref().map(|r| Arc::clone(&r.story)) {
+                            ctx.events.extend(shut_warp_facts(&story, &pose));
+                        }
                         return Decision::Fail(format!(
                             "looping at {pose}: {MAX_TILE_VISITS} acts from the same tile without progress toward {:?}",
                             self.dest
@@ -2394,6 +2425,29 @@ mod tests {
         ));
         assert!(!wants_flash(&world, "RockTunnel_1F", false, None));
         assert!(!wants_flash(&world, "Route10", true, None));
+    }
+
+    /// Fleet continue-1, the Celadon Game Corner: the Rocket Hideout's
+    /// stairs at (15, 2) shown only with FLAG_OPENED_ROCKET_HIDEOUT; the
+    /// flag unknown, taken for open, the walk looped on the floor there.
+    /// Looping on that warp says the flag is clear; elsewhere, nothing.
+    #[test]
+    fn looping_on_a_shut_warp_learns_its_flag() {
+        let Some(world) = world() else { return };
+        let story = pokebot_world::gates::derive(&world);
+        let at = |x, y| PlayerPose {
+            map: "CeladonCity_GameCorner".into(),
+            x,
+            y,
+        };
+        assert_eq!(
+            shut_warp_facts(&story, &at(15, 2)),
+            vec![pokebot_state::GameEvent::FlagObserved {
+                flag: "FLAG_OPENED_ROCKET_HIDEOUT".into(),
+                value: false,
+            }]
+        );
+        assert!(shut_warp_facts(&story, &at(10, 10)).is_empty());
     }
 
     /// Fleet continue-1: a leg for Victory Road 2F's warp to Route 23,
