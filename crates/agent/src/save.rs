@@ -36,7 +36,14 @@ pub struct SaveGameTask {
     attempts: u32,
     /// The menu, read whole, has no SAVE: closed, then the task fails.
     no_save: bool,
+    /// Where the player stood last, and the frame since which they have
+    /// stood there.
+    stood: Option<(pokebot_state::PlayerPose, u64)>,
 }
+
+/// Frames the player stands still before the Start menu is opened: a
+/// scene walking them (Bill out of his TELEPORTER) ignores Start.
+const STILL_FRAMES: u64 = 30;
 
 impl Default for SaveGameTask {
     fn default() -> Self {
@@ -47,6 +54,24 @@ impl Default for SaveGameTask {
             quiet: 0,
             attempts: 0,
             no_save: false,
+            stood: None,
+        }
+    }
+}
+
+impl SaveGameTask {
+    /// Whether the player moved within [`STILL_FRAMES`] (no input of ours
+    /// moves them while saving).
+    fn moved_lately(&mut self, o: &pokebot_state::Observation) -> bool {
+        let Some(pose) = o.player.as_ref().map(|p| p.pose.clone()) else {
+            return false;
+        };
+        match &self.stood {
+            Some((at, since)) if *at == pose => o.frame_id.saturating_sub(*since) < STILL_FRAMES,
+            _ => {
+                self.stood = Some((pose, o.frame_id));
+                true
+            }
         }
     }
 }
@@ -126,6 +151,12 @@ impl Task for SaveGameTask {
                             60,
                         )),
                     }
+                }
+                (None, None) if self.moved_lately(o) => {
+                    // A scene walks the player (fleet continue-6, the Sea
+                    // Cottage: Bill out of his TELEPORTER after the PC,
+                    // eight Starts ignored and "could not save").
+                    Decision::Wait("a scene moves the player".into())
                 }
                 (None, None) if o.player.is_some() => Decision::Act(Action::new(
                     "open the Start menu",
@@ -396,6 +427,44 @@ mod tests {
         };
         assert_eq!(action.label, "choose CONTINUE");
         assert_eq!(task.phase, ContinuePhase::MainMenu);
+    }
+
+    /// Fleet continue-6 at the Sea Cottage: Bill's scene walked the player
+    /// after the PC, and every Start was ignored ("could not save"). While
+    /// the player moves the save waits; standing still, it opens the menu.
+    #[test]
+    fn a_save_waits_for_a_scene_moving_the_player() {
+        let at = |frame: u64, x: i32| {
+            let mut o = observe(ScreenState::Unknown);
+            o.frame_id = frame;
+            o.player = Some(pokebot_state::PoseObservation {
+                pose: pokebot_state::PlayerPose {
+                    map: "Route25_SeaCottage".into(),
+                    x,
+                    y: 6,
+                },
+                score: 1000,
+            });
+            o
+        };
+        let mut task = SaveGameTask::default();
+        let mut next = |o: &Observation| {
+            task.next(&mut TaskContext {
+                observation: o,
+                state: &GameState::default(),
+                events: &mut Vec::new(),
+            })
+        };
+        assert!(matches!(next(&at(100, 6)), Decision::Wait(_)));
+        assert!(
+            matches!(next(&at(116, 5)), Decision::Wait(_)),
+            "walked a tile"
+        );
+        assert!(matches!(next(&at(132, 4)), Decision::Wait(_)));
+        let Decision::Act(a) = next(&at(132 + STILL_FRAMES, 4)) else {
+            panic!("expected the Start menu opened");
+        };
+        assert_eq!(a.label, "open the Start menu");
     }
 
     /// Fleet continue-5, the Safari Zone: its Start menu has RETIRE first
