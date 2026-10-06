@@ -187,6 +187,8 @@ pub struct ToolContext<'a> {
     /// Trainers the running intents fight (a Beat's, a script's battle):
     /// a loss to one of them is booked by the intent.
     fighting: Vec<String>,
+    /// The dark map FLASH was used on (or found already lit) this visit.
+    pub lit_map: Option<String>,
     toolbox: Toolbox,
     expects: Expects,
     depth: usize,
@@ -271,6 +273,7 @@ impl<'a> ToolContext<'a> {
             next_pickup_check: 0,
             running: Vec::new(),
             fighting: Vec::new(),
+            lit_map: None,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,
@@ -575,6 +578,8 @@ impl<'a> ToolContext<'a> {
             self.ledger.walked(&p.pose);
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
+                // A FLASH lights the map it was used on, for this visit.
+                self.lit_map = None;
                 // What the last map showed is kept (a crash loses at most
                 // one map's worth).
                 if let Err(e) = self.ledger.store() {

@@ -449,6 +449,9 @@ impl Tool for GoTool {
         let Intent::Go { dest } = intent else {
             return ToolOutcome::failed("not a Go");
         };
+        if let Err(e) = light_up_here(ctx) {
+            return Err::<(), _>(e).into();
+        }
         let first = match field_route(ctx, dest) {
             Some(legs) => {
                 ctx.info(format!(
@@ -1271,6 +1274,41 @@ fn walk_leg(
         }
     }
     Ok(())
+}
+
+/// A walk that starts in a dark map lights it first when someone knows
+/// FLASH: only the leg into a dark map used it (Switch, Rock Tunnel: a
+/// heal's walk from inside it, the reload before it having put out the
+/// light; in the dark the pose was read on the south exit while the
+/// player stood elsewhere, and Down was pressed forty times). Once per
+/// visit: lit already, the party menu offers no FLASH, and that is taken
+/// for lit.
+fn light_up_here(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    let Some(map) = ctx.pose().map(|p| p.map) else {
+        return Ok(());
+    };
+    let carrier = field::carrier(ctx.state(), FieldMove::Flash.move_id()).is_some();
+    if !wants_flash(&ctx.world, &map, carrier, ctx.lit_map.as_deref()) {
+        return Ok(());
+    }
+    match use_move(ctx, FieldMove::Flash, None) {
+        Ok(()) => {}
+        Err(ToolError::Failed(why)) if why.contains("has no FLASH") => {}
+        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+        Err(e) => {
+            ctx.info(format!(
+                "{map}: FLASH not used ({e}); walking on in the dark"
+            ));
+        }
+    }
+    ctx.lit_map = Some(map);
+    Ok(())
+}
+
+/// Whether a walk starting on `map` lights it first: dark, someone knows
+/// FLASH, and not lit already this visit.
+fn wants_flash(world: &World, map: &str, carrier: bool, lit: Option<&str>) -> bool {
+    carrier && lit != Some(map) && field::is_dark(world, map)
 }
 
 /// Sandbars a surf leg lands on before it gives up.
@@ -2333,6 +2371,29 @@ mod tests {
             learned: &[],
         };
         assert!(matches!(step.next(&mut ctx), Decision::Done(_)));
+    }
+
+    /// Switch, Rock Tunnel: a heal's walk began inside the dark cave, the
+    /// light out since a reload, and the exit was looked for in the dark.
+    /// A walk starting there lights it, once a visit, when someone can.
+    #[test]
+    fn a_walk_starting_in_the_dark_lights_it_first() {
+        let Some(world) = world() else { return };
+        assert!(wants_flash(&world, "RockTunnel_1F", true, None));
+        assert!(!wants_flash(
+            &world,
+            "RockTunnel_1F",
+            true,
+            Some("RockTunnel_1F")
+        ));
+        assert!(wants_flash(
+            &world,
+            "RockTunnel_1F",
+            true,
+            Some("RockTunnel_B1F")
+        ));
+        assert!(!wants_flash(&world, "RockTunnel_1F", false, None));
+        assert!(!wants_flash(&world, "Route10", true, None));
     }
 
     /// Fleet continue-1: a leg for Victory Road 2F's warp to Route 23,

@@ -1256,6 +1256,18 @@ mod tests {
         assert_ne!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
     }
 
+    /// Switch, Rock Tunnel 1F with the light out (a reload since FLASH was
+    /// used): only a circle round the player shows, the rest black. It is
+    /// the field, not a fade; the walk went on in it (and now lights it).
+    #[test]
+    fn a_dark_cave_without_flash_is_the_field() {
+        let Some(image) = fixture("switch-rocktunnel-dark-no-flash.png") else {
+            return;
+        };
+        let o = FireRedPerception::default().observe(&frame(1, image));
+        assert_ne!(o.screen.value, ScreenState::Transition, "{:?}", o.screen);
+    }
+
     /// Emulator, Route 8's west gate: the void right of the narrow room,
     /// the exit mat's red and its arrow's point were read as the Poké Ball
     /// trail into a battle, every frame, and the walk stuck "letting the
