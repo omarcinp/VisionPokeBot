@@ -607,6 +607,13 @@ pub fn decide(
     if matches!(menu, BattleMenu::Command { .. }) {
         memory.limits.at_command_menu();
     }
+    // The HUD names the foe GHOST only while no SILPH SCOPE shows it (with
+    // the SCOPE it is named): scared from the first turn, not after a turn
+    // lost to "… is too scared to move!" (Switch, Pokémon Tower 4F).
+    if battle.opponent_name.as_deref() == Some("GHOST") {
+        memory.scared = true;
+        memory.trainer = false;
+    }
     // A catch attempt drives the menus (its risk check replaces fleeing);
     // `None` means it was abandoned and the battle goes on as usual.
     if memory.catch.attempt.is_some() {
@@ -1391,6 +1398,11 @@ mod tests {
         };
         observe_page(&mut memory, "IVYSAUR is too scared to move!", &party, &data);
         assert!(memory.scared && !memory.trainer);
+        // Before any turn: the HUD's GHOST alone says so.
+        let mut memory = BattleMemory {
+            trainer: true,
+            ..BattleMemory::default()
+        };
         memory.catch.decided = true;
         let mut o = pokebot_state::Observation::bare(
             1,
