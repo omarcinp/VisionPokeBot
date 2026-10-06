@@ -70,7 +70,8 @@ while True:
             pos[p] = size; grew[p] = now
             for line in chunk.splitlines():
                 key = re.sub(r'\d+', '#', line)[:160]
-                if 'Goal: ' in line:
+                # A battle's own lines repeat while training: no loop.
+                if 'Goal: ' in line and 'Goal: Battle' not in line:
                     # Only the frame number differs: counters in the text
                     # ("battle over (20/150)") are progress.
                     same = re.sub(r'^\[\d+\] ', '', line)[:160]
