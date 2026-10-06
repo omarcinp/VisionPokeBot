@@ -126,6 +126,10 @@ pub struct SpriteDetector {
     /// render, and since when it has matched it.
     history: Vec<(Option<u64>, Option<u64>)>,
     animated: Vec<bool>,
+    /// Per map tile: a script of the map rewrites it, so the render can
+    /// show what the screen doesn't (the Game Corner's stairs, drawn as
+    /// floor while the hideout is shut).
+    rewritten: Vec<bool>,
 }
 
 impl SpriteDetector {
@@ -196,6 +200,16 @@ impl SpriteDetector {
         let tiles = (map.width * map.height).max(0) as usize;
         self.history = vec![(None, None); tiles];
         self.animated = vec![false; tiles];
+        self.rewritten = (0..tiles as i32)
+            .map(|i| world.script_rewrites(&map.name, (i % map.width, i / map.width)))
+            .collect();
+    }
+
+    fn rewritten(&self, map: &MapData, tile: (i32, i32)) -> bool {
+        self.rewritten
+            .get((tile.1 * map.width + tile.0) as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn animates(&self, map: &MapData, tile: (i32, i32)) -> bool {
@@ -269,7 +283,11 @@ impl SpriteDetector {
             let animated = (like || busy)
                 && (self.animates(map, c.tile) || animated_copy(frame, render, cells, i));
             sprite[i] = like && !animated;
-            stray |= busy && !sprite[i] && !animated;
+            // A tile a script redrew isn't someone between tiles (fleet
+            // continue-1, the Game Corner: the shut hideout's floor over
+            // the rendered stairs voided every absence there, and the
+            // grunt long beaten stayed in the way of the poster).
+            stray |= busy && !sprite[i] && !animated && !self.rewritten(map, c.tile);
             let below = at
                 .get(&(c.tile.0, c.tile.1 + 1))
                 .is_some_and(|&j| sprite[j]);

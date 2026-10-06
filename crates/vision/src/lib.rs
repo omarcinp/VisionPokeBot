@@ -1319,6 +1319,41 @@ mod tests {
         assert_eq!(observation.screen.value, ScreenState::Transition);
     }
 
+    /// Fleet continue-1, the Game Corner with the hideout shut: its entry
+    /// script draws floor over the rendered stairs. Those tiles were taken
+    /// for someone between tiles, so no object was ever seen absent, and
+    /// the grunt long beaten stayed in the way of the poster. His tile
+    /// empty, he is absent.
+    #[test]
+    fn a_tile_a_script_redrew_does_not_void_absence() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(world) = World::load(root.join("data/world")) else {
+            return;
+        };
+        let Ok(image) = pokebot_video::png::load(
+            root.join("captures/fixtures/emu-gamecorner-shut-hideout-grunt-gone.png"),
+        ) else {
+            return;
+        };
+        let map = "CeladonCity_GameCorner";
+        let Some(grunt) = world.map(map).and_then(|m| {
+            m.objects
+                .iter()
+                .find(|o| o.flag.as_deref() == Some("FLAG_HIDE_GAME_CORNER_ROCKET"))
+                .map(|o| o.local_id)
+        }) else {
+            return;
+        };
+        let mut p = FireRedPerception::with_world(Arc::new(world));
+        p.set_pose_hint(PlayerPose {
+            map: map.into(),
+            x: 15,
+            y: 2,
+        });
+        let o = p.observe(&frame(0, image));
+        assert!(o.objects_absent.contains(&grunt), "{:?}", o.objects_absent);
+    }
+
     /// Emulator, Oak's lab: located frames carry the sprites around the
     /// player, named.
     #[test]
