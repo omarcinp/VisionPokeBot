@@ -248,7 +248,23 @@ impl Runtime {
             l.mark(0);
         }
         let frame = self.devices.normalizer.normalize(&captured)?;
-        self.outside_game = self.devices.normalizer.outside_viewport_lit(&captured);
+        let outside = self.devices.normalizer.outside_viewport_lit(&captured);
+        // Tools hold still while the console's own screens show (HOME, a
+        // dialog): each change is told, so a wait for it can be traced
+        // (Switch, Pokémon Tower 6F: the party audit pressed nothing for
+        // four minutes, three cycles running, with the game on screen).
+        if outside != self.outside_game {
+            self.info(format!(
+                "capture: the console's screen {} (frame {})",
+                if outside {
+                    "shows outside the game's viewport"
+                } else {
+                    "is the game again"
+                },
+                captured.frame_id
+            ));
+        }
+        self.outside_game = outside;
         self.dark = Normalizer::dark(&captured);
         if let Some(l) = lap.as_mut() {
             l.mark(1);
