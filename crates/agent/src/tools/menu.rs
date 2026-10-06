@@ -312,6 +312,26 @@ pub struct Closer {
     last_press: Option<u64>,
     /// The first frame of the Start menu now up.
     menu_since: Option<u64>,
+    /// What was open at the last press: the presses count per screen,
+    /// each one closed being progress.
+    last_open: Option<[bool; 11]>,
+}
+
+/// Which screens are open (see [`screen_open`]).
+fn open_screens(o: &Observation) -> [bool; 11] {
+    [
+        o.menu.is_some(),
+        o.dialogue.is_some(),
+        o.bag.is_some(),
+        o.shop.is_some(),
+        o.trainer_card.is_some(),
+        o.fly_map.is_some(),
+        o.pokedex_list.is_some(),
+        o.pokedex_page,
+        o.party_menu.is_some(),
+        o.summary.is_some(),
+        o.pc_storage.is_some(),
+    ]
 }
 
 impl Closer {
@@ -341,6 +361,15 @@ impl Closer {
         if arrived {
             return Decision::Done(done.to_owned());
         }
+        // A screen closed (or another come up) since the last press: the
+        // presses before it worked. Fleet emu9 and emu3 in Mt. Moon: a
+        // POTION's message, the party menu, the bag and the Start menu
+        // spent the twelve presses between them, and the field's fade-in
+        // that followed failed "still not in the overworld" within frames.
+        let screens = open_screens(o);
+        if self.last_open.is_some_and(|last| last != screens) {
+            self.presses = 0;
+        }
         if self.presses >= MAX_CLOSE_PRESSES {
             return Decision::Fail(format!(
                 "still not in the overworld after {MAX_CLOSE_PRESSES} B presses"
@@ -357,6 +386,7 @@ impl Closer {
         }
         self.presses += 1;
         self.last_press = Some(o.frame_id);
+        self.last_open = Some(screens);
         let (label, expect) = if o.menu.is_some() {
             ("close the Start menu", Expectation::MenuClosed)
         } else {
@@ -377,6 +407,42 @@ mod tests {
 
     fn lines(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Fleet emu3 in Mt. Moon: presses spent on the screens a POTION goes
+    /// through left none for the field's fade-in, which failed "still not
+    /// in the overworld" within frames. Presses count per screen.
+    #[test]
+    fn presses_on_one_screen_do_not_count_against_the_next() {
+        let bare = |frame: u64| {
+            Observation::bare(
+                frame,
+                pokebot_state::Observed {
+                    value: pokebot_state::ScreenState::Transition,
+                    detector: "test".into(),
+                },
+                Default::default(),
+            )
+        };
+        let mut closer = Closer::default();
+        let mut frame = 0;
+        for _ in 0..MAX_CLOSE_PRESSES {
+            frame += CLOSE_GAP_FRAMES;
+            let mut o = bare(frame);
+            o.bag = Some(pokebot_state::BagObservation {
+                pocket: "ITEMS".into(),
+                rows: Vec::new(),
+                cursor: None,
+                prompt: None,
+            });
+            assert!(matches!(closer.next(&o, "closed"), Decision::Act(_)));
+        }
+        // The bag closed; the field fades in, black.
+        frame += CLOSE_GAP_FRAMES;
+        assert!(!matches!(
+            closer.next(&bare(frame), "closed"),
+            Decision::Fail(_)
+        ));
     }
 
     /// Fleet continue-6: on the way to the bag the TRAINER CARD opened;
