@@ -731,7 +731,15 @@ impl Navigator {
             if self.forget_learned(&map.name) {
                 return NavStatus::Wait(format!("no path {what}; forgetting learned obstacles"));
             }
-            return NavStatus::Fail(format!("no path {what} on {}", map.name));
+            // What the walk held shut, for the reason (fleet continue-6,
+            // Victory Road 2F: "no path to (34, 14)" from (34, 17) every
+            // cycle, the map's own model walking there in 27 steps).
+            let learnt = self.learned().on_map(&map.name).len();
+            let shut = self.gates.closed_on(&map.name).count();
+            return NavStatus::Fail(format!(
+                "no path {what} on {} from ({}, {}): {learnt} tile(s) learnt blocked, {shut} shut",
+                map.name, pose.x, pose.y
+            ));
         };
         self.step_along(observation, &path, what)
     }
