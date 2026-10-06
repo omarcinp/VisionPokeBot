@@ -2248,8 +2248,25 @@ fn run_script(
                     .pose()
                     .is_some_and(|p| p.map == map && (p.x, p.y) == (x, y));
                 if on && matches!(&e, ToolError::Failed(m) if m.starts_with("no scene started")) {
-                    for (var, value) in disarmed(&ctx.world, script, &map, (x, y)) {
-                        ctx.emit(GameEvent::VarObserved { var, value })?;
+                    let learnt = disarmed(&ctx.world, script, &map, (x, y));
+                    for (var, value) in &learnt {
+                        ctx.emit(GameEvent::VarObserved {
+                            var: var.clone(),
+                            value: *value,
+                        })?;
+                    }
+                    // Kept past a reload: the game is as it was saved, and
+                    // the save's checkpoint is written with what was learnt
+                    // (fleet continue-5, Silph Co. 11F: GIOVANNI beaten
+                    // unrecorded; his spent trigger was learnt each cycle,
+                    // lost to the reload, and walked onto again, every
+                    // cycle's recourses spent on it).
+                    if !learnt.is_empty() && ctx.checkpoint.is_some() {
+                        match ctx.invoke(&Intent::Save).result {
+                            Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                            Err(e) => ctx.info(format!("save after the spent trigger: {e}")),
+                            Ok(()) => {}
+                        }
                     }
                 }
                 return Err(e);
