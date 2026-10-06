@@ -728,15 +728,34 @@ pub fn probe_pokedex(ctx: &mut ToolContext<'_>) -> Result<String, ToolError> {
     ctx.drive(&mut step)
 }
 
-/// Records the Fly map when it is on screen; opening it is not driven yet.
+/// Records the Fly map: read where it is on screen, else opened from the
+/// party menu (POKéMON → the member with FLY → FLY) and closed again
+/// (fleet continue-1/5, Switch: "not driven yet" ended plans that needed
+/// to know which towns a flight reaches).
 pub fn probe_fly_map(ctx: &mut ToolContext<'_>) -> Result<String, ToolError> {
     if !party_has_fly(ctx.state()) {
         return Err(ToolError::Unsupported("Fly not in the party".into()));
     }
-    let Some(map) = ctx.observation().and_then(|o| o.fly_map.clone()) else {
-        return Err(ToolError::Unsupported(
-            "opening the Fly map through the POKéMON menu is not driven yet".into(),
-        ));
+    let shown = ctx.observation().and_then(|o| o.fly_map.clone());
+    let map = match shown {
+        Some(map) => map,
+        None => {
+            let slot = super::field::carrier(ctx.state(), "MOVE_FLY")
+                .ok_or_else(|| ToolError::Unsupported("Fly not in the party".into()))?;
+            let mut open = super::field::PartyFieldMove::new(super::field::FieldMove::Fly, slot);
+            ctx.drive(&mut open)?;
+            // Two equal readings: the map drawn, not fading in.
+            let mut read = None;
+            for _ in 0..30 {
+                let o = ctx.observe()?;
+                match (&read, o.fly_map) {
+                    (Some(prev), Some(now)) if *prev == now => break,
+                    (_, now) => read = now,
+                }
+            }
+            close_all(ctx)?;
+            read.ok_or_else(|| ToolError::Failed("the Fly map never read".into()))?
+        }
     };
     let (events, dark) = fly_map_events(&map);
     let summary = format!("fly map: lit {:?}, dark {dark:?}", map.lit);
