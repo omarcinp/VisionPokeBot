@@ -54,6 +54,13 @@ const HUD_FRAMES: u64 = 10;
 const MOVE_MENU_FRAMES: u64 = 4;
 const SUMMARY_FRAMES: u64 = 15;
 const PARTY_MENU_FRAMES: u64 = 15;
+/// Frames a party list showing fewer members than the party holds must
+/// last: a swap slides the panels off and back, and for a moment the list
+/// can read as the lead alone (fleet continue-5: mid-swap the count read 1,
+/// five members were dropped and added back by name only, their species
+/// and moves lost; FLY unknown, the run stopped). A member leaves the party
+/// only by the PC or a trade, never on this screen.
+const PARTY_SHRINK_FRAMES: u64 = 120;
 const BAG_FRAMES: u64 = 4;
 const SHOP_FRAMES: u64 = 4;
 const CARD_FRAMES: u64 = 8;
@@ -737,10 +744,16 @@ impl Sensor {
                     .all(|r| r.nickname.is_some())
         });
         let rows = list.as_ref().map(|m| m.members.clone());
-        if let Some(menu) = self.party_menu.update(f, list, PARTY_MENU_FRAMES) {
+        let known = state.party.value.as_ref().map_or(0, Vec::len);
+        let span = if list.as_ref().is_some_and(|m| usize::from(m.count) < known) {
+            PARTY_SHRINK_FRAMES
+        } else {
+            PARTY_MENU_FRAMES
+        };
+        if let Some(menu) = self.party_menu.update(f, list, span) {
             events.push(GameEvent::PartySizeObserved { size: menu.count });
         }
-        if let Some(rows) = self.party_rows.update(f, rows, PARTY_MENU_FRAMES) {
+        if let Some(rows) = self.party_rows.update(f, rows, span) {
             // Each row's member by its name (unique in the party).
             let by_name: Vec<Option<u8>> = match state.party.value.as_ref() {
                 Some(party) => rows

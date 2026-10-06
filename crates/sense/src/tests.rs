@@ -1259,6 +1259,34 @@ fn absence_watched_in_runs_adds_up() {
     assert_eq!(gone(&state), Some(false));
 }
 
+/// Fleet continue-5: mid-swap the party list read as the lead alone; the
+/// party shrank to one and the rest came back by name only, species and
+/// moves lost. A shorter list holds for a swap's time before it counts.
+#[test]
+fn a_party_read_short_mid_swap_keeps_its_members() {
+    let Some(d) = data() else { return };
+    let mut s = Sensor::new(d);
+    let two = vec![
+        row("BULBASAUR", 12, (25, 33), Status::Healthy),
+        row("BIRDY", 6, (21, 21), Status::Healthy),
+    ];
+    let (state, _) = run(
+        &mut s,
+        GameState::default(),
+        (0..20).map(|f| party_rows(f, two.clone())),
+    );
+    assert_eq!(state.party.value.as_ref().map(Vec::len), Some(2));
+    let one = vec![row("BULBASAUR", 12, (25, 33), Status::Healthy)];
+    let (state, _) = run(&mut s, state, (20..80).map(|f| party_rows(f, one.clone())));
+    assert_eq!(
+        state.party.value.as_ref().map(Vec::len),
+        Some(2),
+        "a swap's time"
+    );
+    let (state, _) = run(&mut s, state, (80..90).map(|f| party_rows(f, two.clone())));
+    assert_eq!(state.party.value.as_ref().map(Vec::len), Some(2));
+}
+
 /// The battle end as the Switch showed it (switch-goal run, frames
 /// 2611960–2621240): the foe faints, the member gains its experience (and
 /// EVs), grows a level, and the level-up window shows the new stats,
@@ -1365,7 +1393,8 @@ fn a_new_foe_replaces_the_defeated_one() {
 /// Switch, Route 4: mid-swap both swapping panels slide off screen
 /// (fixture `switch-party-swap-slide`); the menu counted 1 member with no
 /// name read, and the party was cut to one. A size needs every counted
-/// panel read; a steady menu still gives it.
+/// panel read; a steady menu still gives it (a shorter party only once it
+/// outlasts a swap's slide, `PARTY_SHRINK_FRAMES`).
 #[test]
 fn a_party_menu_mid_swap_does_not_cut_the_party() {
     let Some(d) = data() else { return };
@@ -1390,7 +1419,7 @@ fn a_party_menu_mid_swap_does_not_cut_the_party() {
     let (state, _) = run(
         &mut s,
         with_party(),
-        (0..40).map(|f| party_rows(f, steady.clone())),
+        (0..160).map(|f| party_rows(f, steady.clone())),
     );
     assert_eq!(state.party.value.unwrap().len(), 1);
 }
