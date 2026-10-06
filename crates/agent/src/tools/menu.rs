@@ -86,6 +86,8 @@ pub struct Retries {
     phase: Option<&'static str>,
     count: u32,
     waiting_since: Option<u64>,
+    /// What the last wait was for (for the failure's message).
+    waited_for: Option<String>,
 }
 
 impl Retries {
@@ -118,8 +120,14 @@ impl Retries {
         self.phase.unwrap_or("start")
     }
 
+    /// What the last wait was for, if the step waited (for messages).
+    pub fn waited_for(&self) -> Option<&str> {
+        self.waited_for.as_deref()
+    }
+
     /// Waits; every [`WAIT_RETRY_FRAMES`] of waiting is one retry.
     pub fn wait(&mut self, o: &Observation, reason: &str) -> Decision {
+        self.waited_for = Some(reason.to_owned());
         let since = *self.waiting_since.get_or_insert(o.frame_id);
         if o.frame_id.saturating_sub(since) >= WAIT_RETRY_FRAMES {
             self.failed();

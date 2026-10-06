@@ -183,7 +183,12 @@ impl ToolStep for PartyAudit {
                 .next(o, "party, HP, status, moves and PP audited");
         }
         if self.retries.exhausted() {
-            return Decision::Fail("party audit: screen or field stayed unreadable".into());
+            // What it waited for says why (Switch, Pokémon Tower 6F: three
+            // cycles ended so, the field on screen, no input made).
+            return Decision::Fail(match self.retries.waited_for() {
+                Some(why) => format!("party audit: screen or field stayed unreadable ({why})"),
+                None => "party audit: screen or field stayed unreadable".into(),
+            });
         }
         if self.returning {
             let Some(menu) = &o.party_menu else {
