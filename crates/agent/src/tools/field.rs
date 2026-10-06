@@ -197,8 +197,13 @@ fn says_refused(page: &str) -> bool {
 
 /// The game's answer when the obstacle is already gone (`gText_NothingToCut`,
 /// "There's nothing to CUT."): the way is clear, nothing is refused.
+/// Also FLASH used with the light on: "This is in use already."
+/// (`PARTY_MSG_ALREADY_IN_USE`; fleet continue-1, Rock Tunnel: the walk
+/// lit the cave it started in, already lit, and the step waited on the
+/// party menu until "no progress in after").
 fn says_nothing_there(page: &str) -> bool {
-    page.replace('’', "'").contains("There's nothing to")
+    let page = page.replace('’', "'");
+    page.contains("There's nothing to") || page.contains("in use already")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1645,6 +1650,24 @@ mod tests {
 
     /// Fleet continue-5: a medicine's bag still up when STRENGTH came to
     /// the party menu, and Start does nothing there. B backs out first.
+    /// Fleet continue-1 in Rock Tunnel: FLASH used with the cave already
+    /// lit; the game answers "This is in use already." on the party menu.
+    /// Nothing to do: the menu is closed and the step is done.
+    #[test]
+    fn flash_in_use_already_is_nothing_to_do() {
+        let mut step = PartyFieldMove::new(FieldMove::Flash, 0);
+        step.chosen = true;
+        let state = GameState::default();
+        let mut events = Vec::new();
+        let mut o = bare(1);
+        let mut menu = party_menu(0, &[], None);
+        menu.prompt = "This is in use already.".into();
+        o.party_menu = Some(menu);
+        let d = step.next(&mut step_ctx(&o, &state, &mut events, 60));
+        assert!(step.nothing_there);
+        assert_eq!(pressed(&d), Some(Button::B), "the menu closed");
+    }
+
     #[test]
     fn a_bag_left_up_is_backed_out_of_before_the_start_menu() {
         let mut step = PartyFieldMove::new(FieldMove::Strength, 0);
