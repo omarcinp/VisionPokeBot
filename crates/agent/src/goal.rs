@@ -571,7 +571,9 @@ impl Run<'_, '_> {
                     ),
                 ))?;
             }
+            ctx.save_on_the_way = self.opts.save_game && !self.in_gauntlet(ctx)?;
             let outcome = ctx.invoke(&intent);
+            ctx.save_on_the_way = false;
             ctx.scheduler.assumptions.clear();
             ctx.scheduler.side_catch = SideCatch::default();
             if outcome.result.is_ok() {

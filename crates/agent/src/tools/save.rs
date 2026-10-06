@@ -34,6 +34,9 @@ impl Tool for SaveTool {
             }
             Ok(())
         })();
+        if result.is_ok() {
+            ctx.last_saved = std::time::Instant::now();
+        }
         result.into()
     }
 }

@@ -189,6 +189,11 @@ pub struct ToolContext<'a> {
     fighting: Vec<String>,
     /// The dark map FLASH was used on (or found already lit) this visit.
     pub lit_map: Option<String>,
+    /// Whether a long walk may save on the way (the run saves, and isn't
+    /// in a gauntlet a reload couldn't help): set by the goal per step.
+    pub save_on_the_way: bool,
+    /// When the game was last saved (or the context made).
+    pub last_saved: std::time::Instant,
     /// Maps entered so far: a change says the player left and came back
     /// (boulders reset, STRENGTH off).
     pub map_visits: u64,
@@ -278,6 +283,8 @@ impl<'a> ToolContext<'a> {
             fighting: Vec::new(),
             lit_map: None,
             map_visits: 0,
+            save_on_the_way: false,
+            last_saved: std::time::Instant::now(),
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,

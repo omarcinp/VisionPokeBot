@@ -1081,10 +1081,40 @@ fn walk_legs_from(
             }
             r => r?,
         }
+        save_on_the_way(ctx)?;
     }
     match dest {
         Dest::Map { map } => go_to_map(ctx, map),
         other => go(ctx, Destination::from(other)),
+    }
+}
+
+/// Time a walk goes unsaved before it saves between legs.
+const SAVE_ON_THE_WAY_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Whether a walk saves now, `unsaved` after the last save.
+fn save_due(allowed: bool, unsaved: std::time::Duration) -> bool {
+    allowed && unsaved >= SAVE_ON_THE_WAY_EVERY
+}
+
+/// A long walk saves between its legs: the step is saved only once done,
+/// and a restart in between goes back to the last save (Switch: Route 10
+/// to Route 16 by Rock Tunnel and Lavender, hours on the console, never
+/// done before a restart; eight hours of play went back to Route 10 again
+/// and again).
+fn save_on_the_way(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
+    if !save_due(ctx.save_on_the_way, ctx.last_saved.elapsed()) {
+        return Ok(());
+    }
+    // Tried once per interval, saved or not (the Safari Zone has no SAVE).
+    ctx.last_saved = std::time::Instant::now();
+    match ctx.invoke(&Intent::Save).result {
+        Err(e @ (ToolError::Stopped | ToolError::Device(_))) => Err(e),
+        Err(e) => {
+            ctx.info(format!("save on the way: {e}"));
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 
@@ -1365,6 +1395,18 @@ impl From<&Destination> for Dest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Switch: Route 10 to Route 16, hours of walking, never done before a
+    /// restart, and never saved: eight hours went back to Route 10. A walk
+    /// saves between legs once a quarter hour has gone unsaved, when the
+    /// run saves and isn't in a gauntlet.
+    #[test]
+    fn a_long_walk_saves_on_the_way() {
+        let min = |m: u64| std::time::Duration::from_secs(m * 60);
+        assert!(!save_due(true, min(5)));
+        assert!(save_due(true, min(15)));
+        assert!(!save_due(false, min(60)), "not where saving isn't wanted");
+    }
 
     /// Fleet continue-2, Pokémon Mansion B1F: the switch was read off
     /// halfway through a walk, and the walk kept the passages it set out
