@@ -1232,6 +1232,22 @@ pub fn boulder_pushes(
 
 /// Activates Strength on the boulder at `(x, y)` of `map`, then pushes it
 /// along `pushes`, walking behind it before each push.
+/// What a boulder sequence fails with when the map was left part way: on
+/// re-entry the boulders are back on their own tiles and STRENGTH is off
+/// (`ClearTempFieldEventData`), so the pushes start over.
+pub const LEFT_MID_PUSH: &str = "left the map mid-push";
+
+/// Fails with [`LEFT_MID_PUSH`] when the map was entered again since
+/// visit `visit` (now `now`).
+fn left_mid_push(visit: u64, now: u64) -> Result<(), ToolError> {
+    if now == visit {
+        return Ok(());
+    }
+    Err(ToolError::Failed(format!(
+        "{LEFT_MID_PUSH}: the boulders are back and STRENGTH is off"
+    )))
+}
+
 pub fn strength(
     ctx: &mut ToolContext<'_>,
     map: &str,
@@ -1244,6 +1260,12 @@ pub fn strength(
         y,
     };
     use_on_obstacle(ctx, FieldMove::Strength, &at)?;
+    let visit = ctx.map_visits;
+    // A heal, a white-out or a reroute between pushes leaves the map
+    // (fleet continue-5, Victory Road 1F: flown to Viridian to heal after
+    // a wild battle, back, and the pushes went on from where the boulder
+    // had been, STRENGTH off: "the boulder did not move Down").
+    let left = |ctx: &ToolContext<'_>| left_mid_push(visit, ctx.map_visits);
     let mut boulder = (x, y);
     for &dir in pushes {
         let (dx, dy) = dir.delta();
@@ -1262,6 +1284,7 @@ pub fn strength(
             },
         );
         ctx.drive(&mut walk)?;
+        left(ctx)?;
         let from = ctx
             .pose()
             .ok_or_else(|| ToolError::Failed("not located behind the boulder".into()))?;
@@ -1277,6 +1300,7 @@ pub fn strength(
             tapped_at: 0,
         };
         ctx.drive(&mut push)?;
+        left(ctx)?;
         // The boulder's old tile is free, its new one blocks.
         ctx.blocked
             .lock()
@@ -2038,6 +2062,19 @@ mod tests {
             panic!("expected the push")
         };
         assert_eq!(a.commands, vec![ControllerCommand::Press(Button::Right)]);
+    }
+
+    /// Fleet continue-5, Victory Road 1F: flown to Viridian to heal between
+    /// pushes, back, and the pushes went on from where the boulder had
+    /// been, STRENGTH off ("the boulder did not move Down"). Entered again,
+    /// the sequence fails so as to start over.
+    #[test]
+    fn leaving_the_map_between_pushes_starts_them_over() {
+        assert!(left_mid_push(3, 3).is_ok());
+        match left_mid_push(3, 5) {
+            Err(ToolError::Failed(why)) => assert!(why.starts_with(LEFT_MID_PUSH), "{why}"),
+            r => panic!("expected a failure, got {r:?}"),
+        }
     }
 
     /// Fleet continue-6, Victory Road 3F: the player at (5, 7), the boulder

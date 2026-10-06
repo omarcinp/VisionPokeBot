@@ -189,6 +189,9 @@ pub struct ToolContext<'a> {
     fighting: Vec<String>,
     /// The dark map FLASH was used on (or found already lit) this visit.
     pub lit_map: Option<String>,
+    /// Maps entered so far: a change says the player left and came back
+    /// (boulders reset, STRENGTH off).
+    pub map_visits: u64,
     toolbox: Toolbox,
     expects: Expects,
     depth: usize,
@@ -274,6 +277,7 @@ impl<'a> ToolContext<'a> {
             running: Vec::new(),
             fighting: Vec::new(),
             lit_map: None,
+            map_visits: 0,
             toolbox: Toolbox::default(),
             expects: Expects::NONE,
             depth: 0,
@@ -578,6 +582,7 @@ impl<'a> ToolContext<'a> {
             self.ledger.walked(&p.pose);
             if self.last_map.as_deref() != Some(map.as_str()) {
                 self.last_map = Some(map.clone());
+                self.map_visits += 1;
                 // A FLASH lights the map it was used on, for this visit.
                 self.lit_map = None;
                 // What the last map showed is kept (a crash loses at most

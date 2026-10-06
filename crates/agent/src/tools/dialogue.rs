@@ -816,6 +816,25 @@ fn push_boulder(
     targets: &[(i32, i32)],
     local_id: Option<u32>,
 ) -> Result<(), ToolError> {
+    match push_boulder_once(ctx, script, path, map, targets, local_id) {
+        // Left and back part way (a heal): the boulders stand on their own
+        // tiles again, the pushes start over from there, once.
+        Err(ToolError::Failed(why)) if why.starts_with(super::field::LEFT_MID_PUSH) => {
+            ctx.info(format!("{map}: {why}; pushing again from the start"));
+            push_boulder_once(ctx, script, path, map, targets, local_id)
+        }
+        r => r,
+    }
+}
+
+fn push_boulder_once(
+    ctx: &mut ToolContext<'_>,
+    script: &str,
+    path: Option<usize>,
+    map: &str,
+    targets: &[(i32, i32)],
+    local_id: Option<u32>,
+) -> Result<(), ToolError> {
     let target = targets
         .first()
         .copied()
@@ -905,7 +924,8 @@ fn push_boulder(
         // out and back puts them on their own tiles for the next try
         // (Switch, Victory Road 1F: the retry took the boulder at (7, 18),
         // already moved, and STRENGTH "Can't use that here").
-        if !matches!(e, ToolError::Stopped | ToolError::Device(_)) {
+        let left = matches!(&e, ToolError::Failed(w) if w.starts_with(super::field::LEFT_MID_PUSH));
+        if !left && !matches!(e, ToolError::Stopped | ToolError::Device(_)) {
             ctx.info(format!(
                 "{map}: the pushes failed ({e}); out and back to reset the boulders"
             ));
