@@ -169,8 +169,13 @@ impl BattleStep {
                 m.slot != out && !in_battle.contains(&m.slot) && m.hp.is_some_and(|(hp, _)| hp > 0)
             })
             .collect();
+        // The member a SHIFT is still to bring out; once it went out, it is
+        // no one's replacement (fleet emu3 at LASS MIRIAM: KAKUNA, shifted
+        // in and fainted, was gone back to again and again, the party
+        // menu's WARTORTLE never chosen).
         if let Some(carrier) = self
             .shift_to
+            .filter(|_| !self.shifted)
             .filter(|slot| able.iter().any(|m| m.slot == *slot))
         {
             return Some(carrier);
@@ -422,6 +427,11 @@ impl BattleStep {
             };
             let row = row as u8;
             if at == row {
+                // Chosen: the SHIFT is done, whoever the HUD is read to
+                // name next (fleet emu3 at LASS MIRIAM: KAKUNA's name went
+                // unread once out, the SHIFT stayed pending, and after it
+                // fainted the party menu was walked to it again and again).
+                self.shifted = true;
                 return press("choose SHIFT".into(), Button::A, Expectation::InputsDone);
             }
             let (button, next) = if at < row {
@@ -1536,6 +1546,9 @@ mod tests {
             label(step.shift_in_party_menu(&actions, 2, Some("BEEDRILL"))),
             "choose SHIFT"
         );
+        // Chosen, the SHIFT is no longer pending: no replacement after a
+        // faint is steered back to it.
+        assert!(step.shifted);
         // Opened again and again without a SHIFT: given up, fight on.
         actions.actions = false;
         for _ in 0..MAX_SHIFT_OPENS - 1 {

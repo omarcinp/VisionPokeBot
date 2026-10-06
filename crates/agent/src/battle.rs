@@ -232,6 +232,22 @@ pub fn defensive_switch(
         .members
         .iter()
         .skip(1)
+        // One that can hit back: a member with no attack is "safe" only
+        // in that it takes the hits (fleet emu3 at LASS MIRIAM: WARTORTLE
+        // at risk made way for KAKUNA Lv4, HARDEN only, which ODDISH's
+        // ABSORB drained to a faint).
+        .filter(|m| {
+            choose_move(
+                data,
+                &Party {
+                    members: vec![(*m).clone()],
+                },
+                None,
+                &BattleMemory::default(),
+                &BattlePolicy::default(),
+            )
+            .is_some()
+        })
         .filter_map(|m| {
             let hp = m.hp.filter(|(hp, _)| *hp > 0)?;
             let risk = catch::risk(data, &catch::Lead { member: m, hp }, &foe, 3);
@@ -1010,6 +1026,50 @@ mod tests {
         Party {
             members: vec![member],
         }
+    }
+
+    /// Fleet emu3 at LASS MIRIAM: WARTORTLE at risk against her ODDISH made
+    /// way for KAKUNA Lv4, HARDEN only, the safest only in taking hits; it
+    /// was drained to a faint. A member with no attack isn't switched to;
+    /// one that can fight is.
+    #[test]
+    fn a_defensive_switch_goes_to_one_that_can_hit_back() {
+        use pokebot_state::{BattleMenu, BattleObservation};
+        let Some(data) = data() else { return };
+        let mut wartortle = Member::new(&data, "SPECIES_WARTORTLE", 20);
+        wartortle.hp = Some((4, 56));
+        wartortle.moves = vec!["MOVE_TACKLE".into(), "MOVE_BUBBLE".into()];
+        let mut kakuna = Member::new(&data, "SPECIES_KAKUNA", 4);
+        kakuna.slot = 1;
+        kakuna.hp = Some((17, 17));
+        kakuna.moves = vec!["MOVE_HARDEN".into()];
+        let battle = BattleObservation {
+            menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+            player_name: Some("WARTORTLE".into()),
+            player_level: Some(20),
+            player_hp_numbers: Some((4, 56)),
+            opponent_name: Some("ODDISH".into()),
+            opponent_level: Some(11),
+            player_hp: None,
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: Some(true),
+            opponent_shiny: None,
+            level_up_stats: None,
+        };
+        let party = Party {
+            members: vec![wartortle.clone(), kakuna],
+        };
+        assert_eq!(defensive_switch(&data, &party, &battle, [0; 6]), None);
+        let mut pidgeotto = Member::new(&data, "SPECIES_PIDGEOTTO", 22);
+        pidgeotto.slot = 1;
+        pidgeotto.hp = Some((60, 60));
+        pidgeotto.moves = vec!["MOVE_GUST".into(), "MOVE_WING_ATTACK".into()];
+        let party = Party {
+            members: vec![wartortle, pidgeotto],
+        };
+        assert_eq!(defensive_switch(&data, &party, &battle, [0; 6]), Some(1));
     }
 
     /// Switch goal run: a Lv6 Bulbasaur fought two wild Pidgeys on Route
