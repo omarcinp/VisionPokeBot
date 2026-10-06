@@ -1224,10 +1224,14 @@ fn scripted_trainer(
             _ => true,
         };
     let mut found: BTreeSet<String> = BTreeSet::new();
+    // Not the scripts of the map's objects: a trainer standing there is
+    // named on the battle and found by name (fleet continue-6, Silph Co.
+    // 7F: three GRUNTs and a SCIENTIST not yet beaten made the rival's
+    // trigger one of five, and his loss went unbooked).
     for script in events
         .scripts
         .values()
-        .filter(|s| s.map.as_deref() == Some(map))
+        .filter(|s| s.map.as_deref() == Some(map) && s.kind != "object")
     {
         for path in script.paths.iter().filter(|p| p.when.iter().all(holds)) {
             if let Some(t) = pokebot_planner::intents::first_battle(path) {
@@ -1687,6 +1691,14 @@ mod tests {
         assert_eq!(
             scripted_trainer(events, &state, room).as_deref(),
             Some("TRAINER_CHAMPION_FIRST_BULBASAUR")
+        );
+        // Fleet continue-6 lost to the rival on Silph Co. 7F with three
+        // GRUNTs and a SCIENTIST there unbeaten: their own scripts are the
+        // objects', named on their battles; the rival's trigger is the
+        // floor's one scripted battle.
+        assert_eq!(
+            scripted_trainer(events, &state, "SilphCo_7F").as_deref(),
+            Some("TRAINER_RIVAL_SILPH_BULBASAUR")
         );
     }
 
