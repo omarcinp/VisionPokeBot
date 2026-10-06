@@ -138,11 +138,15 @@ pub fn health(party: Option<&[PartyMon]>, data: &GameData) -> Option<Need> {
                 (cur + u32::from(pp.0), max + u32::from(pp.1))
             })
     };
+    // A member with no attack at all counts as it stands: a heal gives it
+    // none (fleet continue-3, the nugget farm's keeper KAKUNA alone,
+    // HARDEN only: every heal "did not establish safe party health").
     let usable = party
         .iter()
         .filter(|m| {
+            let (pp, total) = attacks(m);
             valid_hp(m).is_some_and(|p| p.0 > 0)
-                && attacks(m).0 > 0
+                && (pp > 0 || total == 0)
                 && !matches!(
                     m.status.value,
                     Some(Status::Fainted | Status::Frozen | Status::Asleep)
@@ -558,7 +562,7 @@ mod tests {
     /// Fleet continue-3: METAPOD, HARDEN only, led to be switch-trained;
     /// every walk healed for it and failed "recovery did not establish
     /// safe party health". A lead with no attack at all isn't spent: the
-    /// others fight for it. Alone, it can't fight at all.
+    /// others fight for it, and alone no heal changes it.
     #[test]
     fn a_lead_with_no_attack_at_all_is_not_healed_for() {
         let d = data();
@@ -573,7 +577,9 @@ mod tests {
             None,
         ];
         assert_eq!(health(Some(&[metapod.clone(), mon(100)]), &d), None);
-        assert_eq!(health(Some(&[metapod]), &d), Some(Need::HealUrgent));
+        // Alone too: no heal gives it an attack (fleet continue-3, the
+        // nugget farm's KAKUNA keeper healed at every start).
+        assert_eq!(health(Some(&[metapod]), &d), None);
     }
 
     /// A catch joins with the HP and status its battle showed (derived,

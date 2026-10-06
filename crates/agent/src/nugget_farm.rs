@@ -753,9 +753,9 @@ mod tests {
     }
 
     /// Fleet continue-3's party at the bridge: KAKUNA Lv4, HARDEN only, is
-    /// the keeper, and walks to the grunt alone with no attack at all. The
-    /// scheduler's heals are off for that walk: a party with no attack
-    /// reads as in urgent need, which no heal mends.
+    /// the keeper, and walks to the grunt alone with no attack at all. No
+    /// heal is called for it (none would give it an attack), and the
+    /// scheduler is off for that walk besides.
     #[test]
     fn a_keeper_with_no_attack_walks_to_the_grunt() {
         let Some(d) = data() else { return };
@@ -809,10 +809,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(
-            crate::scheduler::health(Some(&[alone]), &d),
-            Some(crate::scheduler::Need::HealUrgent)
-        );
+        assert_eq!(crate::scheduler::health(Some(&[alone]), &d), None);
     }
 
     #[test]
