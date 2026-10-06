@@ -257,10 +257,15 @@ impl Scheduler {
     }
 }
 
+/// A way out of a cave (Dig or an Escape Rope) and where it lands.
+pub type Escape = (EdgeKind, PlayerPose);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Recovery {
     pub map: String,
     pub medicine: Option<String>,
+    /// Out of the cave first (a rope or Dig) to where it leads.
+    pub escape: Option<Escape>,
     pub added_travel_s: f64,
     pub encounter_risk_s: f64,
     pub service_s: f64,
@@ -333,6 +338,48 @@ pub fn recovery(
         .filter(|(map, _)| lookup::healer_on(world, map).is_some())
         .collect();
     maps.sort_by_key(|(map, d)| (*d, map.clone()));
+    // Out of the cave first, when a rope is in the bag or a member knows
+    // DIG: the way out on foot may cross trainers a worn party can't flee
+    // (fleet continue-6, Victory Road 2F: BLASTOISE fainted, the heal's
+    // way to Pewter went up through 3F past COOL COUPLE RAY & TYRA, and
+    // the party whited out to them three cycles running, two ropes in the
+    // bag).
+    let escape_start: Option<(EdgeKind, PlayerPose, f64)> = (|| {
+        let e = state.world.escape.value.as_ref()?;
+        let here = world.map(&from.map)?;
+        if !here.allow_escaping || !graph.escape_region(&e.entered).contains(&from.map) {
+            return None;
+        }
+        let to = PlayerPose {
+            map: e.map.clone(),
+            x: e.x,
+            y: e.y,
+        };
+        let has_rope = state
+            .bag
+            .pockets
+            .get(&pokebot_state::Pocket::Items)
+            .and_then(|k| k.value.as_ref())
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|(i, n)| i == route::ITEM_ESCAPE_ROPE && *n > 0)
+            });
+        let digs = state.party.value.iter().flatten().any(|m| {
+            m.moves
+                .iter()
+                .flatten()
+                .any(|s| s.mv.value.as_deref() == Some(route::MOVE_DIG))
+        });
+        let p = graph.params();
+        if digs {
+            Some((EdgeKind::Dig, to, p.dig_s))
+        } else if has_rope {
+            Some((EdgeKind::EscapeRope, to, p.escape_rope_s))
+        } else {
+            None
+        }
+    })();
     let mut candidates = Vec::new();
     for (name, _) in maps.into_iter().take(8) {
         let map = world.map(&name)?;
@@ -340,97 +387,134 @@ pub fn recovery(
         let (x, y) = lookup::object_tile(world, &name, id)?;
         for ((x, y), _) in crate::nav::facing_spots(map, x, y) {
             let to = Place::tile(&name, x, y);
-            let out = route::route(world, graph, &belief, from, &to, UnknownPolicy::Pessimistic);
-            if !out.found() {
-                continue;
+            let mut starts: Vec<(Option<Escape>, PlayerPose, f64)> =
+                vec![(None, from.clone(), 0.0)];
+            if urgent {
+                if let Some((kind, at, cost)) = &escape_start {
+                    starts.push((Some((kind.clone(), at.clone())), at.clone(), *cost));
+                }
             }
-            let return_cost = destination
-                .map(|d| {
-                    route::route_to_map(
-                        world,
-                        graph,
-                        &belief,
-                        &PlayerPose {
-                            map: name.clone(),
-                            x,
-                            y,
-                        },
-                        d,
-                        UnknownPolicy::Pessimistic,
-                    )
-                    .cost_s
-                })
-                .unwrap_or(0.0);
-            // Urgent, the way back counts too (Switch, Route 7: Cerulean's
-            // Center, a flight away with no grass, beat Celadon's next
-            // door; the training walked back from Cerulean six maps each
-            // time).
-            let travel = if !baseline.is_finite() {
-                out.cost_s
-            } else if urgent {
-                out.cost_s
-                    + if return_cost.is_finite() {
-                        return_cost
+            for (escape, start, escape_s) in starts {
+                let out = route::route(
+                    world,
+                    graph,
+                    &belief,
+                    &start,
+                    &to,
+                    UnknownPolicy::Pessimistic,
+                );
+                if !out.found() {
+                    continue;
+                }
+                // A way priced out of the cave by rope or Dig is left that
+                // way: the heal's own walk there would take the floors
+                // (fleet continue-6: priced by rope, walked up through
+                // Victory Road 3F to its trainers).
+                let escape = escape.or_else(|| {
+                    out.legs
+                        .first()
+                        .filter(|l| matches!(l.kind, EdgeKind::EscapeRope | EdgeKind::Dig))
+                        .map(|l| {
+                            (
+                                l.kind.clone(),
+                                PlayerPose {
+                                    map: l.to.map.clone(),
+                                    x: l.to.x,
+                                    y: l.to.y,
+                                },
+                            )
+                        })
+                });
+                let return_cost = destination
+                    .map(|d| {
+                        route::route_to_map(
+                            world,
+                            graph,
+                            &belief,
+                            &PlayerPose {
+                                map: name.clone(),
+                                x,
+                                y,
+                            },
+                            d,
+                            UnknownPolicy::Pessimistic,
+                        )
+                        .cost_s
+                    })
+                    .unwrap_or(0.0);
+                // Urgent, the way back counts too (Switch, Route 7: Cerulean's
+                // Center, a flight away with no grass, beat Celadon's next
+                // door; the training walked back from Cerulean six maps each
+                // time).
+                let travel = escape_s
+                    + if !baseline.is_finite() {
+                        out.cost_s
+                    } else if urgent {
+                        out.cost_s
+                            + if return_cost.is_finite() {
+                                return_cost
+                            } else {
+                                0.0
+                            }
                     } else {
-                        0.0
-                    }
-            } else {
-                (out.cost_s + return_cost - baseline).max(0.0)
-            };
-            if !travel.is_finite() {
-                continue;
-            }
-            let risk = out
-                .legs
-                .iter()
-                .map(|leg| {
-                    let EdgeKind::Walk { tiles, .. } = leg.kind else {
-                        return 0.0;
+                        (out.cost_s + return_cost - baseline).max(0.0)
                     };
-                    let Some(m) = world.map(&leg.from.map) else {
-                        return 0.0;
-                    };
-                    let mut grass = 0;
-                    let mut walkable = 0;
-                    for y in 0..m.height {
-                        for x in 0..m.width {
-                            if let Some(t) = m.tile(x, y) {
-                                if t.collision == 0 {
-                                    walkable += 1;
-                                    if lookup::encounter_tile(&t) {
-                                        grass += 1;
+                if !travel.is_finite() {
+                    continue;
+                }
+                let risk = out
+                    .legs
+                    .iter()
+                    .map(|leg| {
+                        let EdgeKind::Walk { tiles, .. } = leg.kind else {
+                            return 0.0;
+                        };
+                        let Some(m) = world.map(&leg.from.map) else {
+                            return 0.0;
+                        };
+                        let mut grass = 0;
+                        let mut walkable = 0;
+                        for y in 0..m.height {
+                            for x in 0..m.width {
+                                if let Some(t) = m.tile(x, y) {
+                                    if t.collision == 0 {
+                                        walkable += 1;
+                                        if lookup::encounter_tile(&t) {
+                                            grass += 1;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    f64::from(tiles) * grass as f64 / (walkable.max(1) as f64)
-                        * if urgent { 4.0 } else { 1.0 }
-                })
-                .sum::<f64>();
-            // Trainers whose sight the way can't go round: a battle that
-            // can't be fled, fought worn (fleet worker 3: BULBASAUR at
-            // 10/29 walked on to Pewter's Center through Viridian Forest,
-            // met a Bug Catcher and fainted; Viridian's was behind it).
-            let walks: Vec<_> = out
-                .legs
-                .iter()
-                .filter(|l| matches!(l.kind, EdgeKind::Walk { .. }) && l.from.map == l.to.map)
-                .map(|l| (l.from.map.clone(), (l.from.x, l.from.y), (l.to.x, l.to.y)))
-                .collect();
-            let sightings = crate::nav::unavoidable_sightings(world, data, &walks, |t| {
-                state.world.flags.get(t).and_then(|k| k.value) == Some(true)
-            });
-            let risk = risk + f64::from(sightings) * TRAINER_ON_THE_WAY_S;
-            candidates.push(Recovery {
-                map: name.clone(),
-                medicine: None,
-                added_travel_s: travel,
-                encounter_risk_s: risk,
-                service_s: 12.0,
-                item_cost_s: 0.0,
-                score_s: travel + risk + 12.0,
-            });
+                        f64::from(tiles) * grass as f64 / (walkable.max(1) as f64)
+                            * if urgent { 4.0 } else { 1.0 }
+                    })
+                    .sum::<f64>();
+                // Trainers whose sight the way can't go round: a battle that
+                // can't be fled, fought worn (fleet worker 3: BULBASAUR at
+                // 10/29 walked on to Pewter's Center through Viridian Forest,
+                // met a Bug Catcher and fainted; Viridian's was behind it).
+                let walks: Vec<_> = out
+                    .legs
+                    .iter()
+                    .filter(|l| matches!(l.kind, EdgeKind::Walk { .. }) && l.from.map == l.to.map)
+                    .map(|l| (l.from.map.clone(), (l.from.x, l.from.y), (l.to.x, l.to.y)))
+                    .collect();
+                let sightings = crate::nav::unavoidable_sightings(world, data, &walks, |t| {
+                    state.world.flags.get(t).and_then(|k| k.value) == Some(true)
+                });
+                let risk = risk + f64::from(sightings) * TRAINER_ON_THE_WAY_S;
+                candidates.push(Recovery {
+                    map: name.clone(),
+                    medicine: None,
+                    escape: escape.clone(),
+                    added_travel_s: travel,
+                    encounter_risk_s: risk,
+                    service_s: 12.0,
+                    item_cost_s: 0.0,
+                    score_s: travel + risk + 12.0,
+                });
+            }
         }
     }
     candidates.extend(medicines(state, data, &from.map));
@@ -478,6 +562,7 @@ fn medicines(state: &GameState, data: &GameData, map: &str) -> Vec<Recovery> {
         candidates.push(Recovery {
             map: map.into(),
             medicine: Some(item.into()),
+            escape: None,
             added_travel_s: 0.0,
             encounter_risk_s: 0.0,
             service_s: 15.0,
@@ -908,6 +993,65 @@ mod tests {
             dug.added_travel_s + dug.encounter_risk_s
                 < walked.added_travel_s + walked.encounter_risk_s,
             "{dug:?} vs {walked:?}"
+        );
+    }
+
+    /// Fleet continue-6, Victory Road 2F: BLASTOISE fainted; the heal's way
+    /// to Pewter went up through 3F past COOL COUPLE RAY & TYRA (the floor
+    /// switch below reset), and the party whited out to them three cycles
+    /// running with two Escape Ropes in the bag. With a rope, the way out
+    /// starts with it; without one, it walks.
+    #[test]
+    fn a_worn_party_ropes_out_rather_than_meet_the_trainers_above() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(world), Ok(d)) = (
+            World::load(root.join("data/world")),
+            GameData::load(root.join("data/world/gamedata.json")),
+        ) else {
+            return;
+        };
+        let graph = graph(&world);
+        let from = PlayerPose {
+            map: "VictoryRoad_2F".into(),
+            x: 16,
+            y: 19,
+        };
+        let mut state = GameState::default();
+        state.world.escape = Knowledge::observed(
+            pokebot_state::EscapeWarp {
+                map: "Route23".into(),
+                x: 5,
+                y: 29,
+                entered: "VictoryRoad_1F".into(),
+            },
+            1,
+        );
+        // BLASTOISE, fainted, SURF among its moves; all eight badges.
+        let mut blastoise = mon(0);
+        blastoise.moves[1] = Some(MoveSlot {
+            mv: Knowledge::observed("MOVE_SURF".into(), 1),
+            pp: Knowledge::observed((15, 15), 1),
+        });
+        state.party = Knowledge::observed(vec![blastoise], 1);
+        for n in 1..=8 {
+            state
+                .world
+                .flags
+                .insert(format!("FLAG_BADGE0{n}_GET"), Knowledge::observed(true, 1));
+        }
+        let walked = recovery(&world, &graph, &state, &d, &from, None, true);
+        assert!(
+            walked.as_ref().is_none_or(|w| w.escape.is_none()),
+            "{walked:?}"
+        );
+        state.bag.pockets.insert(
+            pokebot_state::Pocket::Items,
+            Knowledge::observed(vec![("ITEM_ESCAPE_ROPE".into(), 2)], 1),
+        );
+        let roped = recovery(&world, &graph, &state, &d, &from, None, true).expect("a healer");
+        assert!(
+            matches!(roped.escape, Some((EdgeKind::EscapeRope, ref to)) if to.map == "Route23"),
+            "{roped:?}"
         );
     }
 

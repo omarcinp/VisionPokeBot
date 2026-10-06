@@ -865,6 +865,10 @@ impl<'a> ToolContext<'a> {
             if let Some(item) = candidate.medicine {
                 super::medicine::use_item(self, &item)?;
             } else {
+                if let Some((kind, to)) = &candidate.escape {
+                    self.info(format!("scheduler: out by {kind} to {} first", to.map));
+                    super::escape::escape(self, kind, to)?;
+                }
                 self.invoke(&Intent::Heal {
                     center: Some(candidate.map),
                 })
