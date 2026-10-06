@@ -78,6 +78,9 @@ pub struct BattleMemory {
     /// The one out has no move the game takes and the foe feels: a wild
     /// battle is run from.
     pub nothing_to_use: bool,
+    /// A GHOST no SILPH SCOPE shows ("… is too scared to move!"): no turn
+    /// can be fought, and running always works (`TryRunFromBattle`).
+    pub scared: bool,
 }
 
 impl BattleMemory {
@@ -369,6 +372,12 @@ pub fn lead_status_text(page: &str, lead: &str) -> Option<Status> {
 /// Battle text read on two frames ([`crate::catch::observe`]): tracks
 /// DISABLE on our lead.
 pub fn observe_page(memory: &mut BattleMemory, page: &str, party: &Party, data: &GameData) {
+    // A GHOST unseen without the SILPH SCOPE: our side is too scared to
+    // move every turn (Switch, Pokémon Tower 4F: VENUSAUR chose RAZOR
+    // LEAF and was too scared to move, turn after turn for over an hour).
+    if page.contains("is too scared to move") || page.starts_with("GHOST: Get out") {
+        memory.scared = true;
+    }
     if page.starts_with("Wild ") && page.contains("appeared") {
         memory.trainer = false;
         memory.no_effect.clear();
@@ -679,7 +688,12 @@ pub fn decide(
     // one out still wins (the user's rule: Pokémon may faint, as long as
     // not all of them do).
     let low = low && !(usable > 1 && risk.is_some());
-    let wants_out = (low || high_risk || no_attacks || memory.catch.flee || memory.nothing_to_use)
+    let wants_out = (low
+        || high_risk
+        || no_attacks
+        || memory.catch.flee
+        || memory.nothing_to_use
+        || memory.scared)
         && !memory.trainer;
     // Trapped (ARENA TRAP, MEAN LOOK, WRAP…): the game refuses RUN and
     // puts the menu back; fight on.
@@ -716,6 +730,9 @@ pub fn decide(
                 .nothing_to_use
                 .then(|| "no move the foe feels".to_owned()),
             memory.catch.flee.then(|| "not catching it".to_owned()),
+            memory
+                .scared
+                .then(|| "a GHOST too scary to fight (no SILPH SCOPE)".to_owned()),
         ]
         .into_iter()
         .flatten()
@@ -1352,6 +1369,48 @@ mod tests {
         // No damaging PP at all: nothing to choose (the battle policy runs).
         let party = ivysaur(&data, &[("MOVE_TACKLE", 35), ("MOVE_VINE_WHIP", 10)]);
         assert_eq!(choose_move(&data, &party, None, &wild, &policy), None);
+    }
+
+    /// Switch, Pokémon Tower 4F: a GHOST the SILPH SCOPE didn't show;
+    /// VENUSAUR chose RAZOR LEAF and "is too scared to move!", turn after
+    /// turn for over an hour. Scared, the battle is run from.
+    #[test]
+    fn a_ghost_too_scary_to_fight_is_run_from() {
+        let Some(data) = data() else { return };
+        let policy = BattlePolicy::default();
+        let party = ivysaur(&data, &[]);
+        let mut memory = BattleMemory::default();
+        observe_page(&mut memory, "IVYSAUR is too scared to move!", &party, &data);
+        assert!(memory.scared);
+        memory.catch.decided = true;
+        let mut o = pokebot_state::Observation::bare(
+            1,
+            pokebot_state::Observed {
+                value: ScreenState::BattleCommand,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.battle = Some(pokebot_state::BattleObservation {
+            menu: Some(BattleMenu::Command { column: 0, row: 0 }),
+            player_name: Some("IVYSAUR".into()),
+            player_level: Some(30),
+            player_hp_numbers: Some((90, 90)),
+            opponent_name: Some("GHOST".into()),
+            opponent_level: None,
+            player_hp: Some(1000),
+            opponent_hp: Some(1000),
+            move_pp: None,
+            move_names: Vec::new(),
+            opponent_caught: None,
+            opponent_shiny: None,
+            level_up_stats: None,
+        });
+        let mut events = Vec::new();
+        match decide(&o, &policy, &mut memory, &party, &data, &mut events) {
+            Some(Decision::Act(a)) => assert!(a.label.contains("RUN"), "{}", a.label),
+            _ => panic!("expected a way to RUN"),
+        }
     }
 
     /// Fleet continue-5, Pokémon Tower: a wild GASTLY against a RATTATA
