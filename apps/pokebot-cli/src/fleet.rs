@@ -480,15 +480,45 @@ impl Worker {
 
 impl State {
     fn launch(&mut self, body: &Value) -> Result<Value> {
-        let count = body["count"]
-            .as_u64()
-            .context("count must be a positive integer")?;
+        // Continuing workers by number (`"numbers": [1, 5, 6]`): which
+        // games go on, each number's starter and fossil fixed
+        // ([`new_game_choice`]); `count` is then their number.
+        let numbers: Option<Vec<u64>> = match body.get("numbers") {
+            Some(v) => Some(
+                v.as_array()
+                    .context("numbers must be an array of positive integers")?
+                    .iter()
+                    .map(|n| n.as_u64().filter(|n| *n > 0))
+                    .collect::<Option<Vec<_>>>()
+                    .context("numbers must be an array of positive integers")?,
+            ),
+            None => None,
+        };
+        let count = match &numbers {
+            Some(n) => n.len() as u64,
+            None => body["count"]
+                .as_u64()
+                .context("count must be a positive integer")?,
+        };
         let task = body["task"]
             .as_str()
             .context("task must be autonomy, autonomy-continue, new-game, story or observe")?;
         if !["autonomy", CONTINUE, "new-game", "story", "observe"].contains(&task) {
             bail!("unknown task");
         }
+        if let Some(numbers) = &numbers {
+            if task != CONTINUE {
+                bail!("numbers are for {CONTINUE} workers");
+            }
+            if let Some(k) = numbers.iter().find(|&&k| {
+                self.workers
+                    .get(&continue_name(k).0)
+                    .is_some_and(|w| w.outcome.is_none())
+            }) {
+                bail!("continuing worker {k} is already running");
+            }
+        }
+        let mut wanted = numbers.clone().unwrap_or_default().into_iter();
         let running = self
             .workers
             .values()
@@ -523,14 +553,17 @@ impl State {
         let mut created = Vec::new();
         for _ in 0..count {
             let (n, name, folder, label) = if task == CONTINUE {
-                // The first number no running worker continues.
-                let k = (1..)
-                    .find(|&k| {
-                        self.workers
-                            .get(&continue_name(k).0)
-                            .is_none_or(|w| w.outcome.is_some())
-                    })
-                    .expect("a free number");
+                // The number asked for, else the first no running worker
+                // continues.
+                let k = wanted.next().unwrap_or_else(|| {
+                    (1..)
+                        .find(|&k| {
+                            self.workers
+                                .get(&continue_name(k).0)
+                                .is_none_or(|w| w.outcome.is_some())
+                        })
+                        .expect("a free number")
+                });
                 let (name, folder) = continue_name(k);
                 (k, name, folder, format!("Continue {k}"))
             } else {
@@ -1098,6 +1131,39 @@ mod tests {
         );
         assert!(dir.join("worker.log.1").is_file());
         assert!(dir.join("data").exists());
+        drop(fleet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The user halved the fleet: three continuing games, one per starter
+    /// with both fossils among them (1: BULBASAUR, dome; 5: CHARMANDER,
+    /// helix; 6: SQUIRTLE, helix). They are launched by number; one already
+    /// running is refused.
+    #[test]
+    fn continuing_workers_are_launched_by_number() {
+        if available_memory() < WORKER_MEMORY * 2 {
+            return;
+        }
+        let (fleet, root) = fixture();
+        std::fs::create_dir(root.join("data/world")).unwrap();
+        std::fs::write(root.join("data/world/index.json"), "{}").unwrap();
+        let (code, started) = fleet.request(
+            "POST",
+            "/api/emulators",
+            json!({"numbers":[5,6],"task":CONTINUE}),
+        );
+        assert_eq!(code, 201, "{started}");
+        assert_eq!(
+            started["started"],
+            json!(["emu-continue-5", "emu-continue-6"])
+        );
+        assert_eq!(new_game_choice(5), ("charmander", "helix"));
+        let (code, _) = fleet.request(
+            "POST",
+            "/api/emulators",
+            json!({"numbers":[5],"task":CONTINUE}),
+        );
+        assert_ne!(code, 201, "worker 5 runs already");
         drop(fleet);
         std::fs::remove_dir_all(root).unwrap();
     }
