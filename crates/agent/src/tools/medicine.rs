@@ -166,12 +166,19 @@ impl ToolStep for UseMedicine {
                     SCREEN_FRAMES,
                 );
             }
-            return crate::bag::select_item(
+            let d = crate::bag::select_item(
                 o,
                 &self.data,
                 &self.item,
                 Expectation::PartyList,
                 &mut self.seek,
+            );
+            return crate::bag::note_missing(
+                d,
+                pokebot_state::Pocket::Items,
+                &self.item,
+                ctx.state,
+                ctx.events,
             );
         }
         if let Some(menu) = &o.menu {

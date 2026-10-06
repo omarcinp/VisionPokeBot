@@ -61,6 +61,39 @@ pub struct Seek {
 /// A bag list's rows as shown: name and count.
 type ShownRows = Vec<(String, Option<u16>)>;
 
+/// `d`, a selection's decision; when it found `item` missing from `pocket`
+/// the belief stops counting it (Switch, Pokémon Tower: an Escape Rope
+/// the belief still held; every urgent heal's way out by rope failed "not
+/// in the pocket", replanned the same way, over and over).
+pub fn note_missing(
+    d: Decision,
+    pocket: Pocket,
+    item: &str,
+    state: &pokebot_state::GameState,
+    events: &mut Vec<GameEvent>,
+) -> Decision {
+    if let Decision::Fail(why) = &d {
+        if why.ends_with("is not in the pocket") {
+            let held = state
+                .bag
+                .pockets
+                .get(&pocket)
+                .and_then(|k| k.value.as_ref())
+                .and_then(|items| items.iter().find(|(i, _)| i == item).map(|(_, n)| *n))
+                .unwrap_or(0);
+            if held > 0 {
+                events.push(GameEvent::ItemsChanged {
+                    pocket,
+                    item: item.to_owned(),
+                    delta: -i32::from(held),
+                    reason: "not in the pocket".into(),
+                });
+            }
+        }
+    }
+    d
+}
+
 /// Select one known item and its USE/OPEN action, checking both cursors.
 /// `seek` carries the search for an item not on screen from call to call.
 pub fn select_item(
@@ -746,6 +779,40 @@ mod tests {
     };
 
     use super::*;
+
+    /// Switch, Pokémon Tower: an Escape Rope the belief still held; every
+    /// urgent heal's way out by rope failed "not in the pocket" and was
+    /// planned again. Found missing, the belief stops counting it.
+    #[test]
+    fn an_item_found_missing_is_no_longer_counted() {
+        let mut state = pokebot_state::GameState::default();
+        state.bag.pockets.insert(
+            Pocket::Items,
+            pokebot_state::Knowledge::observed(vec![("ITEM_ESCAPE_ROPE".into(), 2)], 1),
+        );
+        let mut events = Vec::new();
+        let d = note_missing(
+            Decision::Fail("ITEM_ESCAPE_ROPE is not in the pocket".into()),
+            Pocket::Items,
+            "ITEM_ESCAPE_ROPE",
+            &state,
+            &mut events,
+        );
+        assert!(matches!(d, Decision::Fail(_)));
+        assert!(matches!(
+            events.as_slice(),
+            [GameEvent::ItemsChanged { delta: -2, .. }]
+        ));
+        let mut events = Vec::new();
+        let _ = note_missing(
+            Decision::Wait("reading".into()),
+            Pocket::Items,
+            "ITEM_ESCAPE_ROPE",
+            &state,
+            &mut events,
+        );
+        assert!(events.is_empty());
+    }
 
     fn data() -> Option<GameData> {
         GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))

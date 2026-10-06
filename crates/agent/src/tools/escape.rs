@@ -164,12 +164,19 @@ impl ToolStep for UseEscapeRope {
                     self.used = true;
                 }
             }
-            return crate::bag::select_item(
+            let d = crate::bag::select_item(
                 o,
                 &self.data,
                 ITEM_ESCAPE_ROPE,
                 Expectation::InputsDone,
                 &mut self.seek,
+            );
+            return crate::bag::note_missing(
+                d,
+                Pocket::Items,
+                ITEM_ESCAPE_ROPE,
+                ctx.state,
+                ctx.events,
             );
         }
         if let Some(menu) = &o.menu {
