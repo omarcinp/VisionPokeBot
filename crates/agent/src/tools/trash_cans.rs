@@ -104,6 +104,12 @@ pub fn next_can(
         })
 }
 
+/// Every one of the fifteen cans answered plain trash, no first switch
+/// found: with the locks shut one of them hides it, so they are open.
+fn locks_open(first: Option<u8>, tried: &BTreeSet<u8>) -> bool {
+    first.is_none() && (1..=15).all(|c| tried.contains(&c))
+}
+
 fn press(ctx: &mut ToolContext<'_>, can: u8) -> Result<Answer, ToolError> {
     let script = format!("{PREFIX}{can}");
     let Some(Start::Sign { map, x, y, facing }) =
@@ -135,6 +141,19 @@ pub fn solve(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
     for _ in 0..MAX_PRESSES {
         let from = ctx.pose().map(|p: PlayerPose| (p.x, p.y));
         let Some(can) = next_can(first, &tried, at, from) else {
+            // Every can plain trash, and no first switch among them: the
+            // locks are open already, every can answering as trash
+            // (`LocksAlreadyOpen`; fleet continue-1, a save inside the gym
+            // after they were opened: 200 cans pressed, "still locked",
+            // the door open all along).
+            if locks_open(first, &tried) {
+                ctx.emit(progress("Gym", "every can is trash: the locks are open"))?;
+                ctx.emit(GameEvent::FlagObserved {
+                    flag: FLAG.into(),
+                    value: true,
+                })?;
+                return Ok(());
+            }
             // Every candidate tried without an answer that fits: start over.
             first = None;
             tried.clear();
@@ -176,6 +195,18 @@ pub fn solve(ctx: &mut ToolContext<'_>) -> Result<(), ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet continue-1: all fifteen cans trash, twice over, and no first
+    /// switch: the locks were open. A sweep of every can without one says
+    /// so; a sweep of a first switch's neighbours doesn't.
+    #[test]
+    fn every_can_trash_means_the_locks_are_open() {
+        let all: BTreeSet<u8> = (1..=15).collect();
+        assert!(locks_open(None, &all));
+        let some: BTreeSet<u8> = (1..=14).collect();
+        assert!(!locks_open(None, &some));
+        assert!(!locks_open(Some(8), &all));
+    }
 
     /// `SetVermilionTrashCans`: 1 → 2 or 6; 3 → 2, 4 or 8; 5 → 4 or 10;
     /// 8 → 3, 7, 9 or 13; 15 → 10 or 14.
