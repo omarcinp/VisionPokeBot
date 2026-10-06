@@ -630,6 +630,17 @@ impl Conversation {
     }
 }
 
+/// Whether a trainer battle was won during `conversation`: as it saw,
+/// or in what was learnt since it began (`learned`, the running tool's).
+fn won_during(conversation: &Conversation, learned: &[GameEvent]) -> bool {
+    conversation.battled
+        || conversation.learned_at_start.is_some_and(|start| {
+            learned
+                .get(start..)
+                .is_some_and(|l| l.iter().any(trainer_won))
+        })
+}
+
 /// A trainer battle's win: its prize money (wild battles pay none).
 pub(crate) fn trainer_won(e: &GameEvent) -> bool {
     matches!(e, GameEvent::MoneyChanged { delta, reason } if *delta > 0 && reason == "won a battle")
@@ -911,6 +922,12 @@ fn push_boulder(
 /// Finishes a conversation: saves an unrecognised one, and records the
 /// path that ran with its effects. What was recognised, for the log.
 pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<(), ToolError> {
+    // A trainer battle won while the script ran, whether or not the
+    // conversation looked again after it: a scene that ends with its
+    // battle is never asked for another step (fleet continue-5, Silph Co.
+    // 11F: GIOVANNI beaten, ¥4100 won, and "can't tell path 0 from 1"
+    // three times, the win unseen by the conversation).
+    let battled = won_during(conversation, ctx.learned());
     if let Some((frame_id, text)) = &conversation.unknown {
         save_unknown(ctx, *frame_id, text);
     }
@@ -977,7 +994,7 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
                 &conversation.recognised,
                 &conversation.answered,
                 &belief,
-                conversation.battled,
+                battled,
             )
         };
         if let Some(twin) = twin {
@@ -1036,7 +1053,7 @@ pub fn finish(ctx: &mut ToolContext<'_>, conversation: &Conversation) -> Result<
             })?;
         }
     }
-    if let Some(trainer) = battle_not_won(events, &script, path, conversation) {
+    if let Some(trainer) = battle_not_won(events, &script, path, conversation, battled) {
         ctx.emit(progress(
             "Dialogue",
             format!("{script}[{path}]: {trainer} not beaten yet; what follows isn't recorded"),
@@ -1064,9 +1081,10 @@ fn battle_not_won(
     script: &str,
     path: usize,
     conversation: &Conversation,
+    battled: bool,
 ) -> Option<String> {
     use pokebot_world::events::Effect;
-    if conversation.battled {
+    if battled {
         return None;
     }
     let does = &events.script(script)?.paths.get(path)?.does;
@@ -2434,6 +2452,35 @@ mod tests {
         );
     }
 
+    /// Fleet continue-5, Silph Co. 11F: GIOVANNI beaten (¥4100 won) as the
+    /// scene's last act, the conversation never asked again, and its paths
+    /// told apart by nothing: "can't tell path 0 from 1". A win learnt
+    /// since the conversation began counts; one before it doesn't.
+    #[test]
+    fn a_win_learnt_after_the_last_page_counts() {
+        let Some((world, data)) = world_and_data() else {
+            return;
+        };
+        let won = GameEvent::MoneyChanged {
+            delta: 4100,
+            reason: "won a battle".into(),
+        };
+        let mut c = Conversation::new(
+            Arc::clone(&world),
+            Arc::clone(&data),
+            None,
+            None,
+            Vec::new(),
+        );
+        assert!(!won_during(&c, std::slice::from_ref(&won)), "not begun");
+        c.learned_at_start = Some(1);
+        assert!(won_during(&c, &[GameEvent::BattleEnded, won.clone()]));
+        assert!(
+            !won_during(&c, &[won, GameEvent::BattleEnded]),
+            "before it began"
+        );
+    }
+
     /// Fleet continue-6, S.S. Anne's rival: path 2 fights him, path 3 is
     /// the same scene with him beaten, and they print the same words. A
     /// trainer battle won while it ran tells them apart; without one they
@@ -3098,7 +3145,7 @@ mod tests {
             );
             c.recognised = labels.iter().map(|l| l.to_string()).collect();
             c.battled = battled;
-            battle_not_won(events, script, fights, &c)
+            battle_not_won(events, script, fights, &c, c.battled)
         };
         let intro = "PokemonLeague_ChampionsRoom_Text_Intro";
         assert_eq!(
