@@ -200,6 +200,23 @@ fn trail_band(image: &RgbImage, b: u32, from_left: bool) -> bool {
     let mid = runs.len() / 2;
     let centre = runs[mid];
     let edge = runs[0].min(runs[runs.len() - 1]);
+    // A map's void runs on past the band: the rows just outside it are as
+    // black, as far, as its own edge rows (emulator, Route 8's west gate:
+    // the void right of the room, the exit mat's red and its arrow's
+    // point read as a ball, every frame a "battle wipe", and the walk
+    // stuck "letting the scene settle"). A trail's black stays in its
+    // band: the next band's ball comes from the other side.
+    let beyond = [
+        top.checked_sub(1),
+        Some(top + TRAIL_BAND).filter(|y| *y < image.height()),
+    ];
+    if beyond
+        .into_iter()
+        .flatten()
+        .any(|y| black_run(image, y, from_left).abs_diff(edge) <= 2)
+    {
+        return false;
+    }
     (centre + 8..=centre + 32).contains(&edge)
         && runs[..=mid].windows(2).all(|w| w[1] <= w[0] + 1)
         && runs[mid..].windows(2).all(|w| w[1] + 1 >= w[0])

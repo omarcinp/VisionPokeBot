@@ -1256,6 +1256,20 @@ mod tests {
         assert_ne!(o.screen.value, ScreenState::Whiteout, "{:?}", o.screen);
     }
 
+    /// Emulator, Route 8's west gate: the void right of the narrow room,
+    /// the exit mat's red and its arrow's point were read as the Poké Ball
+    /// trail into a battle, every frame, and the walk stuck "letting the
+    /// scene settle". A void's edge runs on past the band: no trail.
+    #[test]
+    fn a_rooms_void_edge_is_no_pokeball_trail() {
+        let Some(image) = fixture("emu-route8-gate-black-border-not-wipe.png") else {
+            return;
+        };
+        assert!(!detect::transition::is_pokeballs_trail(&image));
+        let o = FireRedPerception::default().observe(&frame(1, image));
+        assert_ne!(o.screen.value, ScreenState::Transition, "{:?}", o.screen);
+    }
+
     #[test]
     fn black_and_white_frames_are_transitions() {
         let mut perception = FireRedPerception::default();
@@ -2481,7 +2495,10 @@ mod tests {
     /// Switch, Route 16's north gatehouse: standing on the west mat, the
     /// map's black edge fills the left of the view and read as a battle
     /// wipe; the walk waited for it to end. A wipe changes every frame;
-    /// unchanged, it is the screen, and the player is located.
+    /// unchanged, it is the screen, and the player is located. Since the
+    /// void edge runs on past the trail's band, it is no wipe at all, from
+    /// the first frame (emulator, Route 8's west gate, where the frame
+    /// kept changing and the unchanged rule never came in).
     #[test]
     fn an_unchanging_wipe_is_the_screen() {
         let (Some(world), Some(image)) = (world(), fixture("switch-gatehouse-west-mat.png")) else {
@@ -2494,7 +2511,7 @@ mod tests {
             y: 3,
         });
         let first = p.observe(&frame(0, image.clone()));
-        assert_eq!(first.screen.value, ScreenState::Transition);
+        assert_ne!(first.screen.value, ScreenState::Transition);
         let later: Vec<_> = (1..=u64::from(STATIC_FADE_FRAMES) + 2)
             .map(|i| p.observe(&frame(i, image.clone())))
             .collect();
