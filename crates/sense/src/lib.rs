@@ -345,7 +345,7 @@ impl Sensor {
         }
         events.extend(self.field.observe(o, state));
         if let Some(world) = &self.world {
-            events.extend(shown_objects(world, state, &self.field.visible()));
+            events.extend(shown_objects(world, state, &self.field.visible(), f));
             if let Some(p) = &o.player {
                 events.extend(stood_on_items(world, &self.data, state, &p.pose));
             }
@@ -1139,10 +1139,15 @@ fn contradicted_paths(
 /// for gone and saved so, stood on its tile, and no plan could get it;
 /// fleet continue-1/3/6: Route 12's SNORLAX, unknown, assumed gone by
 /// every plan).
+/// Frames after a script set a hide flag in which the object is still
+/// seen on its way out: no sighting then says it stays.
+const SCRIPT_EXIT_FRAMES: u64 = 600;
+
 fn shown_objects(
     world: &pokebot_world::World,
     state: &GameState,
     seen: &[pokebot_state::VisibleNpc],
+    frame: u64,
 ) -> Vec<GameEvent> {
     let mut out = Vec::new();
     for npc in seen {
@@ -1157,7 +1162,22 @@ fn shown_objects(
         else {
             continue;
         };
-        let hidden = state.world.flags.get(&flag).and_then(|k| k.value) != Some(false);
+        // Hidden just now by a script (`removeobject` after a battle): the
+        // sprite still walking out is no proof it stays (fleet continue-1,
+        // the Celadon Game Corner's ROCKET seen leaving seven frames after,
+        // his hide flag read clear, and every plan held him in front of
+        // the poster).
+        let known = state.world.flags.get(&flag);
+        let leaving = known.is_some_and(|k| {
+            k.value == Some(true)
+                && k.source == pokebot_state::KnowledgeSource::Tracked
+                && k.last_verified_frame
+                    .is_some_and(|at| frame.saturating_sub(at) < SCRIPT_EXIT_FRAMES)
+        });
+        if leaving {
+            continue;
+        }
+        let hidden = known.and_then(|k| k.value) != Some(false);
         let told = out
             .iter()
             .any(|e| matches!(e, GameEvent::FlagObserved { flag: f, .. } if *f == flag));

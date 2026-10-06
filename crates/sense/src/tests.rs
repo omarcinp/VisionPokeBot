@@ -1653,3 +1653,34 @@ fn an_object_that_keeps_its_tile_stood_on_is_gone() {
     // anyway, and she walks up to the player.
     assert!(stood_on_items(&world, &data, &state, &at("RockTunnel_B1F", 11, 15)).is_empty());
 }
+
+/// Fleet continue-1, the Celadon Game Corner: the ROCKET beaten, his
+/// `removeobject` recorded, and seven frames later his sprite, walking
+/// out, read his hide flag clear; every plan held him in front of the
+/// poster. Seen just after a script hid him, he is leaving; seen long
+/// after, he is there.
+#[test]
+fn an_object_seen_leaving_after_a_script_hid_it_is_not_shown() {
+    let Some(world) = world() else { return };
+    let flag = "FLAG_HIDE_GAME_CORNER_ROCKET";
+    let mut state = GameState::default();
+    state
+        .world
+        .flags
+        .insert(flag.into(), Knowledge::tracked(true, Some(100)));
+    let grunt = pokebot_state::VisibleNpc {
+        map: "CeladonCity_GameCorner".into(),
+        x: 11,
+        y: 2,
+        local_id: Some(11),
+        facing: None,
+    };
+    assert!(shown_objects(&world, &state, std::slice::from_ref(&grunt), 107).is_empty());
+    assert_eq!(
+        shown_objects(&world, &state, &[grunt], 100 + SCRIPT_EXIT_FRAMES),
+        vec![GameEvent::FlagObserved {
+            flag: flag.into(),
+            value: false
+        }]
+    );
+}
