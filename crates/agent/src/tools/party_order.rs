@@ -28,6 +28,9 @@ pub struct LeadWith {
     to: u8,
     /// Its species, to know it leads once the state says so.
     species: String,
+    /// Its nickname as the state held it when the step began (the species
+    /// may be unread).
+    nickname: Option<String>,
     retries: Retries,
     closer: Closer,
     /// SWITCH was chosen; the next A on the first slot swaps.
@@ -57,6 +60,7 @@ impl LeadWith {
             slot,
             to,
             species: species.to_owned(),
+            nickname: None,
             retries: Retries::default(),
             closer: Closer::default(),
             switching: false,
@@ -67,14 +71,25 @@ impl LeadWith {
         }
     }
 
+    /// Whether the member stands in slot `to`, read as the party is read
+    /// for choosing it (a species known only by its nickname counts: fleet
+    /// continue-6, MUK swapped into slot 2 with its species unread, and
+    /// the swap was tried again and again, its actions opened and closed).
     fn leads(&self, state: &GameState) -> bool {
-        state
-            .party
-            .value
-            .as_ref()
-            .and_then(|p| p.get(usize::from(self.to)))
-            .and_then(|m| m.species.value.as_deref())
-            == Some(self.species.as_str())
+        let by_species = Party::from_state(state)
+            .members
+            .iter()
+            .find(|m| m.slot == self.to)
+            .is_some_and(|m| m.species == self.species);
+        let by_name = self.nickname.is_some()
+            && state
+                .party
+                .value
+                .as_ref()
+                .and_then(|p| p.get(usize::from(self.to)))
+                .and_then(|m| m.nickname.value.as_ref())
+                == self.nickname.as_ref();
+        by_species || by_name
     }
 }
 
@@ -107,6 +122,15 @@ impl ToolStep for LeadWith {
                 self.slot,
                 self.retries.phase()
             ));
+        }
+        if self.nickname.is_none() {
+            self.nickname = ctx
+                .state
+                .party
+                .value
+                .as_ref()
+                .and_then(|p| p.get(usize::from(self.slot)))
+                .and_then(|m| m.nickname.value.clone());
         }
         if self.leads(ctx.state) {
             // The swap is in the state: back to the field.
@@ -614,6 +638,76 @@ mod tests {
         let moves = lineup_for_trainers(&d, &party, "VictoryRoad_3F", |_| false);
         assert_eq!(moves, [(3, 0), (2, 1)], "{moves:?}");
         assert!(lineup_for_trainers(&d, &party, "VictoryRoad_3F", |_| true).is_empty());
+    }
+
+    /// Fleet continue-6, Victory Road 3F: MUK swapped into slot 2, its
+    /// species unread once there; the swap was tried again and again (A on
+    /// its row opened its actions, B closed them), for half an hour. The
+    /// member is known where it stands by its nickname too.
+    #[test]
+    fn a_member_moved_is_known_there_by_its_nickname() {
+        use pokebot_state::{Knowledge, Observation, Observed, PartyMenuObservation, PartyMon};
+        let mon = |species: Option<&str>, nickname: &str| PartyMon {
+            species: species.map_or_else(Knowledge::unknown, |s| Knowledge::observed(s.into(), 1)),
+            nickname: Knowledge::observed(nickname.into(), 1),
+            ..PartyMon::default()
+        };
+        let before = GameState {
+            party: Knowledge::observed(
+                vec![
+                    mon(Some("SPECIES_BLASTOISE"), "BLASTOISE"),
+                    mon(Some("SPECIES_ODDISH"), "ODDISH"),
+                    mon(Some("SPECIES_MUK"), "MUK"),
+                ],
+                1,
+            ),
+            ..GameState::default()
+        };
+        let after = GameState {
+            party: Knowledge::observed(
+                vec![
+                    mon(Some("SPECIES_BLASTOISE"), "BLASTOISE"),
+                    mon(None, "MUK"),
+                    mon(None, "ODDISH"),
+                ],
+                2,
+            ),
+            ..GameState::default()
+        };
+        let mut o = Observation::bare(
+            1,
+            Observed {
+                value: pokebot_state::ScreenState::PartyMenu,
+                detector: "test".into(),
+            },
+            Default::default(),
+        );
+        o.party_menu = Some(PartyMenuObservation {
+            count: 3,
+            selected: Some(2),
+            ..Default::default()
+        });
+        let mut step = LeadWith::to(2, "SPECIES_MUK", 1);
+        let mut events = Vec::new();
+        let mut next = |state: &GameState| {
+            let label = match step.next(&mut StepContext {
+                observation: &o,
+                state,
+                events: &mut events,
+                quiet_frames: 100,
+                frame: None,
+                learned: &[],
+            }) {
+                Decision::Act(a) => a.label,
+                Decision::Wait(w) => format!("wait: {w}"),
+                Decision::Done(d) => format!("done: {d}"),
+                Decision::Fail(f) => format!("fail: {f}"),
+            };
+            label
+        };
+        assert_eq!(next(&before), "open the member's actions");
+        assert!(!next(&after).starts_with("swap into slot"));
+        assert!(step.leads(&after));
     }
 
     /// Fleet continue-4: HYPNO in slot 5, its actions opened; the window
