@@ -381,6 +381,14 @@ impl BattleStep {
                 .map_or(slot, |row| row as u8),
             _ => slot,
         };
+        // The row aimed at is kept for the action window, where the fainted
+        // check no longer runs (Switch, Route 10: VENUSAUR in party slot 0,
+        // SPEAROW out first and fainted; the able row 1 was opened, its
+        // SEND OUT taken for slot 0's and closed, six times, then B on a
+        // send-out that can't be left, 40 times).
+        if !party.actions && party.members.get(slot as usize).is_some() {
+            self.shift_row = Some(slot);
+        }
         let press = |label: String, button: Button, expect: Expectation| {
             Decision::Act(Action::new(
                 label,
@@ -1488,6 +1496,53 @@ mod tests {
         match step.shift_in_party_menu(&menu, 3, Some("BLASTOISE")) {
             Decision::Act(a) => assert_eq!(a.label, "shift: open the member's actions"),
             _ => panic!("expected the able member chosen"),
+        }
+    }
+
+    /// Switch, Route 10: VENUSAUR in party slot 0, SPEAROW out first and
+    /// fainted, so the send-out's list (battle order) has SPEAROW in row 0.
+    /// The able row 1 was opened, its SEND OUT read as slot 0's actions
+    /// and closed, six times; then B, 40 times, on a send-out that can't
+    /// be left. The row opened is the one sent out.
+    #[test]
+    fn the_able_row_opened_for_a_fainted_slot_is_sent_out() {
+        use pokebot_vision::{FireRedPerception, PerceptionSystem};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (Ok(data), Ok(font), Ok(small)) = (
+            GameData::load(root.join("data/world/gamedata.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_normal.json")),
+            pokebot_vision::text::Font::load(root.join("data/world/font_small.json")),
+        ) else {
+            return;
+        };
+        let mut vision = FireRedPerception::default()
+            .with_font(Arc::new(font))
+            .with_small_font(Arc::new(small));
+        let mut menu = |name: &str, id: u64| {
+            let Ok(image) =
+                pokebot_video::png::load(root.join(format!("captures/fixtures/{name}.png")))
+            else {
+                return None;
+            };
+            let frame =
+                pokebot_core::NormalizedFrame::new(id, std::time::Instant::now(), image).unwrap();
+            vision.observe(&frame).party_menu
+        };
+        let (Some(list), Some(actions)) = (
+            menu("switch-sendout-fainted-lead-list", 1),
+            menu("switch-sendout-fainted-lead-actions", 2),
+        ) else {
+            return;
+        };
+        assert!(actions.actions && actions.selected == Some(1));
+        let mut step = BattleStep::new(Arc::new(data), BattlePlan::Fight, false).shifting_to(0);
+        match step.shift_in_party_menu(&list, 0, None) {
+            Decision::Act(a) => assert_eq!(a.label, "shift: open the member's actions"),
+            _ => panic!("expected the able row opened"),
+        }
+        match step.shift_in_party_menu(&actions, 0, None) {
+            Decision::Act(a) => assert_eq!(a.label, "choose SHIFT"),
+            _ => panic!("expected SEND OUT chosen"),
         }
     }
 
