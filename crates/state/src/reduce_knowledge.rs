@@ -7,6 +7,9 @@ use crate::{
     Status,
 };
 
+/// The most money the game holds (`MAX_MONEY`, src/money.c).
+pub const MAX_MONEY: u32 = 999_999;
+
 /// Applies `event` if it is a knowledge event; returns whether it was one.
 pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> bool {
     match event {
@@ -265,7 +268,9 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
         GameEvent::MoneyObserved { amount } => state.money = Knowledge::observed(*amount, frame),
         GameEvent::MoneyChanged { delta, .. } => {
             if let Some(m) = state.money.value {
-                let new = (i64::from(m) + delta).clamp(0, i64::from(u32::MAX)) as u32;
+                // The game holds ¥999,999 at most (fleet continue-6: the
+                // nugget farm's ¥1,000,000 of sales tracked as ¥1,002,832).
+                let new = (i64::from(m) + delta).clamp(0, i64::from(MAX_MONEY)) as u32;
                 state.money = Knowledge::tracked(new, state.money.last_verified_frame);
             }
         }
@@ -795,6 +800,15 @@ mod tests {
         ]);
         assert_eq!(s.money.value, Some(3600));
         assert!(s.money.is_stale());
+        // Never past what the game holds.
+        let s = run(vec![
+            GameEvent::MoneyObserved { amount: 998_000 },
+            GameEvent::MoneyChanged {
+                delta: 5000,
+                reason: "sold".into(),
+            },
+        ]);
+        assert_eq!(s.money.value, Some(MAX_MONEY));
     }
 
     fn boxed(slot: u8, species: &str) -> BoxMon {
