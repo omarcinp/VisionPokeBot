@@ -862,6 +862,12 @@ impl<'a> ToolContext<'a> {
                 ));
             }
             self.info("scheduler: recovery verified, resume suspended task");
+            // The recovery is over: the way back is a walk like any other,
+            // its health looked after (fleet continue-1: healed at
+            // Vermilion, walked back through Rock Tunnel with the scheduler
+            // still held off, four trainers in a row, the lead at a
+            // quarter of its HP, and the party whited out to the fourth).
+            self.scheduler.recovering = false;
             // Back to the task's map the way the route prices it (FLY),
             // not the suspended walker's warps and edges (Switch: Route 7's
             // training walked back from a Center six maps away each time).
