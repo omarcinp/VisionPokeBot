@@ -205,6 +205,8 @@ pub struct ToolContext<'a> {
     /// counted between its actions and during them ([`count_interrupt`]).
     interrupt_counts: Vec<std::collections::HashMap<pokebot_state::PlayerPose, u32>>,
     quiet_frames: u32,
+    /// The first frame of the quiet going on.
+    quiet_since: Option<u64>,
     last_map: Option<String>,
     last_dialogue_frame: Option<u64>,
     outside: OutsideRecovery,
@@ -291,6 +293,7 @@ impl<'a> ToolContext<'a> {
             learned: Vec::new(),
             interrupt_counts: Vec::new(),
             quiet_frames: 0,
+            quiet_since: None,
             last_map: None,
             last_dialogue_frame: None,
             outside: OutsideRecovery::default(),
@@ -554,11 +557,19 @@ impl<'a> ToolContext<'a> {
             || o.pc_storage.is_some()
             || o.screen.value == ScreenState::Transition
             || self.runtime.outside_game();
-        self.quiet_frames = if busy {
-            0
+        // Game frames, not frames processed: the Switch processes about
+        // one in seven, so 90 frames processed took ten seconds, as long as
+        // a step's patience (Switch, Pokémon Tower 6F: the party audit
+        // waited "for the scene to settle" until its retries ran out, four
+        // cycles running, the field on screen all along).
+        if busy {
+            self.quiet_since = None;
+            self.quiet_frames = 0;
         } else {
-            self.quiet_frames.saturating_add(1)
-        };
+            let since = *self.quiet_since.get_or_insert(o.frame_id);
+            self.quiet_frames =
+                u32::try_from(o.frame_id.saturating_sub(since) + 1).unwrap_or(u32::MAX);
+        }
         if o.dialogue.is_some() {
             self.last_dialogue_frame = Some(o.frame_id);
         }
