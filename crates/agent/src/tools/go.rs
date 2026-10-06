@@ -1064,9 +1064,22 @@ fn walk_legs_from(
         ctx.pose()
             .is_some_and(|p| arrived_off_route(&p, dest.map(), leg))
     };
+    // A walk across maps meets each one's unbeaten trainers with the
+    // party in the order they call for (not a walk about one map: a
+    // training's trainee leads there on purpose).
+    let travels = legs.iter().any(|l| l.from.map != l.to.map);
+    let mut lined_up: Option<&str> = None;
     for (i, leg) in legs.iter().enumerate() {
         if i > 0 && arrived(ctx, leg) {
             break;
+        }
+        if travels && lined_up != Some(leg.from.map.as_str()) {
+            lined_up = Some(leg.from.map.as_str());
+            match super::party_order::line_up_for(ctx, &leg.from.map) {
+                Err(e @ (ToolError::Stopped | ToolError::Device(_))) => return Err(e),
+                Err(e) => ctx.info(format!("line-up for {}: {e}", leg.from.map)),
+                Ok(()) => {}
+            }
         }
         match walk_leg(ctx, &world, legs, i, dest.map()) {
             Err(ToolError::Failed(_)) if arrived(ctx, leg) => break,

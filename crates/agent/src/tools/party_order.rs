@@ -20,9 +20,12 @@ use crate::{Action, Decision, Expectation, Outcome};
 /// A better fighter leads only when its chance beats the lead's by this.
 pub const LEAD_MARGIN: f64 = 0.05;
 
-/// Moves party slot `slot` to the front.
+/// Moves party slot `slot` to the front (or to slot `to`, the second for
+/// a double battle).
 pub struct LeadWith {
     slot: u8,
+    /// The slot it goes to.
+    to: u8,
     /// Its species, to know it leads once the state says so.
     species: String,
     retries: Retries,
@@ -45,8 +48,14 @@ const MAX_OPENS: u32 = 6;
 
 impl LeadWith {
     pub fn new(slot: u8, species: &str) -> Self {
+        Self::to(slot, species, 0)
+    }
+
+    /// Moves party slot `slot` to slot `to`.
+    pub fn to(slot: u8, species: &str, to: u8) -> Self {
         Self {
             slot,
+            to,
             species: species.to_owned(),
             retries: Retries::default(),
             closer: Closer::default(),
@@ -63,7 +72,7 @@ impl LeadWith {
             .party
             .value
             .as_ref()
-            .and_then(|p| p.first())
+            .and_then(|p| p.get(usize::from(self.to)))
             .and_then(|m| m.species.value.as_deref())
             == Some(self.species.as_str())
     }
@@ -80,7 +89,7 @@ impl ToolStep for LeadWith {
         } else if action.label == "choose SWITCH" {
             self.switching = true;
             self.opened = false;
-        } else if action.label == "swap into the first slot" {
+        } else if action.label.starts_with("swap into slot") {
             self.swapped = true;
         } else if action.label == "open the member's actions" {
             self.opened = true;
@@ -110,7 +119,7 @@ impl ToolStep for LeadWith {
                 self.retries.enter("reordered");
                 if let Some(n) = ctx.state.party.value.as_ref().map(Vec::len) {
                     let mut order: Vec<u8> = (0..n as u8).collect();
-                    order.swap(0, usize::from(self.slot));
+                    order.swap(usize::from(self.to), usize::from(self.slot));
                     ctx.events.push(GameEvent::PartyReordered { order });
                     self.reordered = true;
                 }
@@ -120,23 +129,28 @@ impl ToolStep for LeadWith {
         }
         if let Some(party) = &o.party_menu {
             if !party.actions && self.switching {
-                // "Move to where?": the ▶ to the first slot, then A.
+                // "Move to where?": the ▶ to the slot it goes to, then A.
                 self.retries.enter("switching");
                 let Some(at) = party.selected else {
                     return self.retries.wait(o, "reading the switch cursor");
                 };
-                if at == 0 {
+                if at == self.to {
                     return self.retries.act(
-                        "swap into the first slot",
+                        format!("swap into slot {}", self.to),
                         Button::A,
                         Expectation::InputsDone,
                         SCREEN_FRAMES,
                     );
                 }
+                let (button, next) = if at < self.to {
+                    (Button::Down, at + 1)
+                } else {
+                    (Button::Up, at - 1)
+                };
                 return self.retries.act(
-                    "switch: Up toward the first slot",
-                    Button::Up,
-                    Expectation::PartySelected(at - 1),
+                    format!("switch: {button:?} toward slot {}", self.to),
+                    button,
+                    Expectation::PartySelected(next),
                     CURSOR_FRAMES,
                 );
             }
@@ -299,6 +313,114 @@ pub fn fighter_for_wilds(data: &GameData, party: &Party, map: &str) -> Option<(u
         .iter()
         .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))?;
     (slot != 0 && p_best > p_lead + LEAD_MARGIN).then_some((slot, p_best, p_lead))
+}
+
+/// The order `map`'s unbeaten trainers call for: the member with the best
+/// chance over their Pokémon leads, and when one of them fights double
+/// battles, the next best goes second (both come out). Moves as (slot, to),
+/// each when it beats the one there by [`LEAD_MARGIN`]; the second judged
+/// with the first already moved.
+pub fn lineup_for_trainers(
+    data: &GameData,
+    party: &Party,
+    map: &str,
+    beaten: impl Fn(&str) -> bool,
+) -> Vec<(u8, u8)> {
+    let trainers: Vec<&pokebot_gamedata::Trainer> = data
+        .map_trainers
+        .get(map)
+        .into_iter()
+        .flatten()
+        .filter(|t| !beaten(&t.trainer))
+        .filter_map(|t| data.trainers.get(&t.trainer))
+        .collect();
+    let foes: Vec<pokebot_planner::Combatant> = trainers
+        .iter()
+        .flat_map(|t| &t.party)
+        .filter_map(|m| {
+            let moves = m
+                .moves
+                .clone()
+                .unwrap_or_else(|| data.default_moves(&m.species, m.level));
+            let iv = u32::from(m.iv) * 31 / 255;
+            pokebot_planner::Combatant::new(data, &m.species, m.level, moves, iv)
+        })
+        .collect();
+    if foes.is_empty() {
+        return Vec::new();
+    }
+    let chance = |us: &pokebot_planner::Combatant| {
+        foes.iter()
+            .map(|them| pokebot_planner::matchup(data, us, them).p_win)
+            .sum::<f64>()
+            / foes.len() as f64
+    };
+    let mut odds: Vec<(u8, f64)> = fighters(data, party)
+        .iter()
+        .map(|(slot, c)| (*slot, chance(c)))
+        .collect();
+    let mut moves = Vec::new();
+    let places = if trainers.iter().any(|t| t.double) {
+        2
+    } else {
+        1
+    };
+    for to in 0..places {
+        let here = odds
+            .iter()
+            .find(|(slot, _)| *slot == to)
+            .map_or(0.0, |o| o.1);
+        let Some(&(slot, best)) = odds
+            .iter()
+            .filter(|(slot, _)| *slot >= to)
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+        else {
+            break;
+        };
+        if slot != to && best > here + LEAD_MARGIN {
+            moves.push((slot, to));
+            for o in odds.iter_mut() {
+                if o.0 == slot {
+                    o.0 = to;
+                } else if o.0 == to {
+                    o.0 = slot;
+                }
+            }
+        }
+    }
+    moves
+}
+
+/// On the way across `map`, its unbeaten trainers meet the party in the
+/// order they call for ([`lineup_for_trainers`]): their battles can't be
+/// fled, and a sighting the walk can't go round comes unplanned (fleet
+/// continue-6, Victory Road 3F: COOL COUPLE RAY & TYRA's double battle
+/// met ODDISH and DROWZEE Lv13, BLASTOISE Lv65 behind; two white-outs).
+pub fn line_up_for(ctx: &mut ToolContext<'_>, map: &str) -> Result<(), ToolError> {
+    for _ in 0..2 {
+        let party = Party::from_state(ctx.state());
+        let state = ctx.state();
+        let beaten = |t: &str| state.world.flags.get(t).and_then(|k| k.value) == Some(true);
+        let Some(&(slot, to)) = lineup_for_trainers(&ctx.data, &party, map, beaten).first() else {
+            return Ok(());
+        };
+        let species = party
+            .members
+            .iter()
+            .find(|m| m.slot == slot)
+            .map(|m| m.species.clone())
+            .unwrap_or_default();
+        ctx.emit(progress(
+            "Party",
+            format!(
+                "{} goes to slot {} for {map}'s trainers",
+                crate::party::display_name(&species),
+                to + 1
+            ),
+        ))?;
+        ctx.drive(&mut LeadWith::to(slot, &species, to))?;
+    }
+    Ok(())
 }
 
 /// Before a long stay on `map` (a boulder puzzle), the member fittest
@@ -468,6 +590,30 @@ mod tests {
             fighter_for_wilds(&d, &party, "PalletTown_PlayersHouse_1F"),
             None
         );
+    }
+
+    /// Fleet continue-6, Victory Road 3F: RAY & TYRA's double battle met
+    /// ODDISH and DROWZEE Lv13 with BLASTOISE Lv65 and MUK Lv38 behind.
+    /// The floor's unbeaten trainers call for BLASTOISE first and, for the
+    /// double battle, MUK second; beaten, they call for nothing.
+    #[test]
+    fn a_maps_double_battle_lines_up_two() {
+        let Some(d) = data() else { return };
+        let member = |slot: u8, species: &str, level: u8| Member {
+            slot,
+            ..Member::new(&d, species, level)
+        };
+        let party = Party {
+            members: vec![
+                member(0, "SPECIES_ODDISH", 13),
+                member(1, "SPECIES_DROWZEE", 13),
+                member(2, "SPECIES_MUK", 38),
+                member(3, "SPECIES_BLASTOISE", 65),
+            ],
+        };
+        let moves = lineup_for_trainers(&d, &party, "VictoryRoad_3F", |_| false);
+        assert_eq!(moves, [(3, 0), (2, 1)], "{moves:?}");
+        assert!(lineup_for_trainers(&d, &party, "VictoryRoad_3F", |_| true).is_empty());
     }
 
     /// Fleet continue-4: HYPNO in slot 5, its actions opened; the window
