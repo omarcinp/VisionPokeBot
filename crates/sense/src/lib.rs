@@ -347,7 +347,7 @@ impl Sensor {
         if let Some(world) = &self.world {
             events.extend(shown_objects(world, state, &self.field.visible()));
             if let Some(p) = &o.player {
-                events.extend(stood_on_items(world, state, &p.pose));
+                events.extend(stood_on_items(world, &self.data, state, &p.pose));
             }
         }
         if let (Some(world), Some((map, absent))) =
@@ -1172,18 +1172,33 @@ fn shown_objects(
 /// is set (fleet continue-5, Rocket Hideout B2F: the MOON STONE's ball at
 /// (2, 5) was taken but unknown; the player stepped onto its tile, A found
 /// nothing, and every plan tried it again: "does not answer to A").
+///
+/// So is any object that never leaves its tile: one that doesn't wander,
+/// and no trainer who walks up to the player once seen (fleet continue-5,
+/// the Celadon Game Corner's ROCKET, beaten unrecorded: he was seen gone,
+/// the player stood on his tile, and every plan talked to him there, "does
+/// not answer to A", out of replans).
 fn stood_on_items(
     world: &pokebot_world::World,
+    data: &pokebot_gamedata::GameData,
     state: &GameState,
     pose: &pokebot_state::PlayerPose,
 ) -> Vec<GameEvent> {
     let Some(map) = world.map(&pose.map) else {
         return Vec::new();
     };
+    let walks_up = |local_id: u32| {
+        data.map_trainers
+            .get(&pose.map)
+            .is_some_and(|ts| ts.iter().any(|t| t.local_id == local_id && t.sight > 0))
+    };
     map.objects
         .iter()
         .filter(|o| (o.x, o.y) == (Some(pose.x), Some(pose.y)))
-        .filter(|o| o.graphics.as_deref() == Some("OBJ_EVENT_GFX_ITEM_BALL"))
+        .filter(|o| {
+            o.graphics.as_deref() == Some("OBJ_EVENT_GFX_ITEM_BALL")
+                || (!pokebot_world::obstacles::is_wanderer(o) && !walks_up(o.local_id))
+        })
         .filter_map(|o| o.flag.clone())
         .filter(|f| !pokebot_world::gates::is_local_flag(f))
         .filter(|f| state.world.flags.get(f).and_then(|k| k.value) != Some(true))

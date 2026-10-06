@@ -1600,7 +1600,9 @@ fn the_old_mans_catch_is_not_the_players() {
 /// gone; a ball beside the player says nothing.
 #[test]
 fn an_item_ball_stood_on_is_gone() {
-    let Some(world) = world() else { return };
+    let (Some(world), Some(data)) = (world(), data()) else {
+        return;
+    };
     let state = GameState::default();
     let flag = "FLAG_HIDE_ROCKET_HIDEOUT_B2F_MOON_STONE";
     let at = |x, y| pokebot_state::PlayerPose {
@@ -1609,17 +1611,45 @@ fn an_item_ball_stood_on_is_gone() {
         y,
     };
     assert_eq!(
-        stood_on_items(&world, &state, &at(2, 5)),
+        stood_on_items(&world, &data, &state, &at(2, 5)),
         vec![GameEvent::FlagObserved {
             flag: flag.into(),
             value: true
         }]
     );
-    assert!(stood_on_items(&world, &state, &at(2, 4)).is_empty());
+    assert!(stood_on_items(&world, &data, &state, &at(2, 4)).is_empty());
     let mut taken = state.clone();
     taken
         .world
         .flags
         .insert(flag.into(), Knowledge::observed(true, 1));
-    assert!(stood_on_items(&world, &taken, &at(2, 5)).is_empty());
+    assert!(stood_on_items(&world, &data, &taken, &at(2, 5)).is_empty());
+}
+
+/// Fleet continue-5, the Celadon Game Corner: its ROCKET (sight 0, he only
+/// battles when spoken to) beaten unrecorded; the player stood on his tile
+/// and every plan talked to him there. Stood on, an object that never
+/// leaves its tile is gone; a trainer who walks up to the player once
+/// seen may have left his, and says nothing.
+#[test]
+fn an_object_that_keeps_its_tile_stood_on_is_gone() {
+    let (Some(world), Some(data)) = (world(), data()) else {
+        return;
+    };
+    let state = GameState::default();
+    let at = |map: &str, x, y| pokebot_state::PlayerPose {
+        map: map.into(),
+        x,
+        y,
+    };
+    assert_eq!(
+        stood_on_items(&world, &data, &state, &at("CeladonCity_GameCorner", 11, 2)),
+        vec![GameEvent::FlagObserved {
+            flag: "FLAG_HIDE_GAME_CORNER_ROCKET".into(),
+            value: true
+        }]
+    );
+    // PICNICKER SOFIA, Rock Tunnel B1F (11, 15), sight 4: no hide flag
+    // anyway, and she walks up to the player.
+    assert!(stood_on_items(&world, &data, &state, &at("RockTunnel_B1F", 11, 15)).is_empty());
 }
