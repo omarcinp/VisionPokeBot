@@ -269,6 +269,9 @@ impl Run<'_, '_> {
         let mut reason = "start".to_string();
         let mut plan_no = 0u32;
         self.saved_in_gauntlet = self.in_gauntlet(ctx)?;
+        for event in crate::tools::dialogue::spent_trigger_facts(&ctx.world, ctx.state()) {
+            ctx.emit(event)?;
+        }
         if let Some(config) = &self.opts.nugget_farm {
             match nugget_farm::resume(ctx, config) {
                 Ok(Some(done)) => {

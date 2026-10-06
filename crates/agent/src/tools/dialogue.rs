@@ -2043,6 +2043,113 @@ fn scripted_battle(world: &World, script: &str, path: usize) -> Option<String> {
 /// The vars a trigger on `tile` of `map` (running `script`) is armed by
 /// (`var == v`), each with the other value the script sets it to: what
 /// it holds when the trigger, stood on, doesn't fire.
+/// What the triggers known spent leave, not yet in the belief: a
+/// trigger's scene var known past the value that arms it, set by its
+/// script, means the script ran ([`settled_after`]). Fleet continue-5:
+/// GIOVANNI's trigger learnt spent and saved before that rule, the
+/// SAFFRON ROCKETS' flag still unknown at every start after.
+pub fn spent_trigger_facts(world: &World, state: &GameState) -> Vec<GameEvent> {
+    let Some(events) = world.events() else {
+        return Vec::new();
+    };
+    let mut out: Vec<GameEvent> = Vec::new();
+    for t in &events.triggers {
+        let Some(script) = t.script.as_deref() else {
+            continue;
+        };
+        for c in &t.when {
+            let Condition::Var { var, cmp } = c else {
+                continue;
+            };
+            let Some(armed) = cmp.eq.as_ref().and_then(Val::as_int) else {
+                continue;
+            };
+            let Some(now) = state.world.vars.get(var).and_then(|k| k.value) else {
+                continue;
+            };
+            if i64::from(now) == armed {
+                continue;
+            }
+            for (flag, value) in settled_after(events, script, &[(var.clone(), now)]) {
+                let known = state.world.flags.get(&flag).and_then(|k| k.value);
+                let told = out
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::FlagObserved { flag: f, .. } if *f == flag));
+                if known.is_none() && !told {
+                    out.push(GameEvent::FlagObserved { flag, value });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The flags (trainers' defeats among them) every path of `script` that
+/// sets the vars `ran` leaves at the same value: what holds once it ran,
+/// whichever path it took (each path's conditions, then its effects).
+fn settled_after(
+    events: &pokebot_world::events::Events,
+    script: &str,
+    ran: &[(String, u16)],
+) -> Vec<(String, bool)> {
+    use std::collections::BTreeMap;
+    let Some(s) = events.script(script) else {
+        return Vec::new();
+    };
+    let sets = |p: &pokebot_world::events::ScriptPath| {
+        ran.iter().all(|(var, n)| {
+            p.does.iter().any(|e| {
+                matches!(e, Effect::Var { var: v, change }
+                    if v == var && change.eq.as_ref().and_then(Val::as_int) == Some(i64::from(*n)))
+            })
+        })
+    };
+    let mut common: Option<BTreeMap<String, bool>> = None;
+    for p in s.paths.iter().filter(|p| !ran.is_empty() && sets(p)) {
+        let mut after = BTreeMap::new();
+        for c in &p.when {
+            match c {
+                Condition::Flag { flag, is } => {
+                    after.insert(flag.clone(), *is);
+                }
+                Condition::Trainer { trainer, defeated } => {
+                    after.insert(trainer.clone(), *defeated);
+                }
+                _ => {}
+            }
+        }
+        for e in &p.does {
+            match e {
+                Effect::Set { set } => {
+                    after.insert(set.clone(), true);
+                }
+                Effect::Clear { clear } => {
+                    after.insert(clear.clone(), false);
+                }
+                Effect::Defeated { defeated } => {
+                    after.insert(defeated.clone(), true);
+                }
+                Effect::Undefeated { undefeated } => {
+                    after.insert(undefeated.clone(), false);
+                }
+                _ => {}
+            }
+        }
+        common = Some(match common {
+            None => after,
+            Some(c) => c
+                .into_iter()
+                .filter(|(f, v)| after.get(f) == Some(v))
+                .collect(),
+        });
+    }
+    common
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(f, _)| !pokebot_world::gates::is_local_flag(f))
+        .collect()
+}
+
 fn disarmed(world: &World, script: &str, map: &str, tile: (i32, i32)) -> Vec<(String, u16)> {
     let Some(events) = world.events() else {
         return Vec::new();
@@ -2273,6 +2380,19 @@ fn run_script(
                             value: *value,
                         })?;
                     }
+                    // The script ran, whichever path: what every path
+                    // leaves holds (fleet continue-5, Silph Co. 11F:
+                    // GIOVANNI's trigger spent, the SAFFRON ROCKETS' flag
+                    // only it sets left unknown, and "no plan establishes
+                    // FLAG_SYS_GAME_CLEAR").
+                    if let Some(events) = ctx.world.events() {
+                        for (flag, value) in settled_after(events, script, &learnt) {
+                            let known = ctx.state().world.flags.get(&flag).and_then(|k| k.value);
+                            if known != Some(value) {
+                                ctx.emit(GameEvent::FlagObserved { flag, value })?;
+                            }
+                        }
+                    }
                     // Kept past a reload: the game is as it was saved, and
                     // the save's checkpoint is written with what was learnt
                     // (fleet continue-5, Silph Co. 11F: GIOVANNI beaten
@@ -2450,6 +2570,63 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Fleet continue-5, Silph Co. 11F: GIOVANNI's trigger found spent,
+    /// its scene var learnt, but the SAFFRON ROCKETS' flag only its script
+    /// sets left unknown: "no plan establishes FLAG_SYS_GAME_CLEAR". What
+    /// every path setting the var leaves holds once it ran.
+    #[test]
+    fn a_spent_trigger_leaves_what_every_path_does() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let events = world.events().unwrap();
+        let settled = settled_after(
+            events,
+            "SilphCo_11F_EventScript_GiovanniTriggerLeft",
+            &[("VAR_MAP_SCENE_SILPH_CO_11F".into(), 1)],
+        );
+        for want in [
+            ("TRAINER_BOSS_GIOVANNI_2", true),
+            ("FLAG_HIDE_SAFFRON_ROCKETS", true),
+            ("FLAG_HIDE_SAFFRON_CIVILIANS", false),
+        ] {
+            assert!(
+                settled.contains(&(want.0.to_owned(), want.1)),
+                "{want:?} in {settled:?}"
+            );
+        }
+        assert!(
+            settled_after(events, "SilphCo_11F_EventScript_GiovanniTriggerLeft", &[]).is_empty()
+        );
+    }
+
+    /// Fleet continue-5: the spent trigger saved before its facts were
+    /// learnt; at every start its scene var at 1 brings them back.
+    #[test]
+    fn a_trigger_known_spent_at_the_start_brings_its_facts() {
+        let Some((world, _)) = world_and_data() else {
+            return;
+        };
+        let mut state = GameState::default();
+        state.world.vars.insert(
+            "VAR_MAP_SCENE_SILPH_CO_11F".into(),
+            pokebot_state::Knowledge::observed(1, 1),
+        );
+        let facts = spent_trigger_facts(&world, &state);
+        assert!(facts.contains(&GameEvent::FlagObserved {
+            flag: "FLAG_HIDE_SAFFRON_ROCKETS".into(),
+            value: true,
+        }));
+        // Armed still: nothing.
+        state.world.vars.insert(
+            "VAR_MAP_SCENE_SILPH_CO_11F".into(),
+            pokebot_state::Knowledge::observed(0, 1),
+        );
+        assert!(!spent_trigger_facts(&world, &state)
+            .iter()
+            .any(|e| matches!(e, GameEvent::FlagObserved { flag, .. } if flag == "FLAG_HIDE_SAFFRON_ROCKETS")));
     }
 
     /// Fleet continue-5, Silph Co. 11F: GIOVANNI beaten (¥4100 won) as the
