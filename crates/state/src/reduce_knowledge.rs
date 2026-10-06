@@ -432,6 +432,20 @@ pub(crate) fn apply(state: &mut GameState, frame: u64, event: &GameEvent) -> boo
             state.world.infeasible.clear();
         }
         GameEvent::FlagObserved { flag, value } => {
+            // A belief the screen overturns: what was found infeasible on
+            // it may not be any more (fleet continue-1: the Game Corner
+            // poster, "no path" past a grunt long gone, stayed infeasible
+            // after he was seen gone, and the shut stairs were walked at
+            // for hours).
+            let overturned = state
+                .world
+                .flags
+                .get(flag)
+                .and_then(|k| k.value)
+                .is_some_and(|was| was != *value);
+            if overturned {
+                state.world.infeasible.clear();
+            }
             state
                 .world
                 .flags
@@ -651,6 +665,25 @@ mod tests {
             slot: 0,
             mon: Box::new(mon),
         }
+    }
+
+    /// Fleet continue-1: the Game Corner poster was infeasible ("no path"
+    /// past a grunt believed there); once he was seen gone, it stayed so
+    /// for the session. A flag the screen overturns lifts the session's
+    /// infeasible intents; one learnt afresh or confirmed doesn't.
+    #[test]
+    fn an_overturned_flag_lifts_the_infeasible_intents() {
+        let flag = |value| GameEvent::FlagObserved {
+            flag: "FLAG_HIDE_GAME_CORNER_ROCKET".into(),
+            value,
+        };
+        let poster = || GameEvent::IntentInfeasible {
+            intent: "RunScript(CeladonCity_GameCorner_EventScript_Poster[0])".into(),
+        };
+        let s = run(vec![poster(), flag(false), flag(false)]);
+        assert_eq!(s.world.infeasible.len(), 1, "learnt, then confirmed");
+        let s = run(vec![flag(false), poster(), flag(true)]);
+        assert!(s.world.infeasible.is_empty());
     }
 
     #[test]
