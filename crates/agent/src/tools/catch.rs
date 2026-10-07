@@ -574,7 +574,20 @@ pub fn reachable_grass_spot(
     pose: &pokebot_state::PlayerPose,
 ) -> Option<(i32, i32)> {
     let m = nav.world.map(&pose.map)?;
-    let reached = crate::nav::walkable_on_map(&nav.world, pose, &nav.gone);
+    // Shut passages and tiles found blocked count, as for the walk there
+    // (fleet continue-6, Victory Road 2F: from (34, 17) the spot was
+    // (34, 14), behind 4 tiles the walk held shut; "no path to (34, 14)",
+    // every cycle, the run's recourses spent).
+    let mut shut: pokebot_world::path::Obstacles = nav.gates.closed_on(&pose.map).collect();
+    shut.extend(
+        nav.blocked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .on_map(&pose.map),
+    );
+    let opened = nav.gates.opened_on(&pose.map);
+    let reached =
+        crate::nav::walkable_on_map_with(&nav.world, pose, &nav.gone, &shut, Some(&opened));
     let grass = |x: i32, y: i32| {
         reached.contains(&(x, y)) && m.tile(x, y).is_some_and(|t| encounter_tile(&t))
     };
@@ -1166,6 +1179,45 @@ mod tests {
         party.members[0].slot = 0;
         party.members[4].slot = 4;
         assert_eq!(catcher_for(&data, &party, "VictoryRoad_2F"), None);
+    }
+
+    /// Fleet continue-6, Victory Road 2F: from (34, 17) the training's spot
+    /// was (34, 14), behind tiles the walk held shut ("no path to (34, 14)
+    /// … 4 shut", every cycle). Shut tiles count for the spot as for the
+    /// walk: with the way out of (34, 17) shut, the spot is where it stands.
+    #[test]
+    fn a_training_spot_is_not_behind_shut_tiles() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let world = Arc::new(world);
+        let pose = PlayerPose {
+            map: "VictoryRoad_2F".into(),
+            x: 34,
+            y: 17,
+        };
+        let nav = |gates: pokebot_world::gates::GateTiles| NavParts {
+            story: None,
+            world: Arc::clone(&world),
+            gone: Gone::new(),
+            maybe_gone: Gone::new(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Arc::new(gates),
+            data: None,
+        };
+        assert_eq!(
+            reachable_grass_spot(&nav(Default::default()), &pose),
+            Some((34, 14))
+        );
+        let mut shut = pokebot_world::gates::GateTiles::default();
+        for t in [(33, 17), (35, 17), (34, 16), (34, 18)] {
+            shut.closed
+                .entry("VictoryRoad_2F".into())
+                .or_default()
+                .insert(t);
+        }
+        let spot = reachable_grass_spot(&nav(shut), &pose);
+        assert!(spot.is_none_or(|s| s == (34, 17)), "{spot:?}");
     }
 
     /// Switch, Route 21 with SURF: from (13, 48) none of the map's grass is

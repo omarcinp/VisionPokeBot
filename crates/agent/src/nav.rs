@@ -1524,14 +1524,28 @@ pub fn route_search_via(
 /// Indigo Plateau's approach and the stretch south of Victory Road) keeps
 /// the other part out.
 pub fn walkable_on_map(world: &World, pose: &PlayerPose, gone: &Gone) -> HashSet<(i32, i32)> {
+    walkable_on_map_with(world, pose, gone, &Obstacles::new(), None)
+}
+
+/// [`walkable_on_map`], with `extra` tiles blocked (passages shut, tiles
+/// learnt blocked) and `opened` walls walkable, as the walk itself takes
+/// them.
+pub fn walkable_on_map_with(
+    world: &World,
+    pose: &PlayerPose,
+    gone: &Gone,
+    extra: &Obstacles,
+    opened: Option<&Obstacles>,
+) -> HashSet<(i32, i32)> {
     let Some(map) = world.map(&pose.map) else {
         return HashSet::new();
     };
-    let obstacles = object_obstacles(map, gone);
+    let mut obstacles = object_obstacles(map, gone);
+    obstacles.extend(extra.iter().copied());
     let walk = Walk {
         obstacles: &obstacles,
         surf: false,
-        opened: None,
+        opened,
     };
     let mut seen = HashSet::from([(pose.x, pose.y)]);
     let mut queue = VecDeque::from([(pose.x, pose.y)]);
