@@ -189,6 +189,9 @@ pub struct ToolContext<'a> {
     fighting: Vec<String>,
     /// The dark map FLASH was used on (or found already lit) this visit.
     pub lit_map: Option<String>,
+    /// The map SURF was used on this visit: the player may be on its water
+    /// whatever tile the pose reads.
+    pub surfed_on: Option<String>,
     /// Whether a long walk may save on the way (the run saves, and isn't
     /// in a gauntlet a reload couldn't help): set by the goal per step.
     pub save_on_the_way: bool,
@@ -284,6 +287,7 @@ impl<'a> ToolContext<'a> {
             running: Vec::new(),
             fighting: Vec::new(),
             lit_map: None,
+            surfed_on: None,
             map_visits: 0,
             save_on_the_way: false,
             last_saved: std::time::Instant::now(),
@@ -603,6 +607,7 @@ impl<'a> ToolContext<'a> {
                 self.map_visits += 1;
                 // A FLASH lights the map it was used on, for this visit.
                 self.lit_map = None;
+                self.surfed_on = None;
                 // What the last map showed is kept (a crash loses at most
                 // one map's worth).
                 if let Err(e) = self.ledger.store() {

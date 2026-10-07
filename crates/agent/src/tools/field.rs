@@ -1068,6 +1068,9 @@ pub fn use_on_obstacle(
                     ctx.gone.insert((gate.map.clone(), gate.local_id));
                 }
             }
+            if mv == FieldMove::Surf {
+                ctx.surfed_on = ctx.pose().map(|p| p.map);
+            }
             ctx.emit(progress(
                 "FieldMove",
                 format!("{} used at {at:?}", mv.label()),

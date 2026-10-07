@@ -214,6 +214,12 @@ impl GoStep {
 
     /// A leg to any tile of `map`: routed to a walkable tile near its
     /// middle, done on arrival on the map.
+    /// The walk takes the player for surfing from the start.
+    pub fn surfing(mut self) -> Self {
+        self.nav.start_surfing();
+        self
+    }
+
     pub fn to_map(parts: &NavParts, map: &str) -> Self {
         let (x, y) = map_tile(&parts.world, map).unwrap_or((0, 0));
         let mut step = Self::with(
@@ -463,8 +469,28 @@ pub fn go_to_map(
     map: &str,
 ) -> Result<Option<PlayerPose>, super::ToolError> {
     let mut step = GoStep::to_map(&NavParts::of(ctx), map);
-    ctx.drive(&mut step)?;
+    match ctx.drive(&mut step) {
+        // Surfed on this map, the player is on its water, though the pose
+        // may read a shore tile (fleet continue-1, Pallet Town: SURF used
+        // at (10, 19), the pose read (6, 19) among lookalike water, and
+        // the walk to Route 21's edge found "no path" on foot, 8 times).
+        Err(ToolError::Failed(why))
+            if why.starts_with("no path") && surfed_here(ctx.surfed_on.as_deref(), ctx.pose()) =>
+        {
+            ctx.info(format!("{why}; surfed here: walking as surfing"));
+            let mut step = GoStep::to_map(&NavParts::of(ctx), map).surfing();
+            ctx.drive(&mut step)?;
+        }
+        r => {
+            r?;
+        }
+    }
     Ok(ctx.pose())
+}
+
+/// Whether SURF was used on the map the player is on (`surfed_on`).
+fn surfed_here(surfed_on: Option<&str>, pose: Option<PlayerPose>) -> bool {
+    surfed_on.is_some_and(|m| pose.is_some_and(|p| p.map == m))
 }
 
 impl Tool for GoTool {
@@ -1408,6 +1434,40 @@ impl From<&Destination> for Dest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fleet continue-1, Pallet Town: SURF used at (10, 19), the pose read
+    /// (6, 19) on the shore among lookalike water, and the walk to Route
+    /// 21's edge found "no path" on foot. Surfed on the player's map, the
+    /// walk is tried as surfing.
+    #[test]
+    fn a_walk_after_surf_on_the_map_may_surf() {
+        let pose = |map: &str| {
+            Some(PlayerPose {
+                map: map.into(),
+                x: 6,
+                y: 19,
+            })
+        };
+        assert!(surfed_here(Some("PalletTown"), pose("PalletTown")));
+        assert!(!surfed_here(Some("Route21_North"), pose("PalletTown")));
+        assert!(!surfed_here(None, pose("PalletTown")));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = World::load(&dir) else { return };
+        let parts = NavParts {
+            story: None,
+            world: Arc::new(world),
+            gone: Default::default(),
+            maybe_gone: Default::default(),
+            syncer: None,
+            blocked: Default::default(),
+            gates: Default::default(),
+            data: None,
+        };
+        assert!(GoStep::to_map(&parts, "Route21_North")
+            .surfing()
+            .nav
+            .surfing());
+    }
 
     /// Switch: Route 10 to Route 16, hours of walking, never done before a
     /// restart, and never saved: eight hours went back to Route 10. A walk
