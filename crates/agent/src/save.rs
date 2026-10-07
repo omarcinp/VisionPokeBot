@@ -109,8 +109,16 @@ impl Task for SaveGameTask {
                     // the bottom is the Trainer Card there (fleet
                     // continue-5, the Safari Zone: RETIRE, POKéDEX, …,
                     // the card opened eight times and "could not save").
+                    // Read to its last entry, EXIT, is whole too, whatever
+                    // the window's rows were taken to be (fleet continue-1,
+                    // the Safari Zone: RETIRE … EXIT read, the row count
+                    // off, SAVE's place opened the Trainer Card, twelve
+                    // probes failed "could not save").
                     let lines = &o.menu_lines;
-                    if lines.len() == usize::from(menu.rows)
+                    let whole = lines.len() == usize::from(menu.rows)
+                        || (lines.len() >= 5
+                            && lines.last().is_some_and(|l| crate::bag::fits("EXIT", l)));
+                    if whole
                         && !lines.is_empty()
                         && !lines.iter().any(|l| crate::bag::fits("SAVE", l))
                     {
@@ -501,6 +509,15 @@ mod tests {
         assert_eq!(close.label, "close the Start menu");
         let closed = observe(ScreenState::Unknown);
         assert!(matches!(next(&mut task, &closed), Decision::Fail(why) if why == NO_SAVE_HERE));
+        // The window's rows read off (fleet continue-1): read to EXIT, it
+        // is whole all the same.
+        let mut off = safari.clone();
+        off.menu.as_mut().unwrap().rows = 8;
+        let mut task = SaveGameTask::default();
+        let Decision::Act(close) = next(&mut task, &off) else {
+            panic!("expected the menu closed");
+        };
+        assert_eq!(close.label, "close the Start menu");
         let field = menu_of(&[
             "POKéDEX", "POKéMON", "BAG", "JADE", "SAVE", "OPTION", "EXIT",
         ]);
