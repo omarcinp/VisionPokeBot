@@ -742,6 +742,29 @@ pub fn probe_fly_map(ctx: &mut ToolContext<'_>) -> Result<String, ToolError> {
         None => {
             let slot = super::field::carrier(ctx.state(), "MOVE_FLY")
                 .ok_or_else(|| ToolError::Unsupported("Fly not in the party".into()))?;
+            // FLY opens the map only where it can be used: out through a
+            // door that leads straight outdoors first (fleet continue-6, a
+            // Viridian house: "FLY: Can't use that here.", the probe marked
+            // infeasible).
+            let world = Arc::clone(&ctx.world);
+            if let Some(here) = ctx.pose().and_then(|p| world.map(&p.map)) {
+                if !here.allows_fly() {
+                    let out = here
+                        .warps
+                        .iter()
+                        .filter_map(|w| world.name_of(&w.dest_map))
+                        .find(|m| world.map(m).is_some_and(|m| m.allows_fly()))
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            ToolError::Unsupported(format!(
+                                "the Fly map opens outdoors; no door of {} leads out",
+                                here.name
+                            ))
+                        })?;
+                    super::go::reach_map(ctx, &out)?;
+                    super::go::go_to_map(ctx, &out)?;
+                }
+            }
             let mut open = super::field::PartyFieldMove::new(super::field::FieldMove::Fly, slot);
             ctx.drive(&mut open)?;
             // Two equal readings: the map drawn, not fading in.
@@ -794,6 +817,22 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// Fleet continue-6, in a Viridian house: the Fly map probe used FLY
+    /// there, "Can't use that here.". FLY works on routes, towns, cities
+    /// and sea routes only (`Overworld_MapTypeAllowsTeleportAndFly`).
+    #[test]
+    fn fly_is_used_outdoors_only() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world");
+        let Ok(world) = pokebot_world::World::load(&dir) else {
+            return;
+        };
+        let fly = |m: &str| world.map(m).map(|m| m.allows_fly());
+        assert_eq!(fly("ViridianCity"), Some(true));
+        assert_eq!(fly("Route21_North"), Some(true));
+        assert_eq!(fly("ViridianCity_School"), Some(false));
+        assert_eq!(fly("VictoryRoad_2F"), Some(false));
+    }
 
     fn data() -> Option<GameData> {
         GameData::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/world/gamedata.json"))

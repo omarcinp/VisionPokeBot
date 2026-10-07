@@ -213,6 +213,18 @@ impl MapData {
         self.weather.as_deref() == Some("WEATHER_FOG_HORIZONTAL")
     }
 
+    /// FLY (and TELEPORT) can be used here: a route, town, city or sea
+    /// route (`Overworld_MapTypeAllowsTeleportAndFly`).
+    pub fn allows_fly(&self) -> bool {
+        matches!(
+            self.map_type.as_deref(),
+            Some("MAP_TYPE_ROUTE")
+                | Some("MAP_TYPE_TOWN")
+                | Some("MAP_TYPE_OCEAN_ROUTE")
+                | Some("MAP_TYPE_CITY")
+        )
+    }
+
     pub fn is_outdoor(&self) -> bool {
         !matches!(
             self.map_type.as_deref(),
