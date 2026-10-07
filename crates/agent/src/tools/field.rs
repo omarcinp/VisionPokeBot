@@ -20,7 +20,7 @@
 //! the player moving into the boulder's old tile.
 
 use pokebot_core::{Button, ControllerCommand};
-use pokebot_state::{Direction, GameEvent, GameState, Observation};
+use pokebot_state::{Direction, GameEvent, GameState, Observation, PlayerPose};
 use pokebot_vision::detect::fly_map;
 
 use super::go::{GoStep, NavParts};
@@ -1041,6 +1041,11 @@ impl ToolStep for Push {
 
 /// Uses `mv` on the obstacle at `at` (overworld prompt; the party-menu
 /// path when the move has none or A offered nothing).
+/// Whether the player stands off the map of the obstacle at `at`.
+fn off_its_map(at: &Dest, pose: Option<&PlayerPose>) -> bool {
+    matches!(at, Dest::Facing { map, .. } if pose.is_some_and(|p| p.map != *map))
+}
+
 pub fn use_on_obstacle(
     ctx: &mut ToolContext<'_>,
     mv: FieldMove,
@@ -1069,7 +1074,13 @@ pub fn use_on_obstacle(
             ))?;
             Ok(())
         }
-        Err(ToolError::Failed(why)) if !prompt.offered && !prompt.refused => {
+        // Only facing the obstacle: a walk that never reached its map
+        // (fleet continue-6: "no known route from Route23 to
+        // VictoryRoad_3F") used STRENGTH from the party menu on Route 23,
+        // "Can't use that here.", eight times.
+        Err(ToolError::Failed(why))
+            if !prompt.offered && !prompt.refused && !off_its_map(at, ctx.pose().as_ref()) =>
+        {
             // The game offered nothing on A: the party-menu path, still
             // facing the obstacle.
             let slot = carrier(ctx.state(), mv.move_id()).ok_or_else(|| {
@@ -2062,6 +2073,27 @@ mod tests {
             panic!("expected the push")
         };
         assert_eq!(a.commands, vec![ControllerCommand::Press(Button::Right)]);
+    }
+
+    /// Fleet continue-6: the walk to a Victory Road 3F boulder never
+    /// reached the map ("no known route from Route23"), and STRENGTH was
+    /// used from the party menu on Route 23, "Can't use that here.". The
+    /// party-menu way is for a player on the obstacle's map.
+    #[test]
+    fn the_party_menu_way_is_only_on_the_obstacles_map() {
+        let at = Dest::Facing {
+            map: "VictoryRoad_3F".into(),
+            x: 22,
+            y: 3,
+        };
+        let pose = |map: &str| PlayerPose {
+            map: map.into(),
+            x: 7,
+            y: 1,
+        };
+        assert!(off_its_map(&at, Some(&pose("Route23"))));
+        assert!(!off_its_map(&at, Some(&pose("VictoryRoad_3F"))));
+        assert!(!off_its_map(&at, None));
     }
 
     /// Fleet continue-5, Victory Road 1F: flown to Viridian to heal between
